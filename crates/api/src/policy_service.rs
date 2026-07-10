@@ -1467,9 +1467,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             )));
         }
         let mut store = SetStore::new();
+        // Dry runs have no dataset file bindings — a candidate source
+        // referencing one is rejected, not panicked on (LAN-305).
         let chain = file
-            .compile_policy(base, &args, &mut store)
-            .expect("existence checked above");
+            .compile_policy_bound(
+                base,
+                &args,
+                &mut store,
+                &rustbgpd_policy::datasets::DatasetBindings::new(),
+            )
+            .expect("existence checked above")
+            .map_err(|missing| {
+                Status::invalid_argument(format!(
+                    "policy {base:?} probes datasets, which TestPolicy cannot bind: {missing}"
+                ))
+            })?;
 
         // Read-only route snapshot via the existing RIB query
         // machinery. Import evaluates Adj-RIB-In (optionally one
@@ -2782,6 +2794,39 @@ policy customer-in(peer_lp: u32) {
             resp.diagnostics
         );
         assert_eq!(resp.routes_evaluated, 0);
+    }
+
+    /// A candidate source that references a dataset compiles per the
+    /// language (LAN-305) but has no file bindings in a dry run — the
+    /// RPC must reject it, not panic in `compile_policy`.
+    #[tokio::test]
+    async fn test_policy_rejects_dataset_referencing_source() {
+        let svc = test_policy_service(Vec::new());
+        let source = "dataset asn-set customers\n\n\
+                      policy origin-guard {\n\
+                          term members { if route.origin-as in customers { accept } }\n\
+                          term rest { reject }\n\
+                      }\n";
+        let status = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                rpol_source: source.to_string(),
+                policy: "origin-guard".to_string(),
+                direction: "import".to_string(),
+                peer: String::new(),
+                afi_safi: 0,
+                limit: 0,
+                show_changes: 0,
+            }),
+        )
+        .await
+        .expect_err("dataset-referencing source must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("customers"),
+            "{}",
+            status.message()
+        );
     }
 
     #[tokio::test]

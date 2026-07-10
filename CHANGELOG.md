@@ -651,6 +651,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`TestPolicy` no longer panics on a candidate source that probes a
+  dataset.** A dry-run source declaring and referencing a `dataset`
+  compiles per the language (LAN-305) but has no file bindings inside
+  the RPC; the handler previously hit the dataset-free
+  `compile_policy` convenience and panicked. It now returns
+  `INVALID_ARGUMENT` naming the unbindable datasets, mirroring the
+  inline-compilation diagnostic. Found by the LAN-8 `unwrap()`/
+  `expect()` audit of the wire, policy, api, cli, fsm, mrt, telemetry,
+  bfd, and event-history crates — every other non-test site guards a
+  compile-time-certain conversion or a locally provable, documented
+  invariant. (LAN-8)
 - **`unwrap()`/`expect()` audit of the transport, rpki, bmp, evpn, and
   evpn-linux crates.** Every non-test site was reviewed: none are
   reachable from network input or runtime IO — all remaining `expect()`
