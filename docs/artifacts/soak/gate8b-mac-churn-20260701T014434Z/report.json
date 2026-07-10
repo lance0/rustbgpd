@@ -1,5 +1,5 @@
 {
-  "samples_csv": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z/samples.csv",
+  "samples_csv": "<SOAK_HOME>/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z/samples.csv",
   "row_count": 591,
   "runtime_hours": 10.088888888888889,
   "pe1_memory_slope_mb_per_h": 0.12462185291014867,

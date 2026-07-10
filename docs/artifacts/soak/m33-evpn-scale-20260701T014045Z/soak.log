@@ -1,11 +1,11 @@
-acquired host lock: /home/lance/.local/state/rustbgpd-host.lock
+acquired host lock: <SOAK_HOME>/.local/state/rustbgpd-host.lock
 [1;34m[21:40:45 TEST][0m M33 soak run 20260701T014045Z
 [1;34m[21:40:45 TEST][0m   duration:   24.00h (86400s)
 [1;34m[21:40:45 TEST][0m   warmup:     600s
 [1;34m[21:40:45 TEST][0m   sample:     every 60s
 [1;34m[21:40:45 TEST][0m   health:     every 300s
 [1;34m[21:40:45 TEST][0m   churn rate: 1000 rps
-[1;34m[21:40:45 TEST][0m   output:     /home/lance/projects/rustbgpd/tests/soak/runs/20260701T014045Z
+[1;34m[21:40:45 TEST][0m   output:     <SOAK_HOME>/projects/rustbgpd/tests/soak/runs/20260701T014045Z
 [1;34m[21:40:45 TEST][0m gRPC endpoint: 172.20.20.4:50051
 [1;34m[21:40:45 TEST][0m Starting rustbgpd daemon...
 [1;34m[21:40:45 TEST][0m rustbgpd is running (after 1s)
