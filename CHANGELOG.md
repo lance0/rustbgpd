@@ -668,6 +668,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Update-group withdraw residue now drains on the per-peer resync
+  path.** A grouped member that went dirty, missed withdrawals (group
+  tombstones), and then moved off the grouped path (e.g. its export
+  chain became peer-context-dependent) carried those tombstones as
+  pending extra withdraws that the per-peer resync never consumed —
+  the keys were in neither the Loc-RIB nor the seeded Adj-RIB-Out, so
+  the stale routes stayed on the peer's wire until a regroup or
+  session bounce, and the residue gauge floored at a nonzero value.
+  Relatedly, a resync whose enumeration came up empty in every family
+  (a full-withdraw moment after a regroup-while-dirty) dropped the
+  carried residue without emitting the withdraws. Pending extra
+  withdraws now feed the resync enumerations (so an empty enumeration
+  proves there is nothing owed), the per-peer resync appends the
+  residue keys as (over-)withdraws — skipping keys announced in the
+  same pass or genuinely advertised in Adj-RIB-Out — and the residue
+  is dropped only after a successful send. A still-dirty member moving
+  to the per-peer path also folds its retained regroup baseline into
+  the seeded Adj-RIB-Out (wire values win), matching the union rule
+  already used for grouped→grouped moves. (LAN-344)
 - **`TestPolicy` no longer panics on a candidate source that probes a
   dataset.** A dry-run source declaring and referencing a `dataset`
   compiles per the language (LAN-305) but has no file bindings inside

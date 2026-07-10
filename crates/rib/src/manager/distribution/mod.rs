@@ -1288,6 +1288,14 @@ impl RibManager {
                         all.extend(rib_out.iter().map(|r| r.prefix));
                     }
                 }
+                // Extra (over-)withdraw residue keys can be in NONE of
+                // the sources above (withdrawn while the peer was
+                // dirty, then carried across a regroup): without them
+                // a resync can enumerate empty — or skip the keys
+                // entirely — and the owed withdraws are never emitted.
+                if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
+                    all.extend(extras.unicast.iter().map(|(prefix, _)| *prefix));
+                }
                 Cow::Owned(all)
             } else if member_of.is_some() {
                 // Grouped peers have no ORR / Add-Path extras (both are
@@ -1406,6 +1414,10 @@ impl RibManager {
                         all.extend(rib_out.iter_vpn().map(|route| route.nlri.key()));
                     }
                 }
+                // Same residue rule as the unicast enumeration above.
+                if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
+                    all.extend(extras.vpn.iter().copied());
+                }
                 all
             } else {
                 HashSet::new()
@@ -1462,11 +1474,12 @@ impl RibManager {
                 // RefreshPeerOutbound for a different reason) would
                 // accidentally inherit the bypass-equality-suppression
                 // semantics. Same shape for `dirty_peers` for symmetry.
+                // The residue drop is safe here: pending extra
+                // withdraws feed the enumerations above, so an empty
+                // enumeration proves there is no residue to emit.
                 if is_dirty {
                     self.dirty_peers.remove(&peer);
-                    if member_of.is_some() {
-                        self.clear_grouped_member_synced(peer);
-                    }
+                    self.clear_grouped_member_synced(peer);
                 }
                 if is_force {
                     self.force_outbound_peers.remove(&peer);
@@ -1953,6 +1966,57 @@ impl RibManager {
                 );
             }
 
+            // A dirty peer on the per-peer path may carry extra
+            // (over-)withdraw residue: group tombstones that rode a
+            // grouped→per-peer move while the peer was dirty. Those
+            // keys are in neither the Loc-RIB nor the Adj-RIB-Out
+            // seeded from the regroup baseline, so the equality diff
+            // above cannot emit them — append them here (the per-peer
+            // twin of the grouped resync assembly's extras term). A key
+            // staged for announce this pass or still present in
+            // Adj-RIB-Out (genuinely advertised — commit-after-send)
+            // is not stale and must not be withdrawn; one already
+            // staged for withdraw needs no duplicate. The residue is
+            // dropped only after a successful send (the unconditional
+            // `clear_grouped_member_synced` below).
+            if is_dirty
+                && member_of.is_none()
+                && let Some(extras) = self.pending_extra_withdraws.get(&peer)
+            {
+                let announced: HashSet<(Prefix, u32)> =
+                    announce.iter().map(|r| (r.prefix, r.path_id)).collect();
+                let staged: HashSet<(Prefix, u32)> = withdraw.iter().copied().collect();
+                withdraw.extend(extras.unicast.iter().copied().filter(|key| {
+                    !announced.contains(key)
+                        && !staged.contains(key)
+                        && rib_out.get(&key.0, key.1).is_none()
+                }));
+                let vpn_announced: HashSet<rustbgpd_wire::VpnRouteKey> =
+                    vpn_announce.iter().map(|r| r.nlri.key()).collect();
+                let vpn_staged: HashSet<rustbgpd_wire::VpnRouteKey> =
+                    vpn_withdraw.iter().map(|key| key.nlri_key).collect();
+                vpn_withdraw.extend(
+                    extras
+                        .vpn
+                        .iter()
+                        .copied()
+                        .filter(|key| {
+                            !vpn_announced.contains(key)
+                                && !vpn_staged.contains(key)
+                                && rib_out
+                                    .get_vpn(&crate::route::VpnRibRouteKey {
+                                        nlri_key: *key,
+                                        path_id: 0,
+                                    })
+                                    .is_none()
+                        })
+                        .map(|nlri_key| crate::route::VpnRibRouteKey {
+                            nlri_key,
+                            path_id: 0,
+                        }),
+                );
+            }
+
             // The outbound payload: the group-shared Arc for a covered
             // member, otherwise this peer's own staged vectors. A shared
             // member never stages per-peer unicast (grouped + in-sync),
@@ -2034,9 +2098,7 @@ impl RibManager {
                         );
                         if is_dirty {
                             self.dirty_peers.remove(&peer);
-                            if member_of.is_some() {
-                                self.clear_grouped_member_synced(peer);
-                            }
+                            self.clear_grouped_member_synced(peer);
                             if pending_eor.is_empty() {
                                 self.flush_pending_eor(peer);
                             } else {
@@ -2092,9 +2154,7 @@ impl RibManager {
                     debug!(%peer, "outbound routes unchanged after resync");
                     if is_dirty {
                         self.dirty_peers.remove(&peer);
-                        if member_of.is_some() {
-                            self.clear_grouped_member_synced(peer);
-                        }
+                        self.clear_grouped_member_synced(peer);
                         self.flush_pending_eor(peer);
                         self.retry_pending_refresh(peer);
                     }
