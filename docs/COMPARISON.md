@@ -7,7 +7,9 @@ See [CHANGELOG.md](../CHANGELOG.md) for per-release feature deltas and
 
 This matrix is a broad operator-facing comparison. Cells marked `Partial` or
 with a footnote intentionally distinguish shipped subsets from a full routing-
-suite implementation.
+suite implementation. GoBGP capability cells are reconciled with
+[gobgp-parity.md](gobgp-parity.md), the canonical source for the
+rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 
 ## Overview
 
@@ -85,7 +87,7 @@ IPv4/IPv6 `Prefix` routes.
 | 4-byte ASN (RFC 6793) | Yes | Yes | Yes | Yes | Yes |
 | Capability negotiation | Yes | Yes | Yes | Yes | Yes |
 | Route Refresh (RFC 2918) | Yes | Yes | Yes | Yes | Yes |
-| Enhanced Route Refresh (RFC 7313) | Yes | Yes | Yes | No | Yes |
+| Enhanced Route Refresh (RFC 7313) | Yes | Yes | Yes | Yes | Yes |
 | Prefix ORF (RFC 5291/5292) | Receive | Yes | No | No | No |
 | Graceful Restart (RFC 4724) | Yes | Yes | Yes | Yes | Yes |
 | Long-Lived GR (RFC 9494) | Yes | Partial | Yes | Yes | No |

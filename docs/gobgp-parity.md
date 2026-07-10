@@ -2,6 +2,16 @@
 
 For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
+This document is the canonical source for GoBGP capability claims in the
+project docs (the [comparison matrix](COMPARISON.md) defers to it). GoBGP
+cells are verified against GoBGP source — the `BGPCapabilityCode` constants
+in `pkg/packet/bgp/bgp.go` — rather than release notes: Enhanced Route
+Refresh is present (`BGP_CAP_ENHANCED_ROUTE_REFRESH = 70`); no ORF
+capability is defined (no code 3 in the constant block); no BGP Role
+capability is defined (RFC 9234, tracked upstream as the still-open feature
+request [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244)).
+Verified 2026-07 against GoBGP `master`.
+
 ## Address Families
 
 | Feature | GoBGP | rustbgpd | Notes |
@@ -35,7 +45,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
-| Prefix ORF (RFC 5291/5292) | Partial | Receive | rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
+| Prefix ORF (RFC 5291/5292) | No | Receive | GoBGP defines no ORF capability (code 3 absent from `bgp.go`). rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
@@ -43,7 +53,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
 | Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
-| BGP Roles + Only-to-Customer (RFC 9234) | Partial | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6 with a structured `OtcRouteBlockedEvent` payload on `SubscribeFromEvent` alongside the `bgp_otc_routes_blocked_total{peer, reason}` counter and per-peer scalar. GoBGP has draft-era support without OTC enforcement parity at last check. ADR-0071, M55. |
+| BGP Roles + Only-to-Customer (RFC 9234) | No | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6 with a structured `OtcRouteBlockedEvent` payload on `SubscribeFromEvent` alongside the `bgp_otc_routes_blocked_total{peer, reason}` counter and per-peer scalar. GoBGP does not implement RFC 9234 (no Role capability in `bgp.go`; open feature request osrg/gobgp#3244). ADR-0071, M55. |
 
 ## Path Attributes
 
@@ -59,7 +69,7 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 | MP_REACH / MP_UNREACH (RFC 4760) | Yes | Yes | |
 | AIGP (type 26) | Yes | No | |
 | PMSI_TUNNEL (type 22) | Yes | Yes | RFC 6514 §5; originated on Type 3 IMET for ingress-replication BUM |
-| Only-to-Customer (type 35, RFC 9234) | Partial | Yes | Codec + ingress/egress enforcement (see Core Protocol row above). |
+| Only-to-Customer (type 35, RFC 9234) | No | Yes | Codec + ingress/egress enforcement (see Core Protocol row above). GoBGP does not implement RFC 9234 (osrg/gobgp#3244). |
 | TUNNEL_ENCAP (type 23) | Yes | No | |
 | PREFIX_SID (type 40) | Yes | No | |
 | Unknown attribute passthrough | Yes | Yes | Partial bit on re-advert |
@@ -249,8 +259,9 @@ Competing head-to-head with GoBGP for all use cases:
 The IX route-server ORF gap is closed for the receive-side shape operators
 normally need: a client can push an Address-Prefix ORF filter and rustbgpd
 suppresses matching outbound advertisements before export policy (ADR-0075,
-M57 FRR interop). This is now ahead of GoBGP's documented standard Prefix ORF
-surface. The remaining ORF tail is send-side/client behavior, where rustbgpd
+M57 FRR interop). GoBGP implements no standard Prefix ORF at all (no ORF
+capability in `bgp.go`), so this is a clear gap rustbgpd closes. The
+remaining ORF tail is send-side/client behavior, where rustbgpd
 would push filters to its own upstreams, but that is demand-shaped rather than
 a route-server parity blocker. Otherwise no material control-plane gaps remain;
 remaining work is operator polish: CLI integration tests, bulk policy-edit
