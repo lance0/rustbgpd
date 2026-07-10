@@ -964,6 +964,17 @@ pub async fn events_watch(
     Ok(())
 }
 
+/// LAN-329 empty-state convention: JSON list output is never empty
+/// (`[]` parses where the non-empty NDJSON event lines also parse
+/// line-wise); human output names what was absent.
+fn print_empty_history(json: bool, what: &str) {
+    if json {
+        println!("[]");
+    } else {
+        println!("No {what} events recorded");
+    }
+}
+
 pub async fn history(
     connection: Connection,
     neighbor: Option<String>,
@@ -987,6 +998,10 @@ pub async fn history(
         .await?
         .into_inner();
 
+    if response.events.is_empty() {
+        print_empty_history(json, "route");
+        return Ok(());
+    }
     for event in response.events {
         print_event(&event, json)?;
     }
@@ -1016,6 +1031,10 @@ pub async fn session_history(
         .await?
         .into_inner();
 
+    if response.events.is_empty() {
+        print_empty_history(json, "session");
+        return Ok(());
+    }
     for event in response.events {
         print_bgp_event(&event, json)?;
     }
@@ -1045,6 +1064,10 @@ pub async fn policy_history(
         .await?
         .into_inner();
 
+    if response.events.is_empty() {
+        print_empty_history(json, "policy");
+        return Ok(());
+    }
     for event in response.events {
         print_bgp_event(&event, json)?;
     }
@@ -1078,6 +1101,10 @@ pub async fn evpn_history(
         .await?
         .into_inner();
 
+    if response.events.is_empty() {
+        print_empty_history(json, "EVPN");
+        return Ok(());
+    }
     for event in response.events {
         print_bgp_event(&event, json)?;
     }
