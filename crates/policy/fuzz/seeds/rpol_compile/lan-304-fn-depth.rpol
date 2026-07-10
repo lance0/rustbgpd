@@ -1,0 +1,12 @@
+fn f1(x: u32) -> u32 { f2(x) + 1 }
+fn f2(x: u32) -> u32 { f3(x) + 1 }
+fn f3(x: u32) -> u32 { f4(x) + 1 }
+fn f4(x: u32) -> u32 { x + 1 }
+
+policy p {
+    term t {
+        let total = f1(route.med)
+        if total >= 1000 { reject }
+        accept
+    }
+}

@@ -1,0 +1,16 @@
+fn penalty(len: u32, weight: u32) -> u32 {
+    let base = len * weight
+    min(base, 1000)
+}
+
+fn padded(x: u32) -> u32 { penalty(x, 10) + 7 }
+
+policy p {
+    term dampen { if penalty(route.as-path.len, 10) >= route.med { reject } }
+    term pad { set med padded(route.as-path.len); accept }
+}
+
+test penalty-rejects-long-paths {
+    route { prefix 10.0.0.0/24; as-path "65001 65002 65003"; med 20 }
+    expect p == reject
+}

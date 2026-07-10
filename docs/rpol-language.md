@@ -449,8 +449,9 @@ keys on source attributes plus modifications — and needs its own ADR
 if ever demanded).
 
 **Static slots, zero allocation.** Bindings compile to fixed slots in
-a 128-slot register file (two nesting levels × the 64-binding
-per-scope cap): slot assignment is a pure function of the source
+a 256-slot register file (term, nested loop, and `if` scopes at the
+64-binding per-scope cap; inlined function calls draw on the same
+frame, LAN-304): slot assignment is a pure function of the source
 (identical source → identical compiled form, so unchanged reloads
 still diff as no-ops), sibling scopes reuse slots, and the frame is a
 lazily-materialized stack array — policies without bindings pay
@@ -465,8 +466,8 @@ identically — pinned by test).
 be a target of `apply` this slice: `apply` inlines its target as a
 pure predicate expression, which has no term walk to execute bindings
 in. The compile error points at the offending `apply` and the target's
-first `let`; factor the shared value into the applying policy, or wait
-for user functions (LAN-304), the designed vehicle for composing
+first `let`; factor the shared value into the applying policy, or use
+a user function (`fn`, LAN-304) — the designed vehicle for composing
 computed values.
 
 Migration example — factoring a repeated computed value:
@@ -632,6 +633,129 @@ policy bogon-guard {
 }
 ```
 
+### Functions — `fn`
+
+`fn NAME(param: u32, ...) -> u32 { ... }` names a pure computation
+over `u32` values (ADR-0103 Decision 2, LAN-304):
+
+```rpol
+fn penalty(len: u32, weight: u32) -> u32 {
+    let base = len * weight
+    min(base, 1000)
+}
+
+policy p {
+    term dampen { if penalty(route.as-path.len, 10) >= route.med { reject } }
+    term rest { accept }
+}
+```
+
+`fn` is a top-level contextual identifier like statement-`let`: top
+level previously admitted no bare identifier, so existing names keep
+working. Functions get their own namespace — duplicate `fn` names are
+errors, but a set or policy may share a function's name (every
+reference position is disjoint); the builtin names `min`/`max`/`clamp`
+are reserved and cannot be shadowed.
+
+**Bodies are expression-shaped.** A body is zero or more `let`
+bindings followed by exactly **one result expression** — the
+last-expression rule; there is no `return`. Verdicts, `set`/`add`/
+`remove`/`prepend`, `if`, and `for` are policy-term territory and get
+a typed diagnostic inside a body (`if` would need expression-`if`,
+which does not exist in the language — `min`/`max`/`clamp` cover
+selection; a later slice may revisit). Parameters and return values
+are `u32` this slice, and the return type is spelled explicitly
+(`-> u32`).
+
+**Closed over nothing (normative).** A function body may not read
+`route.*`/`peer.*` fields — every input arrives as a parameter, so a
+function is a pure function of its arguments. This is what keeps the
+hot-path analyses call-site-local: `penalty(peer.asn, 10)` counts
+toward `requires_peer_context` because the *argument* reads peer
+identity; `penalty(route.as-path.len, 10)` never disqualifies
+update-group sharing, no matter what the body does. The compile error
+says to pass the field as an argument.
+
+**No recursion.** The call graph must form a DAG — direct or mutual
+recursion is a compile error naming the cycle, exactly like `apply`.
+Call chains are depth-capped at 8 (`MAX_CALL_DEPTH`), enforced in the
+same Kahn-ordered cost DP as the `apply` bounds.
+
+**Full inlining (normative).** A call is compile-time sugar for a
+scope of `let` bindings: each argument binds to a caller-frame slot
+(named `fn.param` in explain surfaces), each body `let` to
+`fn.binding`, and the result expression to a slot named by the
+rendered call itself, which the call site reads. There are **no
+runtime call frames** — evaluation walks the same flat term list as
+before, and a program that never calls functions pays nothing.
+Consequences:
+
+- **Evaluation is eager, like `let`.** Arguments and the body evaluate
+  when the walk reaches the statement containing the call — even if a
+  `&&` short-circuit would have skipped the value — so a call that
+  errors (checked arithmetic; functions are pure and terminating but
+  *not* total) denies the route on the uniform eval-error rail
+  whenever its statement executes.
+- **Term identity survives.** The inlined binds become `<term>.<n>`
+  IR terms of the *calling* term (the established multi-term split
+  naming), so the counter grid and trace skeleton stay a function of
+  the source; per-function hit counting is explicitly out of scope
+  (Decision 6.3 — it would need runtime call frames).
+- **Attribution names both sides.** An error inside a body renders
+  with the calling term's name and the qualified binding, e.g.
+  `term compute.3: let share.each = share.total / share.parts [matched]`
+  followed by
+  `term compute.3: evaluation error: division by zero — fail closed => reject`;
+  the live-path WARN carries the same `(let share.each)` label.
+  Guards render calls source-level:
+  `penalty(route.as-path.len, 10) >= route.med`.
+- **Budgets compound honestly.** The cost DP charges the fully-inlined
+  body per call site, against the same `MAX_APPLY_EXPANSION` /
+  `MAX_EVAL_COST` budgets as `apply` — a big body called from many
+  sites is rejected at compile time. Inlined bodies also consume
+  caller-frame binding slots (arguments + body lets + the result, per
+  call site); a term whose calls exceed the 256-slot frame is a
+  compile error at the term's span.
+
+**Calling parity.** `penalty(a, b)` evaluates exactly like writing the
+body inline — same verdicts, same modifications, zero fuel (calls are
+straight-line code; only loop iterations meter) — pinned by test.
+
+**`apply` restriction.** Like `let` and `for`, a policy that calls
+functions cannot be an `apply` target: calls lower to binding terms a
+pure inlined predicate cannot execute. Call the function in the
+applying policy instead.
+
+Migration example — factoring a computation repeated across policies
+(the step beyond LAN-302's single-policy `let`):
+
+```rpol
+# Before: the damping formula is duplicated — and must be kept in
+# sync — across two policies.
+policy transit-in {
+    term dampen { if min(route.as-path.len * 10, 1000) >= route.med { reject } }
+    term rest { accept }
+}
+policy peer-in {
+    term dampen { if min(route.as-path.len * 12, 1000) >= route.med { reject } }
+    term rest { accept }
+}
+
+# After: one definition, weights at the call sites.
+fn penalty(len: u32, weight: u32) -> u32 {
+    let base = len * weight
+    min(base, 1000)
+}
+policy transit-in {
+    term dampen { if penalty(route.as-path.len, 10) >= route.med { reject } }
+    term rest { accept }
+}
+policy peer-in {
+    term dampen { if penalty(route.as-path.len, 12) >= route.med { reject } }
+    term rest { accept }
+}
+```
+
 ### `route.family` — one chain, many families
 
 `route.family` is the route's **typed** AFI/SAFI family, carried by the
@@ -682,7 +806,9 @@ Two consequences worth internalizing:
   final term → `reject`).
 - A policy that declares `let` bindings cannot be applied (LAN-302):
   the inlined predicate has no term walk to execute bindings in. The
-  compile error names the target's first `let`.
+  compile error names the target's first `let`. The same rule covers
+  `for` loops (LAN-303) and function calls (LAN-304 — a call is sugar
+  for a scope of lets).
 
 ## Actions
 
@@ -805,11 +931,14 @@ involvement. Testing a *candidate* policy against a live RIB is
 ## Grammar sketch
 
 ```text
-file        := (prefix-set-def | community-set-def | asn-set-def | policy-def | test-def)*
+file        := (prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
 asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
+fn-def      := "fn" IDENT "(" [param ("," param)*] ")" "->" "u32"
+               "{" fn-let* value "}"               # contextual `fn` (LAN-304)
+fn-let      := "let" IDENT "=" value [";"]
 policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
@@ -839,6 +968,7 @@ mul         := atom (("*"|"/"|"%") atom)*
 atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
              | ("min"|"max") "(" value "," value ")"
              | "clamp" "(" value "," value "," value ")"
+             | IDENT "(" [value ("," value)*] ")"  # user-function call (LAN-304)
 field       := ("route" | "peer") ("." IDENT)+
 u32arg      := INT | IDENT          # parameter reference
 test-def    := "test" IDENT "{" route-block [peer-block] expect+ "}"
@@ -1022,10 +1152,11 @@ $ rbgp policy stats --peer 10.0.0.2 --direction both
   dry run; `.rpol` has both.
 - **vs BIRD filters:** BIRD's filter language is a general-purpose
   interpreter — variables, arbitrary control flow, user-defined
-  functions. `.rpol` is deliberately smaller: no loops, no variables,
-  no user types, so every policy terminates by construction and
-  compiles to an indexed IR (a 1,000-member set is one hash probe,
-  not a linear scan). What BIRD can't do: test a candidate policy
+  functions. `.rpol` is deliberately smaller: immutable bindings, only
+  bounded `for` loops over finite sources, only pure non-recursive
+  functions (fully inlined at compile time), no user types — so every
+  policy terminates by construction and compiles to an indexed IR (a
+  1,000-member set is one hash probe, not a linear scan). What BIRD can't do: test a candidate policy
   read-only against the *running* daemon's RIB (`rbgp policy test`),
   trace which term decided a live route (`rbgp policy explain`), or
   read per-term live hit counters (`rbgp policy stats`).
@@ -1134,7 +1265,8 @@ iterates finite sources only, capped and fuel-metered. No
 user-defined types, no maps (safety is total by construction —
 ADR-0096 Decision 2; the ADR-0103 extension program adds bounded
 constructs slice by slice — checked arithmetic shipped as LAN-299,
-bindings as LAN-302, bounded loops as LAN-303). No `as-path-set`. No `else if` chains and no nested `if`
+bindings as LAN-302, bounded loops as LAN-303, pure functions as
+LAN-304). No `as-path-set`. No `else if` chains and no nested `if`
 (keep terms small; use `&&` or more terms). No mutable state of any
 kind — `let` bindings (LAN-302) are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and

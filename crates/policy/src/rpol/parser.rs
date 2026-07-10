@@ -16,9 +16,9 @@ use crate::ir::ArithOp;
 
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    ExpectDef, Expr, FieldPath, FieldRoot, ForSource, ForStmt, IfStmt, NextHopArg, PeerField,
-    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt,
-    TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    ExpectDef, Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfStmt, NextHopArg,
+    PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile,
+    Stmt, TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -129,11 +129,16 @@ impl Parser<'_> {
     /// Skip tokens until one of `stops` at local brace depth zero (or
     /// EOF). A closing brace that would take the depth negative is
     /// consumed and resets to zero — it closed the enclosing block the
-    /// error occurred in.
-    fn recover_to(&mut self, stops: &[Tok]) {
+    /// error occurred in. `stop_at_fn` additionally stops at the
+    /// top-level contextual `fn` identifier (LAN-304) — it is not a
+    /// keyword token, so top-level recovery names it explicitly.
+    fn recover_to(&mut self, stops: &[Tok], stop_at_fn: bool) {
         let mut depth: u32 = 0;
         while let Some(token) = self.peek() {
-            if depth == 0 && stops.contains(&token.kind) {
+            if depth == 0
+                && (stops.contains(&token.kind)
+                    || (stop_at_fn && token.kind == Tok::Ident && self.text(token) == "fn"))
+            {
                 return;
             }
             self.pos += 1;
@@ -378,8 +383,16 @@ impl Parser<'_> {
                 Tok::AsnSetKw => self.asn_set_def().map(|def| file.asn_sets.push(def)),
                 Tok::PolicyKw => self.policy_def().map(|def| file.policies.push(def)),
                 Tok::TestKw => self.test_def().map(|def| file.tests.push(def)),
+                // Top-level contextual `fn` (LAN-304, ADR-0103
+                // Decision 2.2): top level previously admitted no bare
+                // identifier, so consuming it is purely additive — a
+                // set or policy named `fn` keeps working (those appear
+                // after their own keyword).
+                Tok::Ident if self.text(token) == "fn" => {
+                    self.fn_def().map(|def| file.fns.push(def))
+                }
                 _ => Err(self.error_expected(
-                    "a top-level item (`prefix-set`, `community-set`, `asn-set`, `policy`, or `test`)",
+                    "a top-level item (`prefix-set`, `community-set`, `asn-set`, `fn`, `policy`, or `test`)",
                 )),
             };
             if result.is_err() {
@@ -388,7 +401,7 @@ impl Parser<'_> {
                 if self.peek().map(|t| t.kind) == Some(token.kind) && self.here() == token.span {
                     self.pos += 1;
                 }
-                self.recover_to(Self::TOP_LEVEL);
+                self.recover_to(Self::TOP_LEVEL, true);
             }
         }
         file
@@ -470,6 +483,92 @@ impl Parser<'_> {
         Ok(AsnSetDef { name, entries })
     }
 
+    // ── functions (LAN-304) ─────────────────────────────────────────
+
+    /// `fn NAME(param: u32, ...) -> u32 { lets… result }`; the caller
+    /// has peeked the contextual `fn` identifier. Bodies are
+    /// expression-shaped — `let` bindings then exactly one result
+    /// expression (the last-expression rule; there is no `return`) —
+    /// so nothing here joins the expression recursion cycle
+    /// (`value_expr` runs with a fresh depth, as everywhere else).
+    fn fn_def(&mut self) -> PResult<FnDef> {
+        self.bump().expect("caller peeked `fn`");
+        let name = self.expect_ident("a function name")?;
+        self.expect(Tok::LParen, "`(` and the parameter list")?;
+        let mut params = Vec::new();
+        while !self.at(Tok::RParen) {
+            let param = self.expect_ident("a parameter name")?;
+            self.expect(Tok::Colon, "`:` and the parameter type")?;
+            self.expect(Tok::U32Kw, "`u32` (the only parameter type)")?;
+            params.push(param);
+            if self.eat(Tok::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(Tok::RParen, "`)`")?;
+        self.expect(
+            Tok::Arrow,
+            "`->` (functions declare their return type: `-> u32`)",
+        )?;
+        self.expect(Tok::U32Kw, "`u32` (the only return type)")?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut lets = Vec::new();
+        while let Some(token) = self.peek()
+            && token.kind == Tok::Ident
+            && self.text(token) == "let"
+        {
+            self.bump();
+            let let_name = self.expect_ident("a binding name")?;
+            self.expect(Tok::Eq, "`=` (`let <name> = <value expression>`)")?;
+            let init = self.value_expr(0)?;
+            self.eat(Tok::Semi);
+            lets.push(FnLet {
+                name: let_name,
+                init,
+            });
+        }
+        // Statements are policy-term territory: a typed diagnostic
+        // beats "expected a u32 value" when someone reaches for them.
+        if let Some(token) = self.peek()
+            && (matches!(
+                token.kind,
+                Tok::AcceptKw
+                    | Tok::RejectKw
+                    | Tok::SetKw
+                    | Tok::AddKw
+                    | Tok::RemoveKw
+                    | Tok::PrependKw
+                    | Tok::IfKw
+            ) || (token.kind == Tok::Ident && self.text(token) == "for"))
+        {
+            self.diags.push(
+                Diagnostic::new(
+                    token.span,
+                    "functions compute a value; they cannot execute statements",
+                    "not allowed in a function body",
+                )
+                .with_note(
+                    "a function body is `let` bindings followed by one result expression — \
+                     verdicts, `set`/`add`/`remove`/`prepend`, `if`, and `for` live in policy \
+                     terms",
+                ),
+            );
+            return Err(Fail);
+        }
+        let result = self.value_expr(0)?;
+        self.eat(Tok::Semi);
+        self.expect(
+            Tok::RBrace,
+            "`}` (a function body ends with one result expression)",
+        )?;
+        Ok(FnDef {
+            name,
+            params,
+            lets,
+            result,
+        })
+    }
+
     // ── policies ────────────────────────────────────────────────────
 
     fn policy_def(&mut self) -> PResult<PolicyDef> {
@@ -494,7 +593,7 @@ impl Parser<'_> {
             if let Ok(term) = self.term_def() {
                 terms.push(term);
             } else {
-                self.recover_to(&[Tok::TermKw, Tok::RBrace]);
+                self.recover_to(&[Tok::TermKw, Tok::RBrace], false);
                 if self.peek().is_none() {
                     return Err(Fail);
                 }
@@ -517,7 +616,7 @@ impl Parser<'_> {
             if let Ok(stmt) = self.stmt(0) {
                 stmts.push(stmt);
             } else {
-                self.recover_to(&[Tok::Semi, Tok::RBrace, Tok::TermKw]);
+                self.recover_to(&[Tok::Semi, Tok::RBrace, Tok::TermKw], false);
                 if self.eat(Tok::Semi).is_none() {
                     break;
                 }
@@ -573,7 +672,7 @@ impl Parser<'_> {
             if let Ok(stmt) = self.stmt(depth + 1) {
                 body.push(stmt);
             } else {
-                self.recover_to(&[Tok::Semi, Tok::RBrace]);
+                self.recover_to(&[Tok::Semi, Tok::RBrace], false);
                 if self.eat(Tok::Semi).is_none() {
                     break;
                 }

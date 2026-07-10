@@ -226,6 +226,13 @@ pub enum Tok {
     /// `%`
     #[token("%")]
     Percent,
+    /// `->` — the function return-type arrow (LAN-304). Un-lexable
+    /// before functions landed (`-` was a token but `>` alone was
+    /// not, so any `->` was a lex error), and the kebab identifier
+    /// rule cannot consume it (`>` is not an identifier character):
+    /// purely additive — ADR-0103 Decision 2.3.
+    #[token("->")]
+    Arrow,
 }
 
 impl Tok {
@@ -292,6 +299,7 @@ impl Tok {
             Tok::Star => "`*`",
             Tok::Slash => "`/`",
             Tok::Percent => "`%`",
+            Tok::Arrow => "`->`",
         }
     }
 }
@@ -387,6 +395,16 @@ mod tests {
         // Prefix literals own `/` inside maximal munch; arithmetic `/`
         // only appears where a prefix cannot lex.
         assert_eq!(kinds("10.0.0.0/8"), vec![Tok::PrefixLit]);
+    }
+
+    /// LAN-304: the return-type arrow lexes as one token and never
+    /// collides with kebab identifiers or spaced subtraction.
+    #[test]
+    fn arrow_vs_minus_and_kebab_munch() {
+        assert_eq!(kinds(") -> u32"), vec![Tok::RParen, Tok::Arrow, Tok::U32Kw]);
+        assert_eq!(kinds("a - b"), vec![Tok::Ident, Tok::Minus, Tok::Ident]);
+        // `>` is not an identifier character, so the munch stops at `a`.
+        assert_eq!(kinds("a->b"), vec![Tok::Ident, Tok::Arrow, Tok::Ident]);
     }
 
     #[test]

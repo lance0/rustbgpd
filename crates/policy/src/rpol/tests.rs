@@ -2269,7 +2269,10 @@ fn constant_folding_diagnostics_carry_spans() {
 #[test]
 fn value_expression_type_diagnostics() {
     let (_, rendered) = diagnostics_of("policy p { term t { set med mim(1, 2); accept } }");
-    assert!(rendered.contains("unknown builtin `mim`"), "{rendered}");
+    assert!(
+        rendered.contains("unknown function or builtin `mim`"),
+        "{rendered}"
+    );
     assert!(rendered.contains("did you mean `min`?"), "{rendered}");
 
     let (_, rendered) = diagnostics_of("policy p { term t { set med min(1); accept } }");
@@ -3702,4 +3705,568 @@ fn dry_run_recording_hits_agrees_with_live_loop_walk() {
         let live = chain.evaluate(&ctx);
         assert_eq!(recorded, live, "communities {communities:?}");
     }
+}
+
+// ── LAN-304: pure user-defined functions ────────────────────────────
+
+/// The headline shape: a factored penalty computation, called with
+/// route fields as arguments.
+const FN_EXAMPLE: &str = "
+fn penalty(len: u32, weight: u32) -> u32 {
+    let base = len * weight
+    min(base, 1000)
+}
+
+policy p {
+    term t { if penalty(route.as-path.len, 10) >= route.med { reject } }
+    term rest { accept }
+}
+";
+
+/// The same policy with the function body written inline — the parity
+/// oracle.
+const FN_EXAMPLE_INLINE: &str = "
+policy p {
+    term t { if min(route.as-path.len * 10, 1000) >= route.med { reject } }
+    term rest { accept }
+}
+";
+
+fn ctx_with_path_and_med(as_path_len: usize, med: Option<u32>) -> RouteContext<'static> {
+    let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    ctx.as_path_len = as_path_len;
+    ctx.med = med;
+    ctx
+}
+
+#[test]
+fn fn_calls_compile_and_evaluate() {
+    let chain = compile_ok(FN_EXAMPLE);
+    // penalty(3, 10) = 30 >= med 20 -> reject.
+    assert_eq!(
+        chain.evaluate(&ctx_with_path_and_med(3, Some(20))).action,
+        PolicyAction::Deny
+    );
+    // penalty(3, 10) = 30 < med 50 -> falls through to accept.
+    assert_eq!(
+        chain.evaluate(&ctx_with_path_and_med(3, Some(50))).action,
+        PolicyAction::Permit
+    );
+    // The min clamp: penalty(200, 10) = min(2000, 1000) = 1000 < 2000.
+    assert_eq!(
+        chain
+            .evaluate(&ctx_with_path_and_med(200, Some(2000)))
+            .action,
+        PolicyAction::Permit
+    );
+}
+
+/// Calling `penalty(a, b)` behaves — verdicts, modifications, and
+/// runtime fuel — exactly like writing the body inline (the call is
+/// sugar for a scope of lets; both shapes are loop-free, so both
+/// consume zero fuel).
+#[test]
+fn fn_inlined_parity_with_manual_body() {
+    let called = compile_ok(FN_EXAMPLE);
+    let inline = compile_ok(FN_EXAMPLE_INLINE);
+    for (len, med) in [(0, None), (3, Some(20)), (3, Some(50)), (200, Some(2000))] {
+        let ctx = ctx_with_path_and_med(len, med);
+        let (lhs, lhs_fuel) = called.evaluate_measuring_fuel(&ctx);
+        let (rhs, rhs_fuel) = inline.evaluate_measuring_fuel(&ctx);
+        assert_eq!(lhs.action, rhs.action, "len={len} med={med:?}");
+        assert_eq!(
+            lhs.modifications, rhs.modifications,
+            "len={len} med={med:?}"
+        );
+        assert_eq!(lhs_fuel, 0, "loop-free walks pay zero fuel");
+        assert_eq!(rhs_fuel, 0);
+    }
+}
+
+/// Functions work in every value position: `set` values, `let`
+/// initializers, and nested calls as arguments.
+#[test]
+fn fn_calls_in_set_values_and_nested_calls() {
+    let chain = compile_ok(
+        "
+        fn double(x: u32) -> u32 { x * 2 }
+        fn pad(x: u32, amount: u32) -> u32 { x + amount }
+        policy p {
+            term t {
+                let bumped = pad(double(route.med), 7)
+                set med bumped;
+                set local-pref double(double(5));
+                accept
+            }
+        }
+        ",
+    );
+    let result = chain.evaluate(&ctx_with_path_and_med(0, Some(10)));
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(27), "pad(double(10), 7)");
+    // Constant arguments fold through the inlined body's checked
+    // arithmetic at compile time or evaluate identically at runtime.
+    assert_eq!(result.modifications.set_local_pref, Some(20));
+}
+
+#[test]
+fn fn_declaration_diagnostics() {
+    // Arity mismatch, with the definition labelled.
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32, b: u32) -> u32 { a + b }
+         policy p { term t { if f(1) >= 2 { reject } } }",
+    );
+    assert!(
+        rendered.contains("takes 2 arguments but 1 was supplied"),
+        "{rendered}"
+    );
+
+    // Unknown function, suggesting across builtins and fns.
+    let (_, rendered) = diagnostics_of(
+        "fn shift(a: u32) -> u32 { a + 1 }
+         policy p { term t { if shitf(1) >= 2 { reject } } }",
+    );
+    assert!(
+        rendered.contains("unknown function or builtin"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("did you mean `shift`?"), "{rendered}");
+
+    // Duplicate function names.
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32) -> u32 { a }
+         fn f(b: u32) -> u32 { b }
+         policy p { term t { accept } }",
+    );
+    assert!(rendered.contains("duplicate fn `f`"), "{rendered}");
+
+    // Builtin shadowing is rejected.
+    let (_, rendered) = diagnostics_of(
+        "fn min(a: u32) -> u32 { a }
+         policy p { term t { accept } }",
+    );
+    assert!(rendered.contains("shadows the builtin"), "{rendered}");
+
+    // Calling a policy for a value points at apply().
+    let (_, rendered) = diagnostics_of(
+        "policy helper { term t { reject } }
+         policy p { term t { if helper(1) >= 2 { reject } } }",
+    );
+    assert!(rendered.contains("is a policy"), "{rendered}");
+    assert!(rendered.contains("apply"), "{rendered}");
+}
+
+/// Functions get their own namespace: a set and a policy may share a
+/// function's name — every reference position is disjoint.
+#[test]
+fn fn_namespace_coexists_with_sets_and_policies() {
+    let chain = compile_ok(
+        "
+        asn-set scale { 64512 }
+        policy scale(threshold: u32) { term t { reject } }
+        fn scale(x: u32) -> u32 { x * 100 }
+        policy p {
+            term t {
+                if scale(route.med) >= 1000 && route.origin-as in scale { reject }
+                accept
+            }
+        }
+        ",
+    );
+    let mut ctx = ctx_with_path_and_med(0, Some(50));
+    ctx.origin_asn = Some(64512);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    ctx.med = Some(5);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+}
+
+/// Purity by construction: bodies read no context fields — inputs
+/// arrive as parameters.
+#[test]
+fn fn_purity_rejects_field_reads() {
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32) -> u32 { a + route.med }
+         policy p { term t { if f(1) >= 2 { reject } } }",
+    );
+    assert!(rendered.contains("closed over nothing"), "{rendered}");
+    assert!(
+        rendered.contains("pass the field as an argument"),
+        "{rendered}"
+    );
+}
+
+/// Bodies are expression-shaped: verdicts/actions/loops get a typed
+/// diagnostic, not a generic parse error.
+#[test]
+fn fn_body_rejects_statements() {
+    for body in ["accept", "reject", "set med 5", "for a in s { break }"] {
+        let src = format!(
+            "asn-set s {{ 1 }} fn f(a: u32) -> u32 {{ {body} }} policy p {{ term t {{ accept }} }}"
+        );
+        let (_, rendered) = diagnostics_of(&src);
+        assert!(
+            rendered.contains("cannot execute statements"),
+            "body {body:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn fn_recursion_cycle_named() {
+    // Direct recursion.
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32) -> u32 { f(a) }
+         policy p { term t { accept } }",
+    );
+    assert!(
+        rendered.contains("function call cycle: f -> f"),
+        "{rendered}"
+    );
+
+    // Mutual recursion names the full cycle.
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32) -> u32 { g(a) }
+         fn g(a: u32) -> u32 { f(a) }
+         policy p { term t { accept } }",
+    );
+    assert!(rendered.contains("function call cycle"), "{rendered}");
+    assert!(
+        rendered.contains('f') && rendered.contains('g'),
+        "{rendered}"
+    );
+}
+
+/// A linear chain of `levels` functions, `f1` calling `f2` … calling
+/// `f<levels>`, with a policy calling `f1`.
+fn fn_chain(levels: u32) -> String {
+    use std::fmt::Write;
+
+    let mut src = String::new();
+    for i in 1..levels {
+        writeln!(src, "fn f{i}(x: u32) -> u32 {{ f{}(x) + 1 }}", i + 1).expect("string io");
+    }
+    writeln!(src, "fn f{levels}(x: u32) -> u32 {{ x + 1 }}").expect("string io");
+    writeln!(
+        src,
+        "policy p {{ term t {{ if f1(route.med) >= 1000 {{ reject }} accept }} }}"
+    )
+    .expect("string io");
+    src
+}
+
+#[test]
+fn fn_call_depth_8_ok_9_rejected() {
+    let chain = compile_ok(&fn_chain(8));
+    // med 0 (default): f1(0) = 8 < 1000 -> accept.
+    assert_eq!(
+        chain.evaluate(&ctx_with_path_and_med(0, None)).action,
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        chain.evaluate(&ctx_with_path_and_med(0, Some(995))).action,
+        PolicyAction::Deny,
+        "995 + 8 >= 1000"
+    );
+
+    let (diags, rendered) = diagnostics_of(&fn_chain(9));
+    assert!(
+        rendered.contains("function call chain nests more than 8 deep"),
+        "{rendered}"
+    );
+    // Poisoning: one root cause, one diagnostic.
+    assert_eq!(diags.0.len(), 1, "{rendered}");
+}
+
+/// A function whose inlined body consumes `62` frame slots per call
+/// site (1 parameter + 60 body lets + 1 result), for the frame-budget
+/// tests: 4 statement-level calls fit the 256-slot frame exactly; one
+/// more binding tips it over.
+fn wide_fn() -> String {
+    use std::fmt::Write;
+
+    let mut src = String::from("fn wide(x: u32) -> u32 {\n");
+    writeln!(src, "    let l1 = x + 1").expect("string io");
+    for i in 2..=60 {
+        writeln!(src, "    let l{i} = l{} + 1", i - 1).expect("string io");
+    }
+    src.push_str("    l60\n}\n");
+    src
+}
+
+#[test]
+fn fn_slot_exhaustion_via_call_chain() {
+    // 4 × 62 = 248 slots, plus 8 explicit lets = 256: exactly the
+    // frame. Compiles AND evaluates — pinning that the typecheck
+    // accounting and the lowerer's allocator agree at the boundary
+    // (the lowerer asserts on overflow; the DP must reject first).
+    let boundary = format!(
+        "{}policy p {{ term t {{
+            if wide(1) >= 0 {{ set med 1 }}
+            if wide(2) >= 0 {{ set med 2 }}
+            if wide(3) >= 0 {{ set med 3 }}
+            if wide(4) >= 0 {{ set med 4 }}
+            let a1 = 1
+            let a2 = 1
+            let a3 = 1
+            let a4 = 1
+            let a5 = 1
+            let a6 = 1
+            let a7 = 1
+            let a8 = 1
+            if a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 >= 8 {{ reject }}
+            accept
+        }} }}",
+        wide_fn()
+    );
+    let chain = compile_ok(&boundary);
+    assert_eq!(
+        chain.evaluate(&ctx_with_path_and_med(0, None)).action,
+        PolicyAction::Deny
+    );
+
+    // One more binding: 257 slots -> compile error with the term span.
+    let over = boundary.replace("let a8 = 1", "let a8 = 1\n            let a9 = 1");
+    let (_, rendered) = diagnostics_of(&over);
+    assert!(
+        rendered.contains("binding slots after function inlining"),
+        "{rendered}"
+    );
+}
+
+/// The expansion bomb: a moderately sized body multiplied through a
+/// legal-depth call tree exceeds the inlined-node budget and is
+/// rejected at compile time — never lowered.
+#[test]
+fn fn_expansion_bomb_rejected() {
+    use std::fmt::Write;
+
+    // f1: ~100 arithmetic steps. f2..f8 each call the previous level
+    // three times: 3^7 ≈ 2187 × the base body ≫ 100k nodes, at legal
+    // call depth 8.
+    let mut src = String::from("fn f1(x: u32) -> u32 { x");
+    for _ in 0..100 {
+        src.push_str(" + 1");
+    }
+    src.push_str(" }\n");
+    for i in 2..=8 {
+        writeln!(
+            src,
+            "fn f{i}(x: u32) -> u32 {{ f{p}(x) + f{p}(x) + f{p}(x) }}",
+            p = i - 1
+        )
+        .expect("string io");
+    }
+    src.push_str("policy p { term t { if f8(route.med) >= 1 { reject } accept } }\n");
+    let report = check_on_small_stack(src);
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("expands past"),
+        "want an expansion diagnostic, got: {rendered:.300}"
+    );
+}
+
+/// An evaluation error inside an inlined body denies the route on the
+/// uniform rail and counts, exactly like any checked-arithmetic error.
+#[test]
+fn fn_eval_error_inside_body_denies_and_counts() {
+    let chain = compile_ok(
+        "
+        fn share(total: u32, parts: u32) -> u32 { total / parts }
+        policy p {
+            term t { if share(100, route.med) >= 1 { reject } accept }
+        }
+        ",
+    );
+    let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
+    // med absent -> implicit 0 -> divide-by-zero inside the body ->
+    // Deny, error counted.
+    let denied = chain.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
+    assert_eq!(denied.action, PolicyAction::Deny);
+    assert_eq!(hits.eval_errors(), 1);
+    // A resolvable call decides normally.
+    // 100 / 200 = 0; `0 >= 1` is false -> falls through to accept.
+    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(200)), &hits);
+    assert_eq!(permitted.action, PolicyAction::Permit);
+    assert_eq!(hits.eval_errors(), 1, "no new error");
+}
+
+/// `requires_peer_context` is a property of the CALL SITE's arguments —
+/// functions are closed over nothing, so a route-only call never
+/// disqualifies update-group sharing and a `peer.asn` argument counts
+/// exactly like a bare `peer.asn` operand.
+#[test]
+fn fn_peer_argument_sets_requires_peer_context() {
+    let route_only = compile_ok(
+        "fn f(a: u32) -> u32 { a + 1 }
+         policy p { term t { if f(route.med) >= 10 { reject } accept } }",
+    );
+    assert!(!route_only.requires_peer_context());
+
+    let peer_arg = compile_ok(
+        "fn f(a: u32) -> u32 { a + 1 }
+         policy p { term t { if f(peer.asn) >= 64512 { reject } accept } }",
+    );
+    assert!(peer_arg.requires_peer_context());
+}
+
+/// Explain renders the call site source-level: the result slot is
+/// named by the rendered call expression.
+#[test]
+fn fn_explain_renders_call_source_level() {
+    let chain = compile_ok(FN_EXAMPLE);
+    let terms = &chain.policies[0].terms;
+    // The source term `t` lowers to bind terms + the guard term, all
+    // named `t.<n>` — term identity stays a function of the source.
+    let guard_term = terms
+        .iter()
+        .find(|term| matches!(term.guard, MatchExpr::ValueCmp(_)))
+        .expect("the comparison term");
+    assert!(
+        guard_term.name.as_deref().unwrap_or("").starts_with("t."),
+        "{:?}",
+        guard_term.name
+    );
+    let rendered = crate::engine::explain::render_expr(&guard_term.guard, &chain);
+    assert_eq!(rendered, "penalty(route.as-path.len, 10) >= route.med");
+    // The hoisted binds carry qualified fn.binding names.
+    let bind_names: Vec<&str> = terms
+        .iter()
+        .filter_map(|term| match &term.action {
+            TermAction::Bind { name, .. } => Some(&**name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bind_names,
+        [
+            "penalty.len",
+            "penalty.weight",
+            "penalty.base",
+            "penalty(route.as-path.len, 10)"
+        ]
+    );
+}
+
+/// Per-term hit counters survive inlining: the body dissolves into
+/// `t.<n>` terms of the calling source term, so the counter grid stays
+/// a function of the source and every walk counts the term once per
+/// evaluated guard.
+#[test]
+fn fn_counters_stay_term_shaped() {
+    let chain = compile_ok(FN_EXAMPLE);
+    let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
+    let _ = chain.evaluate_counting(&ctx_with_path_and_med(3, Some(50)), &hits);
+    let snapshot = hits.snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(
+        snapshot[0].len(),
+        chain.policies[0].terms.len(),
+        "one counter row per IR term"
+    );
+    // The unconditional binds and the fallthrough term all matched.
+    assert_eq!(hits.evals(), 1);
+    assert!(snapshot[0].iter().sum::<u64>() >= 4, "{snapshot:?}");
+}
+
+/// Calls in loop-body guards re-bind their slots per iteration; fuel
+/// is charged per iteration only (calls are straight-line code).
+#[test]
+fn fn_calls_inside_loop_bodies() {
+    let chain = compile_ok(
+        "
+        asn-set candidates { 64512, 64513, 64514 }
+        fn shifted(asn: u32, bump: u32) -> u32 { asn + bump }
+        policy p {
+            term t {
+                for a in candidates {
+                    if shifted(a, 1) >= 64515 { reject }
+                }
+                accept
+            }
+        }
+        ",
+    );
+    let ctx = ctx_with_path_and_med(0, None);
+    let (result, fuel) = chain.evaluate_measuring_fuel(&ctx);
+    // 64514 + 1 >= 64515 on the third member.
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(fuel, 3, "one fuel step per iteration, none for the calls");
+}
+
+/// In-language tests exercise fn-using policies through the same
+/// compile + evaluate pipeline.
+#[test]
+fn fn_in_language_test_fixture() {
+    let report = check_rpol(
+        "
+        fn penalty(len: u32, weight: u32) -> u32 {
+            let base = len * weight
+            min(base, 1000)
+        }
+        policy p {
+            term t { if penalty(route.as-path.len, 10) >= route.med { reject } }
+            term rest { accept }
+        }
+        test penalty-rejects-long-paths {
+            route { prefix 10.0.0.0/24; as-path \"65001 65002 65003\"; med 20 }
+            expect p == reject
+        }
+        test penalty-passes-short-paths {
+            route { prefix 10.0.0.0/24; as-path \"65001\"; med 20 }
+            expect p == accept
+        }
+        ",
+    );
+    assert!(report.is_ok(), "{report:?}");
+}
+
+/// `apply` targets cannot call functions — a call is sugar for `let`
+/// binds, which a pure inlined predicate cannot execute (the LAN-302
+/// rule extended).
+#[test]
+fn fn_apply_target_with_calls_rejected() {
+    let (_, rendered) = diagnostics_of(
+        "fn f(a: u32) -> u32 { a + 1 }
+         policy helper { term t { if f(route.med) >= 10 { reject } } term rest { accept } }
+         policy p { term t { if apply(helper) { accept } } }",
+    );
+    assert!(rendered.contains("it calls functions"), "{rendered}");
+    assert!(rendered.contains("first call is here"), "{rendered}");
+}
+
+/// Legal-depth stack shape for functions (the #777 discipline): a
+/// max-depth call chain wrapped in deep expressions compiles AND
+/// evaluates on the small stack — every recursive pass runs.
+#[test]
+fn fn_legal_call_depth_on_small_stack() {
+    // Depth-8 call chain where every body carries a deep-ish
+    // arithmetic chain, called from a 60-deep expression.
+    let mut src = String::new();
+    {
+        use std::fmt::Write;
+        writeln!(src, "fn f8(x: u32) -> u32 {{ x{} }}", " + 1".repeat(60)).expect("string io");
+        for i in (1..8).rev() {
+            writeln!(src, "fn f{i}(x: u32) -> u32 {{ f{}(x) + 1 }}", i + 1).expect("string io");
+        }
+        writeln!(
+            src,
+            "policy p {{ term t {{ if f1(route.med){} >= 100000 {{ reject }} accept }} }}",
+            " + 1".repeat(60),
+        )
+        .expect("string io");
+    }
+    let verdict = std::thread::Builder::new()
+        .stack_size(SMALL_STACK)
+        .spawn(move || {
+            let chain = compile_ok(&src);
+            let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+            let action = chain.evaluate(&ctx).action;
+            drop(chain);
+            action
+        })
+        .expect("spawn")
+        .join()
+        .expect("legal-depth fn chain crashed the small stack");
+    // med 0: f1(0) = 60 + 7 = 67; 67 + 60 = 127 < 100000 -> accept.
+    assert_eq!(verdict, PolicyAction::Permit);
 }
