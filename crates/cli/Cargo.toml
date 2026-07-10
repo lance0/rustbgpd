@@ -36,6 +36,9 @@ serde_json.workspace = true
 toml.workspace = true
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# `rbgp doctor` bundle output (one gzipped tarball).
+tar = "0.4"
+flate2 = "1"
 owo-colors.workspace = true
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }

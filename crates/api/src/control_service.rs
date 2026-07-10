@@ -86,6 +86,7 @@ impl proto::control_service_server::ControlService for ControlService {
             uptime_seconds: uptime,
             active_peers: u32::try_from(active_peers).unwrap_or(u32::MAX),
             total_routes: u32::try_from(snapshot.total_routes).unwrap_or(u32::MAX),
+            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }
 

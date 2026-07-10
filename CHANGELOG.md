@@ -489,6 +489,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counted, and hard caps bound per-record size (16 MiB), total entries
   (2^28), and gzip decompression (4 GiB). Groundwork for MRT warm-boot
   restore. (LAN-337)
+- **Doctor bundle v2 (`rbgp doctor`).** The support-bundle command now
+  prints red/green triage checks live while it collects — daemon
+  reachable/healthy, peers stuck outside Established with
+  time-in-state, flap loops, daemon `nofile` rlimits, recent panic
+  reports — and produces one `rustbgpd-doctor-<ts>.tar.gz` with a
+  stable layout: `manifest.json`, `config/effective.toml` (the
+  daemon's secret-redacted `GetEffectiveConfig` dump — the raw config
+  file is never copied), `peers/`, `logs/tail-1000.jsonl` (opt-in
+  `--log-file`; stdout/journald-only logging is recorded in the
+  manifest instead), `crashes/`, and `system/`. The manifest records
+  tool + daemon versions, that redaction ran, and which sections were
+  collected vs unavailable — a run against a down daemon still
+  produces a bundle and says what is missing. Detailed exit codes: 0
+  all green / 1 error / 2 red checks found. The daemon side gains
+  panic hygiene: a global panic hook writes a bounded, secret-free
+  `crash/panic-<ts>.toml` report (message, location, thread, version —
+  never env or argv) under `runtime_state_dir`, keeping the 10 most
+  recent, and `HealthResponse` now carries `daemon_version`. The
+  GitHub bug-report template asks for the bundle. (LAN-324)
 
 - **rpol did-you-mean for unknown set/policy/function/dataset
   references.** Every unknown-symbol diagnostic (prefix-set /

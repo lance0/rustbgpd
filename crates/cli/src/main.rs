@@ -60,6 +60,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
     config diff, plan    0 no changes / 1 error / 2 changes present\n  \
+    doctor               0 all checks green / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below --coverage-min\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
     policy fmt           0 clean or formatted / 1 needs formatting (--check) or error";
@@ -256,11 +257,30 @@ enum Command {
     /// Check daemon health
     Health,
 
-    /// Write a redacted support bundle for operators and issue reports
+    /// Run red/green triage checks and write a redacted support bundle
+    ///
+    /// Prints live checks (peer stuck in Connect, flap loops, daemon
+    /// rlimits, recent panic reports) while collecting one
+    /// `rustbgpd-doctor-<ts>.tar.gz` with manifest.json,
+    /// config/effective.toml (the daemon's secret-redacted dump), peers/,
+    /// logs/, crashes/, and system/. The raw daemon config file and
+    /// bearer-token material are never collected. A bundle is still
+    /// produced when the daemon is down; the manifest records which
+    /// sections are missing.
+    #[command(after_help = "Exit codes:\n  \
+        0  all checks green\n  \
+        1  error (could not produce a bundle)\n  \
+        2  bundle written but one or more checks are red")]
     Doctor {
-        /// Output directory. Defaults to `rustbgpd-support-<unix-seconds>`.
-        #[arg(long, value_name = "DIR")]
+        /// Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`.
+        #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+
+        /// Daemon log file to tail (last 1000 lines) into the bundle.
+        /// Without it the manifest records that the daemon logs to
+        /// stdout/journald.
+        #[arg(long, value_name = "FILE")]
+        log_file: Option<PathBuf>,
     },
 
     /// Show Prometheus metrics
@@ -1798,8 +1818,27 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         std::process::exit(commands::ribsnap_bmp::from_bmp(&opts));
     }
 
-    let addr = cli.addr.clone();
-    let token_file_configured = cli.token_file.is_some();
+    // `doctor` must produce a bundle even when the daemon is down, so it
+    // handles the connect result itself instead of failing here; it also
+    // owns a detailed 0/1/2 exit-code contract.
+    if let Command::Doctor { output, log_file } = &cli.command {
+        let connection = connect(&cli.addr, cli.token_file.as_deref()).await;
+        let code = commands::doctor::run(
+            connection,
+            &commands::doctor::DoctorOptions {
+                output: output.as_deref(),
+                log_file: log_file.as_deref(),
+                daemon_address: &cli.addr,
+                token_file_configured: cli.token_file.is_some(),
+                json: cli.json,
+            },
+        )
+        .await?;
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        std::process::exit(code);
+    }
+
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -2546,16 +2585,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         }
 
         Command::Health => commands::control::health(connection, json).await,
-        Command::Doctor { output } => {
-            commands::doctor::run(
-                connection,
-                output.as_deref(),
-                &addr,
-                token_file_configured,
-                json,
-            )
-            .await
-        }
+        Command::Doctor { .. } => unreachable!("handled before connect"),
         Command::Metrics => {
             if json {
                 eprintln!(
@@ -2960,9 +2990,24 @@ mod tests {
 
     #[test]
     fn test_parse_doctor() {
-        let cli = Cli::try_parse_from(["rbgp", "doctor", "--output", "support"]).unwrap();
-        if let Command::Doctor { output } = cli.command {
-            assert_eq!(output.as_deref(), Some(std::path::Path::new("support")));
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "doctor",
+            "--output",
+            "support.tar.gz",
+            "--log-file",
+            "/var/log/rustbgpd.jsonl",
+        ])
+        .unwrap();
+        if let Command::Doctor { output, log_file } = cli.command {
+            assert_eq!(
+                output.as_deref(),
+                Some(std::path::Path::new("support.tar.gz"))
+            );
+            assert_eq!(
+                log_file.as_deref(),
+                Some(std::path::Path::new("/var/log/rustbgpd.jsonl"))
+            );
         } else {
             panic!("expected Doctor command");
         }

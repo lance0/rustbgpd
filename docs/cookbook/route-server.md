@@ -220,7 +220,7 @@ hygiene and per-member export views without carrying member traffic yet.
 6. Generate a support bundle before and after the trial:
 
    ```console
-   $ rbgp doctor --output ./support-rs-shadow
+   $ rbgp doctor --output ./support-rs-shadow.tar.gz
    ```
 
 Migration mapping for FRR, BIRD, and ARouteServer lives in

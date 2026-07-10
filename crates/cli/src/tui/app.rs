@@ -384,6 +384,7 @@ mod tests {
                 uptime_seconds: 1,
                 active_peers: neighbors.len() as u32,
                 total_routes: 0,
+                daemon_version: String::new(),
             }),
             neighbors,
             rpki_vrp_count: None,
