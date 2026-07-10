@@ -262,26 +262,33 @@ IPv4/IPv6 `Prefix` routes.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Memory Snapshot (2 peers × 100k prefixes, bgperf2 — 2026-05-29, v0.32.0)
+## Performance Snapshot (bgperf2 — 2026-07-09, v0.50.0)
 
-| Implementation | Max RSS |
-|---|---|
-| BIRD 2.18 | ~30 MB |
-| GoBGP 4.3.0 | ~203 MB |
-| rustbgpd (v0.32.0, default) | ~284 MB |
-| rustbgpd (event-history enabled) | ~346 MB |
+Same host and harness, all targets run back to back on an idle machine.
+"Converged" is bgperf2's elapsed-to-full-table figure; RSS is full-daemon
+max over the run.
 
-Full-daemon process RSS, same host and harness. rustbgpd's full-daemon RSS sits
-above GoBGP here because route storage is less compact: a 2026-06-02
-whole-daemon dhat profile attributes the live-at-peak heap primarily to the
-three-layer RIB model (Adj-RIB-In + Loc-RIB + Adj-RIB-Out) and its route-map /
-prefix-index storage, not operational surfaces. The first measured fix moved
-the Adj-RIB-In / Adj-RIB-Out prefix indexes to trie-backed storage, lowering the
-allocator-tracked RIB profile at this scale from 66.6 MB to 60.6 MB; the durable
-event-history outbox is opt-in (default off) as of v0.32.0, and enabling it is
-the ~284 → ~346 MB delta. FRR and OpenBGPd were not in this run. See
-[BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables, the RIB memory
-profile, and methodology.
+| Scenario | rustbgpd 0.50.0 | BIRD 2.18 (master) | GoBGP 4.3.0 |
+|---|---|---|---|
+| 10 peers × 1k prefixes | 2 s / 42 MB | 2 s / 9 MB | 3 s / 51 MB |
+| 2 peers × 10k prefixes | 2 s / 52 MB | 2 s / 9 MB | 3 s / 43 MB |
+| 2 peers × 100k prefixes | 3 s / 246 MB | 3 s / 25 MB | 6 s / 197 MB |
+
+Convergence is at or ahead of both peers in every scenario (GoBGP takes
+twice as long at 2×100k). BIRD's single-process C core remains far ahead
+of both Go and Rust daemons on memory. rustbgpd's full-daemon RSS still
+sits above GoBGP at the 100k-per-peer scale — route storage is less
+compact: a 2026-06-02 whole-daemon dhat profile attributes the
+live-at-peak heap primarily to the three-layer RIB model (Adj-RIB-In +
+Loc-RIB + Adj-RIB-Out) and its route-map / prefix-index storage, not
+operational surfaces — though the gap has narrowed materially since
+v0.32.0 (~284 → 246 MB at this scale, ~90 → 42 MB at 10×1k) via the
+trie-backed prefix indexes, attribute interning, and the update-groups
+work. At smaller scales rustbgpd and GoBGP are equivalent. The durable
+event-history outbox is opt-in (default off); enabling it adds RSS
+roughly proportional to event volume. FRR and OpenBGPd were not in this
+run. See [BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables,
+the RIB memory profile, and methodology.
 
 ## Positioning
 
