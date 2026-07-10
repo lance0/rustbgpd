@@ -71,6 +71,7 @@ tower = "0.5"
 libc = "0.2"
 x509-parser = "0.18"
 serde = { version = "1", features = ["derive"] }
+schemars = "1.2"
 toml = "1.1"
 toml_edit = "0.25"
 clap = { version = "4", features = ["derive", "env"] }
@@ -134,6 +135,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+schemars.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 prometheus.workspace = true
