@@ -664,6 +664,15 @@ pub enum PeerManagerCommand {
         /// Reply returns normalized TOML plus the live rpol registry.
         reply: oneshot::Sender<Result<RuntimeConfigSnapshotReply, String>>,
     },
+    /// Return the effective running config as normalized TOML with defaults
+    /// materialized and secret material redacted, for
+    /// `ConfigService.GetEffectiveConfig`. Unlike
+    /// [`PeerManagerCommand::RuntimeConfigSnapshot`], the reply is safe to
+    /// hand to `sensitive_read` API callers: secrets never leave the daemon.
+    EffectiveRuntimeConfig {
+        /// Reply returns the redacted effective config TOML.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// Atomically apply resolved import/export policy chains to a set of live
     /// peer sessions, returning each peer's PRIOR chains for rollback.
     ///

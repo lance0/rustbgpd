@@ -60,7 +60,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
 
-### ConfigService (6 RPCs)
+### ConfigService (7 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -70,6 +70,7 @@ shape itself does not raise the tier.
 | `ConfirmConfigTransaction` | `operator_only` | Confirm a pending confirmed config transaction before its timeout expires. Confirms deployment reachability rather than reading config contents. |
 | `AbortConfigTransaction` | `operator_only` | Abort a pending confirmed config transaction and roll back immediately through the transaction executor. |
 | `GetConfigTransactionStatus` | `sensitive_read` | Returns redacted confirmed-transaction lifecycle status: pending/last state, confirm id, deadline, committed sections, and snapshot token, but never candidate TOML. |
+| `GetEffectiveConfig` | `sensitive_read` | Returns the full effective running config as normalized TOML with defaults materialized (`rbgp config effective`). Whole-config disclosure: peer lists, policy structure, topology. Secret material (`md5_password`, `tcp_ao.key`) is replaced with `<redacted>` before the document leaves the daemon. |
 
 ### NeighborService (11 RPCs)
 
@@ -216,13 +217,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 56 | 57.7% |
-| `mutating` | 19 | 19.6% |
-| `operator_only` | 22 | 22.7% |
-| **Total** | **97** | **100%** |
+| `sensitive_read` | 57 | 58.2% |
+| `mutating` | 19 | 19.4% |
+| `operator_only` | 22 | 22.4% |
+| **Total** | **98** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 97
-total is 93 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 98
+total is 94 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

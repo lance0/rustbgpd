@@ -2661,6 +2661,168 @@ impl RuntimeSnapshotKey {
     }
 }
 
+/// Placeholder emitted in place of secret material by the effective-config
+/// dump (`rbgp config effective`). `Config::validate` rejects it loudly so a
+/// dumped config with secrets cannot silently boot with the placeholder as a
+/// live credential.
+pub const REDACTED_SECRET: &str = "<redacted>";
+
+impl Config {
+    /// The running post-defaults config for `rbgp config effective`:
+    /// a clone of this config with per-neighbor session defaults
+    /// materialized (peer-group inheritance and computed defaults such
+    /// as `hold_time` / RFC 9687 `send_hold_time` resolved to the
+    /// values the daemon is using) and secret material replaced with
+    /// [`REDACTED_SECRET`].
+    ///
+    /// Peer-group and dynamic-neighbor rows are shown as written —
+    /// their values resolve per-session; static `[[neighbors]]` rows
+    /// carry the resolved values. Fields whose absence *is* the
+    /// effective value (`max_prefixes` unset = unlimited,
+    /// `remove_private_as` unset = disabled) stay absent.
+    ///
+    /// The default constants below are pinned to `resolve_neighbor` by
+    /// the `effective_redacted_matches_resolve_neighbor` config test,
+    /// so they cannot drift silently.
+    #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one inheritance/default chain per materialized neighbor field; splitting would scatter the pins"
+    )]
+    pub fn effective_redacted(&self) -> Config {
+        let mut effective = self.clone();
+
+        for neighbor in &mut effective.neighbors {
+            // Runtime configs are validated, so referenced groups exist;
+            // a dangling reference just skips inheritance here.
+            let group = self.peer_group_for_neighbor(neighbor).unwrap_or(None);
+            let hold_time = neighbor
+                .hold_time
+                .or_else(|| group.and_then(|g| g.hold_time))
+                .unwrap_or(DEFAULT_HOLD_TIME);
+            neighbor.hold_time = Some(hold_time);
+            neighbor.send_hold_time = Some(
+                neighbor
+                    .send_hold_time
+                    .or_else(|| group.and_then(|g| g.send_hold_time))
+                    .unwrap_or_else(|| rustbgpd_fsm::default_send_hold_time(hold_time)),
+            );
+            neighbor.graceful_restart = Some(
+                neighbor
+                    .graceful_restart
+                    .or_else(|| group.and_then(|g| g.graceful_restart))
+                    .unwrap_or(true),
+            );
+            neighbor.gr_restart_time = Some(
+                neighbor
+                    .gr_restart_time
+                    .or_else(|| group.and_then(|g| g.gr_restart_time))
+                    .unwrap_or(120),
+            );
+            neighbor.gr_stale_routes_time = Some(
+                neighbor
+                    .gr_stale_routes_time
+                    .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
+                    .unwrap_or(360),
+            );
+            neighbor.llgr_stale_time = Some(
+                neighbor
+                    .llgr_stale_time
+                    .or_else(|| group.and_then(|g| g.llgr_stale_time))
+                    .unwrap_or(0),
+            );
+            neighbor.ttl_security = Some(
+                neighbor
+                    .ttl_security
+                    .or_else(|| group.and_then(|g| g.ttl_security))
+                    .unwrap_or(false),
+            );
+            neighbor.max_prefixes = neighbor
+                .max_prefixes
+                .or_else(|| group.and_then(|g| g.max_prefixes));
+            neighbor.route_reflector_client = Some(
+                neighbor
+                    .route_reflector_client
+                    .or_else(|| group.and_then(|g| g.route_reflector_client))
+                    .unwrap_or(false),
+            );
+            neighbor.route_server_client = Some(
+                neighbor
+                    .route_server_client
+                    .or_else(|| group.and_then(|g| g.route_server_client))
+                    .unwrap_or(false),
+            );
+            neighbor.per_client_best = Some(
+                neighbor
+                    .per_client_best
+                    .or_else(|| group.and_then(|g| g.per_client_best))
+                    .unwrap_or(false),
+            );
+            neighbor.strict_role = Some(
+                neighbor
+                    .strict_role
+                    .or_else(|| group.and_then(|g| g.strict_role))
+                    .unwrap_or(false),
+            );
+            neighbor.prefix_orf_receive = Some(
+                neighbor
+                    .prefix_orf_receive
+                    .or_else(|| group.and_then(|g| g.prefix_orf_receive))
+                    .unwrap_or(false),
+            );
+            neighbor.disable_ipv4_unicast = Some(
+                neighbor
+                    .disable_ipv4_unicast
+                    .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
+                    .unwrap_or(false),
+            );
+            if neighbor.families.is_empty() {
+                if let Some(group_families) = group.map(|g| &g.families).filter(|f| !f.is_empty()) {
+                    neighbor.families.clone_from(group_families);
+                } else {
+                    neighbor.families.push("ipv4_unicast".to_string());
+                    if neighbor
+                        .address
+                        .parse::<IpAddr>()
+                        .is_ok_and(|addr| addr.is_ipv6())
+                    {
+                        neighbor.families.push("ipv6_unicast".to_string());
+                    }
+                }
+            }
+        }
+
+        // Redact secret material everywhere it appears in the schema:
+        // neighbor md5_password / tcp_ao.key and peer-group md5_password.
+        for neighbor in &mut effective.neighbors {
+            if neighbor.md5_password.is_some() {
+                neighbor.md5_password = Some(REDACTED_SECRET.to_string());
+            }
+            if let Some(tcp_ao) = &mut neighbor.tcp_ao {
+                tcp_ao.key = REDACTED_SECRET.to_string();
+            }
+        }
+        for group in effective.peer_groups.values_mut() {
+            if group.md5_password.is_some() {
+                group.md5_password = Some(REDACTED_SECRET.to_string());
+            }
+        }
+
+        effective
+    }
+
+    /// Deterministic TOML rendering of [`Config::effective_redacted`].
+    /// Canonicalized through `toml::Value` (BTreeMap-backed, keys
+    /// sorted) exactly like the runtime snapshot token, so the output
+    /// is stable across `HashMap` iteration orders.
+    pub fn effective_redacted_toml(&self) -> Result<String, String> {
+        let canonical = toml::Value::try_from(self.effective_redacted())
+            .map_err(|error| format!("failed to canonicalize effective config: {error}"))?;
+        toml::to_string_pretty(&canonical)
+            .map_err(|error| format!("failed to serialize effective config: {error}"))
+    }
+}
+
 /// Classify a validated config diff for the v1 config transaction model.
 ///
 /// This deliberately does not mirror all SIGHUP reload-applied sections. The

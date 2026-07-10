@@ -56,6 +56,14 @@ oracle:
 rbgp config diff --from-file /etc/rustbgpd/candidate.toml
 ```
 
+Not sure what a value on the live RR *currently* is (an inherited
+peer-group timer, a defaulted `hold_time`)? Dump the effective running
+config first — defaults materialized, secrets redacted:
+
+```bash
+rbgp config effective
+```
+
 The diff annotates each changed field. Two classes matter here:
 
 - **Hot-applied** (`description`, `max_prefixes`,

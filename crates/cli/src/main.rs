@@ -380,6 +380,18 @@ enum ConfigAction {
 
     /// Show pending or last confirmed-transaction lifecycle state
     Status,
+
+    /// Dump the daemon's effective running config (defaults materialized)
+    ///
+    /// Prints the live post-defaults config as normalized TOML: peer-group
+    /// inheritance and computed defaults (hold_time, send_hold_time, GR
+    /// timers, families) are resolved to the values the daemon is using.
+    /// Secret material (md5_password, tcp_ao key) is replaced with
+    /// `<redacted>` before it leaves the daemon; a dump containing the
+    /// placeholder fails `rustbgpd --check` loudly, so restore real secrets
+    /// before reusing it as a config file. Use --json (-j) for a JSON
+    /// rendering; the default output is TOML.
+    Effective,
 }
 
 #[derive(Subcommand)]
@@ -1723,6 +1735,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 commands::config::abort(connection, &confirm_id, json).await
             }
             ConfigAction::Status => commands::config::status(connection, json).await,
+            ConfigAction::Effective => commands::config::effective(connection, json).await,
         },
 
         Command::Neighbor {

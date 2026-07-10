@@ -12946,3 +12946,232 @@ fn dataset_reload_reuses_handles_swaps_scoped_and_keeps_prior_on_failure() {
         "old data still probing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Effective running config dump (`rbgp config effective`, LAN-325)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn effective_redacted_materializes_neighbor_defaults() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let rendered = config.effective_redacted_toml().unwrap();
+
+    // Computed defaults appear as concrete values: DEFAULT_HOLD_TIME and
+    // the RFC 9687 §6 derived send-hold default (max(480, 2 × hold)).
+    assert!(rendered.contains("hold_time = 90"), "{rendered}");
+    assert!(rendered.contains("send_hold_time = 480"), "{rendered}");
+    assert!(rendered.contains("graceful_restart = true"), "{rendered}");
+    assert!(rendered.contains("gr_restart_time = 120"), "{rendered}");
+    assert!(
+        rendered.contains("gr_stale_routes_time = 360"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("llgr_stale_time = 0"), "{rendered}");
+    assert!(rendered.contains("ttl_security = false"), "{rendered}");
+    assert!(rendered.contains("\"ipv4_unicast\""), "{rendered}");
+}
+
+#[test]
+fn effective_redacted_matches_resolve_neighbor() {
+    // Drift guard: the materialization constants in `effective_redacted`
+    // must agree with `resolve_neighbor` for both a bare neighbor and a
+    // group-inheriting neighbor.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.rr-clients]
+hold_time = 30
+gr_restart_time = 200
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65001
+peer_group = "rr-clients"
+"#;
+    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let effective = config.effective_redacted();
+    for (original, materialized) in config.neighbors.iter().zip(&effective.neighbors) {
+        let resolved = config.resolve_neighbor(original).unwrap();
+        let peer = &resolved.transport_config.peer;
+        assert_eq!(materialized.hold_time, Some(peer.hold_time));
+        assert_eq!(materialized.send_hold_time, Some(peer.send_hold_time));
+        assert_eq!(materialized.graceful_restart, Some(peer.graceful_restart));
+        assert_eq!(materialized.gr_restart_time, Some(peer.gr_restart_time));
+        assert_eq!(
+            materialized.gr_stale_routes_time,
+            Some(resolved.transport_config.gr_stale_routes_time)
+        );
+        assert_eq!(
+            materialized.llgr_stale_time,
+            Some(resolved.transport_config.llgr_stale_time)
+        );
+        assert_eq!(
+            materialized.ttl_security,
+            Some(resolved.transport_config.ttl_security)
+        );
+    }
+    // Group inheritance visible on the second neighbor.
+    assert_eq!(effective.neighbors[1].hold_time, Some(30));
+    assert_eq!(effective.neighbors[1].gr_restart_time, Some(200));
+}
+
+#[test]
+fn effective_redacted_never_leaks_secrets() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.md5-group]
+md5_password = "group-hunter2-seed"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "neighbor-hunter2-seed"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+
+[neighbors.tcp_ao]
+key = "tcp-ao-hunter2-seed"
+send_id = 1
+recv_id = 2
+algorithm = "hmac(sha256)"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65001
+peer_group = "md5-group"
+"#;
+    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let rendered = config.effective_redacted_toml().unwrap();
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(rendered.contains(REDACTED_SECRET), "{rendered}");
+}
+
+#[test]
+fn effective_redacted_toml_is_deterministic_and_round_trips() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.zeta]
+hold_time = 15
+
+[peer_groups.alpha]
+hold_time = 45
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+peer_group = "alpha"
+
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65002
+"#;
+    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let first = config.effective_redacted_toml().unwrap();
+    let second = config.effective_redacted_toml().unwrap();
+    assert_eq!(first, second, "effective dump must be deterministic");
+
+    // Secretless dumps round-trip through the normal loader + validator.
+    let reloaded = Config::load_toml_with_diagnostics(&first, "effective.toml")
+        .expect("secretless effective dump must reload cleanly");
+    assert_eq!(reloaded.neighbors[0].hold_time, Some(45));
+    // Implicit-family default for the IPv6 neighbor is materialized.
+    let v6 = reloaded
+        .neighbors
+        .iter()
+        .find(|n| n.address == "2001:db8::2")
+        .unwrap();
+    assert_eq!(
+        v6.families,
+        vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()]
+    );
+
+    // Reloading the dump and dumping again is a fixpoint.
+    assert_eq!(reloaded.effective_redacted_toml().unwrap(), first);
+}
+
+#[test]
+fn redacted_placeholder_fails_validation_loudly() {
+    for (label, snippet) in [
+        (
+            "neighbor md5",
+            "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\nmd5_password = \"<redacted>\"\n",
+        ),
+        (
+            "tcp_ao key",
+            "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n[neighbors.tcp_ao]\nkey = \"<redacted>\"\nsend_id = 1\nrecv_id = 2\nalgorithm = \"hmac(sha256)\"\n",
+        ),
+        (
+            "peer group md5",
+            "[peer_groups.g]\nmd5_password = \"<redacted>\"\n",
+        ),
+    ] {
+        let toml_str = format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n\n{snippet}"
+        );
+        let err = Config::load_toml_with_diagnostics(&toml_str, "effective.toml").expect_err(label);
+        assert!(err.contains("rbgp config effective"), "{label}: {err}");
+    }
+}
+
+#[test]
+fn effective_redacted_dump_with_secrets_does_not_reload() {
+    // The documented contract: a dump taken from a secret-bearing config
+    // must fail --check/load loudly rather than boot with the placeholder.
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "hunter2"
+"#;
+    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let rendered = config.effective_redacted_toml().unwrap();
+    let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
+    assert!(err.contains("md5_password"), "{err}");
+}

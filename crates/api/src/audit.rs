@@ -140,6 +140,13 @@ pub(crate) fn get_config_transaction_status_summary() -> GrpcRequestSummary {
     GrpcRequestSummary::new("request=empty")
 }
 
+/// Summary for `GetEffectiveConfig`; there are no request fields. The
+/// response TOML is redacted by the peer manager before it reaches the
+/// service, so nothing response-side needs masking here either.
+pub(crate) fn get_effective_config_summary() -> GrpcRequestSummary {
+    GrpcRequestSummary::new("request=empty")
+}
+
 /// Summary for `gnmi.gNMI/Set`. Set payloads can carry future secret-bearing
 /// config values, so log only operation counts and extension count.
 pub(crate) fn gnmi_set_summary(request: &crate::gnmi::SetRequest) -> GrpcRequestSummary {

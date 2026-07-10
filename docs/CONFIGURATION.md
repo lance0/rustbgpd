@@ -63,6 +63,21 @@ Note that the schema checks structure, types, and enum values; semantic
 rules (ASN/hold-time ranges, cross-field requirements, name references)
 are still enforced by `rustbgpd --check`. Run both for full coverage.
 
+To see what a **running** daemon is actually using — the post-defaults
+config, with peer-group inheritance and computed defaults (`hold_time`,
+`send_hold_time`, GR timers, address families) materialized on every
+static neighbor — dump it live:
+
+```
+rbgp config effective            # normalized TOML
+rbgp -j config effective         # same document as JSON
+```
+
+Secret material (`md5_password`, `tcp_ao` keys) is replaced with
+`<redacted>` before it leaves the daemon; a dump containing the
+placeholder deliberately fails `rustbgpd --check`, so restore real
+secrets before reusing a dump as a config file.
+
 ### SchemaStore submission (not yet submitted)
 
 Once submitted to [SchemaStore](https://github.com/SchemaStore/schemastore),

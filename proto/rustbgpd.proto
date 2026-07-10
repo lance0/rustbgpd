@@ -130,6 +130,24 @@ service ConfigService {
   // Return the current confirmed-transaction lifecycle state. The response is
   // redacted and never includes candidate config contents.
   rpc GetConfigTransactionStatus(GetConfigTransactionStatusRequest) returns (ConfigTransactionStatusResponse);
+
+  // Return the daemon's effective running config as normalized TOML with
+  // per-neighbor defaults materialized (peer-group inheritance and computed
+  // defaults such as hold_time / send_hold_time resolved to the values the
+  // daemon is using). Secret material (md5_password, tcp_ao.key) is replaced
+  // with the `<redacted>` placeholder before the document leaves the daemon;
+  // config validation rejects the placeholder loudly, so a dump taken from a
+  // secret-bearing config cannot silently boot as-is.
+  rpc GetEffectiveConfig(GetEffectiveConfigRequest) returns (GetEffectiveConfigResponse);
+}
+
+message GetEffectiveConfigRequest {}
+
+message GetEffectiveConfigResponse {
+  // Normalized effective config TOML, defaults materialized, secrets
+  // redacted. Key order is canonical (sorted), so the output is stable
+  // across calls against an unchanged runtime config.
+  string toml = 1;
 }
 
 message DiffRuntimeConfigRequest {
