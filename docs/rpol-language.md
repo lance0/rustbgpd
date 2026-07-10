@@ -34,9 +34,7 @@ policy bogon-filter {
 
 # A parameterized policy: `peer_lp` is substituted at instantiation.
 policy customer-in(peer_lp: u32) {
-    term rpki-guard {
-        if route.rpki == invalid { reject }
-    }
+    term rpki-guard { if route.rpki == invalid { reject } }
     term customer-routes {
         if route.prefix in customers && route.communities has 65000:100 {
             set local-pref peer_lp;
@@ -1264,6 +1262,48 @@ Error: unknown prefix-set `custmers`
    │ Note: did you mean `customers`?
 ───╯
 ```
+
+## Formatting — `rbgp policy fmt`
+
+`rbgp policy fmt FILE...` rewrites `.rpol` files into the one
+canonical style — no options, no configuration (the gofmt
+philosophy), so multi-file policy repos never drift.
+`rbgp policy fmt --check FILE...` rewrites nothing and exits 1 with a
+diff when any file is not canonically formatted — the CI mode. `-`
+reads stdin and writes the formatted source to stdout (editor
+integration). Exit codes: `0` all files clean/formatted, `1` a
+`--check` difference or an error (unreadable file, or syntax errors —
+broken files are refused, never rewritten).
+
+The canonical style:
+
+- Four-space indentation; one statement per line; opening braces on
+  the construct's line (`policy p {`), closing braces on their own
+  line.
+- A `term` / `if` / `else` body stays on one line when it holds a
+  single statement, contains no comments, and the line fits in 100
+  columns — `term rest { accept }`,
+  `term guard { if route.rpki == invalid { reject } }`. `policy`,
+  `test`, `fn`, and `for` bodies always expand.
+- Set bodies and test `route` / `peer` / `dataset` fixtures stay on
+  one line when they fit, otherwise one member per line.
+- Single spaces around operators and between tokens; none inside
+  parentheses or after a call name (`min(a, b)`, `customer-in(200)`).
+- Blank-line runs collapse to one; a blank line always precedes a
+  top-level `policy`, `fn`, or `test` (attached comments move with
+  it).
+- No trailing whitespace; exactly one trailing newline. Expressions
+  are never wrapped — a long guard stays on its line.
+
+The formatter is layout-only: it never adds, removes, or reorders a
+token. Semicolons stay exactly as written (they are optional in the
+grammar), `import` declarations keep their order (resolution order is
+semantic), and comments are preserved. Formatting is therefore
+guaranteed parse-identical — and the formatter proves it on every
+run, re-lexing its own output and refusing to write anything if the
+token-and-comment sequence moved. Idempotence (`fmt(fmt(x)) ==
+fmt(x)`) and compiled-IR identity are additionally property-tested
+over every `.rpol` fixture in the repository.
 
 ## Using policies in the daemon
 

@@ -18,9 +18,7 @@ asn-set partners { 64999 }
 # the down peer customer-in(300).
 policy customer-in(peer_lp: u32) {
     # FRR: route-map RPOL-IN deny 10 (match as-path TRANSIT)
-    term transit-guard {
-        if route.as-path matches "_65500_" { reject }
-    }
+    term transit-guard { if route.as-path matches "_65500_" { reject } }
     # Modify-and-continue (no verdict): scrub the mark, zero MED,
     # keep walking. FRR: permit 20 + on-match next.
     term med-scrub {
@@ -64,16 +62,12 @@ policy customer-in(peer_lp: u32) {
 # Only the src peer's chain references this policy — the SIGHUP phase
 # edits its LP and asserts that only src gets a Route Refresh.
 policy src-default {
-    term baseline {
-        if route.prefix == 198.51.100.0/24 { set local-pref 100 }
-    }
+    term baseline { if route.prefix == 198.51.100.0/24 { set local-pref 100 } }
 }
 
 # Export toward the down peer. FRR: route-map RPOL-OUT on parity.
 policy edge-out {
-    term no-leak {
-        if route.prefix == 198.51.100.0/24 { reject }
-    }
+    term no-leak { if route.prefix == 198.51.100.0/24 { reject } }
     # FRR: permit 15 (v6 prefix-list) — the export-side family branch.
     term med-v6 {
         if route.family == ipv6-unicast {

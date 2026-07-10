@@ -116,6 +116,12 @@ Parse, typecheck, and every `test` block — exit 0 clean, 1 for
 diagnostics (rendered with source spans), 2 for test failures. Put
 this in CI next to the config lint; M80 gates on it.
 
+Keep the file in the canonical style with `rbgp policy fmt edge.rpol`
+(one style, no options; comments and semicolons survive), and add
+`rbgp policy fmt --check edge.rpol` beside `policy check` in CI —
+exit 1 with a diff when a file drifts. See "Formatting" in
+[the language reference](../rpol-language.md).
+
 ## 3. Wire it into the config
 
 ```toml

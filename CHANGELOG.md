@@ -426,6 +426,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binaries so they cannot drift; the container image installs the bash
   completions at `/usr/share/bash-completion/completions/rbgp`.
   (LAN-326)
+- **`rbgp policy fmt` — the canonical `.rpol` formatter.** One
+  canonical style, zero options (gofmt philosophy): `rbgp policy fmt
+  FILE...` rewrites in place (atomic write-temp-rename), `--check`
+  exits 1 with a diff for CI, and `-` formats stdin to stdout for
+  editors. Concrete-syntax architecture: the token stream — comments
+  included — is re-laid-out and never mutated (semicolons, comments,
+  and declaration order are preserved verbatim), so formatting is
+  parse-identical by construction; the formatter additionally
+  re-lexes its own output and refuses to write on any
+  token-or-comment mismatch. Idempotence and compiled-IR identity are
+  property-tested over every `.rpol` fixture and fuzz seed in the
+  repo, and the repo's own `.rpol` files are reformatted to the
+  canonical style. New "Formatting" section in
+  `docs/rpol-language.md`. (LAN-323)
 
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
