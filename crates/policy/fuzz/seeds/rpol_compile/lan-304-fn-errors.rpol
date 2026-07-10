@@ -1,0 +1,11 @@
+fn share(total: u32, parts: u32) -> u32 { total / parts }
+
+fn f(a: u32) -> u32 { g(a) }
+fn g(a: u32) -> u32 { f(a) }
+
+fn impure(a: u32) -> u32 { a + route.med }
+
+policy p {
+    term t { if share(100, route.med) >= 1 { reject } accept }
+    term arity { if share(1) >= 2 { reject } }
+}

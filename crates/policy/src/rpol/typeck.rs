@@ -17,8 +17,8 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityKind, Expr, FieldPath, FieldRoot, ForSource, ForStmt,
-    PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, CommunityKind, Expr, FieldPath, FieldRoot, FnDef, ForSource,
+    ForStmt, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, Span, Spanned, closest};
 
@@ -106,6 +106,35 @@ const MAX_LOOP_DEPTH: u32 = 4;
 /// The value-expression builtins (LAN-299) and their arities.
 const VALUE_BUILTINS: &[(&str, usize)] = &[("min", 2), ("max", 2), ("clamp", 3)];
 
+/// Maximum function call-graph depth (LAN-304, ADR-0103 Decision 3):
+/// calls fully inline at lowering, so — exactly like `apply` — every
+/// level of the call chain multiplies the inlined shape, and useful
+/// compositions are intrinsically shallow. Enforced in the same
+/// Kahn-ordered DP as the apply bounds, before lowering runs; the
+/// lowering recursion trusts it.
+const MAX_CALL_DEPTH: u32 = 8;
+
+/// One function's inlining budget entry (LAN-304), computed by
+/// [`Checker::check_fn_graph`] in Kahn (callee-first) order so every
+/// entry is exact for the fully-inlined shape:
+///
+/// - `depth`: call-graph depth (a leaf is 1) — bounded by
+///   [`MAX_CALL_DEPTH`].
+/// - `cost`: worst-case evaluation steps / IR nodes one call site
+///   expands to, excluding the argument expressions (those are charged
+///   at the call site): one `Bind` term per parameter, each body
+///   `let`'s bind + initializer, and the result bind + expression.
+/// - `slots`: caller-frame slots one call site consumes — parameters +
+///   body lets + the result slot + every nested call's slots. Mirrors
+///   the lowerer's monotonic allocation exactly (nested-call binds
+///   inside argument expressions are charged by the caller's
+///   `call_slots` walk, not here).
+struct FnCost {
+    depth: u32,
+    cost: u64,
+    slots: u64,
+}
+
 /// Maximum `let` bindings per lexical scope (LAN-302, ADR-0103
 /// Decision 3). A scope is one term body or one `if`/`else` body; the
 /// grammar has exactly those two nesting levels, so the evaluation
@@ -126,6 +155,11 @@ const MAX_LOCALS: usize = 64;
 struct Scope<'a> {
     params: Vec<&'a str>,
     lets: Vec<String>,
+    /// False inside a function body (LAN-304): functions are closed
+    /// over nothing — `route.`/`peer.` field reads are rejected there;
+    /// every input arrives as a parameter, which keeps the
+    /// `requires_*` analyses call-site-local and memoization trivial.
+    fields_allowed: bool,
 }
 
 impl Scope<'_> {
@@ -217,11 +251,15 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
         diags: Vec::new(),
     };
     checker.check_declarations();
+    // Functions first (LAN-304): their Kahn DP produces the per-fn
+    // cost/slot/depth table the policy bounds below fold in.
+    let fn_costs = checker.check_fns();
     for policy in &file.policies {
         checker.check_policy(policy);
+        checker.check_policy_frames(policy, &fn_costs);
     }
     checker.check_apply_dag();
-    checker.check_apply_bounds();
+    checker.check_apply_bounds(&fn_costs);
     checker.check_tests();
     checker.diags
 }
@@ -231,7 +269,7 @@ struct Checker<'a> {
     diags: Vec<Diagnostic>,
 }
 
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn policy(&self, name: &str) -> Option<&PolicyDef> {
         self.file.policies.iter().find(|p| p.name.node == name)
     }
@@ -265,8 +303,225 @@ impl Checker<'_> {
             self.file.community_sets.iter().map(|s| &s.name),
         );
         self.duplicate_check("asn-set", self.file.asn_sets.iter().map(|s| &s.name));
+        // Functions get their own namespace (LAN-304): duplicates are
+        // errors; sharing a name with a set or policy is allowed —
+        // every reference position is disjoint (calls in value
+        // positions, `apply` for policies, `in` for sets), the same
+        // positional rule the contextual keywords ride on.
+        self.duplicate_check("fn", self.file.fns.iter().map(|f| &f.name));
         self.duplicate_check("policy", self.file.policies.iter().map(|p| &p.name));
         self.duplicate_check("test", self.file.tests.iter().map(|t| &t.name));
+    }
+
+    // ── functions (LAN-304) ─────────────────────────────────────────
+
+    /// Check every `fn` body — parameters, `let` scoping, purity (no
+    /// context-field reads), builtin-name collisions — then validate
+    /// the call graph and return the per-function cost table.
+    fn check_fns(&mut self) -> HashMap<&'a str, FnCost> {
+        for def in &self.file.fns {
+            if VALUE_BUILTINS.iter().any(|(b, _)| *b == def.name.node) {
+                self.diags.push(
+                    Diagnostic::new(
+                        def.name.span,
+                        format!(
+                            "function `{}` shadows the builtin of the same name",
+                            def.name.node
+                        ),
+                        "`min`, `max`, and `clamp` are reserved value builtins",
+                    )
+                    .with_note("rename the function; builtin calls always win in value positions"),
+                );
+            }
+            self.duplicate_check("parameter", def.params.iter());
+            let mut scope = Scope {
+                params: def.params.iter().map(|p| p.node.as_str()).collect(),
+                lets: Vec::new(),
+                fields_allowed: false,
+            };
+            // Parameters and lets share the body's single scope, so
+            // both count against the per-scope binding cap.
+            for (index, l) in def.lets.iter().enumerate() {
+                // Initializer checked before declaring, so
+                // `let x = x + 1` reads a parameter/earlier `x`
+                // (shadowing, never self-reference) — the LAN-302 rule.
+                self.check_value_expr(&l.init, &scope);
+                if def.params.len() + index == MAX_LOCALS {
+                    self.locals_exceeded(l.name.span);
+                }
+                scope.lets.push(l.name.node.clone());
+            }
+            self.check_value_expr(&def.result, &scope);
+        }
+        self.check_fn_graph()
+    }
+
+    /// Validate the function call graph — a DAG (cycles are compile
+    /// errors naming the cycle), depth-capped at [`MAX_CALL_DEPTH`] —
+    /// and compute each function's inlining cost/slot footprint in the
+    /// same Kahn-ordered DP discipline as the apply bounds
+    /// (ADR-0103 Decision 3: one place answers "how big can this
+    /// program get").
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one Kahn pass — cycle check, depth, cost, slots; splitting would scatter the DP"
+    )]
+    fn check_fn_graph(&mut self) -> HashMap<&'a str, FnCost> {
+        let file = self.file;
+        let mut edges: HashMap<&str, Vec<(&str, Span)>> = HashMap::new();
+        for def in &file.fns {
+            let mut targets = Vec::new();
+            for l in &def.lets {
+                collect_fn_calls(&l.init, file, &mut targets);
+            }
+            collect_fn_calls(&def.result, file, &mut targets);
+            edges.insert(&def.name.node, targets);
+        }
+        // Cycles: reuse the apply DFS — same diagnostic shape.
+        let mut done: HashSet<&str> = HashSet::new();
+        for def in &file.fns {
+            let name = def.name.node.as_str();
+            if done.contains(name) {
+                continue;
+            }
+            let mut path: Vec<&str> = Vec::new();
+            if let Some((cycle, span)) = find_cycle(name, &edges, &mut path, &mut done) {
+                self.diags.push(
+                    Diagnostic::new(
+                        span,
+                        format!("function call cycle: {}", cycle.join(" -> ")),
+                        "this call closes the cycle",
+                    )
+                    .with_note(
+                        "functions cannot recurse, directly or mutually — the call graph \
+                         must form a DAG (ADR-0103)",
+                    ),
+                );
+            }
+        }
+        // Kahn DP (callee-first). Functions on a diagnosed cycle never
+        // become ready and are skipped; call sites naming them find no
+        // entry and charge trivially (the file already has errors).
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut pending: HashMap<&str, usize> = HashMap::new();
+        let mut ready: VecDeque<&str> = VecDeque::new();
+        for def in &file.fns {
+            let name = def.name.node.as_str();
+            let known: Vec<&str> = edges[name]
+                .iter()
+                .map(|&(target, _)| target)
+                .filter(|target| edges.contains_key(target))
+                .collect();
+            if known.is_empty() {
+                ready.push_back(name);
+            } else {
+                pending.insert(name, known.len());
+                for target in known {
+                    dependents.entry(target).or_default().push(name);
+                }
+            }
+        }
+        let defs: HashMap<&str, &FnDef> =
+            file.fns.iter().map(|f| (f.name.node.as_str(), f)).collect();
+        let mut costs: HashMap<&str, FnCost> = HashMap::new();
+        while let Some(name) = ready.pop_front() {
+            let def = defs[name];
+            let deepest = edges[name]
+                .iter()
+                .filter_map(|&(target, span)| costs.get(target).map(|c| (c.depth + 1, span)))
+                .max_by_key(|&(d, _)| d);
+            let depth = match deepest {
+                Some((d, span)) if d > MAX_CALL_DEPTH => {
+                    self.diags.push(
+                        Diagnostic::new(
+                            span,
+                            format!("function call chain nests more than {MAX_CALL_DEPTH} deep"),
+                            "this call exceeds the call-depth limit",
+                        )
+                        .with_note(
+                            "calls fully inline at compile time, so every level multiplies \
+                             the inlined shape (ADR-0103); flatten the composition",
+                        ),
+                    );
+                    // Record trivially so dependents don't cascade —
+                    // one root cause, one diagnostic.
+                    costs.insert(
+                        name,
+                        FnCost {
+                            depth: 0,
+                            cost: 1,
+                            slots: 0,
+                        },
+                    );
+                    for &dependent in dependents.get(name).into_iter().flatten() {
+                        let left = pending.get_mut(dependent).expect("counted above");
+                        *left -= 1;
+                        if *left == 0 {
+                            ready.push_back(dependent);
+                        }
+                    }
+                    continue;
+                }
+                Some((d, _)) => d,
+                None => 1,
+            };
+            // One call site's fully-inlined shape: a Bind term per
+            // parameter, each body let's bind + initializer, the
+            // result bind + expression (argument costs land at the
+            // call site via `value_cost`).
+            let mut cost: u64 = def.params.len() as u64;
+            let mut slots: u64 = (def.params.len() + def.lets.len() + 1) as u64;
+            for l in &def.lets {
+                cost = cost
+                    .saturating_add(1)
+                    .saturating_add(value_cost(&l.init, &costs));
+                slots = slots.saturating_add(call_slots(&l.init, &costs));
+            }
+            cost = cost
+                .saturating_add(1)
+                .saturating_add(value_cost(&def.result, &costs));
+            slots = slots.saturating_add(call_slots(&def.result, &costs));
+            costs.insert(name, FnCost { depth, cost, slots });
+            for &dependent in dependents.get(name).into_iter().flatten() {
+                let left = pending.get_mut(dependent).expect("counted above");
+                *left -= 1;
+                if *left == 0 {
+                    ready.push_back(dependent);
+                }
+            }
+        }
+        costs
+    }
+
+    /// The LAN-304 frame budget: inlined function bodies consume
+    /// caller-frame slots, invisibly to the source-level `let`
+    /// accounting, so each term's slot high-water mark — mirroring the
+    /// lowerer's monotonic allocation with body-level scope reuse
+    /// exactly — must fit the register file. Deep call chains × locals
+    /// exceed it at compile time, never at the lowerer's assert.
+    fn check_policy_frames(&mut self, policy: &PolicyDef, fns: &HashMap<&'a str, FnCost>) {
+        for term in &policy.terms {
+            let hw = stmts_slot_high_water(&term.stmts, 0, fns);
+            let frame = crate::eval::LOCAL_FRAME_SLOTS as u64;
+            if hw > frame {
+                self.diags.push(
+                    Diagnostic::new(
+                        term.name.span,
+                        format!(
+                            "term `{}` needs {hw} binding slots after function inlining — \
+                             more than the {frame}-slot frame",
+                            term.name.node
+                        ),
+                        "binding frame exceeded",
+                    )
+                    .with_note(
+                        "every call site materializes its arguments, body bindings, and \
+                         result as caller-frame slots; shallow the call chain or split \
+                         the term",
+                    ),
+                );
+            }
+        }
     }
 
     // ── policies ────────────────────────────────────────────────────
@@ -277,6 +532,7 @@ impl Checker<'_> {
         let mut scope = Scope {
             params: policy.params.iter().map(|p| p.node.as_str()).collect(),
             lets: Vec::new(),
+            fields_allowed: true,
         };
         for term in &policy.terms {
             // Each term body is its own scope: bindings never cross
@@ -684,6 +940,10 @@ impl Checker<'_> {
     /// must evaluate cleanly under checked arithmetic (`4294967295 +
     /// 1` is a compile error at its span, not a per-route runtime
     /// error).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per value-expression kind; splitting would scatter the operand rules"
+    )]
     fn check_value_expr(&mut self, expr: &ValueExprAst, scope: &Scope<'_>) {
         match expr {
             ValueExprAst::Lit(..) => {}
@@ -692,6 +952,23 @@ impl Checker<'_> {
             // followed by `(` is a builtin call (the `Call` arm), the
             // same per-position rule parameters already follow.
             ValueExprAst::Ident(name) => self.check_value_ident(name, scope),
+            // Purity by construction (LAN-304): function bodies are
+            // closed over nothing — every input arrives as a
+            // parameter, so `requires_*` analyses stay call-site-local
+            // and a call is a pure function of its arguments.
+            ValueExprAst::Field(path) if !scope.fields_allowed => {
+                self.diags.push(
+                    Diagnostic::new(
+                        path.span,
+                        format!("`{}` read inside a function body", path.render()),
+                        "functions are closed over nothing",
+                    )
+                    .with_note(
+                        "functions are pure over their parameters (ADR-0103); pass the \
+                         field as an argument at the call site",
+                    ),
+                );
+            }
             ValueExprAst::Field(path) => match resolve_field(path) {
                 Err(diag) => self.diags.push(diag),
                 Ok(resolved) => {
@@ -734,14 +1011,47 @@ impl Checker<'_> {
                     .iter()
                     .find(|(builtin, _)| *builtin == name.node)
                 else {
+                    // A user-defined function (LAN-304): arity-checked
+                    // here; the call graph and budgets are validated
+                    // in `check_fn_graph`.
+                    if let Some(def) = self.file.fns.iter().find(|f| f.name.node == name.node) {
+                        if def.params.len() != args.len() {
+                            self.diags.push(
+                                Diagnostic::new(
+                                    *span,
+                                    format!(
+                                        "function `{}` takes {} argument{} but {} {} supplied",
+                                        name.node,
+                                        def.params.len(),
+                                        if def.params.len() == 1 { "" } else { "s" },
+                                        args.len(),
+                                        if args.len() == 1 { "was" } else { "were" },
+                                    ),
+                                    "wrong number of arguments",
+                                )
+                                .with_label(def.name.span, "function defined here"),
+                            );
+                        }
+                        return;
+                    }
                     let mut diag = Diagnostic::new(
                         name.span,
-                        format!("unknown builtin `{}`", name.node),
-                        "not a value builtin",
+                        format!("unknown function or builtin `{}`", name.node),
+                        "not a function or value builtin",
                     );
-                    if let Some(suggestion) =
-                        closest(&name.node, VALUE_BUILTINS.iter().map(|(b, _)| *b))
-                    {
+                    if self.policy(&name.node).is_some() {
+                        diag = diag.with_note(format!(
+                            "`{}` is a policy — policies are predicates, composed with \
+                             `apply({}(...))`, not called for a value",
+                            name.node, name.node
+                        ));
+                    } else if let Some(suggestion) = closest(
+                        &name.node,
+                        VALUE_BUILTINS
+                            .iter()
+                            .map(|(b, _)| *b)
+                            .chain(self.file.fns.iter().map(|f| f.name.node.as_str())),
+                    ) {
                         diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                     } else {
                         diag = diag
@@ -1037,6 +1347,27 @@ impl Checker<'_> {
                         .with_note(
                             "`apply` inlines the target as a pure predicate; keep loops \
                              in the applying policy instead",
+                        ),
+                    );
+                }
+                // LAN-304: a function call is sugar for a scope of
+                // `let` bindings, so it rides the same rule — a pure
+                // inlined predicate has no walk to execute binds in.
+                if let Some(call_span) = first_fn_call(target, self.file) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            *span,
+                            format!(
+                                "cannot `apply` policy `{}`: it calls functions",
+                                policy.node
+                            ),
+                            "`apply` targets cannot call functions",
+                        )
+                        .with_label(call_span, "first call is here")
+                        .with_note(
+                            "`apply` inlines the target as a pure predicate, and a call \
+                             lowers to binding terms a predicate cannot execute; call the \
+                             function in the applying policy instead",
                         ),
                     );
                 }
@@ -1411,8 +1742,10 @@ impl Checker<'_> {
     /// `apply` cycle (diagnosed by [`Self::check_apply_dag`]) never
     /// become ready and are skipped. A policy over a limit gets one
     /// diagnostic and poisons its dependents (their costs clamp to
-    /// trivial), so a single root cause does not cascade.
-    fn check_apply_bounds(&mut self) {
+    /// trivial), so a single root cause does not cascade. `fns` folds
+    /// LAN-304 function inlining into the same DP: every call site
+    /// charges the callee's fully-inlined cost.
+    fn check_apply_bounds(&mut self, fns: &HashMap<&'a str, FnCost>) {
         let file = self.file;
         let edges = apply_edges(file);
         // Kahn scaffolding: a policy is ready once every *known* apply
@@ -1449,6 +1782,7 @@ impl Checker<'_> {
                 defs[name],
                 &edges[name],
                 file,
+                fns,
                 &mut depth,
                 &mut pred_cost,
                 &mut poisoned,
@@ -1652,6 +1986,7 @@ fn bound_policy<'a>(
     def: &'a PolicyDef,
     targets: &[(&'a str, Span)],
     file: &SourceFile,
+    fns: &HashMap<&'a str, FnCost>,
     depth: &mut HashMap<&'a str, u32>,
     pred_cost: &mut HashMap<&'a str, u64>,
     poisoned: &mut HashSet<&'a str>,
@@ -1699,7 +2034,7 @@ fn bound_policy<'a>(
         for stmt in &term.stmts {
             match stmt {
                 Stmt::If(if_stmt) => {
-                    let cost = guard_cost(&if_stmt.cond, pred_cost);
+                    let cost = guard_cost(&if_stmt.cond, pred_cost, fns);
                     arms.push(cost);
                     if if_stmt.else_actions.is_some() {
                         arms.push(cost.saturating_add(1));
@@ -1716,12 +2051,12 @@ fn bound_policy<'a>(
                         if matches!(action, ActionStmt::Let { .. }) {
                             arms.push(cost.saturating_add(1));
                         }
-                        action_cost = action_cost.saturating_add(action_value_cost(action));
+                        action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                     }
                 }
                 Stmt::Action(action) => {
                     arms.push(1);
-                    action_cost = action_cost.saturating_add(action_value_cost(action));
+                    action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
                 // LAN-303: one IR term for the loop itself; the body
                 // charges the eval-cost budget at bound × per-iteration
@@ -1731,7 +2066,7 @@ fn bound_policy<'a>(
                 // rather than metering it per route.
                 Stmt::For(for_stmt) => {
                     arms.push(1);
-                    let (nodes, steps) = for_costs(for_stmt, pred_cost, file);
+                    let (nodes, steps) = for_costs(for_stmt, pred_cost, file, fns);
                     loop_nodes = loop_nodes.saturating_add(nodes);
                     action_cost = action_cost.saturating_add(steps);
                 }
@@ -1775,8 +2110,8 @@ fn bound_policy<'a>(
                 "compiled size limit exceeded",
             )
             .with_note(
-                "apply(p) inlines p's decision predicate at every use site; \
-                 split or flatten the composition",
+                "apply(p) inlines p's decision predicate — and every function call its \
+                 fully-inlined body — at every use site; split or flatten the composition",
             ),
         );
     }
@@ -1802,19 +2137,20 @@ fn bound_policy<'a>(
 /// (LAN-303), every lowered node evaluates at most once per route.
 /// Recursion depth is capped by the parser's `MAX_EXPR_DEPTH`
 /// (LAN-184).
-fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
+fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
         Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => 1u64
-            .saturating_add(guard_cost(lhs, pred_cost))
-            .saturating_add(guard_cost(rhs, pred_cost)),
-        Expr::Not(inner, _) => 1u64.saturating_add(guard_cost(inner, pred_cost)),
+            .saturating_add(guard_cost(lhs, pred_cost, fns))
+            .saturating_add(guard_cost(rhs, pred_cost, fns)),
+        Expr::Not(inner, _) => 1u64.saturating_add(guard_cost(inner, pred_cost, fns)),
         // `==`/`!=` on u32 fields lower widest: `Not(And(Ge, Le))`.
         Expr::Cmp { .. } => 4,
         // LAN-299: every operator/builtin in the value expressions
-        // counts one step in the DP.
+        // counts one step in the DP. LAN-304: a function call charges
+        // its fully-inlined body per call site.
         Expr::ValueCmp { lhs, rhs, .. } => 1u64
-            .saturating_add(value_cost(lhs))
-            .saturating_add(value_cost(rhs)),
+            .saturating_add(value_cost(lhs, fns))
+            .saturating_add(value_cost(rhs, fns)),
         Expr::Apply { policy, .. } => pred_cost.get(policy.node.as_str()).copied().unwrap_or(1),
         _ => 1,
     }
@@ -1841,13 +2177,18 @@ fn loop_iteration_bound(source: &ForSource, file: &SourceFile) -> u64 {
 /// the static iteration bound × per-iteration body cost — nested loops
 /// multiply through the recursion, which is the ADR-0103 Decision 3
 /// compounding-composition defense.
-fn for_costs(for_stmt: &ForStmt, pred_cost: &HashMap<&str, u64>, file: &SourceFile) -> (u64, u64) {
+fn for_costs(
+    for_stmt: &ForStmt,
+    pred_cost: &HashMap<&str, u64>,
+    file: &SourceFile,
+    fns: &HashMap<&str, FnCost>,
+) -> (u64, u64) {
     let mut nodes: u64 = 1; // the ForEach term
     let mut body_steps: u64 = 1; // the loop-var bind per iteration
     for stmt in &for_stmt.body {
         match stmt {
             Stmt::If(if_stmt) => {
-                let guard = guard_cost(&if_stmt.cond, pred_cost);
+                let guard = guard_cost(&if_stmt.cond, pred_cost, fns);
                 // Upper bound per iteration: the guard (twice with an
                 // else — the negated arm) plus every body action.
                 let arms: u64 = if if_stmt.else_actions.is_some() { 2 } else { 1 };
@@ -1861,17 +2202,17 @@ fn for_costs(for_stmt: &ForStmt, pred_cost: &HashMap<&str, u64>, file: &SourceFi
                     nodes = nodes.saturating_add(1);
                     body_steps = body_steps
                         .saturating_add(1)
-                        .saturating_add(action_value_cost(action));
+                        .saturating_add(action_value_cost(action, fns));
                 }
             }
             Stmt::Action(action) => {
                 nodes = nodes.saturating_add(1);
                 body_steps = body_steps
                     .saturating_add(1)
-                    .saturating_add(action_value_cost(action));
+                    .saturating_add(action_value_cost(action, fns));
             }
             Stmt::For(inner) => {
-                let (inner_nodes, inner_steps) = for_costs(inner, pred_cost, file);
+                let (inner_nodes, inner_steps) = for_costs(inner, pred_cost, file, fns);
                 nodes = nodes.saturating_add(inner_nodes);
                 body_steps = body_steps.saturating_add(inner_steps);
             }
@@ -1897,10 +2238,10 @@ fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
 /// carry expressions; everything else is constant-time. LAN-302: a
 /// `let` charges its initializer plus one slot-write step; each read
 /// already costs one step as a `value_cost` operand).
-fn action_value_cost(action: &ActionStmt) -> u64 {
+fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
     match action {
-        ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => value_cost(expr),
-        ActionStmt::Let { init, .. } => value_cost(init).saturating_add(1),
+        ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => value_cost(expr, fns),
+        ActionStmt::Let { init, .. } => value_cost(init, fns).saturating_add(1),
         _ => 0,
     }
 }
@@ -1940,19 +2281,198 @@ fn first_loop(def: &PolicyDef) -> Option<Span> {
     def.terms.iter().find_map(|term| in_stmts(&term.stmts))
 }
 
+/// Span of the first user-function call anywhere in a policy — guard
+/// value expressions, `set` values, and `let` initializers, in every
+/// statement position — or `None`. Backs the LAN-304 `apply`-target
+/// rejection (calls lower to binding terms a pure predicate cannot
+/// execute).
+fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
+    fn in_value(expr: &ValueExprAst, file: &SourceFile) -> Option<Span> {
+        match expr {
+            ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+            ValueExprAst::Binary { lhs, rhs, .. } => {
+                in_value(lhs, file).or_else(|| in_value(rhs, file))
+            }
+            ValueExprAst::Call { name, args, span } => {
+                if file.fns.iter().any(|f| f.name.node == name.node) {
+                    return Some(*span);
+                }
+                args.iter().find_map(|arg| in_value(arg, file))
+            }
+        }
+    }
+    fn in_expr(expr: &Expr, file: &SourceFile) -> Option<Span> {
+        match expr {
+            Expr::Or(lhs, rhs) | Expr::And(lhs, rhs) => {
+                in_expr(lhs, file).or_else(|| in_expr(rhs, file))
+            }
+            Expr::Not(inner, _) => in_expr(inner, file),
+            Expr::ValueCmp { lhs, rhs, .. } => in_value(lhs, file).or_else(|| in_value(rhs, file)),
+            _ => None,
+        }
+    }
+    fn in_action(action: &ActionStmt, file: &SourceFile) -> Option<Span> {
+        match action {
+            ActionStmt::SetLocalPref(expr, _)
+            | ActionStmt::SetMed(expr, _)
+            | ActionStmt::Let { init: expr, .. } => in_value(expr, file),
+            _ => None,
+        }
+    }
+    fn in_stmts(stmts: &[Stmt], file: &SourceFile) -> Option<Span> {
+        stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Action(action) => in_action(action, file),
+            Stmt::If(if_stmt) => in_expr(&if_stmt.cond, file)
+                .or_else(|| if_stmt.then_actions.iter().find_map(|a| in_action(a, file)))
+                .or_else(|| {
+                    if_stmt
+                        .else_actions
+                        .iter()
+                        .flatten()
+                        .find_map(|a| in_action(a, file))
+                }),
+            Stmt::For(for_stmt) => in_stmts(&for_stmt.body, file),
+        })
+    }
+    def.terms
+        .iter()
+        .find_map(|term| in_stmts(&term.stmts, file))
+}
+
+/// Every user-function call in a value expression, as `(name, span)`
+/// call-graph edges (LAN-304) — builtins and unknown names excluded,
+/// arguments walked for nested calls.
+fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec<(&'a str, Span)>) {
+    match expr {
+        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => {}
+        ValueExprAst::Binary { lhs, rhs, .. } => {
+            collect_fn_calls(lhs, file, out);
+            collect_fn_calls(rhs, file, out);
+        }
+        ValueExprAst::Call { name, args, span } => {
+            if file.fns.iter().any(|f| f.name.node == name.node) {
+                out.push((&name.node, *span));
+            }
+            for arg in args {
+                collect_fn_calls(arg, file, out);
+            }
+        }
+    }
+}
+
+/// Caller-frame slots a value expression's function calls consume when
+/// inlined (LAN-304): each call site allocates its callee's full slot
+/// footprint plus whatever its argument expressions' own calls need —
+/// exactly the lowerer's monotonic allocation order.
+fn call_slots(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
+    match expr {
+        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 0,
+        ValueExprAst::Binary { lhs, rhs, .. } => {
+            call_slots(lhs, fns).saturating_add(call_slots(rhs, fns))
+        }
+        ValueExprAst::Call { name, args, .. } => {
+            let own = fns.get(name.node.as_str()).map_or(0, |fc| fc.slots);
+            args.iter()
+                .map(|arg| call_slots(arg, fns))
+                .fold(own, u64::saturating_add)
+        }
+    }
+}
+
+/// Function-call slots consumed by a guard expression's value
+/// comparisons (LAN-304 frame accounting; other guard forms carry no
+/// value expressions).
+fn guard_call_slots(expr: &Expr, fns: &HashMap<&str, FnCost>) -> u64 {
+    match expr {
+        Expr::Or(lhs, rhs) | Expr::And(lhs, rhs) => {
+            guard_call_slots(lhs, fns).saturating_add(guard_call_slots(rhs, fns))
+        }
+        Expr::Not(inner, _) => guard_call_slots(inner, fns),
+        Expr::ValueCmp { lhs, rhs, .. } => {
+            call_slots(lhs, fns).saturating_add(call_slots(rhs, fns))
+        }
+        // `apply` targets cannot call functions (rejected above).
+        _ => 0,
+    }
+}
+
+/// One statement sequence's frame-slot high-water mark (LAN-304),
+/// mirroring the lowerer's `LetEnv` discipline exactly: statement-level
+/// allocations (guard call binds, `set` value call binds, `let`s and
+/// their initializer call binds) persist for the rest of the term;
+/// `if`/`else` and loop bodies mark/reset, so sibling scopes reuse
+/// slots (their readers execute before the sibling's binds — LAN-302).
+fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>) -> u64 {
+    fn actions_high_water(actions: &[ActionStmt], base: u64, fns: &HashMap<&str, FnCost>) -> u64 {
+        let mut cur = base;
+        for action in actions {
+            match action {
+                ActionStmt::Let { init, .. } => {
+                    cur = cur.saturating_add(call_slots(init, fns)).saturating_add(1);
+                }
+                ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
+                    cur = cur.saturating_add(call_slots(expr, fns));
+                }
+                _ => {}
+            }
+        }
+        cur
+    }
+    let mut cur = base;
+    let mut high = base;
+    for stmt in stmts {
+        match stmt {
+            Stmt::Action(ActionStmt::Let { init, .. }) => {
+                cur = cur.saturating_add(call_slots(init, fns)).saturating_add(1);
+            }
+            Stmt::Action(ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _)) => {
+                cur = cur.saturating_add(call_slots(expr, fns));
+            }
+            Stmt::Action(_) => {}
+            Stmt::If(if_stmt) => {
+                cur = cur.saturating_add(guard_call_slots(&if_stmt.cond, fns));
+                high = high.max(actions_high_water(&if_stmt.then_actions, cur, fns));
+                if let Some(else_actions) = &if_stmt.else_actions {
+                    high = high.max(actions_high_water(else_actions, cur, fns));
+                }
+            }
+            // Loop variable + body in a nested scope, reset on exit.
+            Stmt::For(for_stmt) => {
+                high = high.max(stmts_slot_high_water(
+                    &for_stmt.body,
+                    cur.saturating_add(1),
+                    fns,
+                ));
+            }
+        }
+        high = high.max(cur);
+    }
+    high
+}
+
 /// Worst-case evaluation steps of a value expression (LAN-299): one
 /// per operand read and one per operator/builtin step (`clamp`
 /// charges two — it is a min/max pair).
-fn value_cost(expr: &ValueExprAst) -> u64 {
+fn value_cost(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
         ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 1,
         ValueExprAst::Binary { lhs, rhs, .. } => 1u64
-            .saturating_add(value_cost(lhs))
-            .saturating_add(value_cost(rhs)),
+            .saturating_add(value_cost(lhs, fns))
+            .saturating_add(value_cost(rhs, fns)),
         ValueExprAst::Call { name, args, .. } => {
-            let op_cost = if name.node == "clamp" { 2 } else { 1 };
+            // LAN-304: a user-function call charges its fully-inlined
+            // body (the Kahn table entry) plus the result read; its
+            // arguments are charged below like any operand. A name in
+            // neither table is an unknown-call diagnostic elsewhere.
+            let op_cost = if let Some(fc) = fns.get(name.node.as_str()) {
+                fc.cost.saturating_add(1)
+            } else if name.node == "clamp" {
+                2
+            } else {
+                1
+            };
             args.iter()
-                .map(value_cost)
+                .map(|arg| value_cost(arg, fns))
                 .fold(op_cost, u64::saturating_add)
         }
     }

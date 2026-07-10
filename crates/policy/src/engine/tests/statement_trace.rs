@@ -624,6 +624,55 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     assert!(step.term_traces[2].ends_with("[not matched]"));
 }
 
+/// LAN-304 dual attribution: an evaluation error inside an inlined
+/// function body renders with the calling term's name AND the
+/// function-qualified binding names — the trace names both.
+#[test]
+fn rpol_fn_body_error_names_function_and_calling_term() {
+    const FN_RPOL: &str = r"
+fn share(total: u32, parts: u32) -> u32 {
+    let each = total / parts
+    each
+}
+policy divide {
+    term compute { if share(100, route.med) >= 1 { reject } accept }
+}
+";
+    let file = crate::rpol::RpolFile::parse(FN_RPOL).expect("clean rpol");
+    let mut store = crate::sets::SetStore::new();
+    let compiled = file
+        .compile_policy("divide", &[], &mut store)
+        .expect("policy exists");
+    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "divide".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    // med absent -> implicit 0 -> divide-by-zero inside share().
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
+    let step = &trace.steps[0];
+    let traces = step.term_traces.join(
+        "
+",
+    );
+    // The calling term (compute.<n> split names) attributes the walk...
+    assert!(traces.contains("term compute."), "{traces}");
+    // ...the erroring bind names the function-qualified binding...
+    assert!(traces.contains("let share.each"), "{traces}");
+    // ...and the error renders on the uniform rail.
+    assert!(traces.contains("division by zero"), "{traces}");
+    assert!(traces.contains("fail closed => reject"), "{traces}");
+
+    // On a resolvable route the walk reaches the comparison, which
+    // renders the call source-level (the result slot's name).
+    let mut ok = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    ok.med = Some(50);
+    let trace = explain_chain_statements(Some(&chain), &ok);
+    assert_eq!(trace.action, PolicyAction::Deny, "100/50 = 2 >= 1 rejects");
+    let traces = trace.steps[0].term_traces.join("\n");
+    assert!(traces.contains("share(100, route.med) >= 1"), "{traces}");
+}
+
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that
 /// exercise deny terms, Continue accumulation, and fallthrough.
 fn rpol_agreement_chains() -> Vec<(&'static str, PolicyChain)> {

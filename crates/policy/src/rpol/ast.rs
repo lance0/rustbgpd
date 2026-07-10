@@ -22,10 +22,42 @@ pub struct SourceFile {
     pub community_sets: Vec<CommunitySetDef>,
     /// `asn-set` definitions.
     pub asn_sets: Vec<AsnSetDef>,
+    /// `fn` definitions (LAN-304), in source order.
+    pub fns: Vec<FnDef>,
     /// `policy` definitions, in source order.
     pub policies: Vec<PolicyDef>,
     /// `test` blocks.
     pub tests: Vec<TestDef>,
+}
+
+/// `fn NAME(params) -> u32 { lets… result }` — a pure user-defined
+/// value function (LAN-304, ADR-0103 Decision 2). Bodies are
+/// expression-shaped: `let` bindings followed by exactly one result
+/// expression — no verdicts, actions, `if`, or loops. Functions are
+/// closed over nothing (no `route.`/`peer.` reads inside bodies; every
+/// input arrives as a parameter — enforced by the typechecker), so
+/// they are pure functions of their arguments, and calls fully inline
+/// at lowering (no runtime call frames).
+#[derive(Debug)]
+pub struct FnDef {
+    /// Function name. `fn` is a top-level contextual identifier
+    /// (ADR-0103 Decision 2.2), not a reserved word.
+    pub name: Spanned<String>,
+    /// Declared parameters (all `u32` this slice).
+    pub params: Vec<Spanned<String>>,
+    /// Body `let` bindings, in source order.
+    pub lets: Vec<FnLet>,
+    /// The result expression (the body's last — and only — expression).
+    pub result: ValueExprAst,
+}
+
+/// One `let <name> = <expr>` inside a function body (LAN-304).
+#[derive(Debug)]
+pub struct FnLet {
+    /// The binding name (may shadow a parameter or earlier binding).
+    pub name: Spanned<String>,
+    /// The initializer.
+    pub init: ValueExprAst,
 }
 
 /// `prefix-set NAME { entries }`.

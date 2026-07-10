@@ -560,11 +560,20 @@ impl CompiledChain {
                     if COUNT && let Some(hits) = hits {
                         hits.eval_errors.fetch_add(1, Ordering::Relaxed);
                     }
-                    let term = policy
-                        .terms
-                        .get(term_index)
-                        .and_then(|term| term.name.as_deref());
-                    warn_eval_error(policy.name.as_deref(), term, kind);
+                    // A failing Bind names its binding — for
+                    // call-inlined binds (LAN-304) the qualified
+                    // `fn.binding` name, so the WARN names both the
+                    // function and the calling term. Error path only;
+                    // the hot path never allocates here.
+                    let term = policy.terms.get(term_index);
+                    let term_label = term.map(|term| {
+                        let name = term.name.as_deref().unwrap_or("<unnamed>");
+                        match &term.action {
+                            TermAction::Bind { name: bind, .. } => format!("{name} (let {bind})"),
+                            _ => name.to_string(),
+                        }
+                    });
+                    warn_eval_error(policy.name.as_deref(), term_label.as_deref(), kind);
                     return (
                         PolicyResult::deny(),
                         PolicyEvaluation {

@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **rpol pure user-defined functions (`fn`).** The fourth ADR-0103
+  Phase B slice: `fn penalty(len: u32, weight: u32) -> u32 { let base
+  = len * weight  min(base, 1000) }` names a pure `u32` computation
+  callable from any value position. Bodies are expression-shaped
+  (`let` bindings + one result expression) and closed over nothing —
+  every input arrives as a parameter, which keeps `requires_*`
+  analyses call-site-local (a `peer.asn` argument disqualifies
+  update-group sharing; route-only arguments never do). No recursion
+  (the call graph is a DAG, cycles named in the diagnostic; depth
+  capped at 8 through the same Kahn cost DP as `apply`); calls fully
+  inline at compile time into caller-frame binding terms — no runtime
+  call frames, zero cost for programs that don't call. Inlined bodies
+  count against the existing expansion/eval-cost budgets per call
+  site and consume caller-frame slots (a term whose calls exceed the
+  256-slot frame is a compile error); explain renders calls
+  source-level and errors inside a body name both the function and
+  the calling term. (LAN-304)
+
 - **Update-group growth and residue observability.** Three new metrics
   make the registry's append-only growth and the dirty-member
   withdrawal residue visible before they matter:
