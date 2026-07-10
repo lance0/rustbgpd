@@ -441,6 +441,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   canonical style. New "Formatting" section in
   `docs/rpol-language.md`. (LAN-323)
 
+- **`rbgp config effective` — dump the running post-defaults config.**
+  New `ConfigService.GetEffectiveConfig` RPC (`sensitive_read`) returns
+  the daemon's live config as normalized, deterministic TOML with
+  per-neighbor defaults materialized: peer-group inheritance and
+  computed defaults (`hold_time`, the RFC 9687 `send_hold_time`
+  derivation, GR/LLGR timers, address families, `ttl_security`,
+  RR/RS-client flags) are resolved to the values the daemon is using.
+  `rbgp -j config effective` re-renders the same document as JSON.
+  Secret material (`md5_password`, `tcp_ao.key`) is replaced with
+  `<redacted>` server-side before the document leaves the daemon, and
+  config validation now rejects the placeholder loudly — a dump taken
+  from a secret-bearing config cannot silently boot as-is. Secretless
+  dumps round-trip: they reload through `rustbgpd --check` and re-dump
+  to the identical document. (LAN-325)
+
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 - **Docs reorganized by task shape (Diátaxis).** `docs/README.md` now

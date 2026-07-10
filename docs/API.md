@@ -153,7 +153,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | — |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -248,9 +248,12 @@ dynamic neighbor wildcard-MKT support are not exposed through the API yet.
 
 ## ConfigService
 
-Live runtime config diagnostics and transaction planning. This service never
-exports the daemon's full live config snapshot; callers submit candidate TOML
-and receive only redacted diff / plan output.
+Live runtime config diagnostics and transaction planning. Diff / plan
+callers submit candidate TOML and receive only redacted diff / plan
+output; `GetEffectiveConfig` is the one deliberate full-document export
+— it returns the effective running config as normalized TOML with
+defaults materialized and secret material replaced with `<redacted>`
+before it leaves the daemon (`rbgp config effective`).
 
 | RPC | Description |
 |-----|-------------|
@@ -260,6 +263,7 @@ and receive only redacted diff / plan output.
 | `ConfirmConfigTransaction` | Confirm a pending confirmed transaction before its timer expires |
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
+| `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults materialized, secrets redacted (`rbgp config effective`) |
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the

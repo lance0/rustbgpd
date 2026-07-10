@@ -38,6 +38,8 @@ pub(crate) struct MockState {
     pub(crate) config_confirm_calls: AtomicUsize,
     pub(crate) config_abort_calls: AtomicUsize,
     pub(crate) config_status_calls: AtomicUsize,
+    pub(crate) config_effective_calls: AtomicUsize,
+    pub(crate) config_effective_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
@@ -512,6 +514,21 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 human_text: "No confirmed config transaction is pending.\n".to_string(),
             },
         ))
+    }
+
+    async fn get_effective_config(
+        &self,
+        _request: Request<server_proto::GetEffectiveConfigRequest>,
+    ) -> Result<Response<server_proto::GetEffectiveConfigResponse>, Status> {
+        self.state
+            .config_effective_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = self.state.config_effective_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(server_proto::GetEffectiveConfigResponse {
+            toml: "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n\n[[neighbors]]\naddress = \"192.0.2.2\"\nhold_time = 90\nremote_asn = 65000\n".to_string(),
+        }))
     }
 }
 

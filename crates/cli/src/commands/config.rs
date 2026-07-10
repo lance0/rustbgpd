@@ -6,7 +6,7 @@ use crate::proto::{
     ConfigTransactionConfirmation, ConfigTransactionConfirmationStatus,
     ConfigTransactionPlanResponse, ConfigTransactionPlanStatus, ConfigTransactionStatusResponse,
     ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
-    GetConfigTransactionStatusRequest, PlanConfigTransactionRequest,
+    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, PlanConfigTransactionRequest,
 };
 
 const MAX_CONFIRM_ID_CHARS: usize = 128;
@@ -215,6 +215,39 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
         print_confirmation(resp.confirmation.as_ref());
     }
     Ok(())
+}
+
+/// Dump the daemon's effective running config: normalized TOML with
+/// defaults materialized and secrets redacted server-side. `--json`
+/// re-renders the same document as JSON; the daemon only ships TOML.
+pub async fn effective(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .get_effective_config(GetEffectiveConfigRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        print_json(effective_to_json(&resp.toml)?)?;
+    } else {
+        print!("{}", resp.toml);
+    }
+    Ok(())
+}
+
+/// Re-render the daemon's effective-config TOML document as JSON for `-j`.
+fn effective_to_json(toml_text: &str) -> Result<serde_json::Value, CliError> {
+    let value: toml::Value = toml::from_str(toml_text).map_err(|error| {
+        CliError::Argument(format!(
+            "daemon returned unparseable effective config TOML: {error}"
+        ))
+    })?;
+    serde_json::to_value(value).map_err(|error| {
+        CliError::Argument(format!(
+            "failed to convert effective config to JSON: {error}"
+        ))
+    })
 }
 
 fn read_candidate_toml(from_file: &str) -> Result<String, CliError> {
@@ -474,6 +507,63 @@ mod tests {
     fn change_status_exit_codes_are_terraform_style() {
         assert_eq!(change_status_exit_code(false), 0);
         assert_eq!(change_status_exit_code(true), 2);
+    }
+
+    #[tokio::test]
+    async fn effective_fetches_running_config() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        effective(connection, false).await.unwrap();
+
+        assert_eq!(
+            server.state.config_effective_calls.load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_json_renders_config_as_structured_json() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        effective(connection, true).await.unwrap();
+
+        assert_eq!(
+            server.state.config_effective_calls.load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn effective_to_json_produces_structured_config() {
+        let value = effective_to_json(
+            "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n\n[[neighbors]]\naddress = \"192.0.2.2\"\nhold_time = 90\nremote_asn = 65000\n",
+        )
+        .unwrap();
+        assert_eq!(value["global"]["asn"], 65000);
+        assert_eq!(value["neighbors"][0]["hold_time"], 90);
+    }
+
+    #[test]
+    fn effective_to_json_rejects_unparseable_toml() {
+        // A daemon reply that is not parseable TOML must error rather
+        // than print garbage.
+        assert!(effective_to_json("not = [valid").is_err());
+    }
+
+    #[tokio::test]
+    async fn effective_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_effective_error.lock().await = Some((
+            tonic::Code::PermissionDenied,
+            "sensitive_read required".to_string(),
+        ));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let result = effective(connection, false).await;
+
+        assert!(result.is_err(), "daemon error must take the exit-1 path");
     }
 
     #[tokio::test]

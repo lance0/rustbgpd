@@ -179,6 +179,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::SensitiveRead,
     ),
     method(
+        "rustbgpd.v1.ConfigService",
+        "GetEffectiveConfig",
+        "/rustbgpd.v1.ConfigService/GetEffectiveConfig",
+        AuthTier::SensitiveRead,
+    ),
+    method(
         "rustbgpd.v1.NeighborService",
         "AddNeighbor",
         "/rustbgpd.v1.NeighborService/AddNeighbor",
@@ -835,7 +841,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 97);
+        assert_eq!(METHODS.len(), 98);
     }
 
     #[test]
@@ -876,7 +882,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 56);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 57);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
     }
@@ -952,6 +958,14 @@ mod tests {
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/GetConfigTransactionStatus").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        // The effective-config dump discloses the whole config (peer lists,
+        // policy, topology) but never secret material — the peer manager
+        // redacts before the document reaches the service. Read-only
+        // full-config disclosure pins at sensitive_read, never read.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/GetEffectiveConfig").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
         );
         assert_eq!(

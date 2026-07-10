@@ -723,6 +723,9 @@ impl PeerManager {
                                 });
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::EffectiveRuntimeConfig { reply } => {
+                            let _ = reply.send(self.current_config.effective_redacted_toml());
+                        }
                         PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
                             let result = self.apply_resolved_policy_snapshot(targets).await;
                             let _ = reply.send(result);

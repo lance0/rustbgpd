@@ -91,6 +91,12 @@ transaction with an optimistic runtime snapshot token:
 `rbgp` is the supported CLI spelling.
 
 ```bash
+# What is the daemon actually running? Dump the effective config with
+# defaults materialized (hold_time, send_hold_time, GR timers, families)
+# and secrets redacted:
+rbgp config effective
+rbgp -j config effective
+
 rbgp config diff --from-file /tmp/new-config.toml
 rbgp --json config diff --from-file /tmp/new-config.toml
 

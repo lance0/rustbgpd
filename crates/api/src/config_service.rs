@@ -6,7 +6,8 @@ use tonic::{Request, Response, Status};
 use crate::audit::{
     abort_config_transaction_summary, apply_config_transaction_summary,
     confirm_config_transaction_summary, diff_runtime_config_summary,
-    get_config_transaction_status_summary, plan_config_transaction_summary, set_request_summary,
+    get_config_transaction_status_summary, get_effective_config_summary,
+    plan_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
@@ -251,6 +252,26 @@ impl proto::config_service_server::ConfigService for ConfigService {
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
     }
+
+    async fn get_effective_config(
+        &self,
+        request: Request<proto::GetEffectiveConfigRequest>,
+    ) -> Result<Response<proto::GetEffectiveConfigResponse>, Status> {
+        set_request_summary(&request, get_effective_config_summary());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::EffectiveRuntimeConfig { reply: reply_tx })
+            .await
+            .map_err(|_| Status::unavailable("peer manager is unavailable"))?;
+
+        match reply_rx
+            .await
+            .map_err(|_| Status::unavailable("peer manager dropped effective config reply"))?
+        {
+            Ok(toml) => Ok(Response::new(proto::GetEffectiveConfigResponse { toml })),
+            Err(error) => Err(Status::internal(error)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +322,51 @@ mod tests {
         assert!(resp.has_restart_required_changes);
         assert_eq!(resp.human_text, "Restart-required changes:\n");
         assert_eq!(resp.diff_json, "{\"has_any_changes\":true}");
+    }
+
+    #[tokio::test]
+    async fn get_effective_config_returns_peer_manager_toml() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        let server = tokio::spawn(async move {
+            let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
+                panic!("expected EffectiveRuntimeConfig command");
+            };
+            let _ = reply.send(Ok(
+                "[global]\nasn = 65001\nhold_time = 90\nrouter_id = \"10.0.0.1\"\n".to_string(),
+            ));
+        });
+
+        let resp = svc
+            .get_effective_config(Request::new(proto::GetEffectiveConfigRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        server.await.unwrap();
+        assert_eq!(
+            resp.toml,
+            "[global]\nasn = 65001\nhold_time = 90\nrouter_id = \"10.0.0.1\"\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_effective_config_maps_serialization_failure_to_internal() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
+                panic!("expected EffectiveRuntimeConfig command");
+            };
+            let _ = reply.send(Err("failed to serialize effective config".to_string()));
+        });
+
+        let err = svc
+            .get_effective_config(Request::new(proto::GetEffectiveConfigRequest {}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
     }
 
     fn sample_runtime_diff() -> RuntimeConfigDiff {

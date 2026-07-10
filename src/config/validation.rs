@@ -90,6 +90,7 @@ impl Config {
 
         validate_event_history(&self.event_history)?;
         validate_grpc_security(&self.security)?;
+        self.validate_no_redacted_secrets()?;
 
         // Validate prometheus_addr is a valid SocketAddr (if configured)
         if let Some(ref addr) = self.global.telemetry.prometheus_addr {
@@ -949,6 +950,45 @@ impl Config {
             };
             effective.iter().any(|f| f == "linkstate")
         })
+    }
+}
+
+impl Config {
+    /// Reject the literal `<redacted>` placeholder that `rbgp config
+    /// effective` emits in place of secret material. A dumped config that
+    /// still carries the placeholder must fail loudly at load instead of
+    /// silently booting with `<redacted>` as a live credential.
+    fn validate_no_redacted_secrets(&self) -> Result<(), ConfigError> {
+        let placeholder_error = |address: &str, field: &str| ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: field.to_string(),
+            reason: format!(
+                "is the literal {:?} placeholder emitted by `rbgp config effective`; \
+                 restore the real secret before loading this config",
+                super::REDACTED_SECRET
+            ),
+        };
+        for neighbor in &self.neighbors {
+            if neighbor.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
+                return Err(placeholder_error(&neighbor.address, "md5_password"));
+            }
+            if neighbor
+                .tcp_ao
+                .as_ref()
+                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+            {
+                return Err(placeholder_error(&neighbor.address, "tcp_ao.key"));
+            }
+        }
+        for (name, group) in &self.peer_groups {
+            if group.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
+                return Err(placeholder_error(
+                    &format!("peer_groups.{name}"),
+                    "md5_password",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
