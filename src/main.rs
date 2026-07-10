@@ -1431,12 +1431,21 @@ async fn run<T>(
         error!(
             confirm_id = %notice.confirm_id,
             unconfirmed_candidate = %notice.backup_path.display(),
+            rollback_failed = notice.rollback_failed,
             "commit-confirmed transaction was never confirmed before the last shutdown — reverted to the pre-transaction config at boot; the unconfirmed candidate config was saved aside"
         );
         eprintln!(
             "!! commit-confirm boot revert: transaction {:?} was never confirmed before the last shutdown.",
             notice.confirm_id
         );
+        if notice.rollback_failed {
+            // The journal recorded a live rollback FAILURE for this
+            // transaction: before this restart the runtime, the on-disk
+            // config, and the journal were three-way inconsistent.
+            eprintln!(
+                "!! A live rollback of this transaction FAILED before the restart, so the pre-restart on-disk state was uncertain."
+            );
+        }
         eprintln!(
             "!! Booted from the pre-transaction config; the unconfirmed candidate was saved to {}.",
             notice.backup_path.display()

@@ -22,7 +22,7 @@ use rustbgpd_api::server::{
     GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
 };
 use rustbgpd_telemetry::BgpMetrics;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::{Config, EffectiveNeighborImpactKind, Neighbor, diff_config, diff_neighbors};
 use crate::fib_table_control::{
@@ -371,6 +371,7 @@ impl ConfigTransactionController {
                     confirm_id: confirmed.confirm_id.clone(),
                     deadline_unix_seconds,
                     rollback_toml: rollback_toml.clone(),
+                    rollback_failed: false,
                 },
             )
             .map_err(|error| {
@@ -984,6 +985,29 @@ impl ConfigTransactionController {
             && pending.confirm_id == confirm_id
         {
             pending.rollback_failed = Some(status);
+            // Persist the failure into the retained on-disk journal so a
+            // later boot's revert diagnostics can say "a rollback already
+            // failed; the pre-restart state was uncertain" instead of the
+            // generic never-confirmed message. Best-effort: the journal
+            // (with the proven rollback snapshot) is already on disk, and
+            // failing to annotate it must not mask the rollback failure.
+            if let Some(journal_path) = &self.deps.confirm_journal_path
+                && let Err(error) = crate::confirm_journal::write(
+                    journal_path,
+                    &crate::confirm_journal::ConfirmJournal {
+                        confirm_id: pending.confirm_id.clone(),
+                        deadline_unix_seconds: pending.deadline_unix_seconds,
+                        rollback_toml: pending.rollback_toml.clone(),
+                        rollback_failed: true,
+                    },
+                )
+            {
+                warn!(
+                    journal = %journal_path.display(),
+                    error = %error,
+                    "failed to record the rollback failure in the commit-confirm revert journal"
+                );
+            }
         }
     }
 
@@ -4723,8 +4747,13 @@ remote_asn = 65010
         ));
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let journal_dir = tempfile::tempdir().unwrap();
+        let journal_path = journal_dir.path().join("commit-confirm-journal.json");
         let controller = ConfigTransactionController::new(
-            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
             BgpMetrics::new(),
         );
 
@@ -4737,6 +4766,10 @@ remote_asn = 65010
             ))
             .await
             .expect("confirmed apply must succeed");
+        assert!(
+            !read_journal(&journal_path).rollback_failed,
+            "a fresh journal must not carry a rollback failure"
+        );
 
         let err = controller
             .clone()
@@ -4745,6 +4778,13 @@ remote_asn = 65010
             })
             .await
             .expect_err("abort rollback failure must be reported");
+        // The retained on-disk journal now records the failed rollback, so a
+        // restart's boot-revert diagnostics can say the pre-restart state was
+        // uncertain rather than the generic never-confirmed message.
+        assert!(
+            read_journal(&journal_path).rollback_failed,
+            "a failed rollback must be recorded in the retained journal"
+        );
         // A rollback re-apply that fails candidate validation is an internal
         // condition (the captured snapshot is bad), not a malformed abort
         // request, so the abort surfaces INTERNAL rather than INVALID_ARGUMENT.
@@ -4807,6 +4847,10 @@ remote_asn = 65010
             .await
             .expect("successful abort retry must open the mutation gate");
         assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+        assert!(
+            !journal_path.exists(),
+            "a successful abort retry must consume the journal"
+        );
         ack_task.abort();
     }
 

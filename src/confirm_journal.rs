@@ -18,8 +18,9 @@
 
 #![deny(unsafe_code)]
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,15 @@ pub struct ConfirmJournal {
     /// TOML snapshot of the running config captured before the candidate
     /// committed; this is what boot restores.
     pub rollback_toml: String,
+    /// Set when a live abort/timeout rollback of this transaction FAILED
+    /// (LAN-277 three-way inconsistency: runtime part-candidate, disk holds
+    /// the candidate, journal holds the pre-transaction snapshot). Boot
+    /// diagnostics use it to say "a rollback already failed; the state
+    /// before this restart was uncertain" instead of the generic
+    /// never-confirmed message. Defaults to `false` so journals written by
+    /// older versions still parse.
+    #[serde(default)]
+    pub rollback_failed: bool,
 }
 
 /// Boot-revert outcome consumed by `main`.
@@ -65,6 +75,10 @@ pub struct BootRevertNotice {
     pub confirm_id: String,
     /// Where the unconfirmed candidate was saved aside.
     pub backup_path: PathBuf,
+    /// The journal recorded a failed live rollback of this transaction: the
+    /// state the daemon was in before this restart is uncertain (the banner
+    /// says so), even though the boot revert itself succeeded.
+    pub rollback_failed: bool,
 }
 
 #[must_use]
@@ -115,6 +129,22 @@ pub fn boot_revert_check(
     journal_path: &Path,
     config_path: &Path,
 ) -> Result<Option<BootRevert>, String> {
+    // Resolve a symlinked config up front (operators legitimately symlink
+    // configs into place): every operation below — save-aside, restore
+    // write, refusal messages — then targets the REAL file, so the revert
+    // updates the file the symlink points at and the symlink itself
+    // survives, instead of the restore replacing the symlink with a regular
+    // file (or landing wherever a later-swapped symlink points). A plain
+    // path canonicalizes to itself; a missing config (crash resume) is used
+    // as-is.
+    let resolved_config;
+    let config_path = match fs::canonicalize(config_path) {
+        Ok(real) => {
+            resolved_config = real;
+            resolved_config.as_path()
+        }
+        Err(_) => config_path,
+    };
     // LAN-221: the journal must be a regular file. A FIFO/socket/device reports
     // `len() == 0` (silently bypassing the size guard) and then blocks or reads
     // unbounded; a directory is nonsense. Reject anything non-regular before
@@ -217,6 +247,7 @@ pub fn boot_revert_check(
         notice: BootRevertNotice {
             confirm_id: journal.confirm_id,
             backup_path,
+            rollback_failed: journal.rollback_failed,
         },
     }))
 }
@@ -362,16 +393,48 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn write_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = parent_dir(path)?;
-    let mut tmp = path.as_os_str().to_os_string();
+    // Resolve symlinks so the write lands on the REAL file: `rename(2)` over
+    // a symlink replaces the symlink itself (orphaning its target), and
+    // resolving at write time means the rename cannot be redirected by a
+    // symlink swapped in underneath us in a world-writable directory. A
+    // plain path canonicalizes to itself, so the non-symlink case is
+    // unchanged.
+    let target = match fs::canonicalize(path) {
+        Ok(real) => real,
+        // Destination absent (first write) or a dangling symlink: resolve
+        // the parent so a symlinked directory still lands on the real one.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("path {} has no file name", path.display()),
+                )
+            })?;
+            fs::canonicalize(parent_dir(path)?)?.join(name)
+        }
+        Err(error) => return Err(error),
+    };
+    let mut tmp = target.clone().into_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let mut file = File::create(&tmp)?;
+    // Owner-only from the first byte: the payload embeds config snapshots
+    // (which may carry secrets such as TCP-MD5 passwords), and a permissive
+    // umask must not make them world-readable. The rename below preserves
+    // the temp file's mode — it moves the inode.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    // `mode` applies only when the file is CREATED; clamp a stale leftover
+    // temp file to owner-only too before secrets are written into it.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&tmp, path)?;
-    fsync_dir(parent)
+    fs::rename(&tmp, &target)?;
+    fsync_dir(parent_dir(&target)?)
 }
 
 fn parent_dir(path: &Path) -> io::Result<&Path> {
@@ -407,6 +470,7 @@ log_format = "json"
             confirm_id: "deploy-1".to_string(),
             deadline_unix_seconds: 1234,
             rollback_toml: PREVIOUS_TOML.to_string(),
+            rollback_failed: false,
         }
     }
 
@@ -567,6 +631,138 @@ log_format = "json"
         // Fail closed: config untouched, journal preserved.
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "candidate");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn write_atomic_sets_owner_only_permissions() {
+        // The payload may embed config secrets; the file must be 0o600 from
+        // creation, under any umask, and the rename must preserve that mode.
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.json");
+        write_atomic(&path, b"secret").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+
+        // Overwriting a pre-existing world-readable file tightens it: the
+        // rename moves the 0o600 temp inode over the old one.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&path, b"secret2").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret2");
+    }
+
+    #[test]
+    fn write_atomic_writes_through_symlink_to_real_file() {
+        // A symlinked destination (operators symlink configs) must have the
+        // write land on the REAL file — a bare rename would replace the
+        // symlink itself with a regular file and orphan the target.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        fs::write(&real, "old").unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, b"new").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink must survive the write"
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "new");
+    }
+
+    #[test]
+    fn journal_roundtrips_rollback_failed_and_defaults_it_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = journal_path(dir.path());
+        write(
+            &path,
+            &ConfirmJournal {
+                rollback_failed: true,
+                ..journal()
+            },
+        )
+        .unwrap();
+        let read: ConfirmJournal =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(read.rollback_failed);
+
+        // A journal written before the field existed still parses (false).
+        let legacy: ConfirmJournal = serde_json::from_str(
+            &serde_json::to_string(&serde_json::json!({
+                "confirm_id": "deploy-1",
+                "deadline_unix_seconds": 1234,
+                "rollback_toml": PREVIOUS_TOML,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!legacy.rollback_failed);
+    }
+
+    #[test]
+    fn boot_check_notice_carries_rollback_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("rustbgpd.toml");
+        fs::write(&config_path, "candidate").unwrap();
+        let path = journal_path(dir.path());
+        write(
+            &path,
+            &ConfirmJournal {
+                rollback_failed: true,
+                ..journal()
+            },
+        )
+        .unwrap();
+
+        let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
+        assert!(revert.notice.rollback_failed);
+        // The revert itself still applies — the journaled snapshot is the
+        // proven pre-transaction config.
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+    }
+
+    #[test]
+    fn boot_check_reverts_through_symlinked_config() {
+        // A symlinked config file survives the boot revert: the save-aside
+        // and restore operate on the real file, next to which the
+        // `.unconfirmed` candidate is preserved.
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("rustbgpd.toml");
+        fs::write(&real, "unconfirmed candidate bytes").unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = journal_path(dir.path());
+        write(&path, &journal()).unwrap();
+
+        let revert = boot_revert_check(&path, &link).unwrap().unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the config symlink must survive the revert"
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&link).unwrap(), PREVIOUS_TOML);
+        // Candidate saved aside next to the REAL file.
+        assert_eq!(
+            revert.notice.backup_path,
+            real_dir.join("rustbgpd.toml.unconfirmed")
+        );
+        assert_eq!(
+            fs::read_to_string(&revert.notice.backup_path).unwrap(),
+            "unconfirmed candidate bytes"
+        );
+        assert!(!path.exists(), "journal consumed");
     }
 
     #[test]
