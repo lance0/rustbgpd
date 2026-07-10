@@ -18,6 +18,14 @@ receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
 | [EVPN fabric route reflector](evpn-fabric-rr.md) | Control-plane-only RR for a VXLAN-EVPN leaf/spine fabric | M29, M30, M82, M33 |
 | [Policy quickstart (`.rpol`)](policy-quickstart.md) | First typed policy: tests, dry-run, hot swap, explain | M80, M34 |
 
+Operator runbooks — short, ordered checklists for a live daemon:
+
+| Runbook | When to reach for it |
+|---------|----------------------|
+| [Peer-flap triage](peer-flap-triage.md) | A session keeps cycling: confirm, read events, match the teardown reason, contain |
+| [RR pair day-2](rr-pair-day2.md) | Routine changes on a redundant RR pair: GR sanity, adding clients, hot vs session-reset edits, commit-confirm |
+| Shadow cutover | The step-by-step shadow trial lives in [route-server-migration.md](route-server-migration.md); the comparison tool it gates on is [`rbgp diff advertised`](../ribdiff.md) |
+
 Conventions:
 
 - Addresses are examples (RFC 5737 / private ranges) — substitute your

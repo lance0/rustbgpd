@@ -1,7 +1,7 @@
 # Gate 8b MAC-churn 24h soak — raw artifacts
 
 Frozen snapshot of the five load-bearing files from the run that
-landed [`docs/soak-gate8b-mac-churn-24h.md`](../../../soak-gate8b-mac-churn-24h.md).
+landed [`docs/soaks/soak-gate8b-mac-churn-24h.md`](../../../soaks/soak-gate8b-mac-churn-24h.md).
 This is the 24-hour MAC-churn evidence that, together with the M37
 local-origination soak, gated the EVPN production-default flip.
 

@@ -1,7 +1,7 @@
 # Gate 8b MAC-churn 1h dry-run soak — raw artifacts
 
 Frozen snapshot of the five load-bearing files from the dry run that
-landed [`docs/soak-gate8b-mac-churn-1h.md`](../../../soak-gate8b-mac-churn-1h.md).
+landed [`docs/soaks/soak-gate8b-mac-churn-1h.md`](../../../soaks/soak-gate8b-mac-churn-1h.md).
 This run validated the process-restart flip mechanism and churn harness
 before the 24-hour production-default gate.
 

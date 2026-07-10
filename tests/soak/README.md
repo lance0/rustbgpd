@@ -298,7 +298,7 @@ Publish the 24h postmortem only after checking:
 - Steady-state RSS slope after `WARMUP_SEC` is flat enough to rule out a
   retained-state leak.
 
-Template: `docs/soak-m37-local-origination-churn-24h.md`.
+Template: `docs/soaks/soak-m37-local-origination-churn-24h.md`.
 
 ---
 
@@ -524,7 +524,7 @@ The base Gate 8b soak validated steady memory under DF-flip churn
 only (no FDB churn). This variant was the alpha-checklist exit
 condition for the production-default flip of `apply_bum_enforcement`
 and `apply_aliasing_ecmp` to `true`; it PASSED 2026-05-16 (postmortem
-`docs/soak-gate8b-mac-churn-24h.md`) and the flip shipped in v0.23.0.
+`docs/soaks/soak-gate8b-mac-churn-24h.md`) and the flip shipped in v0.23.0.
 Future runs guard the production default rather than gate its
 initial flip.
 

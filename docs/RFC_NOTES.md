@@ -1010,7 +1010,7 @@ implemented per ADR-0040.
   BUM-suppression kernel primitive behind `apply_bum_enforcement`,
   aliasing projection, and a receive-side EAD-per-ES mass-withdraw
   filter. The 24 h MAC-churn soak passed 2026-05-16
-  ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
+  ([`docs/soaks/soak-gate8b-mac-churn-24h.md`](soaks/soak-gate8b-mac-churn-24h.md)),
   which unblocks the production-default flip, and the flip landed:
   `apply_bum_enforcement` / `apply_aliasing_ecmp` default to `true`
   since v0.23.0, with explicit `= false` as the documented opt-out.

@@ -7785,9 +7785,9 @@ table_id = 5001
 fn apply_bum_enforcement_default_is_true() {
     // Pinned by the v0.23.0 production-default flip after the
     // Gate 8b 24h MAC-churn soak (2026-05-16, postmortem
-    // `docs/soak-gate8b-mac-churn-24h.md`) and the M37
+    // `docs/soaks/soak-gate8b-mac-churn-24h.md`) and the M37
     // local-origination 24h soak (2026-05-19, postmortem
-    // `docs/soak-m37-local-origination-churn-24h.md`) both passed
+    // `docs/soaks/soak-m37-local-origination-churn-24h.md`) both passed
     // clean. If this regresses to `false` without a deliberate
     // schema change, the production posture has silently rolled back.
     let config = parse(valid_toml()).unwrap();

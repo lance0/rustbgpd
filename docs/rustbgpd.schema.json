@@ -4,7 +4,7 @@
   "type": "object",
   "properties": {
     "apply_bum_enforcement": {
-      "description": "Apply Gate 8b BUM-suppression filters to the kernel\n(per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge\nports). **Default `true` since v0.23.0** — kernel enforcement\nis the production posture after the Gate 8b MAC-churn 24h soak\n(2026-05-16, postmortem `docs/soak-gate8b-mac-churn-24h.md`)\nand the M37 local-origination 24h soak (2026-05-19,\npostmortem `docs/soak-m37-local-origination-churn-24h.md`)\nboth passed clean. Operators who need the prior observe-only\nbehavior can still opt out explicitly with\n`apply_bum_enforcement = false`; the deserializer honors\nexplicit values unchanged. The resolved enforcement plan is\nalways reported via `DataplaneReport.bum_enforcement`\nregardless of this flag, so observability does not depend on\nthe flip.",
+      "description": "Apply Gate 8b BUM-suppression filters to the kernel\n(per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge\nports). **Default `true` since v0.23.0** — kernel enforcement\nis the production posture after the Gate 8b MAC-churn 24h soak\n(2026-05-16, postmortem `docs/soaks/soak-gate8b-mac-churn-24h.md`)\nand the M37 local-origination 24h soak (2026-05-19,\npostmortem `docs/soaks/soak-m37-local-origination-churn-24h.md`)\nboth passed clean. Operators who need the prior observe-only\nbehavior can still opt out explicitly with\n`apply_bum_enforcement = false`; the deserializer honors\nexplicit values unchanged. The resolved enforcement plan is\nalways reported via `DataplaneReport.bum_enforcement`\nregardless of this flag, so observability does not depend on\nthe flip.",
       "type": "boolean",
       "default": true
     },

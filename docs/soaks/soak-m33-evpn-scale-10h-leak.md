@@ -86,16 +86,16 @@ both the mobility-churn and route-scale axes.
 Tracked here so the postmortem stays self-contained when the soak
 host is recycled (`tests/soak/runs/` stays off-repo):
 
-- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/samples.csv`](artifacts/soak/m33-evpn-scale-20260701T014045Z/samples.csv)
-- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/soak.log`](artifacts/soak/m33-evpn-scale-20260701T014045Z/soak.log)
-- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/report.json`](artifacts/soak/m33-evpn-scale-20260701T014045Z/report.json)
-- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/run.json`](artifacts/soak/m33-evpn-scale-20260701T014045Z/run.json)
+- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/samples.csv`](../artifacts/soak/m33-evpn-scale-20260701T014045Z/samples.csv)
+- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/soak.log`](../artifacts/soak/m33-evpn-scale-20260701T014045Z/soak.log)
+- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/report.json`](../artifacts/soak/m33-evpn-scale-20260701T014045Z/report.json)
+- [`artifacts/soak/m33-evpn-scale-20260701T014045Z/run.json`](../artifacts/soak/m33-evpn-scale-20260701T014045Z/run.json)
 
 ## Cross-references
 
-- [`docs/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md) —
+- [`docs/soaks/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md) —
   the MAC-mobility axis of the same fix.
-- [`docs/soak-gate8b-mac-churn-10h-leak.md`](soak-gate8b-mac-churn-10h-leak.md) —
+- [`docs/soaks/soak-gate8b-mac-churn-10h-leak.md`](soak-gate8b-mac-churn-10h-leak.md) —
   companion MAC-mobility-churn soak run the same night.
 - `tests/soak/run-m33-soak.sh` / `tests/soak/analyze-soak.py` —
   harness + gate analyzer.

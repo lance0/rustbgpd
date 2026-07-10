@@ -3,7 +3,7 @@
 One-page record of the 24-hour Gate 8b MAC-churn soak, the gating
 evidence for flipping the `apply_bum_enforcement` and
 `apply_aliasing_ecmp` defaults to `true` per
-[`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md).
+[`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md).
 
 ## What this soak exercised
 
@@ -81,7 +81,7 @@ ts (elapsed)   pe1_rss_mb   note
 
 - **Peak RSS**: 18.93 MB.
 - **Settle delta**: +4.24 MB across the first ~3 h (the one-time
-  RSS arena settle pattern from `docs/soak-gate8b-24h-bum-state.md`,
+  RSS arena settle pattern from `docs/soaks/soak-gate8b-24h-bum-state.md`,
   with the higher plateau here reflecting the additional FDB
   nexthop-group state that ADR-0059 carries when
   `apply_aliasing_ecmp` is active).

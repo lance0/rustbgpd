@@ -120,15 +120,15 @@ The five load-bearing artifacts are tracked here so the postmortem
 stays self-contained when the soak host is recycled (`tests/soak/runs/`
 and the per-machine state dir stay off-repo):
 
-- Per-sample CSV: [`artifacts/soak/m67-link-drain-20260628T141945Z/samples.csv`](artifacts/soak/m67-link-drain-20260628T141945Z/samples.csv)
-- Harness driver log: [`artifacts/soak/m67-link-drain-20260628T141945Z/soak.log`](artifacts/soak/m67-link-drain-20260628T141945Z/soak.log)
-- Per-cycle log: [`artifacts/soak/m67-link-drain-20260628T141945Z/cycles.log`](artifacts/soak/m67-link-drain-20260628T141945Z/cycles.log)
-- Gate report: [`artifacts/soak/m67-link-drain-20260628T141945Z/report.json`](artifacts/soak/m67-link-drain-20260628T141945Z/report.json)
-- Run manifest: [`artifacts/soak/m67-link-drain-20260628T141945Z/run.json`](artifacts/soak/m67-link-drain-20260628T141945Z/run.json)
+- Per-sample CSV: [`artifacts/soak/m67-link-drain-20260628T141945Z/samples.csv`](../artifacts/soak/m67-link-drain-20260628T141945Z/samples.csv)
+- Harness driver log: [`artifacts/soak/m67-link-drain-20260628T141945Z/soak.log`](../artifacts/soak/m67-link-drain-20260628T141945Z/soak.log)
+- Per-cycle log: [`artifacts/soak/m67-link-drain-20260628T141945Z/cycles.log`](../artifacts/soak/m67-link-drain-20260628T141945Z/cycles.log)
+- Gate report: [`artifacts/soak/m67-link-drain-20260628T141945Z/report.json`](../artifacts/soak/m67-link-drain-20260628T141945Z/report.json)
+- Run manifest: [`artifacts/soak/m67-link-drain-20260628T141945Z/run.json`](../artifacts/soak/m67-link-drain-20260628T141945Z/run.json)
 
 ## Cross-references
 
-- [`docs/soak-gate8b-24h-bum-state.md`](soak-gate8b-24h-bum-state.md) —
+- [`docs/soaks/soak-gate8b-24h-bum-state.md`](soak-gate8b-24h-bum-state.md) —
   postmortem template + the flat-plateau RSS reference shape.
 - `tests/soak/run-m67-link-drain-churn-soak.sh` /
   `tests/soak/analyze-m67-link-drain-soak.py` — harness + gate analyzer.
