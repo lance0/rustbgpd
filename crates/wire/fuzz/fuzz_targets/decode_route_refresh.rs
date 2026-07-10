@@ -22,7 +22,11 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut encoded = bytes::BytesMut::new();
-    rr.encode(&mut encoded)
+    // Re-encode under the same RFC 8654 extended regime the decode above
+    // accepts — `encode()` pins the 4096 base limit, so an ORF-heavy
+    // refresh between 4097 and 65535 octets round-trips only with the
+    // extended limit.
+    rr.encode_with_limit(&mut encoded, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
         .expect("decoded ROUTE-REFRESH must re-encode");
     let mut wire = encoded.freeze();
     let msg = decode_message(&mut wire, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
