@@ -1,6 +1,6 @@
 # rustbgpd-mrt
 
-MRT dump export implementing RFC 6396 TABLE_DUMP_V2.
+MRT TABLE_DUMP_V2 export and read-back implementing RFC 6396.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
@@ -14,6 +14,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **Atomic writes** — temp file + rename to prevent partial dumps
 - **NH synthesis** — IPv4 routes get NEXT_HOP attribute, IPv6 get
   MP_REACH_NLRI, RFC 8950 IPv4-with-IPv6-NH get MP_REACH_NLRI
+- **TABLE_DUMP_V2 reader** — `SnapshotReader` parses `PEER_INDEX_TABLE` +
+  `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records into
+  `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
+  (`decompress_if_gzip`)
 
 ## License
 

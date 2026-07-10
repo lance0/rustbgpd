@@ -601,8 +601,10 @@ If the global limit is hit, it means either the limit is configured too low or t
 ### gRPC Security (v1)
 
 - gRPC listens on a configurable address (default: localhost only).
-- No built-in TLS in v1. For non-loopback exposure, front rustbgpd with an
-  mTLS/TLS-authenticated proxy.
+- Native gRPC mTLS is supported on TCP listeners via `tls_cert_file` /
+  `tls_key_file` / `tls_client_ca_file` (all three required together; no
+  TLS-without-mTLS half-mode) — see docs/CONFIGURATION.md "Native gRPC mTLS".
+  UDS listeners and bearer-token auth are also available.
 - Per-listener access mode (`read_only` / `read_write`) controls which RPCs
   are available. The eleven-service split supports per-service auth policies
   when finer-grained authorization is added.

@@ -36,6 +36,7 @@ rbgp config apply config.toml \
 rbgp config status
 rbgp config confirm deploy-123
 rbgp config abort deploy-123
+rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON)
 ```
 
 ### Peers and BFD
@@ -80,6 +81,7 @@ rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
 rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
 rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
+rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 
 rbgp policy list
 rbgp policy get <name>
@@ -92,6 +94,7 @@ rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
 rbgp policy check <file.rpol>                          # parse + typecheck an .rpol file in-process (no daemon)
+rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
 rbgp policy stats [--neighbor <addr>]                     # live per-term hit counters
 rbgp policy counters [--neighbor <addr>]                  # alias

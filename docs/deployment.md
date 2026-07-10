@@ -528,7 +528,7 @@ sanity-check on the labelled Prometheus counter:
 Both directions reset together on the next session establishment, so
 "how many routes did this session permit / deny in total" is straight
 subtraction; "how many across reconnects" requires Prometheus history.
-The CLI surfaces these in `rbgp neighbor show` as a Policy Stats
+The CLI surfaces these in `rbgp neighbor <peer>` as a Policy Stats
 block:
 
 ```
@@ -537,7 +537,7 @@ Policy Stats:
   Export — permitted: 892    denied: 0
 ```
 
-JSON output (`rbgp --json neighbor show`) carries the same
+JSON output (`rbgp --json neighbor <peer>`) carries the same
 fields under `import_policy_routes_permitted` / `import_policy_routes_denied`
 / `export_policy_routes_permitted` / `export_policy_routes_denied`,
 elided when zero.

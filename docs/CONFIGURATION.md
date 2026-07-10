@@ -1092,7 +1092,7 @@ Notes:
   rejects it otherwise. It is mutually exclusive with `orr_vantage` by
   construction (ORR requires an iBGP route-reflector client).
 - Per-client-best peers are excluded from update-group sharing (their
-  selected route is per-member); `rbgp neighbor show` reports the
+  selected route is per-member); `rbgp neighbor <peer>` reports the
   `per_client_best` ungrouped reason and the peer counts toward
   `bgp_update_group_fallback_peers`. Prefer Add-Path for large fleets.
 - Selection cost is O(candidate paths × export-policy evaluations) per
@@ -1298,7 +1298,7 @@ v2 it is part of the group key, not a fallback reason. Add-Path send
 remains a fallback for all families (ADR-0099 records why per-member
 path-id correction is unsound without per-member state).
 
-`rbgp neighbor show <peer>` prints the membership (`group:N`) or the
+`rbgp neighbor <peer>` prints the membership (`group:N`) or the
 fallback reason on its `Update Group` line. Metrics:
 `bgp_update_groups`, `bgp_update_group_members{group}`,
 `bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`,
