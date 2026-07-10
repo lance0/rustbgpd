@@ -383,6 +383,18 @@ message NeighborState {
   // "orr_vantage", "orf_installed"). Empty when the peer has no
   // outbound registration.
   string update_group = 22;
+  // Total BGP messages received/sent, all types (OPEN, KEEPALIVE,
+  // UPDATE, NOTIFICATION, ROUTE-REFRESH). Mirrors the
+  // bgp_messages_{received,sent}_total telemetry counters: values are
+  // daemon-lifetime and persist across session flaps, matching the
+  // classic "show ip bgp summary" MsgRcvd/MsgSent semantics (cleared
+  // only by daemon restart).
+  uint64 messages_received = 23;
+  uint64 messages_sent = 24;
+  // True when this iBGP peer is configured as a route-reflector
+  // client. Read-only state: RR-client is configured via TOML or
+  // peer-group, not on the runtime neighbor-add gRPC surface.
+  bool route_reflector_client = 25;
 }
 
 message DynamicNeighborRange {

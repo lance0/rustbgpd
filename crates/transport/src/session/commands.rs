@@ -44,6 +44,8 @@ impl PeerSession {
                 // remote_router_id via QueryState when the session is in
                 // OpenConfirm.
                 let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
+                let (messages_received, messages_sent) =
+                    self.metrics.peer_message_totals(&self.peer_label);
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
@@ -59,6 +61,8 @@ impl PeerSession {
                     updates_sent: self.updates_sent,
                     notifications_received: self.notifications_received,
                     notifications_sent: self.notifications_sent,
+                    messages_received,
+                    messages_sent,
                     otc_routes_blocked: self.otc_routes_blocked,
                     import_policy_routes_permitted: self.import_policy_routes_permitted,
                     import_policy_routes_denied: self.import_policy_routes_denied,

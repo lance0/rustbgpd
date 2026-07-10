@@ -871,6 +871,19 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 ## Common operational tasks
 
+### Check session status
+
+```bash
+rbgp neighbor          # summary table (alias: rbgp summary)
+rbgp neighbor --wide   # adds MsgRcvd, MsgSent, Flaps, RRC, State/PfxRcd
+```
+
+`--wide` appends the classic vendor summary columns: total messages
+received/sent (all types, daemon-lifetime — an Established session whose
+counters stop moving is wedged), flap count, an RR-client marker, and the
+overloaded `State/PfxRcd` column (a number means Established and shows the
+prefixes received). Display-only: `-j` output always carries every field.
+
 ### Add a peer at runtime
 
 ```bash

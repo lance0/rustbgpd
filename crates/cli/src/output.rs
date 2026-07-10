@@ -208,6 +208,12 @@ pub struct JsonNeighbor {
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
+    /// Total BGP messages received/sent, all types (daemon-lifetime;
+    /// persists across session flaps, includes KEEPALIVEs).
+    pub messages_received: u64,
+    pub messages_sent: u64,
+    pub flap_count: u64,
+    pub route_reflector_client: bool,
     pub description: String,
 }
 
@@ -228,6 +234,9 @@ pub struct JsonNeighborDetail {
     pub updates_sent: u64,
     pub notifications_received: u64,
     pub notifications_sent: u64,
+    /// See [`JsonNeighbor::messages_received`].
+    pub messages_received: u64,
+    pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
     pub description: String,
@@ -237,6 +246,7 @@ pub struct JsonNeighborDetail {
     pub families: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_group: String,
+    pub route_reflector_client: bool,
     pub route_server_client: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub per_client_best: bool,
@@ -415,7 +425,16 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
 }
 
 /// Print neighbor table with dynamic column widths and colored state.
-pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
+/// `wide` appends the classic operator columns (MsgRcvd, MsgSent,
+/// Flaps, RRC) plus the overloaded `State/PfxRcd` — prefixes-received
+/// count when Established, state name otherwise — as the last column.
+pub fn print_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) {
+    print!("{}", render_neighbor_table(neighbors, wide));
+}
+
+fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> String {
+    use std::fmt::Write as _;
+
     // Compute column data and max widths
     struct Row {
         addr: String,
@@ -426,12 +445,38 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
         rx: String,
         tx: String,
         desc: String,
+        // Wide-only extras (empty when `wide` is false).
+        msg_rcvd: String,
+        msg_sent: String,
+        flaps: String,
+        rrc: String,
+        state_pfx: String,
     }
 
     let rows: Vec<Row> = neighbors
         .iter()
         .map(|n| {
             let cfg = n.config.as_ref();
+            let (msg_rcvd, msg_sent, flaps, rrc, state_pfx) = if wide {
+                // The classic overloaded summary column: a number means
+                // Established (prefixes received); anything else is the
+                // session state. Stale overrides — a placeholder Idle
+                // must not render as a count.
+                let state_pfx = if !n.stale && n.state == proto::SessionState::Established as i32 {
+                    n.prefixes_received.to_string()
+                } else {
+                    colored_state_with_stale(n.state, n.stale)
+                };
+                (
+                    n.messages_received.to_string(),
+                    n.messages_sent.to_string(),
+                    n.flap_count.to_string(),
+                    if n.route_reflector_client { "*" } else { "" }.to_string(),
+                    state_pfx,
+                )
+            } else {
+                Default::default()
+            };
             Row {
                 addr: cfg
                     .map(|c| {
@@ -449,6 +494,11 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
                 rx: n.prefixes_received.to_string(),
                 tx: n.prefixes_sent.to_string(),
                 desc: cfg.map(|c| c.description.clone()).unwrap_or_default(),
+                msg_rcvd,
+                msg_sent,
+                flaps,
+                rrc,
+                state_pfx,
             }
         })
         .collect();
@@ -470,19 +520,82 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
     let w_rx = rows.iter().map(|r| r.rx.len()).max().unwrap_or(0).max(6);
     let w_tx = rows.iter().map(|r| r.tx.len()).max().unwrap_or(0).max(6);
 
-    println!(
-        "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  Description",
-        "Neighbor", "AS", "State", "Uptime", "Rx Pfx", "Tx Pfx",
+    let mut out = String::new();
+    if !wide {
+        let _ = writeln!(
+            out,
+            "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  Description",
+            "Neighbor", "AS", "State", "Uptime", "Rx Pfx", "Tx Pfx",
+        );
+
+        for row in &rows {
+            let overhead = ansi_overhead(&row.state_colored, row.state_plain.len());
+            let padded_state = w_state + overhead;
+            let _ = writeln!(
+                out,
+                "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  {}",
+                row.addr, row.asn, row.state_colored, row.uptime, row.rx, row.tx, row.desc,
+            );
+        }
+        return out;
+    }
+
+    // Wide: default columns in order, then the extras, with the
+    // overloaded State/PfxRcd last for maximal muscle-memory.
+    let w_desc = rows.iter().map(|r| r.desc.len()).max().unwrap_or(0).max(11); // "Description"
+    let w_mr = rows
+        .iter()
+        .map(|r| r.msg_rcvd.len())
+        .max()
+        .unwrap_or(0)
+        .max(7); // "MsgRcvd"
+    let w_ms = rows
+        .iter()
+        .map(|r| r.msg_sent.len())
+        .max()
+        .unwrap_or(0)
+        .max(7); // "MsgSent"
+    let w_fl = rows.iter().map(|r| r.flaps.len()).max().unwrap_or(0).max(5); // "Flaps"
+
+    let _ = writeln!(
+        out,
+        "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
+         {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} State/PfxRcd",
+        "Neighbor",
+        "AS",
+        "State",
+        "Uptime",
+        "Rx Pfx",
+        "Tx Pfx",
+        "Description",
+        "MsgRcvd",
+        "MsgSent",
+        "Flaps",
+        "RRC",
     );
 
     for row in &rows {
         let overhead = ansi_overhead(&row.state_colored, row.state_plain.len());
         let padded_state = w_state + overhead;
-        println!(
-            "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  {}",
-            row.addr, row.asn, row.state_colored, row.uptime, row.rx, row.tx, row.desc,
+        let _ = writeln!(
+            out,
+            "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
+             {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {}",
+            row.addr,
+            row.asn,
+            row.state_colored,
+            row.uptime,
+            row.rx,
+            row.tx,
+            row.desc,
+            row.msg_rcvd,
+            row.msg_sent,
+            row.flaps,
+            row.rrc,
+            row.state_pfx,
         );
     }
+    out
 }
 
 /// Render one MED table cell. `med_attr` is the honest absence marker
@@ -843,6 +956,8 @@ mod tests {
             updates_sent: 4,
             notifications_received: 5,
             notifications_sent: 6,
+            messages_received: 20,
+            messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
             description: "peer-2".to_string(),
@@ -850,6 +965,7 @@ mod tests {
             send_hold_time: 480,
             families: vec!["ipv4_unicast".to_string()],
             peer_group: "rs-clients".to_string(),
+            route_reflector_client: false,
             route_server_client: true,
             per_client_best: false,
             distribution_mode: "add-path".to_string(),
@@ -886,5 +1002,79 @@ mod tests {
         assert_eq!(value["add_path_receive"], true);
         assert_eq!(value["add_path_send"], true);
         assert_eq!(value["add_path_send_max"], 4);
+        assert_eq!(value["messages_received"], 20);
+        assert_eq!(value["messages_sent"], 21);
+        assert_eq!(value["route_reflector_client"], false);
+    }
+
+    fn table_fixture() -> Vec<proto::NeighborState> {
+        vec![
+            proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.1".to_string(),
+                    remote_asn: 64512,
+                    description: "core-rr-client".to_string(),
+                    ..Default::default()
+                }),
+                state: proto::SessionState::Established as i32,
+                uptime_seconds: 3700,
+                prefixes_received: 100,
+                prefixes_sent: 5,
+                messages_received: 1234,
+                messages_sent: 567,
+                flap_count: 2,
+                route_reflector_client: true,
+                ..Default::default()
+            },
+            proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: "2001:db8::2".to_string(),
+                    remote_asn: 65001,
+                    ..Default::default()
+                }),
+                state: proto::SessionState::Idle as i32,
+                flap_count: 9,
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// Pins the default table byte-for-byte: `--wide` must not change
+    /// the zero-flag output existing operators and scripts see.
+    #[test]
+    fn neighbor_table_default_golden() {
+        owo_colors::set_override(false);
+        let expected = "\
+Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
+10.0.0.1    64512 Established 01:01:40    100      5  core-rr-client
+2001:db8::2 65001 Idle        00:00:00      0      0  \n";
+        assert_eq!(render_neighbor_table(&table_fixture(), false), expected);
+    }
+
+    /// Golden wide table: default columns unchanged and in order, then
+    /// MsgRcvd/MsgSent/Flaps/RRC, with the overloaded State/PfxRcd last
+    /// (prefix count when Established, state name otherwise).
+    #[test]
+    fn neighbor_table_wide_golden() {
+        owo_colors::set_override(false);
+        let expected = "\
+Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgSent Flaps RRC State/PfxRcd
+10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client    1234     567     2 *   100
+2001:db8::2 65001 Idle        00:00:00      0      0                      0       0     9     Idle\n";
+        assert_eq!(render_neighbor_table(&table_fixture(), true), expected);
+    }
+
+    /// A stale row must never render its placeholder state as a
+    /// prefix count in State/PfxRcd, even when the placeholder says
+    /// Established.
+    #[test]
+    fn neighbor_table_wide_stale_overrides_pfxrcd() {
+        owo_colors::set_override(false);
+        let mut neighbors = table_fixture();
+        neighbors[0].stale = true;
+        let rendered = render_neighbor_table(&neighbors, true);
+        let first_row = rendered.lines().nth(1).expect("row rendered");
+        assert!(first_row.ends_with("Stale"), "got: {first_row:?}");
+        assert!(!first_row.ends_with("100"));
     }
 }

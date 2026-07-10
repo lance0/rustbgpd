@@ -15,7 +15,7 @@ fn split_scoped_address(address: &str) -> (String, String) {
     )
 }
 
-pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
+pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
@@ -24,6 +24,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
         .into_inner();
 
     if json {
+        // `--wide` is display-only: JSON always carries every field.
         let out: Vec<JsonNeighbor> = resp
             .neighbors
             .iter()
@@ -38,18 +39,27 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                     uptime_seconds: n.uptime_seconds,
                     prefixes_received: n.prefixes_received,
                     prefixes_sent: n.prefixes_sent,
+                    messages_received: n.messages_received,
+                    messages_sent: n.messages_sent,
+                    flap_count: n.flap_count,
+                    route_reflector_client: n.route_reflector_client,
                     description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
                 }
             })
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.neighbors.is_empty() {
-        println!("No neighbors configured");
+        println!("{EMPTY_NEIGHBOR_LIST}");
     } else {
-        output::print_neighbor_table(&resp.neighbors);
+        output::print_neighbor_table(&resp.neighbors, wide);
     }
     Ok(())
 }
+
+/// Friendly empty state: what happened, plus the one command that
+/// changes it.
+const EMPTY_NEIGHBOR_LIST: &str =
+    "no neighbors configured — add one: rbgp neighbor <addr> add --asn <asn>";
 
 pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
@@ -98,6 +108,8 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             updates_sent: n.updates_sent,
             notifications_received: n.notifications_received,
             notifications_sent: n.notifications_sent,
+            messages_received: n.messages_received,
+            messages_sent: n.messages_sent,
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
@@ -105,6 +117,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
+            route_reflector_client: n.route_reflector_client,
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
             per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
             distribution_mode: distribution_mode.to_string(),
@@ -156,6 +169,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         if !peer_group.is_empty() {
             println!("Peer Group:            {peer_group}");
         }
+        println!("RR Client:             {}", n.route_reflector_client);
         println!(
             "Route Server Client:   {}",
             cfg.map(|c| c.route_server_client).unwrap_or(false)
@@ -208,6 +222,8 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         println!("Updates Sent:          {}", n.updates_sent);
         println!("Notifications Received:{}", n.notifications_received);
         println!("Notifications Sent:    {}", n.notifications_sent);
+        println!("Messages Received:     {}", n.messages_received);
+        println!("Messages Sent:         {}", n.messages_sent);
         println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
         println!("Policy Stats:");
         println!(
@@ -459,6 +475,20 @@ mod tests {
         assert!(request.add_path_send);
         assert_eq!(request.add_path_send_max, 4);
         assert_eq!(request.remote_asn, 65002);
+    }
+
+    /// The zero-peer human output must say what happened AND hand the
+    /// operator the exact next command; `-j` mode bypasses it entirely
+    /// and serializes the empty list as `[]`.
+    #[test]
+    fn empty_state_names_the_add_command_and_json_stays_pure() {
+        assert_eq!(
+            EMPTY_NEIGHBOR_LIST,
+            "no neighbors configured — add one: rbgp neighbor <addr> add --asn <asn>"
+        );
+        let json = serde_json::to_string_pretty(&Vec::<crate::output::JsonNeighbor>::new())
+            .expect("serialize");
+        assert_eq!(json, "[]");
     }
 
     #[tokio::test]

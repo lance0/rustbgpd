@@ -381,6 +381,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/GRAFANA.md` and the `docs/OPERATIONS.md` metrics catalog.
   (LAN-318)
 
+- **`rbgp neighbor --wide` and a friendly empty state.** The neighbor
+  list gains a `--wide` flag that appends the classic vendor summary
+  columns operators pattern-match on: `MsgRcvd`/`MsgSent` (total BGP
+  messages in each direction, all types including KEEPALIVEs —
+  daemon-lifetime counters mirroring `bgp_messages_*_total`, so an
+  Established-but-wedged session is visible as counters that stop
+  moving), `Flaps`, an `RRC` route-reflector-client marker, and the
+  overloaded `State/PfxRcd` column (prefix count when Established,
+  state name otherwise) last. The default table is byte-for-byte
+  unchanged and `--wide` is display-only (`-j` always carries every
+  field; the new `messages_received`/`messages_sent`/
+  `route_reflector_client` fields also appear on `NeighborState` and
+  in list/detail JSON). With zero peers, `rbgp neighbor` now prints
+  `no neighbors configured — add one: rbgp neighbor <addr> add --asn
+  <asn>` instead of a bare notice; `-j` still prints `[]`. (LAN-322)
+
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 

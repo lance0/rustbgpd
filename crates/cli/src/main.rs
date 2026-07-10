@@ -74,6 +74,13 @@ enum Command {
 
         #[command(subcommand)]
         action: Option<NeighborAction>,
+
+        /// Append the classic summary columns to the list: MsgRcvd,
+        /// MsgSent, Flaps, RRC (route-reflector client), and
+        /// State/PfxRcd (prefix count when Established). Display-only;
+        /// -j already carries every field
+        #[arg(long, conflicts_with = "address")]
+        wide: bool,
     },
 
     /// Inspect single-hop BFD sessions (ADR-0067)
@@ -1610,8 +1617,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             ConfigAction::Status => commands::config::status(connection, json).await,
         },
 
-        Command::Neighbor { address, action } => match (address, action) {
-            (None, None) => commands::neighbor::list(connection, json).await,
+        Command::Neighbor {
+            address,
+            action,
+            wide,
+        } => match (address, action) {
+            (None, None) => commands::neighbor::list(connection, json, wide).await,
             (Some(addr), None) => commands::neighbor::show(connection, &addr, json).await,
             (
                 Some(addr),
@@ -2670,7 +2681,8 @@ mod tests {
             cli.command,
             Command::Neighbor {
                 address: None,
-                action: None
+                action: None,
+                wide: false,
             }
         ));
     }
@@ -2682,17 +2694,51 @@ mod tests {
             cli.command,
             Command::Neighbor {
                 address: None,
-                action: None
+                action: None,
+                wide: false,
             }
         ));
     }
 
     #[test]
+    fn test_parse_neighbor_list_wide() {
+        let cli = Cli::try_parse_from(["rbgp", "neighbor", "--wide"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Neighbor {
+                address: None,
+                action: None,
+                wide: true,
+            }
+        ));
+        // Display-only list flag: rejected on the per-neighbor detail view.
+        assert!(Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.1", "--wide"]).is_err());
+    }
+
+    #[test]
+    fn test_neighbor_help_mentions_wide() {
+        use clap::CommandFactory as _;
+        let mut cmd = Cli::command();
+        let neighbor = cmd
+            .find_subcommand_mut("neighbor")
+            .expect("neighbor subcommand");
+        let help = neighbor.render_long_help().to_string();
+        assert!(help.contains("--wide"), "help was: {help}");
+        assert!(help.contains("MsgRcvd"), "help was: {help}");
+    }
+
+    #[test]
     fn test_parse_neighbor_show() {
         let cli = Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.1"]).unwrap();
-        if let Command::Neighbor { address, action } = cli.command {
+        if let Command::Neighbor {
+            address,
+            action,
+            wide,
+        } = cli.command
+        {
             assert_eq!(address.unwrap(), "10.0.0.1");
             assert!(action.is_none());
+            assert!(!wide);
         } else {
             panic!("expected Neighbor command");
         }
@@ -2721,6 +2767,7 @@ mod tests {
                     strict_role,
                     ..
                 }),
+            ..
         } = cli.command
         {
             assert_eq!(addr, "10.0.0.1");

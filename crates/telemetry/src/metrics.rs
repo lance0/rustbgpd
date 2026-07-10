@@ -2004,6 +2004,34 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Total BGP messages (received, sent) for `peer`, summed across
+    /// every message type recorded by
+    /// [`record_message_received`](Self::record_message_received) /
+    /// [`record_message_sent`](Self::record_message_sent) — so
+    /// writer-task cadence KEEPALIVEs are included. Counters are
+    /// daemon-lifetime (Prometheus semantics), not session-scoped.
+    /// Reading instantiates any missing `{peer, type}` series at 0,
+    /// which is harmless: the label set is the closed type list below
+    /// times peers already labeled by the record paths.
+    #[must_use]
+    pub fn peer_message_totals(&self, peer: &str) -> (u64, u64) {
+        // Closed set of `type` label values used by the record sites.
+        const MESSAGE_TYPES: [&str; 5] = [
+            "open",
+            "keepalive",
+            "update",
+            "notification",
+            "route_refresh",
+        ];
+        let sum = |vec: &IntCounterVec| -> u64 {
+            MESSAGE_TYPES
+                .iter()
+                .map(|ty| vec.with_label_values(&[peer, ty]).get())
+                .sum()
+        };
+        (sum(&self.messages_received), sum(&self.messages_sent))
+    }
+
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
     pub fn set_rib_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
         self.rib_prefixes
@@ -3230,6 +3258,26 @@ mod tests {
         // Metrics should be registered but no label vectors initialized yet
         // (prometheus only emits metrics once a label combination is observed)
         assert!(!text.contains("bgp_session_state_transitions_total"));
+    }
+
+    /// LAN-322: the per-peer totals sum every message type in both
+    /// directions and stay scoped to the queried peer.
+    #[test]
+    fn peer_message_totals_sums_all_types_per_peer() {
+        let m = BgpMetrics::new();
+        m.record_message_received("10.0.0.1", "open");
+        m.record_message_received("10.0.0.1", "keepalive");
+        m.record_message_received("10.0.0.1", "update");
+        m.record_message_received("10.0.0.1", "notification");
+        m.record_message_received("10.0.0.1", "route_refresh");
+        m.record_message_sent("10.0.0.1", "keepalive");
+        m.record_message_sent("10.0.0.1", "keepalive");
+        // A different peer's traffic must not leak into the totals.
+        m.record_message_received("10.0.0.2", "update");
+
+        assert_eq!(m.peer_message_totals("10.0.0.1"), (5, 2));
+        assert_eq!(m.peer_message_totals("10.0.0.2"), (1, 0));
+        assert_eq!(m.peer_message_totals("10.0.0.3"), (0, 0));
     }
 
     #[test]

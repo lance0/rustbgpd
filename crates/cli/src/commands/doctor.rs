@@ -219,6 +219,10 @@ pub async fn run(
                 uptime_seconds: n.uptime_seconds,
                 prefixes_received: n.prefixes_received,
                 prefixes_sent: n.prefixes_sent,
+                messages_received: n.messages_received,
+                messages_sent: n.messages_sent,
+                flap_count: n.flap_count,
+                route_reflector_client: n.route_reflector_client,
                 description: redact_text(&cfg.map(|c| c.description.clone()).unwrap_or_default()),
             }
         })
