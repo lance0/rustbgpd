@@ -1,7 +1,7 @@
 use super::{
     AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
-    PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_routes_equal, gauge_val,
-    record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
+    PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_route_family, bgpls_routes_equal,
+    gauge_val, record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
 };
 
 impl RibManager {
@@ -130,6 +130,7 @@ impl RibManager {
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
+                family: Some(bgpls_route_family(key.family)),
                 evpn_route_type: None,
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),

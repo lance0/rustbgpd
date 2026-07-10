@@ -6,8 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, LargeCommunity, PathAttribute,
-    Prefix, RpkiValidation,
+    Afi, AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, LargeCommunity, PathAttribute,
+    Prefix, RpkiValidation, Safi,
 };
 
 use crate::eval::PolicyHitCounters;
@@ -107,6 +107,15 @@ pub struct RouteContext<'a> {
     pub peer_group: Option<&'a str>,
     /// Route source type.
     pub route_type: Option<RouteType>,
+    /// The typed AFI/SAFI route family under evaluation (LAN-295).
+    ///
+    /// Populated from the construction site's typed family knowledge
+    /// (the distribution table, the `MP_REACH` AFI/SAFI, the RIB key) —
+    /// NEVER inferred from prefix shape (the ADR-0077 honest-context
+    /// rule). `None` only where no typed family exists (e.g. a test
+    /// fixture that states no `family`); family predicates then match
+    /// neither `==` nor `!=`.
+    pub family: Option<RouteFamily>,
     /// EVPN route type (RFC 7432 §7) when the route is an EVPN NLRI:
     /// 1=EAD per-ES/per-EVI, 2=MAC/IP, 3=IMET, 4=ES, 5=IP Prefix
     /// (RFC 9136). `None` for non-EVPN routes — `match_evpn_route_type`
@@ -116,6 +125,79 @@ pub struct RouteContext<'a> {
     pub local_pref: Option<u32>,
     /// Explicit MED attribute value.
     pub med: Option<u32>,
+}
+
+/// The closed set of AFI/SAFI route families rustbgpd evaluates policy
+/// for (LAN-295) — the typed value behind `.rpol` `route.family`
+/// predicates. Language spellings are given per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteFamily {
+    /// AFI 1 / SAFI 1 — `ipv4-unicast`.
+    Ipv4Unicast,
+    /// AFI 2 / SAFI 1 — `ipv6-unicast`.
+    Ipv6Unicast,
+    /// AFI 1 / SAFI 4 (RFC 8277) — `ipv4-labeled-unicast`.
+    Ipv4LabeledUnicast,
+    /// AFI 2 / SAFI 4 (RFC 8277) — `ipv6-labeled-unicast`.
+    Ipv6LabeledUnicast,
+    /// AFI 1 / SAFI 128 (RFC 4364) — `vpnv4`.
+    Vpnv4,
+    /// AFI 2 / SAFI 128 (RFC 4659) — `vpnv6`.
+    Vpnv6,
+    /// AFI 1 / SAFI 133 (RFC 8955) — `ipv4-flowspec`.
+    Ipv4Flowspec,
+    /// AFI 2 / SAFI 133 (RFC 8956) — `ipv6-flowspec`.
+    Ipv6Flowspec,
+    /// AFI 25 / SAFI 70 (RFC 7432) — `evpn`.
+    Evpn,
+    /// AFI 1 / SAFI 132 (RFC 4684 Route Target Constrain) — `rtc`.
+    RtConstrain,
+    /// AFI 16388 / SAFI 71 (RFC 9552) — `bgp-ls`.
+    BgpLs,
+    /// AFI 16388 / SAFI 72 (RFC 9552) — `bgp-ls-vpn`.
+    BgpLsVpn,
+}
+
+impl RouteFamily {
+    /// The `.rpol` language spelling (also the explain rendering).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RouteFamily::Ipv4Unicast => "ipv4-unicast",
+            RouteFamily::Ipv6Unicast => "ipv6-unicast",
+            RouteFamily::Ipv4LabeledUnicast => "ipv4-labeled-unicast",
+            RouteFamily::Ipv6LabeledUnicast => "ipv6-labeled-unicast",
+            RouteFamily::Vpnv4 => "vpnv4",
+            RouteFamily::Vpnv6 => "vpnv6",
+            RouteFamily::Ipv4Flowspec => "ipv4-flowspec",
+            RouteFamily::Ipv6Flowspec => "ipv6-flowspec",
+            RouteFamily::Evpn => "evpn",
+            RouteFamily::RtConstrain => "rtc",
+            RouteFamily::BgpLs => "bgp-ls",
+            RouteFamily::BgpLsVpn => "bgp-ls-vpn",
+        }
+    }
+
+    /// Map a wire AFI/SAFI pair to the policy family. `None` for pairs
+    /// rustbgpd never evaluates policy for (e.g. multicast).
+    #[must_use]
+    pub fn from_afi_safi(afi: Afi, safi: Safi) -> Option<Self> {
+        match (afi, safi) {
+            (Afi::Ipv4, Safi::Unicast) => Some(Self::Ipv4Unicast),
+            (Afi::Ipv6, Safi::Unicast) => Some(Self::Ipv6Unicast),
+            (Afi::Ipv4, Safi::LabeledUnicast) => Some(Self::Ipv4LabeledUnicast),
+            (Afi::Ipv6, Safi::LabeledUnicast) => Some(Self::Ipv6LabeledUnicast),
+            (Afi::Ipv4, Safi::MplsVpn) => Some(Self::Vpnv4),
+            (Afi::Ipv6, Safi::MplsVpn) => Some(Self::Vpnv6),
+            (Afi::Ipv4, Safi::FlowSpec) => Some(Self::Ipv4Flowspec),
+            (Afi::Ipv6, Safi::FlowSpec) => Some(Self::Ipv6Flowspec),
+            (Afi::L2Vpn, Safi::Evpn) => Some(Self::Evpn),
+            (Afi::Ipv4, Safi::RtConstrain) => Some(Self::RtConstrain),
+            (Afi::BgpLs, Safi::BgpLs) => Some(Self::BgpLs),
+            (Afi::BgpLs, Safi::BgpLsVpn) => Some(Self::BgpLsVpn),
+            _ => None,
+        }
+    }
 }
 
 /// Route source class for policy matching.

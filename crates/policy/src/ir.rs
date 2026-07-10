@@ -24,7 +24,8 @@ use std::sync::Arc;
 use rustbgpd_wire::{AspaValidation, Prefix, RpkiValidation};
 
 use crate::engine::{
-    AsPathRegex, CommunityMatch, NeighborSetMatch, PolicyAction, RouteModifications, RouteType,
+    AsPathRegex, CommunityMatch, NeighborSetMatch, PolicyAction, RouteFamily, RouteModifications,
+    RouteType,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet};
 
@@ -157,6 +158,18 @@ pub enum MatchExpr {
     /// Unlike `Not(EvpnRouteTypeIs(_))`, this never matches a non-EVPN
     /// (absent evpn-route-type) route — `!=` mirrors `==`.
     EvpnRouteTypeNe(u8),
+    /// The route's typed AFI/SAFI family equals this one (`.rpol`
+    /// `route.family == evpn`, LAN-295). Route-context-only: it reads
+    /// no peer identity, so it does NOT count toward
+    /// [`CompiledChain::requires_peer_context`] and never disqualifies
+    /// a peer from update-group sharing. `.rpol`-only — the TOML
+    /// frontend has no family match field (same posture as strict
+    /// next-hop).
+    FamilyIs(RouteFamily),
+    /// The route's typed family differs from this one. Unlike
+    /// `Not(FamilyIs(_))`, this never matches a context without typed
+    /// family knowledge — `!=` mirrors `==`.
+    FamilyNe(RouteFamily),
     /// RPKI origin validation state equals this state (RFC 6811).
     RpkiIs(RpkiValidation),
     /// ASPA path verification state equals this state.
@@ -192,6 +205,8 @@ impl MatchExpr {
             | MatchExpr::RouteTypeNe(_)
             | MatchExpr::EvpnRouteTypeIs(_)
             | MatchExpr::EvpnRouteTypeNe(_)
+            | MatchExpr::FamilyIs(_)
+            | MatchExpr::FamilyNe(_)
             | MatchExpr::RpkiIs(_)
             | MatchExpr::AspaIs(_) => 0,
             MatchExpr::PrefixInSet(_)

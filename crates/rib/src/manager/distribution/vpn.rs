@@ -1,6 +1,7 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, PolicyChain, RibManager,
-    RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner, vpn_routes_equal, warn,
+    RouteContext, Safi, gauge_val, route_type, should_suppress_ibgp_inner, vpn_route_family,
+    vpn_routes_equal, warn,
 };
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
@@ -252,6 +253,7 @@ impl RibManager {
                         peer_asn,
                         peer_group,
                         route_type: Some(route_type(candidate.origin_type)),
+                        family: Some(vpn_route_family(key)),
                         evpn_route_type: None,
                         local_pref: candidate.local_pref_attr(),
                         med: candidate.med_attr(),
@@ -539,6 +541,7 @@ impl RibManager {
                 peer_asn,
                 peer_group,
                 route_type: Some(route_type(best.origin_type)),
+                family: Some(vpn_route_family(key)),
                 evpn_route_type: None,
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),

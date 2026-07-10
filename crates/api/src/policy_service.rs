@@ -1659,6 +1659,13 @@ fn run_test_policy(
                 RouteOrigin::Ibgp => RouteType::Internal,
                 RouteOrigin::Local => RouteType::Local,
             }),
+            // `rbgp policy test` evaluates the unicast RIB snapshot;
+            // a unicast NLRI *is* its prefix, so the prefix's address
+            // family is the route's typed family (LAN-295).
+            family: Some(match route.prefix {
+                Prefix::V4(_) => rustbgpd_policy::RouteFamily::Ipv4Unicast,
+                Prefix::V6(_) => rustbgpd_policy::RouteFamily::Ipv6Unicast,
+            }),
             evpn_route_type: None,
             local_pref: route.local_pref_attr(),
             med: route.med_attr(),

@@ -22,6 +22,7 @@ fn evaluate_policy_with_validation_states(
         peer_asn: None,
         peer_group: None,
         route_type: None,
+        family: None,
         evpn_route_type: None,
         local_pref: None,
         med: None,

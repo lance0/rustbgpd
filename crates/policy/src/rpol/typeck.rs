@@ -37,6 +37,7 @@ pub(super) enum Field {
     Aspa,
     RouteType,
     EvpnRouteType,
+    Family,
     PeerAddress,
     PeerAsn,
     PeerGroup,
@@ -56,6 +57,7 @@ const ROUTE_FIELDS: &[(&str, Field)] = &[
     ("aspa", Field::Aspa),
     ("route-type", Field::RouteType),
     ("evpn-route-type", Field::EvpnRouteType),
+    ("family", Field::Family),
 ];
 
 const PEER_FIELDS: &[(&str, Field)] = &[
@@ -89,6 +91,22 @@ const MAX_APPLY_EXPANSION: u64 = 100_000;
 pub(super) const RPKI_MEMBERS: &[&str] = &["valid", "invalid", "not-found"];
 pub(super) const ASPA_MEMBERS: &[&str] = &["valid", "invalid", "unknown"];
 pub(super) const ROUTE_TYPE_MEMBERS: &[&str] = &["local", "internal", "external"];
+/// The closed route-family set (LAN-295) — one spelling per
+/// [`crate::engine::RouteFamily`] variant.
+pub(super) const FAMILY_MEMBERS: &[&str] = &[
+    "ipv4-unicast",
+    "ipv6-unicast",
+    "ipv4-labeled-unicast",
+    "ipv6-labeled-unicast",
+    "vpnv4",
+    "vpnv6",
+    "ipv4-flowspec",
+    "ipv6-flowspec",
+    "evpn",
+    "rtc",
+    "bgp-ls",
+    "bgp-ls-vpn",
+];
 
 /// Resolve a dotted field path to a [`Field`], or a diagnostic with a
 /// suggestion.
@@ -478,6 +496,10 @@ impl Checker<'_> {
                 eq_only(self);
                 self.expect_enum_rhs(field, rhs, ROUTE_TYPE_MEMBERS, params);
             }
+            Field::Family => {
+                eq_only(self);
+                self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, params);
+            }
             Field::NextHop => {
                 eq_only(self);
                 self.check_next_hop_rhs(field, rhs);
@@ -852,6 +874,9 @@ impl Checker<'_> {
                     RouteField::RouteType(value) => {
                         self.check_fixture_enum(value, "route-type", ROUTE_TYPE_MEMBERS);
                     }
+                    RouteField::Family(value) => {
+                        self.check_fixture_enum(value, "family", FAMILY_MEMBERS);
+                    }
                     RouteField::EvpnRouteType(value, span) => {
                         if *value > 255 {
                             self.diags.push(Diagnostic::new(
@@ -1198,5 +1223,6 @@ fn route_field_name(field: &RouteField) -> (&'static str, Span) {
         RouteField::Aspa(value) => ("aspa", value.span),
         RouteField::RouteType(value) => ("route-type", value.span),
         RouteField::EvpnRouteType(_, span) => ("evpn-route-type", *span),
+        RouteField::Family(value) => ("family", value.span),
     }
 }

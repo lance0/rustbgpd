@@ -541,6 +541,59 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
     handle.await.unwrap();
 }
 
+/// LAN-295: family predicates are route-context-only — an export chain
+/// matching `route.family` reads no peer identity, so content-equal
+/// chains using it must still group (unlike peer-dependent predicates,
+/// which fall back to `policy_peer_context`).
+#[tokio::test]
+async fn family_predicate_export_chain_still_groups() {
+    use std::sync::Arc;
+
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    fn rpol_chain(source: &str, name: &str) -> PolicyChain {
+        let mut store = SetStore::new();
+        let compiled = RpolFile::parse(source)
+            .expect("clean rpol")
+            .compile_policy(name, &[], &mut store)
+            .expect("policy exists");
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            name.to_string(),
+            Arc::new(compiled),
+        )])
+    }
+
+    let family_gate = "policy family-gate {
+        term v4-only { if route.family != ipv4-unicast { reject } }
+        term rest { accept }
+    }";
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_a = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1));
+    let peer_b = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 2));
+    for peer in [peer_a, peer_b] {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(rpol_chain(family_gate, "family-gate"));
+        let _rx = peer_up(&tx, spec).await;
+    }
+
+    let group_a = query_update_group(&tx, peer_a).await;
+    assert!(
+        group_a.starts_with("group:"),
+        "a family-predicate chain must not disqualify grouping: {group_a}"
+    );
+    assert_eq!(query_update_group(&tx, peer_b).await, group_a);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// LAN-210: a grouped member's export-policy counters must not drift
 /// from an otherwise-identical ungrouped peer's across a dirty resync.
 /// Before the fix the dirty-resync distribution pass replayed the group
