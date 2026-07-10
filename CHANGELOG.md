@@ -31,6 +31,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Update-group members that were outbound-dirty when a unicast source flip
+  staged onto them could permanently retain the displaced route on the wire.**
+  An already-dirty grouped member never runs the per-member source-flip matrix
+  (its pass takes the resync arm), and a flip onto the member keeps the key in
+  the group table — invisible to the withdrawal tombstones — while the resync
+  announces only `table ∖ own-sourced`, so the member-scoped withdraw of the
+  displaced route was silently dropped and the stale route survived until
+  session flap. Shared staging now records those member-scoped withdraws into
+  the member's extra-withdraw residue for every already-dirty member; the
+  record also survives a regroup (the regroup baseline snapshot excludes
+  own-sourced keys and could not cover it either), and the resync retention
+  guard still drops it if the source flips back before the resync runs.
 - **EVPN Type 1/2/4 origination is acknowledgement-aware.** The local Type 2
   MAC/MAC+IP originator and the Ethernet Segment orchestrator's Type 1
   EAD/Type 4 publication treated send-success as done: a dropped RIB reply,

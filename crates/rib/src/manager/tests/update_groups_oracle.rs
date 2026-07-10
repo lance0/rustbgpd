@@ -943,6 +943,185 @@ async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
     );
 }
 
+/// A source flip staged while the member is ALREADY dirty: the member's
+/// pass takes the resync arm (never the per-member matrix), so the only
+/// record of its member-scoped withdraw is the one taken at STAGING —
+/// the key stays IN the group table (invisible to tombstones) and the
+/// resync announces table ∖ own-sourced, so nothing later can withdraw
+/// the displaced route.
+#[tokio::test]
+async fn oracle_source_flip_onto_already_dirty_member_withdraws_stale_route() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // p1 from A lands in C's channel (fills it).
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // p2 announce fails for C → C goes dirty BEFORE the flip pass.
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        // Free the channel: the flip pass's resync will SUCCEED, so a
+        // withdraw not recorded by staging time is lost for good.
+        let first = o.drain_one(C).await;
+        assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
+
+        // Source flip ONTO the already-dirty member: C's own route
+        // displaces A's as best. C's pass takes the resync arm, which
+        // announces table ∖ own-sourced — the displaced p1(A) can only
+        // reach the withdraw set via the extras recorded at staging.
+        o.routes(C, vec![ibgp_route(pfx(1, 0), C, 200, vec![])], vec![])
+            .await;
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "a source flip staged onto an already-dirty member must withdraw the displaced route"
+    );
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "the update lost to the full channel must be recovered by the resync"
+    );
+}
+
+/// Regroup-while-dirty variant of the flip-onto-dirty-member scenario:
+/// the member regroups before its resync drains. The regroup baseline
+/// snapshot filters own-sourced entries, so the flipped key is absent
+/// from it — only the extras recorded at staging (which must SURVIVE
+/// the regroup) can put the displaced route in the one-shot diff's
+/// withdraw set. p1 is the ONLY staged key, so every intermediate
+/// resync assembles empty and nothing else covers the withdraw.
+#[tokio::test]
+async fn oracle_regroup_while_dirty_after_source_flip_withdraws_stale_route() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // p1 from A lands in C's channel (fills it).
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // Attribute change on p1: the re-announce fails for C → dirty,
+        // with p1 the only staged key.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 150, vec![])], vec![])
+            .await;
+        // Source flip ONTO the dirty member (channel still full).
+        o.routes(C, vec![ibgp_route(pfx(1, 0), C, 200, vec![])], vec![])
+            .await;
+        // Regroup C before its resync drains: the baseline snapshot
+        // excludes own-sourced p1.
+        o.replace_policy(C, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "the extras recorded at staging must survive the regroup and withdraw the stale route"
+    );
+}
+
+/// Retention-guard check: the source flips onto the dirty member and
+/// back BEFORE its resync runs. The staging-time extras record for the
+/// flip must be dropped by the resync's `member_retains` guard once the
+/// key is again another peer's (the full-table announce covers it) —
+/// the member ends with p1(A) advertised and no spurious withdraw ever
+/// reaches its wire.
+#[tokio::test]
+async fn oracle_source_flip_back_before_resync_keeps_route_without_spurious_withdraw() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // p1 from A lands in C's channel (fills it).
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // p2 announce fails for C → C goes dirty.
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        // Source flip ONTO the dirty member (channel still full)...
+        o.routes(C, vec![ibgp_route(pfx(1, 0), C, 200, vec![])], vec![])
+            .await;
+        // ... and flip back to A before the resync runs.
+        o.routes(C, vec![], vec![pfx(1, 0)]).await;
+
+        // Free the channel and let the resync timer fire.
+        let first = o.drain_one(C).await;
+        assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    let p1_entry = c_final.get(&(Prefix::V4(pfx(1, 0)), 0));
+    assert_eq!(
+        p1_entry.map(|(_, src, _, _)| *src),
+        Some(IpAddr::V4(A)),
+        "after the flip-back the member must retain p1 sourced from A"
+    );
+    // The retention guard must have dropped the staged extra withdraw:
+    // no withdraw of p1 ever reaches C's wire.
+    let spurious = grouped[&IpAddr::V4(C)]
+        .iter()
+        .any(|msg| msg.withdraw.contains(&(Prefix::V4(pfx(1, 0)), 0)));
+    assert!(
+        !spurious,
+        "flip-back before resync must not put a spurious withdraw on the wire"
+    );
+}
+
 /// Regression (stale-route leak): a grouped member whose regroup resync
 /// SEND FAILS is dirty with `pending_regroup_baseline` holding the ONLY
 /// record of its true wire state (a grouped member keeps no per-family
