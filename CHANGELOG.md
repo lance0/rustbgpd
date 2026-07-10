@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Guard test for the `src/lib.rs` module mirror.**
+  `tests/lib_module_mirror.rs` parses the `mod` declarations of
+  `src/main.rs` and `src/lib.rs` at test time and fails when a new
+  `main.rs` module is neither mirrored in `lib.rs` nor added to the
+  documented not-mirrored list — making the LAN-198 mirror decision
+  explicit at ordinary `cargo test` time instead of surfacing only on
+  an `--all-features --lib` build. (LAN-205)
 - **Grafana dashboard aligned with the shipped metric set.** New panels
   on `docs/grafana/rustbgpd-overview.json`: graceful restart, per-peer
   attribute-intern size, update-group index internals, policy engine
@@ -636,6 +643,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Durable config/journal writes are owner-only and symlink-safe.**
+  The shared atomic-write primitive behind the config persister and the
+  commit-confirm revert journal now creates its temp file with mode
+  `0o600` (the journal embeds config snapshots, which may carry secrets
+  such as TCP-MD5 passwords; a permissive umask previously left it
+  world-readable) and resolves symlinks before writing, so a write
+  through a symlinked config lands on the real file instead of
+  replacing the symlink with a regular file. The boot-time
+  commit-confirm revert likewise resolves the config path up front, so
+  a symlinked config survives a revert with its symlink intact and the
+  candidate saved aside next to the real file. Plain (non-symlink)
+  paths behave exactly as before. (LAN-205)
+- **Boot diagnostics distinguish a failed live rollback.** The
+  commit-confirm revert journal records when an abort/timeout rollback
+  failed at runtime (`rollback_failed`, absent in older journals and
+  defaulting to false), and the boot-revert banner then states that the
+  pre-restart on-disk state was uncertain instead of only the generic
+  never-confirmed message. (LAN-205)
 - **SIGHUP config edits limited to hot-applicable neighbor fields no
   longer rebuild the session.** The reload reconciler previously
   delete/re-added the session task for any changed static-neighbor
