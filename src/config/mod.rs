@@ -1645,13 +1645,18 @@ pub enum ConfigFieldImpact {
 /// peer-group field named by [`describe_neighbor_changes`] /
 /// [`describe_peer_group_changes`].
 ///
-/// Fields whose class the existing classifiers disagree on return `None`
-/// and the diff renders no annotation rather than guessing:
-/// - `remote_asn`: the matrix classes it restart-required identity, but
-///   `diff_neighbors` keys on `(address, interface)` only, so an edit
-///   flows through the reconcile delete/re-add path.
-/// - `peer_group`: the matrix classes it live, but the transaction
-///   executor routes a reassignment to the session-reshape executor.
+/// Adjudicated live against a lab peer for LAN-341, so the classes below
+/// are the shipped reload behavior, not aspiration:
+/// - Hot-applied fields are applied in place by the reload partition
+///   (`neighbor_change_hot_applicable` → `HotUpdatePeer`) without
+///   touching the session task.
+/// - `remote_asn`: `diff_neighbors` keys on `(address, interface)`, so
+///   an ASN edit flows through reconcile as an immediate session rebuild
+///   under the new ASN — identity delete+add semantics without a daemon
+///   restart.
+/// - `peer_group`: a reassignment changes the peer's effective inherited
+///   config, so both SIGHUP reconcile and the transaction session-reshape
+///   executor rebuild the session.
 fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)> {
     Some(match field {
         "description"
@@ -1664,6 +1669,14 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "export_policy"
         | "import_policy_chain"
         | "export_policy_chain" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        "remote_asn" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: peer re-established with new ASN",
+        ),
+        "peer_group" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: reassignment rebuilds the session",
+        ),
         "hold_time"
         | "families"
         | "graceful_restart"
@@ -1848,6 +1861,23 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(export_policy_chain);
 
     changes
+}
+
+/// True when every field that differs between `old` and `new` is
+/// reload-matrix `live` (hot-applied), so a SIGHUP reload can apply the
+/// change to the running peer in place instead of delete/re-adding the
+/// session task (LAN-341).
+///
+/// Conservative on both edges: an empty change list (a runtime-relevant
+/// field `describe_neighbor_changes` doesn't cover) and any field with an
+/// unknown impact class both return `false`, keeping the rebuild path as
+/// the fallback.
+pub fn neighbor_change_hot_applicable(old: &Neighbor, new: &Neighbor) -> bool {
+    let changes = describe_neighbor_changes(old, new);
+    !changes.is_empty()
+        && changes
+            .iter()
+            .all(|change| change.impact == Some(ConfigFieldImpact::HotApplied))
 }
 
 /// Compare two neighbor lists and return the differences.

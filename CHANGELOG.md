@@ -393,6 +393,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **SIGHUP config edits limited to hot-applicable neighbor fields no
+  longer rebuild the session.** The reload reconciler previously
+  delete/re-added the session task for any changed static-neighbor
+  field, bouncing an Established session even for a `description` or
+  `log_level` edit that `docs/reload-matrix.md` classes as live.
+  Changed neighbors are now partitioned by the reload-matrix impact of
+  their changed-field set: an edit touching only hot-applied fields
+  (`description`, `max_prefixes`, `gr_stale_routes_time`,
+  `local_ipv6_nexthop`, `remove_private_as`, `log_level`, import/export
+  policies and chains) applies in place — session task, TCP connection,
+  and FSM untouched, with policy edits still driving Route Refresh and
+  Adj-RIB-Out re-emit. Any session-reset or restart-required field in
+  the same edit keeps the neighbor on the rebuild path, which applies
+  the whole edit through one session reset. `remote_asn` and
+  `peer_group` edits — previously unannotated because the matrix and
+  the reconcile mechanics disagreed — are now classed as session
+  resets in `rustbgpd --diff` / `rbgp config diff` output, matching
+  the shipped behavior (an ASN edit rebuilds the session immediately
+  under the new ASN; a peer-group reassignment rebuilds to re-resolve
+  inheritance), and the reload matrix's `[[neighbors]]` section now
+  documents the real diff key (`address`, `interface`) and the
+  immediate-rebuild semantics of session-reset fields. (LAN-341)
+
 - **`rbgp policy explain` no longer reports `not_seen` when the truth
   is a disabled cache or a missing session.** The explain RPC
   previously folded "no live session with this peer" and
@@ -414,9 +437,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inline-policy fields stay summarized as `<changed>`. Each changed
   neighbor / peer-group field is annotated with its reload-matrix
   impact class (`[hot-applied]`, `[session reset: OPEN renegotiation]`
-  / `TCP re-establish` / `session re-establish`, `[restart required]`;
-  fields whose class the existing classifiers disagree on carry no
-  annotation), and the diff ends with a rollup line (`Plan: 1 to add,
+  / `TCP re-establish` / `session re-establish`, `[restart required]`),
+  and the diff ends with a rollup line (`Plan: 1 to add,
   1 to change · 1 session will reset`). The JSON diff's `changes`
   entries are now structured objects with the stable key set `{field,
   old, new, impact}` (honest `null` for absent values and unknown

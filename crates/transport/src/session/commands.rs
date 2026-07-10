@@ -173,6 +173,27 @@ impl PeerSession {
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
+            PeerCommand::UpdateRuntimeConfig {
+                max_prefixes,
+                gr_stale_routes_time,
+                local_ipv6_nexthop,
+                remove_private_as,
+                reply,
+            } => {
+                // LAN-341 hot-apply: these knobs are read from
+                // `self.config` on every evaluation (see the command's
+                // doc), so swapping them here is the whole apply — no
+                // FSM event, no TCP impact. A lowered `max_prefixes`
+                // trips on the next received UPDATE, matching the
+                // reload matrix's documented semantics.
+                self.config.max_prefixes = max_prefixes;
+                self.config.gr_stale_routes_time = gr_stale_routes_time;
+                self.config.local_ipv6_nexthop = local_ipv6_nexthop;
+                self.config.remove_private_as = remove_private_as;
+                info!(peer = %self.peer_label, "hot-applied runtime config knobs");
+                let _ = reply.send(Ok(()));
+                ControlFlow::Continue(())
+            }
             PeerCommand::UpdateGracefulShutdown { enabled, reply } => {
                 // Idempotent: re-setting to the same value is a no-op.
                 // The toggle takes effect for the next outbound update;
