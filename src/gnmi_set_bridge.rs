@@ -49,6 +49,7 @@ enum NeighborConfigLeaf {
     PeerAs,
     Description,
     PeerGroup,
+    GracefulRestart(GracefulRestartLeaf),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -57,6 +58,18 @@ enum PeerGroupConfigLeaf {
     AuthPassword,
     RemovePrivateAs,
     HoldTime,
+    GracefulRestart(GracefulRestartLeaf),
+}
+
+/// The OpenConfig-defined `graceful-restart/config` leaves shared by the
+/// neighbor and peer-group containers. Both map onto the identically named
+/// native keys (`graceful_restart`, `gr_restart_time`,
+/// `gr_stale_routes_time`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum GracefulRestartLeaf {
+    Enabled,
+    RestartTime,
+    StaleRoutesTime,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -214,6 +227,15 @@ fn apply_neighbor_leaf(
         NeighborConfigLeaf::PeerGroup => {
             draft.neighbor.peer_group = Some(parse_string_value(value, "peer-group")?);
         }
+        NeighborConfigLeaf::GracefulRestart(leaf) => {
+            apply_graceful_restart_leaf(
+                &mut draft.neighbor.graceful_restart,
+                &mut draft.neighbor.gr_restart_time,
+                &mut draft.neighbor.gr_stale_routes_time,
+                leaf,
+                value,
+            )?;
+        }
     }
     Ok(())
 }
@@ -244,6 +266,40 @@ fn apply_peer_group_leaf(
         }
         PeerGroupConfigLeaf::HoldTime => {
             group.hold_time = Some(parse_u16_value(value, "hold-time")?);
+        }
+        PeerGroupConfigLeaf::GracefulRestart(leaf) => {
+            apply_graceful_restart_leaf(
+                &mut group.graceful_restart,
+                &mut group.gr_restart_time,
+                &mut group.gr_stale_routes_time,
+                leaf,
+                value,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply one OpenConfig-defined `graceful-restart/config` leaf onto the
+/// native GR fields, which have the same shape on both `Neighbor` and
+/// `PeerGroupConfig`. Range/consistency checks (restart-time <= 4095, > 0
+/// while enabled) stay with the native candidate validation.
+fn apply_graceful_restart_leaf(
+    graceful_restart: &mut Option<bool>,
+    gr_restart_time: &mut Option<u16>,
+    gr_stale_routes_time: &mut Option<u64>,
+    leaf: GracefulRestartLeaf,
+    value: Value,
+) -> Result<(), GnmiSetError> {
+    match leaf {
+        GracefulRestartLeaf::Enabled => {
+            *graceful_restart = Some(parse_bool_value(&value, "enabled")?);
+        }
+        GracefulRestartLeaf::RestartTime => {
+            *gr_restart_time = Some(parse_u16_value(value, "restart-time")?);
+        }
+        GracefulRestartLeaf::StaleRoutesTime => {
+            *gr_stale_routes_time = Some(parse_u64_value(value, "stale-routes-time")?);
         }
     }
     Ok(())
@@ -560,9 +616,44 @@ fn parse_neighbor_set_path(elem: &[gnmi::PathElem]) -> Result<SetPath, GnmiSetEr
             };
             Ok(SetPath::NeighborConfigLeaf { address, leaf })
         }
+        Some("graceful-restart") => {
+            let leaf = parse_graceful_restart_subtree(&elem[2..], "neighbor")?;
+            Ok(SetPath::NeighborConfigLeaf {
+                address,
+                leaf: NeighborConfigLeaf::GracefulRestart(leaf),
+            })
+        }
         _ => Err(GnmiSetError::Unimplemented(
             "unsupported OpenConfig BGP neighbor Set path".to_string(),
         )),
+    }
+}
+
+/// Parse the shared `graceful-restart/config/<leaf>` tail. `elem` starts at
+/// the `graceful-restart` container.
+fn parse_graceful_restart_subtree(
+    elem: &[gnmi::PathElem],
+    scope: &str,
+) -> Result<GracefulRestartLeaf, GnmiSetError> {
+    ensure_no_extra_leaf_keys(&elem[0])?;
+    if elem.len() != 3 {
+        return Err(GnmiSetError::Unimplemented(format!(
+            "unsupported OpenConfig BGP {scope} graceful-restart subtree"
+        )));
+    }
+    expect_no_keys(&elem[1], "config")?;
+    ensure_no_extra_leaf_keys(&elem[2])?;
+    match elem[2].name.as_str() {
+        "enabled" => Ok(GracefulRestartLeaf::Enabled),
+        "restart-time" => Ok(GracefulRestartLeaf::RestartTime),
+        "stale-routes-time" => Ok(GracefulRestartLeaf::StaleRoutesTime),
+        "helper-only" => Err(GnmiSetError::Unimplemented(
+            "OpenConfig graceful-restart config/helper-only is not supported; rustbgpd GR helper behavior is not a per-session knob"
+                .to_string(),
+        )),
+        _ => Err(GnmiSetError::Unimplemented(format!(
+            "unsupported OpenConfig BGP {scope} graceful-restart config leaf"
+        ))),
     }
 }
 
@@ -632,6 +723,13 @@ fn parse_peer_group_set_path(elem: &[gnmi::PathElem]) -> Result<SetPath, GnmiSet
                     "unsupported OpenConfig BGP peer-group timers config leaf".to_string(),
                 )),
             }
+        }
+        Some("graceful-restart") => {
+            let leaf = parse_graceful_restart_subtree(&elem[2..], "peer-group")?;
+            Ok(SetPath::PeerGroupConfigLeaf {
+                name,
+                leaf: PeerGroupConfigLeaf::GracefulRestart(leaf),
+            })
         }
         _ => Err(GnmiSetError::Unimplemented(
             "unsupported OpenConfig BGP peer-group Set path".to_string(),
@@ -807,6 +905,7 @@ fn typed_value_to_json(value: &gnmi::TypedValue) -> Result<Value, GnmiSetError> 
         gnmi::typed_value::Value::UintVal(value) => {
             Ok(Value::Number(serde_json::Number::from(*value)))
         }
+        gnmi::typed_value::Value::BoolVal(value) => Ok(Value::Bool(*value)),
         gnmi::typed_value::Value::JsonVal(bytes) | gnmi::typed_value::Value::JsonIetfVal(bytes) => {
             serde_json::from_slice(bytes).map_err(|error| {
                 GnmiSetError::InvalidArgument(format!("invalid JSON value: {error}"))
@@ -846,6 +945,32 @@ fn parse_u32_value(value: Value, leaf: &str) -> Result<u32, GnmiSetError> {
             .map_err(|_| GnmiSetError::InvalidArgument(format!("{leaf} requires a uint32 value"))),
         _ => Err(GnmiSetError::InvalidArgument(format!(
             "{leaf} requires a uint32 value"
+        ))),
+    }
+}
+
+fn parse_bool_value(value: &Value, leaf: &str) -> Result<bool, GnmiSetError> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        _ => Err(GnmiSetError::InvalidArgument(format!(
+            "{leaf} requires a boolean value"
+        ))),
+    }
+}
+
+fn parse_u64_value(value: Value, leaf: &str) -> Result<u64, GnmiSetError> {
+    match value {
+        // OpenConfig models stale-routes-time as decimal64; the native key is
+        // whole seconds, so fractional JSON numbers are rejected here rather
+        // than rounded.
+        Value::Number(number) => number.as_u64().ok_or_else(|| {
+            GnmiSetError::InvalidArgument(format!("{leaf} requires a whole-second uint value"))
+        }),
+        Value::String(value) => value.parse::<u64>().map_err(|_| {
+            GnmiSetError::InvalidArgument(format!("{leaf} requires a whole-second uint value"))
+        }),
+        _ => Err(GnmiSetError::InvalidArgument(format!(
+            "{leaf} requires a whole-second uint value"
         ))),
     }
 }
@@ -961,6 +1086,16 @@ description = "old"
     fn update(address: &str, leaf: &str, value: TypedValue) -> GnmiSetOperation {
         GnmiSetOperation::Update(gnmi::Update {
             path: Some(path(address, &["config", leaf])),
+            #[allow(deprecated)]
+            value: None,
+            val: Some(gnmi::TypedValue { value: Some(value) }),
+            duplicates: 0,
+        })
+    }
+
+    fn update_at(address: &str, tail: &[&str], value: TypedValue) -> GnmiSetOperation {
+        GnmiSetOperation::Update(gnmi::Update {
+            path: Some(path(address, tail)),
             #[allow(deprecated)]
             value: None,
             val: Some(gnmi::TypedValue { value: Some(value) }),
@@ -1514,6 +1649,178 @@ description = "old"
         .unwrap_err();
 
         assert!(error.to_string().contains("requires config/peer-group"));
+    }
+
+    #[test]
+    fn set_neighbor_graceful_restart_leaves() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![
+                update_at(
+                    "192.0.2.1",
+                    &["graceful-restart", "config", "enabled"],
+                    TypedValue::BoolVal(false),
+                ),
+                update_at(
+                    "192.0.2.1",
+                    &["graceful-restart", "config", "restart-time"],
+                    TypedValue::UintVal(240),
+                ),
+                update_at(
+                    "192.0.2.1",
+                    &["graceful-restart", "config", "stale-routes-time"],
+                    TypedValue::UintVal(600),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let neighbor = &candidate.neighbors[0];
+        assert_eq!(neighbor.graceful_restart, Some(false));
+        assert_eq!(neighbor.gr_restart_time, Some(240));
+        assert_eq!(neighbor.gr_stale_routes_time, Some(600));
+    }
+
+    #[test]
+    fn set_neighbor_graceful_restart_enabled_accepts_json_ietf_bool() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![update_at(
+                "192.0.2.1",
+                &["graceful-restart", "config", "enabled"],
+                TypedValue::JsonIetfVal(b"true".to_vec()),
+            )]),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.neighbors[0].graceful_restart, Some(true));
+    }
+
+    #[test]
+    fn set_peer_group_graceful_restart_leaves() {
+        let candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![
+                peer_group_update(
+                    "rs-clients",
+                    &["graceful-restart", "config", "enabled"],
+                    TypedValue::BoolVal(true),
+                ),
+                peer_group_update(
+                    "rs-clients",
+                    &["graceful-restart", "config", "restart-time"],
+                    TypedValue::UintVal(180),
+                ),
+                peer_group_update(
+                    "rs-clients",
+                    &["graceful-restart", "config", "stale-routes-time"],
+                    TypedValue::UintVal(720),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let group = candidate.peer_groups.get("rs-clients").unwrap();
+        assert_eq!(group.graceful_restart, Some(true));
+        assert_eq!(group.gr_restart_time, Some(180));
+        assert_eq!(group.gr_stale_routes_time, Some(720));
+    }
+
+    #[test]
+    fn set_rejects_graceful_restart_helper_only() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![update_at(
+                "192.0.2.1",
+                &["graceful-restart", "config", "helper-only"],
+                TypedValue::BoolVal(true),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::Unimplemented(_)));
+        assert!(error.to_string().contains("helper-only"));
+    }
+
+    #[test]
+    fn set_rejects_graceful_restart_enabled_non_bool() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![update_at(
+                "192.0.2.1",
+                &["graceful-restart", "config", "enabled"],
+                TypedValue::StringVal("yes".to_string()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::InvalidArgument(_)));
+        assert!(error.to_string().contains("boolean"));
+    }
+
+    #[test]
+    fn set_rejects_fractional_stale_routes_time() {
+        // OpenConfig decimal64 values with a fractional part must be
+        // rejected, never rounded into the whole-second native key.
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![update_at(
+                "192.0.2.1",
+                &["graceful-restart", "config", "stale-routes-time"],
+                TypedValue::JsonIetfVal(b"360.5".to_vec()),
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::InvalidArgument(_)));
+        assert!(error.to_string().contains("whole-second"));
+    }
+
+    #[test]
+    fn set_graceful_restart_out_of_range_restart_time_is_rejected_downstream() {
+        // parse accepts any u16; the native candidate validation owns the
+        // 12-bit GR restart-time bound and the commit path surfaces its
+        // diagnostic.
+        let mut candidate = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![update_at(
+                "192.0.2.1",
+                &["graceful-restart", "config", "restart-time"],
+                TypedValue::UintVal(4096),
+            )]),
+        )
+        .unwrap();
+        // Same tier-enforcement carve-out as the remove-private-as
+        // round-trip test: keep validation focused on the leaf under test.
+        candidate.security.grpc.enforcement = crate::config::GrpcEnforcementConfig::Legacy;
+        assert_eq!(candidate.neighbors[0].gr_restart_time, Some(4096));
+
+        let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
+        let error =
+            Config::load_toml_with_diagnostics(&candidate_toml, "gnmi set candidate").unwrap_err();
+        assert!(
+            error.contains("4095"),
+            "candidate validation must reject gr_restart_time 4096, got: {error}"
+        );
+    }
+
+    #[test]
+    fn set_rejects_graceful_restart_container_delete() {
+        let error = apply_transaction_to_config(
+            base_config(),
+            &transaction(vec![GnmiSetOperation::Delete(path(
+                "192.0.2.1",
+                &["graceful-restart", "config", "enabled"],
+            ))]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GnmiSetError::Unimplemented(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("whole static neighbor entries only")
+        );
     }
 
     #[test]

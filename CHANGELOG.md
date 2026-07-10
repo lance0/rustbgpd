@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **gNMI Set graceful-restart subset.** The OpenConfig
+  `graceful-restart/config/{enabled, restart-time, stale-routes-time}`
+  leaves are now accepted under both static-neighbor and peer-group
+  paths, mapped onto the native `graceful_restart` / `gr_restart_time`
+  / `gr_stale_routes_time` keys through the same ADR-0076
+  candidate-TOML transaction path as the existing Set subsets.
+  Fractional decimal64 `stale-routes-time` values are rejected (never
+  rounded) and `helper-only` returns `UNIMPLEMENTED`. (LAN-19)
 - **Guard test for the `src/lib.rs` module mirror.**
   `tests/lib_module_mirror.rs` parses the `mod` declarations of
   `src/main.rs` and `src/lib.rs` at test time and fails when a new
