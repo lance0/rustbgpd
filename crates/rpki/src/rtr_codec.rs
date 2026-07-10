@@ -144,7 +144,7 @@ const PDU_IPV4_PREFIX: u8 = 4;
 const PDU_IPV6_PREFIX: u8 = 6;
 const PDU_END_OF_DATA: u8 = 7;
 const PDU_CACHE_RESET: u8 = 8;
-const PDU_ERROR_REPORT: u8 = 10;
+pub(crate) const PDU_ERROR_REPORT: u8 = 10;
 const PDU_ASPA: u8 = 11;
 
 fn checked_u32_len(field: &'static str, len: usize) -> Result<u32, RtrEncodeError> {

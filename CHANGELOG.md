@@ -206,6 +206,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Fatal RTR errors now flush the affected cache's data and emit Error
+  Reports per draft-ietf-sidrops-8210bis-26, instead of retaining until
+  expiry.** Every session-ending event is classified retain-vs-flush:
+  ordinary transport loss, Cache Restart (Error Report code 12, §8.5),
+  Cache Reset, and the unsupported-version fallback (code 4) keep the
+  cache's validated data until the expire interval as before, while
+  fatal evidence the cache epoch is invalid — a session-ID mismatch
+  (§5.1) or a received fatal Error Report, Cache Shutdown (code 13,
+  §8.6) in particular — now removes that cache's VRPs and ASPAs from
+  the merged tables immediately (other caches' data is untouched, and
+  route validation re-runs exactly as at expiry). The client also
+  transmits Error Reports where the draft requires or permits them —
+  code 0 on session-ID mismatch, 4/8 on unsupported/unexpected protocol
+  versions, 5 on unknown PDU types, 9 on invalid ASPA provider lists
+  (§5.12), and 10 on stalled transfers — sent best-effort before the
+  session drops, and never in response to a received Error Report
+  (§5.11). (LAN-314)
 - **Malformed ASPA announcements are rejected instead of poisoning the ASPA
   table.** Per draft-ietf-sidrops-8210bis-26 §5.12 ("ASPA Provider List
   Error"), an ASPA announcement carrying no Provider ASNs — previously

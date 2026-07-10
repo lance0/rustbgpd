@@ -9,9 +9,15 @@
 //! unit at a validated End of Data. Any identity mismatch mid-stream
 //! triggers a full resynchronization (Reset Query), never a splice.
 //! Validated data is retained through reconnects and Cache Reset until a
-//! full replacement completes or the expire interval passes. Each
-//! transaction is bounded by a deadline and record/byte budgets. See the
-//! crate-level docs for the supported RFC 8210 / 8210bis subset.
+//! full replacement completes or the expire interval passes — except on
+//! fatal evidence the cache epoch is invalid (a session-ID mismatch or a
+//! received fatal Error Report such as Cache Shutdown), which flushes
+//! this cache's data from the merged tables immediately (see
+//! `SessionEndDisposition`). Where 8210bis calls for it, an Error
+//! Report is sent best-effort before the session is dropped — never in
+//! response to a received Error Report. Each transaction is bounded by a
+//! deadline and record/byte budgets. See the crate-level docs for the
+//! supported RFC 8210 / 8210bis subset.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -47,6 +53,15 @@ const MAX_TRANSACTION_BYTES: usize = 256 * 1024 * 1024;
 /// `retry_interval`.
 const MAX_TRANSACTION_RESTARTS: u8 = 2;
 
+/// Cap on the erroneous-PDU copy embedded in an outgoing Error Report
+/// (8210bis §5.11 permits truncation; at least the first four octets
+/// must be kept).
+const ERROR_PDU_TRUNCATE: usize = 512;
+
+/// Write budget for a teardown Error Report. Emission is best-effort:
+/// a cache that has stopped reading must not delay the session drop.
+const ERROR_REPORT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// RFC 1982 serial-number order: `new` is the same as or after `old`.
 fn serial_not_before(old: u32, new: u32) -> bool {
     new.wrapping_sub(old) < (1 << 31)
@@ -70,6 +85,29 @@ struct CacheEpoch {
 enum QueryKind {
     Reset,
     Serial,
+}
+
+/// Disposition of the cache's held data when a session ends
+/// (8210bis §12).
+///
+/// Every session-ending event classifies as exactly one of these:
+///
+/// * `RetainAndRetry` — the held data is still the most recent
+///   validated cache state: ordinary transport loss, Cache Restart
+///   (Error Report code 12, §8.5), Cache Reset (§5.9), and the
+///   unsupported-version fallback (code 4, §12: "data previously
+///   learned need not be flushed"). Data is kept until the expire
+///   interval passes without a fresh End of Data.
+/// * `FlushAndDrop` — fatal evidence the cache epoch is invalid:
+///   a session-ID mismatch (§5.1) or a received fatal Error Report,
+///   Cache Shutdown (code 13, §8.6) in particular. This cache's
+///   VRPs/ASPAs are removed from the merged tables immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEndDisposition {
+    /// Keep validated data until it expires; reconnect and resync.
+    RetainAndRetry,
+    /// Flush this cache's data now and drop the session.
+    FlushAndDrop,
 }
 
 /// Update messages sent from an RTR client to the VRP manager.
@@ -199,14 +237,17 @@ impl RtrClient {
     }
 
     async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
-        let stream = TcpStream::connect(self.config.server_addr).await?;
+        let mut stream = TcpStream::connect(self.config.server_addr).await?;
         info!(
             server = %self.config.server_addr,
             rtr_version = self.negotiated_version,
             "RTR connected"
         );
 
-        if let Err(error) = self.run_session(stream).await {
+        if let Err(error) = self.run_session(&mut stream).await {
+            // Close before flushing/retrying so the cache sees the drop
+            // (the teardown Error Report, if any, was already sent).
+            drop(stream);
             if self.should_fallback_to_v1(&error) {
                 self.run_v1_fallback_session().await;
                 return Ok(());
@@ -217,11 +258,16 @@ impl RtrClient {
                 error = %error,
                 "RTR session ended"
             );
-            self.handle_disconnected_session(matches!(error, RtrError::Expired))
-                .await;
+            self.end_session(&error).await;
         }
 
         Ok(())
+    }
+
+    /// Apply the error's [`SessionEndDisposition`] and pace the retry.
+    async fn end_session(&mut self, error: &RtrError) {
+        let flush = error.disposition() == SessionEndDisposition::FlushAndDrop;
+        self.handle_disconnected_session(flush).await;
     }
 
     fn should_fallback_to_v1(&self, error: &RtrError) -> bool {
@@ -259,20 +305,20 @@ impl RtrClient {
         self.epoch = None;
 
         match TcpStream::connect(self.config.server_addr).await {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 info!(
                     server = %self.config.server_addr,
                     rtr_version = self.negotiated_version,
                     "RTR reconnected with fallback version"
                 );
-                if let Err(error) = self.run_session(stream).await {
+                if let Err(error) = self.run_session(&mut stream).await {
+                    drop(stream);
                     warn!(
                         server = %self.config.server_addr,
                         error = %error,
                         "RTR session ended after v1 fallback"
                     );
-                    self.handle_disconnected_session(matches!(error, RtrError::Expired))
-                        .await;
+                    self.end_session(&error).await;
                 }
             }
             Err(error) => {
@@ -290,12 +336,19 @@ impl RtrClient {
     ///
     /// Validated data is RETAINED through reconnect: `ServerDown` (which
     /// drops the cache's entries from the merged tables) is only sent once
-    /// the expire interval passes without a fresh End of Data — either
-    /// signalled by the session (`expired_now`) or detected here while
-    /// retrying. A mere disconnect must not flap route validation.
-    async fn handle_disconnected_session(&mut self, expired_now: bool) {
+    /// the expire interval passes without a fresh End of Data — detected
+    /// here while retrying — or when the session ended with a
+    /// [`SessionEndDisposition::FlushAndDrop`] event (`flush_now`): data
+    /// expiry, a session-ID mismatch, or a received fatal Error Report
+    /// (8210bis §12). A mere disconnect must not flap route validation.
+    ///
+    /// The eager flush is this same expiry path invoked immediately:
+    /// `ServerDown` makes the VRP manager remove exactly this cache's
+    /// VRPs and ASPAs from the merged tables and redistribute, so route
+    /// validation re-runs just as it does at expiry.
+    async fn handle_disconnected_session(&mut self, flush_now: bool) {
         let now = TokioInstant::now();
-        let expired = expired_now || self.data_expires_at.is_some_and(|at| now >= at);
+        let expired = flush_now || self.data_expires_at.is_some_and(|at| now >= at);
         if expired {
             let _ = self
                 .vrp_tx
@@ -375,18 +428,69 @@ impl RtrClient {
         Ok(is_reset)
     }
 
-    async fn run_session(&mut self, mut stream: TcpStream) -> Result<(), RtrError> {
+    async fn run_session(&mut self, stream: &mut TcpStream) -> Result<(), RtrError> {
         let mut read_buf = vec![0u8; 8192];
         let mut parse_buf = Vec::new();
         let mut next_query = self.current_query_kind();
 
-        loop {
-            self.fetch_until_end_of_data(&mut stream, &mut read_buf, &mut parse_buf, next_query)
-                .await?;
-            next_query = self
-                .wait_for_next_query(&mut stream, &mut read_buf, &mut parse_buf)
-                .await?;
+        let result = loop {
+            if let Err(error) = self
+                .fetch_until_end_of_data(stream, &mut read_buf, &mut parse_buf, next_query)
+                .await
+            {
+                break error;
+            }
+            match self
+                .wait_for_next_query(stream, &mut read_buf, &mut parse_buf)
+                .await
+            {
+                Ok(query) => next_query = query,
+                Err(error) => break error,
+            }
+        };
+
+        // An Error Report, where the draft calls for one, is sent
+        // BEFORE the session is dropped (8210bis §5.11, §12) — and
+        // never in response to a received Error Report.
+        if let Some((code, pdu, text)) = teardown_report(&result, &parse_buf) {
+            self.send_error_report(stream, code, &pdu, text).await;
         }
+        Err(result)
+    }
+
+    /// Best-effort transmission of an Error Report just before the
+    /// session is dropped. A cache that has stopped reading must not
+    /// block the drop: the write is bounded by a short timeout and any
+    /// failure is ignored.
+    async fn send_error_report(
+        &self,
+        stream: &mut TcpStream,
+        code: u16,
+        erroneous_pdu: &[u8],
+        text: &str,
+    ) {
+        // §5.11: a too-large erroneous PDU MUST be truncated (keeping
+        // at least the first four octets).
+        let pdu = erroneous_pdu[..erroneous_pdu.len().min(ERROR_PDU_TRUNCATE)].to_vec();
+        let report = RtrPdu::ErrorReport {
+            code,
+            pdu,
+            text: text.to_string(),
+        };
+        let mut buf = Vec::new();
+        if report
+            .encode_with_version(&mut buf, self.negotiated_version)
+            .is_err()
+        {
+            return;
+        }
+        debug!(
+            server = %self.config.server_addr,
+            code,
+            text,
+            "sending RTR error report before dropping session"
+        );
+        let _ = tokio::time::timeout(ERROR_REPORT_WRITE_TIMEOUT, stream.write_all(&buf)).await;
     }
 
     fn handle_idle_pdus(&mut self, parse_buf: &mut Vec<u8>) -> Result<Option<QueryKind>, RtrError> {
@@ -535,9 +639,6 @@ impl RtrClient {
             // Session ID from this transaction's Cache Response; records
             // are only collected once it is set.
             let mut pending_session: Option<u16> = None;
-            // Identity mismatch seen: drain the rest of the response
-            // without collecting, then resync with a Reset Query.
-            let mut discarding = false;
             let mut records: usize = 0;
             let mut announced = Vec::new();
             let mut withdrawn = Vec::new();
@@ -551,19 +652,24 @@ impl RtrClient {
                         RtrPdu::CacheResponse { session_id } => {
                             if expected_session.is_some_and(|expected| expected != session_id) {
                                 // The cache is answering from a different
-                                // session than the one our data belongs to.
-                                // Never splice: discard this response and
-                                // resynchronize with a full Reset Query.
+                                // session than the one our data belongs to
+                                // — fatal per 8210bis §5.1: terminate with
+                                // Error Code 0 ("Corrupt Data") and flush
+                                // everything learned from this cache.
                                 warn!(
                                     server = %self.config.server_addr,
                                     expected = expected_session,
                                     got = session_id,
-                                    "RTR Cache Response session mismatch — resynchronizing"
+                                    "RTR Cache Response session mismatch — fatal, flushing"
                                 );
-                                restart!();
-                                self.epoch = None;
-                                discarding = true;
-                                continue;
+                                let mut offending = Vec::new();
+                                let _ = RtrPdu::CacheResponse { session_id }
+                                    .encode_with_version(&mut offending, self.negotiated_version);
+                                return Err(RtrError::SessionIdMismatch {
+                                    expected: expected_session,
+                                    got: session_id,
+                                    pdu: offending,
+                                });
                             }
                             pending_session = Some(session_id);
                             records = 0;
@@ -639,9 +745,16 @@ impl RtrClient {
                                     providers = provider_asns.len(),
                                     "RTR ASPA announcement with invalid provider list"
                                 );
-                                return Err(RtrError::ProtocolViolation(
-                                    "ASPA provider list error",
-                                ));
+                                // §5.12: "an Error PDU with Error Code 9
+                                // ... is returned by the router".
+                                let mut offending = Vec::new();
+                                let _ = RtrPdu::Aspa {
+                                    flags,
+                                    customer_asn,
+                                    provider_asns,
+                                }
+                                .encode_with_version(&mut offending, self.negotiated_version);
+                                return Err(RtrError::AspaProviderList { pdu: offending });
                             }
                             let record = AspaRecord {
                                 customer_asn,
@@ -664,26 +777,46 @@ impl RtrClient {
                             retry,
                             expire,
                         } => {
-                            if discarding {
-                                // Mismatched response fully drained;
-                                // resynchronize from scratch.
-                                query = QueryKind::Reset;
-                                continue 'transaction;
-                            }
-                            let serial_sane = is_reset
-                                || prior_serial.is_none_or(|old| serial_not_before(old, serial));
-                            if pending_session != Some(session_id) || !serial_sane {
-                                // End of Data identity does not match the
-                                // Cache Response (or was never preceded by
-                                // one), or the serial went backwards: the
-                                // response cannot be trusted as one
-                                // coherent cache state.
+                            if pending_session != Some(session_id) {
+                                // End of Data carries a session ID that
+                                // does not match the Cache Response (or
+                                // was never preceded by one): the cache
+                                // used two session IDs in one response —
+                                // fatal per 8210bis §5.1: terminate with
+                                // Error Code 0 ("Corrupt Data") and flush.
                                 warn!(
                                     server = %self.config.server_addr,
                                     expected = pending_session,
                                     got = session_id,
                                     serial,
-                                    "RTR End of Data identity mismatch — resynchronizing"
+                                    "RTR End of Data session mismatch — fatal, flushing"
+                                );
+                                let mut offending = Vec::new();
+                                let _ = RtrPdu::EndOfData {
+                                    session_id,
+                                    serial,
+                                    refresh,
+                                    retry,
+                                    expire,
+                                }
+                                .encode_with_version(&mut offending, self.negotiated_version);
+                                return Err(RtrError::SessionIdMismatch {
+                                    expected: pending_session,
+                                    got: session_id,
+                                    pdu: offending,
+                                });
+                            }
+                            let serial_sane = is_reset
+                                || prior_serial.is_none_or(|old| serial_not_before(old, serial));
+                            if !serial_sane {
+                                // The serial went backwards (RFC 1982):
+                                // the response cannot extend the held
+                                // table. Resynchronize from scratch.
+                                warn!(
+                                    server = %self.config.server_addr,
+                                    session_id,
+                                    serial,
+                                    "RTR End of Data serial regression — resynchronizing"
                                 );
                                 restart!();
                                 self.epoch = None;
@@ -823,6 +956,78 @@ impl RtrClient {
     }
 }
 
+/// Map a session-ending error to the Error Report the draft requires
+/// or permits the router to send before dropping, if any:
+/// `(error code, erroneous PDU copy, diagnostic text)`.
+///
+/// `parse_buf` still holds the offending wire frame at its front for
+/// decode-level errors ([`RtrClient::next_pdu`] only drains on success);
+/// semantic errors carry a re-encoded copy of the offending PDU in the
+/// error itself.
+///
+/// Returns `None` for received Error Reports — §5.11: "An Error Report
+/// PDU MUST NOT be sent as a response to an Error Report PDU" — and for
+/// events with no draft-assigned code (transport loss, local budgets).
+fn teardown_report(error: &RtrError, parse_buf: &[u8]) -> Option<(u16, Vec<u8>, &'static str)> {
+    // §5.11/§7: never answer an Error Report — even one that is itself
+    // erroneous (bad version byte, undecodable) — with an Error Report.
+    let offending_is_error_report =
+        parse_buf.len() >= 2 && parse_buf[1] == crate::rtr_codec::PDU_ERROR_REPORT;
+    match error {
+        // §5.1: session-ID mismatch → Error Code 0 ("Corrupt Data").
+        RtrError::SessionIdMismatch { pdu, .. } => Some((0, pdu.clone(), "session ID mismatch")),
+        // §5.12: invalid ASPA provider list → Error Code 9.
+        RtrError::AspaProviderList { pdu } => Some((9, pdu.clone(), "ASPA provider list error")),
+        // §12 code 10: transport-layer stall.
+        RtrError::TransactionTimeout => Some((10, Vec::new(), "transaction stalled")),
+        // §7: a PDU with a Protocol Version different from the
+        // negotiated one → code 8 ("Unexpected Protocol Version") for a
+        // known-but-wrong version, code 4 ("Unsupported Protocol
+        // Version") for a version this implementation does not know.
+        RtrError::VersionMismatch { got, .. } => {
+            if offending_is_error_report {
+                return None;
+            }
+            let (code, text) = if matches!(got, 0..=2) {
+                (8, "unexpected protocol version")
+            } else {
+                (4, "unsupported protocol version")
+            };
+            Some((code, offending_pdu_bytes(parse_buf), text))
+        }
+        RtrError::Decode(decode_error) => {
+            if offending_is_error_report {
+                return None;
+            }
+            match decode_error {
+                // §12 code 5: PDU Type not known by the receiver.
+                RtrDecodeError::InvalidType(_) => {
+                    Some((5, offending_pdu_bytes(parse_buf), "unsupported PDU type"))
+                }
+                // §12 code 4: Protocol Version not known by the receiver.
+                RtrDecodeError::InvalidVersion(_) => Some((
+                    4,
+                    offending_pdu_bytes(parse_buf),
+                    "unsupported protocol version",
+                )),
+                RtrDecodeError::Incomplete => None,
+                // §12 code 0: corrupt in a manner not specified by
+                // another error code.
+                _ => Some((0, offending_pdu_bytes(parse_buf), "corrupt PDU")),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The offending wire frame at the front of `parse_buf`, capped for
+/// embedding in an Error Report (§5.11 truncation rule).
+fn offending_pdu_bytes(parse_buf: &[u8]) -> Vec<u8> {
+    let frame_len = RtrPdu::peek_length(parse_buf).map_or(8, |len| len as usize);
+    let take = frame_len.min(parse_buf.len()).min(ERROR_PDU_TRUNCATE);
+    parse_buf[..take].to_vec()
+}
+
 /// Errors from the RTR client.
 #[derive(Debug, thiserror::Error)]
 pub enum RtrError {
@@ -863,6 +1068,25 @@ pub enum RtrError {
     /// Cache data expired without a fresh `EndOfData`.
     #[error("cache data expired")]
     Expired,
+    /// The cache used a session ID different from the one this session
+    /// is bound to (8210bis §5.1) — fatal: reported with Error Code 0
+    /// ("Corrupt Data") and the cache's data is flushed.
+    #[error("RTR session ID mismatch: expected {expected:?}, got {got}")]
+    SessionIdMismatch {
+        /// Session ID the response was required to carry, if any.
+        expected: Option<u16>,
+        /// Session ID the cache actually used.
+        got: u16,
+        /// Encoded copy of the offending PDU, for the Error Report.
+        pdu: Vec<u8>,
+    },
+    /// An ASPA announcement carried an invalid provider list
+    /// (8210bis §5.12) — reported with Error Code 9.
+    #[error("RTR ASPA provider list error")]
+    AspaProviderList {
+        /// Encoded copy of the offending ASPA PDU, for the Error Report.
+        pdu: Vec<u8>,
+    },
     /// Cache server sent an Error Report PDU.
     #[error("server error (code {code}): {text}")]
     ServerError {
@@ -871,6 +1095,46 @@ pub enum RtrError {
         /// Human-readable error text.
         text: String,
     },
+}
+
+impl RtrError {
+    /// Classify what happens to the cache's held data when this error
+    /// ends the session. See [`SessionEndDisposition`].
+    fn disposition(&self) -> SessionEndDisposition {
+        match self {
+            // §5.1: a session-ID mismatch is fatal Corrupt Data — the
+            // epoch the held data belongs to is invalid. Expiry (§6):
+            // the held data outlived its expire interval.
+            RtrError::SessionIdMismatch { .. } | RtrError::Expired => {
+                SessionEndDisposition::FlushAndDrop
+            }
+            // Received Error Reports follow the §12 code table: codes
+            // 2 (No Data Available), 4 (Unsupported Protocol Version —
+            // "data previously learned need not be flushed"), and 12
+            // (Cache Restart, §8.5) are non-fatal; every other code —
+            // including 13 (Cache Shutdown, §8.6: the operator wants
+            // clients to flush) and codes unknown to this
+            // implementation (§12: an invalid Error Report drops the
+            // session and flushes) — is fatal.
+            RtrError::ServerError { code, .. } => match code {
+                2 | 4 | 12 => SessionEndDisposition::RetainAndRetry,
+                _ => SessionEndDisposition::FlushAndDrop,
+            },
+            // Transport loss, budgets, and locally detected garbage:
+            // the held data is still the most recent validated cache
+            // state; keep it until the expire interval says otherwise.
+            RtrError::Io(_)
+            | RtrError::Decode(_)
+            | RtrError::Encode(_)
+            | RtrError::ConnectionClosed
+            | RtrError::BufferOverflow
+            | RtrError::VersionMismatch { .. }
+            | RtrError::TransactionTimeout
+            | RtrError::TransactionLimit(_)
+            | RtrError::ProtocolViolation(_)
+            | RtrError::AspaProviderList { .. } => SessionEndDisposition::RetainAndRetry,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1410,6 +1674,19 @@ mod tests {
     /// Establish an epoch (session 7, serial 100) on `stream` with one
     /// IPv4 prefix and consume the resulting `FullTable` update.
     async fn establish_epoch(stream: &mut TcpStream, vrp_rx: &mut mpsc::Receiver<VrpUpdate>) {
+        establish_epoch_with_timers(stream, vrp_rx, 5, 120).await;
+    }
+
+    /// [`establish_epoch`] with explicit End of Data retry/expire timers.
+    /// The client adopts cache-provided timers over its configured ones,
+    /// so real-time tests that need an instant reconnect pass `retry: 0`
+    /// (zero means "not provided" and leaves the configured value alone).
+    async fn establish_epoch_with_timers(
+        stream: &mut TcpStream,
+        vrp_rx: &mut mpsc::Receiver<VrpUpdate>,
+        retry: u32,
+        expire: u32,
+    ) {
         assert_eq!(read_pdu(stream).await, RtrPdu::ResetQuery);
         write_pdus(
             stream,
@@ -1426,8 +1703,8 @@ mod tests {
                     session_id: 7,
                     serial: 100,
                     refresh: 60,
-                    retry: 5,
-                    expire: 120,
+                    retry,
+                    expire,
                 },
             ],
         )
@@ -1435,16 +1712,27 @@ mod tests {
         let _ = vrp_rx.recv().await.unwrap();
     }
 
+    /// 8210bis §5.1: a Serial Query answered from a DIFFERENT session is
+    /// a fatal session-ID mismatch. Pinned order: the client sends Error
+    /// Report code 0 ("Corrupt Data") with a binary copy of the
+    /// offending PDU, THEN drops the session, THEN flushes everything
+    /// learned from this cache (§12) — it never splices and never waits
+    /// for the expire interval.
+    ///
+    /// (Replaces the pre-fatal-disposition behavior of silently draining
+    /// the mismatched response and requerying in-session.)
     #[tokio::test]
-    async fn cache_response_session_mismatch_resyncs_instead_of_splicing() {
+    async fn cache_response_session_mismatch_sends_error_report_0_then_drops_then_flushes() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        // Long expire interval: the flush below must be eager, not the
+        // expiry path. Zero retry: reconnect immediately.
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
-        establish_epoch(&mut stream, &mut vrp_rx).await;
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
 
         write_pdu(
             &mut stream,
@@ -1463,58 +1751,64 @@ mod tests {
         );
 
         // The cache answers the Serial Query from a DIFFERENT session:
-        // this delta belongs to another cache state and must not be
-        // spliced onto ours.
+        // the epoch our data belongs to is invalid.
         write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 9 }).await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::Ipv4Prefix {
-                flags: 1,
-                prefix_len: 24,
-                max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 114, 0),
-                asn: 65002,
-            },
-        )
-        .await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 9,
-                serial: 200,
-                refresh: 60,
-                retry: 5,
-                expire: 120,
-            },
-        )
-        .await;
 
-        // The client drains the mismatched response, publishes nothing,
-        // and resynchronizes with a full Reset Query.
-        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
-        assert!(vrp_rx.try_recv().is_err());
+        // 1. Error Report code 0 with the offending PDU embedded.
+        let mut offending = Vec::new();
+        RtrPdu::CacheResponse { session_id: 9 }
+            .encode_with_version(&mut offending, crate::rtr_codec::RTR_VERSION_2)
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 0,
+                pdu: offending,
+                text: "session ID mismatch".to_string(),
+            }
+        );
 
-        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 9 }).await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::Ipv4Prefix {
-                flags: 1,
-                prefix_len: 24,
-                max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 114, 0),
-                asn: 65002,
-            },
-        )
-        .await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 9,
-                serial: 200,
-                refresh: 60,
-                retry: 5,
-                expire: 120,
-            },
+        // 2. The session is dropped.
+        let mut buf = [0u8; 16];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "expected the client to close after the report");
+
+        // 3. This cache's data is flushed immediately.
+        let update = timeout(Duration::from_secs(2), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+
+        // Resynchronization starts from scratch with a full Reset Query.
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+
+        write_pdus(
+            &mut stream2,
+            &[
+                RtrPdu::CacheResponse { session_id: 9 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 114, 0),
+                    asn: 65002,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 9,
+                    serial: 200,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
         )
         .await;
 
@@ -1536,12 +1830,18 @@ mod tests {
         let _ = client_handle.await;
     }
 
+    /// 8210bis §5.1/§12: an End of Data carrying a session ID different
+    /// from the Cache Response means the cache used two session IDs in
+    /// one response — fatal Corrupt Data. The client sends Error Report
+    /// code 0, drops the session, flushes, and resynchronizes from
+    /// scratch on reconnect (previously it silently requeried
+    /// in-session).
     #[tokio::test]
-    async fn end_of_data_session_mismatch_triggers_full_requery() {
+    async fn end_of_data_session_mismatch_is_fatal_corrupt_data() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -1561,31 +1861,63 @@ mod tests {
             },
         )
         .await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 8,
-                serial: 100,
-                refresh: 60,
-                retry: 5,
-                expire: 120,
-            },
-        )
-        .await;
+        let bad_end_of_data = RtrPdu::EndOfData {
+            session_id: 8,
+            serial: 100,
+            refresh: 60,
+            retry: 5,
+            expire: 120,
+        };
+        write_pdu(&mut stream, bad_end_of_data.clone()).await;
 
-        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
-        assert!(vrp_rx.try_recv().is_err());
+        // Error Report code 0 with the offending End of Data embedded,
+        // then the drop.
+        let mut offending = Vec::new();
+        bad_end_of_data
+            .encode_with_version(&mut offending, crate::rtr_codec::RTR_VERSION_2)
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 0,
+                pdu: offending,
+                text: "session ID mismatch".to_string(),
+            }
+        );
+        let mut buf = [0u8; 16];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "expected the client to close after the report");
 
-        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 8 }).await;
-        write_pdu(
-            &mut stream,
-            RtrPdu::EndOfData {
-                session_id: 8,
-                serial: 100,
-                refresh: 60,
-                retry: 5,
-                expire: 120,
-            },
+        // The flush fires (idempotent — nothing was published yet, so
+        // the manager treats it as a no-op removal).
+        let update = timeout(Duration::from_secs(2), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+
+        // Fresh full resynchronization on the next connection.
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+
+        write_pdus(
+            &mut stream2,
+            &[
+                RtrPdu::CacheResponse { session_id: 8 },
+                RtrPdu::EndOfData {
+                    session_id: 8,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
         )
         .await;
 
@@ -1785,6 +2117,10 @@ mod tests {
     /// rejects before any fallback signal fires — and re-land the v1
     /// session within one retry interval with full retention.
     #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scripted cache lifecycle: restart, fatal rejection, flush, v1 re-land"
+    )]
     async fn v1_cache_restart_relands_v1_within_one_retry_with_retention() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1842,9 +2178,10 @@ mod tests {
         // The restarted cache no longer knows the session: StayRTR
         // answers the old-session Serial Query with a "Session ID
         // mismatch" Error Report (code 0) and closes — NOT a Cache
-        // Reset. The client must drop the dead epoch (keeping the data)
-        // and resynchronize with a full Reset Query on the next retry,
-        // never re-sending the same rejected Serial Query.
+        // Reset. Code 0 is a fatal Error Report (8210bis §12): the
+        // client flushes this cache's data immediately and never
+        // re-sends the rejected Serial Query. It also must NOT answer
+        // the Error Report with one of its own (§5.11).
         write_pdus_version(
             &mut stream,
             &[RtrPdu::ErrorReport {
@@ -1855,11 +2192,42 @@ mod tests {
             crate::rtr_codec::RTR_VERSION,
         )
         .await;
+        let mut buf = [0u8; 16];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0, "client answered an Error Report with a PDU");
         drop(stream);
 
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let (version, pdu) = read_pdu_with_version(&mut stream).await;
-        assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+        // Fatal received Error Report → eager flush (§12), no expiry
+        // wait.
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+
+        // Epoch-less again (nothing held to protect), the client
+        // re-probes v2; the v1-only cache rejects it and the fallback
+        // re-lands v1 with a full Reset Query.
+        let mut relanded = None;
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (version, pdu) = read_pdu_with_version(&mut stream).await;
+            if version == crate::rtr_codec::RTR_VERSION_2 {
+                write_pdu_version(
+                    &mut stream,
+                    RtrPdu::ErrorReport {
+                        code: 8,
+                        pdu: vec![],
+                        text: "Bad protocol version".to_string(),
+                    },
+                    0,
+                )
+                .await;
+                drop(stream);
+                continue;
+            }
+            relanded = Some((stream, pdu));
+            break;
+        }
+        let (mut stream, pdu) =
+            relanded.expect("client never re-landed v1 after the fatal-error flush");
         assert_eq!(
             pdu,
             RtrPdu::ResetQuery,
@@ -2044,7 +2412,8 @@ mod tests {
 
     /// Drive one transaction whose payload contains `aspa`, and assert the
     /// client rejects the response (8210bis §5.12 "ASPA Provider List
-    /// Error"): the connection is dropped without publishing and the
+    /// Error"): an Error Report with code 9 carrying the offending PDU is
+    /// returned, the connection is dropped without publishing, and the
     /// reconnect starts over with a Reset Query.
     async fn assert_aspa_announcement_rejected(aspa: RtrPdu) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2059,7 +2428,7 @@ mod tests {
             &mut stream,
             &[
                 RtrPdu::CacheResponse { session_id: 7 },
-                aspa,
+                aspa.clone(),
                 RtrPdu::EndOfData {
                     session_id: 7,
                     serial: 100,
@@ -2070,6 +2439,20 @@ mod tests {
             ],
         )
         .await;
+
+        // §5.12: "an Error PDU with Error Code 9 ... is returned by the
+        // router", with the offending ASPA PDU embedded.
+        let mut offending = Vec::new();
+        aspa.encode_with_version(&mut offending, crate::rtr_codec::RTR_VERSION_2)
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 9,
+                pdu: offending,
+                text: "ASPA provider list error".to_string(),
+            }
+        );
 
         let (mut stream2, _) = listener.accept().await.unwrap();
         assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
@@ -2149,6 +2532,531 @@ mod tests {
                 }],
             }
         );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// 8210bis §12 code table: codes 2, 4, and 12 are non-fatal (retain);
+    /// every other assigned code — and any unassigned code, per the §12
+    /// invalid-Error-Report rule — is fatal (flush). §5.1 session-ID
+    /// mismatch and data expiry also flush; transport loss and locally
+    /// detected garbage retain.
+    #[test]
+    fn error_code_disposition_table() {
+        use SessionEndDisposition::{FlushAndDrop, RetainAndRetry};
+
+        for code in 0..=13u16 {
+            let expected = match code {
+                2 | 4 | 12 => RetainAndRetry,
+                _ => FlushAndDrop,
+            };
+            let error = RtrError::ServerError {
+                code,
+                text: String::new(),
+            };
+            assert_eq!(error.disposition(), expected, "error code {code}");
+        }
+        // Unassigned code: invalid Error Report → drop + flush (§12).
+        assert_eq!(
+            RtrError::ServerError {
+                code: 255,
+                text: String::new(),
+            }
+            .disposition(),
+            FlushAndDrop
+        );
+        // §5.1: fatal Corrupt Data.
+        assert_eq!(
+            RtrError::SessionIdMismatch {
+                expected: Some(7),
+                got: 9,
+                pdu: vec![],
+            }
+            .disposition(),
+            FlushAndDrop
+        );
+        // Expiry is the existing flush path.
+        assert_eq!(RtrError::Expired.disposition(), FlushAndDrop);
+        // Transport loss and local guards retain until expiry.
+        assert_eq!(RtrError::ConnectionClosed.disposition(), RetainAndRetry);
+        assert_eq!(RtrError::TransactionTimeout.disposition(), RetainAndRetry);
+        assert_eq!(
+            RtrError::TransactionLimit("record budget exceeded").disposition(),
+            RetainAndRetry
+        );
+        assert_eq!(
+            RtrError::VersionMismatch {
+                expected: 2,
+                got: 1
+            }
+            .disposition(),
+            RetainAndRetry
+        );
+        assert_eq!(
+            RtrError::AspaProviderList { pdu: vec![] }.disposition(),
+            RetainAndRetry
+        );
+    }
+
+    /// Establish an epoch with held data, deliver an Error Report with
+    /// `code` while the session is idle, and assert the 8210bis §12
+    /// disposition end to end: fatal codes flush (`ServerDown`)
+    /// immediately, non-fatal codes retain; in both cases the client
+    /// answers a received Error Report with NOTHING (§5.11) and then
+    /// retries — resuming the held epoch for codes 2/12, falling back to
+    /// v1 for code 4, and resynchronizing from scratch for fatal codes.
+    async fn drive_received_error_code(code: u16) {
+        let flush = !matches!(code, 2 | 4 | 12);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        // Long expire interval: any flush observed is eager, never the
+        // expiry path. Zero retry: reconnect immediately.
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+
+        write_pdu(
+            &mut stream,
+            RtrPdu::ErrorReport {
+                code,
+                pdu: vec![],
+                text: format!("error code {code}"),
+            },
+        )
+        .await;
+
+        // §5.11: an Error Report MUST NOT be answered with an Error
+        // Report — the client closes without writing anything.
+        let mut buf = [0u8; 64];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "code {code}: client replied to an Error Report");
+
+        if flush {
+            let update = timeout(Duration::from_secs(2), vrp_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                update,
+                VrpUpdate::ServerDown { server: addr },
+                "code {code}: expected an eager flush"
+            );
+        }
+
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream2).await;
+        match code {
+            // Non-fatal, session state intact: resume the held epoch.
+            2 | 12 => {
+                assert_eq!(version, crate::rtr_codec::RTR_VERSION_2, "code {code}");
+                assert_eq!(
+                    pdu,
+                    RtrPdu::SerialQuery {
+                        session_id: 7,
+                        serial: 100,
+                    },
+                    "code {code}: expected the held epoch to resume"
+                );
+            }
+            // Non-fatal, but the version was rejected: v1 fallback.
+            4 => {
+                assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+                assert_eq!(pdu, RtrPdu::ResetQuery);
+            }
+            // Fatal: flushed and epoch-less — full resynchronization.
+            _ => {
+                assert_eq!(version, crate::rtr_codec::RTR_VERSION_2, "code {code}");
+                assert_eq!(pdu, RtrPdu::ResetQuery, "code {code}");
+            }
+        }
+        assert!(
+            vrp_rx.try_recv().is_err(),
+            "code {code}: unexpected extra update"
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Full received-error-code disposition matrix, codes 0 through 13,
+    /// driven through the in-process server.
+    #[tokio::test]
+    async fn received_error_report_disposition_matrix() {
+        for code in 0..=13 {
+            drive_received_error_code(code).await;
+        }
+    }
+
+    /// Pinned: Cache Restart (code 12, 8210bis §8.5) RETAINS the cache's
+    /// data and resyncs — the cache intends to come back before expiry.
+    #[tokio::test]
+    async fn cache_restart_code_12_retains_and_resyncs() {
+        drive_received_error_code(12).await;
+    }
+
+    /// Pinned: Cache Shutdown (code 13, 8210bis §8.6) FLUSHES the
+    /// cache's data immediately — the operator wants clients to flush.
+    #[tokio::test]
+    async fn cache_shutdown_code_13_flushes_immediately() {
+        drive_received_error_code(13).await;
+    }
+
+    /// Server-scoped flush through a real [`VrpManager`]: two caches
+    /// loaded, cache A sends Cache Shutdown (13) → A's VRPs and ASPAs
+    /// are gone immediately (validation flips for A-only routes), B's
+    /// data is intact, no expire wait.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two full cache lifecycles driven against one real VrpManager"
+    )]
+    async fn cache_shutdown_flushes_only_that_caches_data() {
+        use rustbgpd_wire::{Ipv4Prefix, Prefix, RpkiValidation};
+
+        use crate::vrp_manager::VrpManager;
+
+        let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+
+        let (vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let manager_handle =
+            tokio::spawn(VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx).run());
+
+        // expire 3600: the flush below must be eager, not expiry.
+        let client_a = RtrClient::new(test_config(addr_a, 60, 0, 3600), vrp_tx.clone());
+        let client_b = RtrClient::new(test_config(addr_b, 60, 0, 3600), vrp_tx);
+        let handle_a = tokio::spawn(client_a.run());
+        let handle_b = tokio::spawn(client_b.run());
+
+        // Cache A: one VRP and one ASPA record.
+        let (mut stream_a, _) = listener_a.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream_a).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream_a,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: 65001,
+                    provider_asns: vec![65010],
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        let table = timeout(Duration::from_secs(2), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .table;
+        assert_eq!(table.len(), 1);
+        let aspa_table = timeout(Duration::from_secs(2), aspa_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .table;
+        assert_eq!(aspa_table.len(), 1);
+
+        // Cache B: a different VRP.
+        let (mut stream_b, _) = listener_b.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream_b).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream_b,
+            &[
+                RtrPdu::CacheResponse { session_id: 21 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 114, 0),
+                    asn: 65002,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 21,
+                    serial: 50,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        let table = timeout(Duration::from_secs(2), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .table;
+        assert_eq!(table.len(), 2);
+
+        let route_a = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let route_b = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24));
+        assert_eq!(table.validate(&route_a, 65001), RpkiValidation::Valid);
+        assert_eq!(table.validate(&route_b, 65002), RpkiValidation::Valid);
+
+        // Cache A shuts down deliberately (§8.6).
+        write_pdu(
+            &mut stream_a,
+            RtrPdu::ErrorReport {
+                code: 13,
+                pdu: vec![],
+                text: "Cache Shutdown".to_string(),
+            },
+        )
+        .await;
+
+        // A's data — and only A's — is flushed immediately: validation
+        // flips to NotFound for the A-only route, B's stays Valid.
+        let table = timeout(Duration::from_secs(2), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .table;
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.validate(&route_a, 65001), RpkiValidation::NotFound);
+        assert_eq!(table.validate(&route_b, 65002), RpkiValidation::Valid);
+        let aspa_table = timeout(Duration::from_secs(2), aspa_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .table;
+        assert!(aspa_table.is_empty());
+
+        handle_a.abort();
+        handle_b.abort();
+        manager_handle.abort();
+        let _ = handle_a.await;
+        let _ = handle_b.await;
+        let _ = manager_handle.await;
+    }
+
+    /// 8210bis §7: a PDU whose Protocol Version differs from the
+    /// negotiated one after negotiation completes → the client drops the
+    /// session, SHOULD-sending Error Report code 8 ("Unexpected Protocol
+    /// Version") first. Held data is retained (the epoch itself is not
+    /// invalidated) and resumes on reconnect.
+    #[tokio::test]
+    async fn unexpected_version_pdu_triggers_error_report_8() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+
+        // v1 PDU inside a negotiated-v2 session.
+        let offending_pdu = RtrPdu::SerialNotify {
+            session_id: 7,
+            serial: 101,
+        };
+        write_pdu_version(
+            &mut stream,
+            offending_pdu.clone(),
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+
+        let mut offending = Vec::new();
+        offending_pdu
+            .encode_with_version(&mut offending, crate::rtr_codec::RTR_VERSION)
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 8,
+                pdu: offending,
+                text: "unexpected protocol version".to_string(),
+            }
+        );
+
+        // Retention: no flush, and the held epoch resumes.
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream2).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// 8210bis §12 code 5: a PDU type not known by the receiver → the
+    /// client sends Error Report code 5 ("Unsupported PDU Type") with
+    /// the offending frame embedded, then drops the session. Held data
+    /// is retained.
+    #[tokio::test]
+    async fn unsupported_pdu_type_triggers_error_report_5() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+
+        // A v2 frame with an unassigned PDU type (99).
+        let bogus_frame = [crate::rtr_codec::RTR_VERSION_2, 99, 0, 0, 0, 0, 0, 8];
+        stream.write_all(&bogus_frame).await.unwrap();
+
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 5,
+                pdu: bogus_frame.to_vec(),
+                text: "unsupported PDU type".to_string(),
+            }
+        );
+
+        // Retention: no flush, and the held epoch resumes.
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_pdu(&mut stream2).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// 8210bis §5.11/§7: even an Error Report that is itself erroneous
+    /// (here: a version byte the session did not negotiate) MUST NOT be
+    /// answered with an Error Report — the session is simply dropped.
+    #[tokio::test]
+    async fn version_mismatched_error_report_gets_no_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+
+        // StayRTR-style: an Error Report stamped with version 0 inside a
+        // negotiated-v2 session.
+        write_pdu_version(
+            &mut stream,
+            RtrPdu::ErrorReport {
+                code: 8,
+                pdu: vec![],
+                text: "Bad protocol version".to_string(),
+            },
+            0,
+        )
+        .await;
+
+        // No reply of any kind; the client just closes.
+        let mut buf = [0u8; 64];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0, "client answered an Error Report with a PDU");
+
+        // Version mismatch retains: the held epoch resumes at its own
+        // version.
+        let (mut stream2, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream2).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(
+            pdu,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Error Report emission is best-effort: a cache that triggers a
+    /// fatal error and then never reads again must not block the drop —
+    /// the flush still completes promptly.
+    #[tokio::test]
+    async fn error_report_emission_is_best_effort_when_server_stops_reading() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        // Fatal session-ID mismatch — and from here on the server never
+        // reads another byte.
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 9 }).await;
+
+        // The drop and eager flush still complete promptly.
+        let update = timeout(Duration::from_secs(3), vrp_rx.recv())
+            .await
+            .expect("session drop was blocked by error-report emission")
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
 
         client_handle.abort();
         let _ = client_handle.await;
