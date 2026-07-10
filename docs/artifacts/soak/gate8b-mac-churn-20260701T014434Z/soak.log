@@ -1,9 +1,9 @@
-acquired host lock: /home/lance/.local/state/rustbgpd-host.lock
+acquired host lock: <SOAK_HOME>/.local/state/rustbgpd-host.lock
 [2026-07-01T01:44:34Z] Gate 8b MAC-churn soak starting
 [2026-07-01T01:44:34Z]   duration=24h  sample=60s  flip=600s
 [2026-07-01T01:44:34Z]   churn_interval=5s  batch=16  pool=512 (target=256)
 [2026-07-01T01:44:34Z]   mobility=25%  ce_port=ce100a  vni=100
-[2026-07-01T01:44:34Z]   run_dir=/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z
+[2026-07-01T01:44:34Z]   run_dir=<SOAK_HOME>/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260701T014434Z
 [2026-07-01T01:44:34Z]   git_rev=c273118e49dcbac46d174c869dcf9626dbacca76 dirty=true kernel=6.8.0-117-generic
 [2026-07-01T01:44:34Z] warmup: waiting 120s for initial dataplane discovery
 [2026-07-01T01:46:34Z] waiting up to 300s for both PEs to reach BGP Established
