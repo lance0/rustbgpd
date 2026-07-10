@@ -341,6 +341,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `LICENSE-MIT` and `LICENSE-APACHE`, with workflow assertions that
   fail the build if either file is missing from an artifact. (LAN-278)
 
+- **Outbound UPDATE writes are coalesced per writer drain.** The
+  per-peer session writer now drains up to 64 queued bulk frames
+  (UPDATE, ROUTE-REFRESH markers, EoR) or ~256 KiB per drain into one
+  contiguous `write + flush` instead of one syscall per message —
+  whole frames only, queue order preserved. Priority messages (OPEN,
+  KEEPALIVE, NOTIFICATION, Cease) still write individually, so
+  teardown ordering and biased preemption semantics are unchanged, as
+  are send-hold (RFC 9687) enforcement and the partial-PDU teardown
+  discipline. Measured on the writer flood path (loopback, 100-byte
+  frames, release build): write syscalls drop 64× (1.0 → 0.016 per
+  frame) and sustained writer throughput rises ~10×. (LAN-332)
+
 ### Fixed
 
 - **`rbgp policy explain` no longer reports `not_seen` when the truth
