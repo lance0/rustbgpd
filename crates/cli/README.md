@@ -15,7 +15,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 ```bash
 rbgp global       # ASN, router ID, families, TCP-AO support
 rbgp health       # daemon health check
-rbgp doctor       # redacted support bundle
+rbgp doctor       # triage checks + redacted support bundle (tar.gz)
 rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard
 ```
@@ -156,7 +156,7 @@ a non-TTY.
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
 | Policy hit counters | `rbgp policy stats` or `rbgp policy counters` |
 | Route-server clients | `rbgp summary`, then `rbgp neighbor <peer>` for distribution mode |
-| Support bundle | `rbgp doctor --output ./support` |
+| Support bundle + triage checks | `rbgp doctor --output ./support.tar.gz` |
 
 Confirmed config transaction handles must be non-empty, at most 128
 characters, and contain no control characters. `--confirm-timeout` requires

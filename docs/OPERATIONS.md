@@ -877,6 +877,54 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 ---
 
+## Support bundles and triage checks (`rbgp doctor`)
+
+`rbgp doctor` runs red/green triage checks live (daemon reachable and
+healthy, peers stuck outside Established with time-in-state, flap loops,
+daemon `nofile` rlimits, recent panic reports) and writes one redacted
+`rustbgpd-doctor-<ts>.tar.gz`:
+
+```
+rustbgpd-doctor-<ts>/
+├── manifest.json            # versions, redaction note, per-section collected/unavailable, check results
+├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
+├── peers/neighbors.json     # per-peer state, counters, flap counts
+├── peers/events.json        # recent session + policy events (free text scrubbed)
+├── logs/tail-1000.jsonl     # only with --log-file; see below
+├── crashes/panic-*.toml     # panic reports swept from <runtime_state_dir>/crash/
+└── system/                  # environment.json, health.json, global.json, metrics.prom, daemon rlimits
+```
+
+Exit codes: `0` all checks green, `1` error, `2` bundle written but one or
+more checks are red. A doctor run against a down daemon still produces a
+bundle (system facts + crash reports) and the manifest records which
+sections are missing.
+
+What is never collected: the raw daemon config file (the config section is
+the daemon's own secret-redacted effective dump — the same document as
+`rbgp config effective`) and bearer-token material. Metrics, event free
+text, peer descriptions, crash reports, and log lines are additionally
+scrubbed for password/secret/token/bearer lines client-side.
+
+Logs: the daemon logs JSON to stdout (journald under systemd), so no log
+file is collected by default — the manifest records that instead. If stdout
+is redirected to a file, pass it explicitly:
+
+```bash
+rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
+```
+
+Crash reports: a daemon panic writes a small TOML report (panic message,
+source location, thread, version — never environment variables or argv)
+to `<runtime_state_dir>/crash/panic-<ts>.toml`, keeping the 10 most
+recent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
+ticket usually pinpoints the crash without a core dump.
+
+Attach the tarball to bug reports — the GitHub bug-report template asks
+for it.
+
+---
+
 ## Common operational tasks
 
 ### Check session status

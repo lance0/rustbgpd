@@ -9,6 +9,11 @@ assignees: ''
 **Describe the bug**
 A clear description of what went wrong.
 
+**Support bundle**
+If possible, attach the tarball produced by `rbgp doctor`. It is redacted
+(no raw config file, no passwords/tokens) and carries the effective config,
+peer states, recent events, crash reports, and system facts in one file.
+
 **To reproduce**
 Steps to reproduce the behavior:
 1. Config (redact sensitive fields):

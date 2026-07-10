@@ -2713,6 +2713,9 @@ message HealthResponse {
   uint64 uptime_seconds = 2;
   uint32 active_peers = 3;
   uint32 total_routes = 4;
+  // Daemon package version (e.g. "0.50.0"). Empty when answered by a
+  // daemon predating the field.
+  string daemon_version = 5;
 }
 
 message MetricsRequest {}

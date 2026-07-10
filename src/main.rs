@@ -1110,6 +1110,12 @@ fn main() {
         process::exit(1);
     }
 
+    // Panic hygiene: write a bounded, secret-free crash report under
+    // `<runtime_state_dir>/crash/` for `rbgp doctor` to sweep into
+    // support bundles. Installed after config resolution so reports
+    // land under the operator's runtime_state_dir.
+    install_panic_hook(config.runtime_state_dir().join("crash"));
+
     #[cfg(feature = "dhat-heap")]
     let profiler = Some(
         dhat::Profiler::builder()
@@ -1127,6 +1133,101 @@ fn main() {
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
     rt.block_on(run(config, boot_revert_notice, profiler));
+}
+
+/// Number of panic reports retained in `<runtime_state_dir>/crash/`;
+/// older reports are pruned on every write.
+const PANIC_REPORTS_KEPT: usize = 10;
+
+/// Shape of one `crash/panic-<ts>.toml` report (human-panic pattern:
+/// message, location, thread, version, timestamp only — never env vars
+/// or argv, which could carry secrets).
+#[derive(Serialize)]
+struct PanicReport<'a> {
+    message: &'a str,
+    location: &'a str,
+    thread: &'a str,
+    version: &'a str,
+    timestamp_unix_seconds: u64,
+}
+
+/// Install a global panic hook that writes a panic report under
+/// `crash_dir` before delegating to the previous hook (the default
+/// stderr backtrace). `rbgp doctor` sweeps these reports into support
+/// bundles.
+fn install_panic_hook(crash_dir: std::path::PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let location = info.location().map(ToString::to_string).unwrap_or_default();
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        // Best-effort: a failing report write must never mask the panic.
+        let _ = write_panic_report(&crash_dir, &message, &location, &thread);
+        previous(info);
+    }));
+}
+
+/// Write one panic report and prune the crash directory to the most
+/// recent [`PANIC_REPORTS_KEPT`] reports.
+fn write_panic_report(
+    crash_dir: &Path,
+    message: &str,
+    location: &str,
+    thread: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(crash_dir)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let report = PanicReport {
+        message,
+        location,
+        thread,
+        version: env!("CARGO_PKG_VERSION"),
+        timestamp_unix_seconds: now.as_secs(),
+    };
+    let body = toml::to_string(&report).map_err(std::io::Error::other)?;
+    // Zero-padded seconds + millisecond suffix: lexicographic order is
+    // chronological, and near-simultaneous panicking threads rarely
+    // clobber each other (last write wins if they do).
+    let path = crash_dir.join(format!(
+        "panic-{:010}-{:03}.toml",
+        now.as_secs(),
+        now.subsec_millis()
+    ));
+    std::fs::write(path, body)?;
+    prune_panic_reports(crash_dir);
+    Ok(())
+}
+
+/// Remove the oldest `panic-*.toml` reports beyond [`PANIC_REPORTS_KEPT`].
+fn prune_panic_reports(crash_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(crash_dir) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| {
+            n.starts_with("panic-")
+                && Path::new(n)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+        })
+        .collect();
+    names.sort();
+    while names.len() > PANIC_REPORTS_KEPT {
+        let oldest = names.remove(0);
+        let _ = std::fs::remove_file(crash_dir.join(oldest));
+    }
 }
 
 /// Default tokio worker-thread cap when neither env nor config specifies one.
@@ -3205,6 +3306,85 @@ mod tests {
         let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
         config
+    }
+
+    #[test]
+    fn panic_report_has_expected_shape_and_no_env_or_args() {
+        let dir = tempfile::tempdir().unwrap();
+        write_panic_report(
+            dir.path(),
+            "explicit panic for shape test",
+            "src/main.rs:1:1",
+            "main",
+        )
+        .unwrap();
+
+        let report_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                let name = p.file_name().unwrap().to_str().unwrap();
+                name.starts_with("panic-")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            })
+            .expect("one panic report written");
+        let body = std::fs::read_to_string(report_path).unwrap();
+        let value: toml::Value = toml::from_str(&body).expect("report is valid TOML");
+
+        assert_eq!(
+            value.get("message").and_then(toml::Value::as_str),
+            Some("explicit panic for shape test")
+        );
+        assert_eq!(
+            value.get("location").and_then(toml::Value::as_str),
+            Some("src/main.rs:1:1")
+        );
+        assert_eq!(
+            value.get("thread").and_then(toml::Value::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            value.get("version").and_then(toml::Value::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(
+            value.get("timestamp_unix_seconds").is_some(),
+            "timestamp recorded"
+        );
+        // Human-panic pattern: never environment or argv material.
+        assert!(value.get("env").is_none());
+        assert!(value.get("args").is_none());
+    }
+
+    #[test]
+    fn panic_reports_are_pruned_to_retention_keeping_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed 12 pre-existing reports older than anything written now.
+        for i in 0..12 {
+            std::fs::write(
+                dir.path().join(format!("panic-{i:010}-000.toml")),
+                "message = \"old\"\n",
+            )
+            .unwrap();
+        }
+        write_panic_report(dir.path(), "newest", "src/main.rs:1:1", "main").unwrap();
+
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), PANIC_REPORTS_KEPT, "pruned to retention");
+        // The newest report (largest timestamp) survives the prune.
+        let newest = std::fs::read_to_string(dir.path().join(names.last().unwrap())).unwrap();
+        assert!(newest.contains("newest"));
+        // The oldest seeded reports were removed first.
+        assert!(!names.contains(&"panic-0000000000-000.toml".to_string()));
+        assert!(!names.contains(&"panic-0000000001-000.toml".to_string()));
     }
 
     #[test]

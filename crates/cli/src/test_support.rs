@@ -40,6 +40,12 @@ pub(crate) struct MockState {
     pub(crate) config_status_calls: AtomicUsize,
     pub(crate) config_effective_calls: AtomicUsize,
     pub(crate) config_effective_error: Mutex<Option<(Code, String)>>,
+    // Doctor-bundle overrides: canned effective-config TOML, metrics
+    // text, and session events so redaction/layout tests can seed
+    // secret-looking material through every collection path.
+    pub(crate) config_effective_toml: Mutex<Option<String>>,
+    pub(crate) metrics_text: Mutex<Option<String>>,
+    pub(crate) session_events: Mutex<Vec<server_proto::BgpEvent>>,
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
@@ -526,8 +532,11 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         if let Some((code, message)) = self.state.config_effective_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }
+        let toml = self.state.config_effective_toml.lock().await.clone().unwrap_or_else(|| {
+            "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n\n[[neighbors]]\naddress = \"192.0.2.2\"\nhold_time = 90\nremote_asn = 65000\n".to_string()
+        });
         Ok(Response::new(server_proto::GetEffectiveConfigResponse {
-            toml: "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n\n[[neighbors]]\naddress = \"192.0.2.2\"\nhold_time = 90\nremote_asn = 65000\n".to_string(),
+            toml,
         }))
     }
 }
@@ -591,6 +600,7 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
             uptime_seconds: 42,
             active_peers: 2,
             total_routes: 10,
+            daemon_version: "0.0.0-mock".to_string(),
         }))
     }
 
@@ -599,12 +609,21 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::MetricsRequest>,
     ) -> Result<Response<server_proto::MetricsResponse>, Status> {
         self.state.metrics_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(server_proto::MetricsResponse {
-            prometheus_text: r#"# HELP test 1
+        let prometheus_text = self
+            .state
+            .metrics_text
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_else(|| {
+                r#"# HELP test 1
 evpn_local_originations_total{action="inject"} 1
 evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
 "#
-            .to_string(),
+                .to_string()
+            });
+        Ok(Response::new(server_proto::MetricsResponse {
+            prometheus_text,
         }))
     }
 
@@ -1037,7 +1056,7 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
             .list_session_events_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(server_proto::ListSessionEventsResponse {
-            events: vec![],
+            events: self.state.session_events.lock().await.clone(),
         }))
     }
 
