@@ -1750,6 +1750,13 @@ message Route {
   // distinction `med = 0` could mean either "MED zero" or "no
   // attribute". Mirrors `local_pref_attr`.
   optional uint32 med_attr = 18;
+  // True while this route is retained as stale during a peer graceful
+  // restart (RFC 4724). Mirrors the per-family route entries
+  // (VpnRouteEntry etc.), which have always carried these flags.
+  bool stale = 19;
+  // True while this route is in the RFC 9494 long-lived graceful
+  // restart stale phase.
+  bool llgr_stale = 20;
 }
 
 message WatchRoutesRequest {

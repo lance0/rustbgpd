@@ -685,6 +685,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Unicast routes now carry their graceful-restart stale flags
+  through the API.** The unicast RIB conversion was the only family
+  that dropped `is_stale`/`is_llgr_stale` when building the gRPC
+  `Route` (VPN, labeled, RTC, and BGP-LS entries have always carried
+  them), so `rbgp rib received` showed GR-preserved routes as normal
+  during a restart window. The proto `Route` message gains
+  `stale`/`llgr_stale` fields, the JSON output emits them when set
+  (matching the other families), and the human route table marks
+  flagged rows with a red `S` (stale, RFC 4724) or `L` (LLGR stale,
+  RFC 9494) next to the best marker — the column only appears when a
+  flagged route is present, so the everyday table is unchanged.
+  (LAN-347)
 - **Update-group withdraw residue now drains on the per-peer resync
   path.** A grouped member that went dirty, missed withdrawals (group
   tombstones), and then moved off the grouped path (e.g. its export

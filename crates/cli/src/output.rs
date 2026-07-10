@@ -612,6 +612,12 @@ fn format_med(med: u32, med_attr: Option<u32>, med_attr_supported: bool) -> Stri
 
 /// Print route table with dynamic column widths and colored best marker.
 pub fn print_route_table(routes: &[proto::Route]) {
+    print!("{}", render_route_table(routes));
+}
+
+fn render_route_table(routes: &[proto::Route]) -> String {
+    use std::fmt::Write as _;
+
     struct Row {
         marker_colored: String,
         marker_plain_len: usize,
@@ -624,6 +630,10 @@ pub fn print_route_table(routes: &[proto::Route]) {
         path_id: String,
     }
 
+    // GR stale flag column ("S" = stale per RFC 4724, "L" = LLGR stale
+    // per RFC 9494), prepended to the best marker only when some route
+    // carries a flag so the everyday table is unchanged.
+    let any_stale = routes.iter().any(|r| r.stale || r.llgr_stale);
     // A daemon that populates `med_attr` anywhere in the response is
     // MED-absence-aware: render an absent MED as "-". Older daemons
     // never set it, so fall back to the bare (0-defaulted) `med` field.
@@ -636,9 +646,30 @@ pub fn print_route_table(routes: &[proto::Route]) {
             } else {
                 String::new()
             };
+            let mut marker_colored = String::new();
+            let mut marker_plain_len = 2;
+            if any_stale {
+                marker_plain_len = 3;
+                if r.llgr_stale {
+                    let _ = write!(
+                        marker_colored,
+                        "{}",
+                        "L".if_supports_color(Stdout, |s| s.red())
+                    );
+                } else if r.stale {
+                    let _ = write!(
+                        marker_colored,
+                        "{}",
+                        "S".if_supports_color(Stdout, |s| s.red())
+                    );
+                } else {
+                    marker_colored.push(' ');
+                }
+            }
+            marker_colored.push_str(&colored_best_marker(r.best));
             Row {
-                marker_colored: colored_best_marker(r.best),
-                marker_plain_len: 2,
+                marker_colored,
+                marker_plain_len,
                 prefix: format!("{}/{}", r.prefix, r.prefix_length),
                 next_hop: r.next_hop.clone(),
                 as_path: format_as_path(&r.as_path),
@@ -677,15 +708,19 @@ pub fn print_route_table(routes: &[proto::Route]) {
         .unwrap_or(0)
         .max(6);
 
-    println!(
-        "   {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
+    let mut out = String::new();
+    let header_pad = if any_stale { "    " } else { "   " };
+    let _ = writeln!(
+        out,
+        "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
         "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin",
     );
 
     for row in &rows {
         let overhead = ansi_overhead(&row.marker_colored, row.marker_plain_len);
-        let marker_width = 2 + overhead;
-        println!(
+        let marker_width = row.marker_plain_len + overhead;
+        let _ = writeln!(
+            out,
             "{:<marker_width$} {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {}",
             row.marker_colored,
             row.prefix,
@@ -697,6 +732,7 @@ pub fn print_route_table(routes: &[proto::Route]) {
             row.path_id,
         );
     }
+    out
 }
 
 /// Print a mutating command result, either as JSON or plain text.
@@ -1076,5 +1112,63 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgS
         let first_row = rendered.lines().nth(1).expect("row rendered");
         assert!(first_row.ends_with("Stale"), "got: {first_row:?}");
         assert!(!first_row.ends_with("100"));
+    }
+
+    fn route_fixture(stale: bool, llgr_stale: bool) -> proto::Route {
+        proto::Route {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.1".to_string(),
+            as_path: vec![65001],
+            local_pref: 100,
+            best: true,
+            stale,
+            llgr_stale,
+            ..Default::default()
+        }
+    }
+
+    /// Without any GR-stale route the table keeps its classic 2-char
+    /// marker column — unchanged from the pre-LAN-347 layout.
+    #[test]
+    fn route_table_no_stale_layout_unchanged() {
+        owo_colors::set_override(false);
+        let rendered = render_route_table(&[route_fixture(false, false)]);
+        let mut lines = rendered.lines();
+        assert!(lines.next().unwrap().starts_with("   Prefix"));
+        assert!(lines.next().unwrap().starts_with("*> 10.0.0.0/24"));
+    }
+
+    /// A GR-stale route widens the marker column with an "S" (stale,
+    /// RFC 4724) or "L" (LLGR stale, RFC 9494) flag; unflagged rows
+    /// stay aligned (LAN-347).
+    #[test]
+    fn route_table_marks_stale_routes() {
+        owo_colors::set_override(false);
+        let mut llgr = route_fixture(true, true);
+        llgr.best = false;
+        let routes = [
+            route_fixture(false, false),
+            route_fixture(true, false),
+            llgr,
+        ];
+        let rendered = render_route_table(&routes);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines[0].starts_with("    Prefix"), "got: {:?}", lines[0]);
+        assert!(
+            lines[1].starts_with(" *> 10.0.0.0/24"),
+            "got: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("S*> 10.0.0.0/24"),
+            "got: {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[3].starts_with("L   10.0.0.0/24"),
+            "got: {:?}",
+            lines[3]
+        );
     }
 }

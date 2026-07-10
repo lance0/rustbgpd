@@ -1047,6 +1047,11 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         path_id: route.path_id,
         validation_state: route.validation_state.to_string(),
         aspa_state: route.aspa_state.to_string(),
+        // GR stale flags, same population as the VPN/labeled/RTC/BGP-LS
+        // route entries (LAN-347: unicast was the only family that
+        // dropped them on conversion).
+        stale: route.is_stale,
+        llgr_stale: route.is_llgr_stale,
         // Distinguishes "explicit LOCAL_PREF attribute" from "no
         // attribute" — required for the M35 interop test to assert
         // that the RFC 8326 implicit demotion actually fired on a
@@ -2565,6 +2570,48 @@ mod tests {
         assert!(entry.stale);
         assert!(!entry.llgr_stale);
         assert_eq!(entry.path_id, 0);
+    }
+
+    /// LAN-347: the unicast conversion dropped the GR stale flags, so
+    /// `rbgp rib received` showed stale routes as normal during a
+    /// graceful-restart window.
+    #[test]
+    fn route_to_proto_populates_gr_stale_flags() {
+        let mut route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: "192.0.2.1".parse().unwrap(),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: "192.0.2.2".parse().unwrap(),
+            attributes: Arc::new(vec![]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: true,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        };
+
+        let entry = route_to_proto(&route, true);
+        assert_eq!(entry.prefix, "10.0.0.0");
+        assert_eq!(entry.prefix_length, 24);
+        assert!(entry.best);
+        assert!(entry.stale);
+        assert!(!entry.llgr_stale);
+
+        route.is_llgr_stale = true;
+        let entry = route_to_proto(&route, false);
+        assert!(entry.stale);
+        assert!(entry.llgr_stale);
+
+        route.is_stale = false;
+        route.is_llgr_stale = false;
+        let entry = route_to_proto(&route, false);
+        assert!(!entry.stale);
+        assert!(!entry.llgr_stale);
     }
 
     #[test]
