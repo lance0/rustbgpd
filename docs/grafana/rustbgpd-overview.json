@@ -1819,7 +1819,7 @@
       "id": 34,
       "type": "timeseries",
       "title": "ASPA records",
-      "description": "bgp_aspa_records_total: ASPA customer records in the merged table.",
+      "description": "bgp_aspa_records: ASPA customer records in the merged table.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1859,7 +1859,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "bgp_aspa_records_total{instance=~\"$instance\"}",
+          "expr": "bgp_aspa_records{instance=~\"$instance\"}",
           "legendFormat": "records",
           "refId": "A"
         }

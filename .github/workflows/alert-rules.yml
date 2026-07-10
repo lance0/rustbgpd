@@ -1,0 +1,38 @@
+name: Alert rules
+
+# Validates the shipped Prometheus alert-rule pack with promtool:
+# `check rules` for syntax/shape, `test rules` for the per-rule unit
+# tests (every rule has a firing and a non-firing case). Path-scoped
+# to the pack so it costs nothing on unrelated changes.
+
+on:
+  push:
+    paths:
+      - "examples/prometheus/**"
+      - ".github/workflows/alert-rules.yml"
+  pull_request:
+    paths:
+      - "examples/prometheus/**"
+      - ".github/workflows/alert-rules.yml"
+
+jobs:
+  promtool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install promtool (pinned)
+        run: |
+          set -euo pipefail
+          VERSION=3.4.1
+          SHA256=09203151c132f36b004615de1a3dea22117ad17e6d7a59962e34f3abf328f312
+          curl -sSfL -o prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${VERSION}/prometheus-${VERSION}.linux-amd64.tar.gz"
+          echo "${SHA256}  prometheus.tar.gz" | sha256sum -c -
+          tar xzf prometheus.tar.gz --strip-components=1 \
+            "prometheus-${VERSION}.linux-amd64/promtool"
+          ./promtool --version
+      - name: promtool check rules
+        run: ./promtool check rules examples/prometheus/rustbgpd-alerts.yml
+      - name: promtool test rules
+        run: cd examples/prometheus && "${GITHUB_WORKSPACE}/promtool" test rules rustbgpd-alerts_test.yml

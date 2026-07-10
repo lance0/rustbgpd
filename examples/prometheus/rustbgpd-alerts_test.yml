@@ -1,0 +1,249 @@
+# Unit tests for rustbgpd-alerts.yml — run with:
+#
+#   promtool test rules rustbgpd-alerts_test.yml
+#
+# Every rule has a firing and a non-firing case (the exp_alerts list is
+# exhaustive per alertname at each eval_time, so healthy series double
+# as the negative case).
+
+rule_files:
+  - rustbgpd-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ── RustbgpdDown ──────────────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'up{job="rustbgpd", instance="edge1:9179"}'
+        values: "0x10"
+      - series: 'up{job="rustbgpd", instance="edge2:9179"}'
+        values: "1x10"
+      # Different scrape job — must not match.
+      - series: 'up{job="node", instance="edge1:9100"}'
+        values: "0x10"
+    alert_rule_test:
+      # Pending, not yet firing (for: 2m).
+      - eval_time: 1m
+        alertname: RustbgpdDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RustbgpdDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rustbgpd
+              instance: edge1:9179
+            exp_annotations:
+              summary: "rustbgpd is down (edge1:9179)"
+              description: >-
+                Prometheus has been unable to scrape rustbgpd at
+                edge1:9179 for 2 minutes. The daemon is down,
+                unreachable, or `prometheus_addr` is no longer configured.
+
+  # ── Session rules ─────────────────────────────────────────────
+  # Session-level series carry the transport label "<addr>:<port>";
+  # bgp_rib_prefixes carries the bare neighbor address (matching the
+  # daemon's real export — the rules' label_replace bridges the two).
+  # 192.0.2.1 — flapped down and stayed down (established == flaps)
+  # 192.0.2.2 — Established, empty Adj-RIB-In
+  # 192.0.2.3 — flapping continuously
+  # 192.0.2.4 — Established with prefixes (healthy)
+  - interval: 1m
+    input_series:
+      - series: 'bgp_session_flaps_total{peer="192.0.2.1:179", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_session_established_total{peer="192.0.2.1:179", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_session_flaps_total{peer="192.0.2.2:179", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_session_established_total{peer="192.0.2.2:179", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_rib_prefixes{peer="192.0.2.2", afi_safi="all", instance="edge1:9179"}'
+        values: "0x30"
+      # IPv6 peer bracketed on the session side, bare on the RIB side —
+      # pins the label_replace port-strip for both address families.
+      - series: 'bgp_session_flaps_total{peer="[2001:db8::2]:179", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_session_established_total{peer="[2001:db8::2]:179", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_rib_prefixes{peer="2001:db8::2", afi_safi="all", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_session_flaps_total{peer="192.0.2.3:179", instance="edge1:9179"}'
+        values: "0+1x30"
+      - series: 'bgp_session_flaps_total{peer="192.0.2.4:179", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_session_established_total{peer="192.0.2.4:179", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_rib_prefixes{peer="192.0.2.4", afi_safi="all", instance="edge1:9179"}'
+        values: "100x30"
+    alert_rule_test:
+      # Pending, not yet firing (for: 2m).
+      - eval_time: 1m
+        alertname: BgpSessionNotEstablished
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BgpSessionNotEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.1:179
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BGP session to 192.0.2.1:179 not Established"
+              description: >-
+                The BGP session to peer 192.0.2.1:179 on edge1:9179 left
+                Established more than 2 minutes ago and has not
+                re-established.
+      # Only the churning peer trips the 15-minute flap threshold.
+      - eval_time: 16m
+        alertname: BgpSessionFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.3:179
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BGP session to 192.0.2.3:179 is flapping"
+              description: >-
+                The BGP session to peer 192.0.2.3:179 on edge1:9179 left
+                Established 15 times in the last 15 minutes.
+      # Not yet firing (for: 10m).
+      - eval_time: 5m
+        alertname: BgpPeerAdjRibInEmpty
+        exp_alerts: []
+      # Established-but-empty peers fire (v4 and v6); the one with
+      # prefixes doesn't, nor does the down peer (guard is false).
+      - eval_time: 12m
+        alertname: BgpPeerAdjRibInEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.2
+              afi_safi: all
+              instance: edge1:9179
+            exp_annotations:
+              summary: "No prefixes from 192.0.2.2"
+              description: >-
+                The session to 192.0.2.2 on edge1:9179 is Established
+                but its Adj-RIB-In has held zero prefixes for 10
+                minutes.
+          - exp_labels:
+              severity: warning
+              peer: 2001:db8::2
+              afi_safi: all
+              instance: edge1:9179
+            exp_annotations:
+              summary: "No prefixes from 2001:db8::2"
+              description: >-
+                The session to 2001:db8::2 on edge1:9179 is Established
+                but its Adj-RIB-In has held zero prefixes for 10
+                minutes.
+
+  # ── BgpMaxPrefixLimitExceeded ─────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_max_prefix_exceeded_total{peer="192.0.2.5:179", instance="edge1:9179"}'
+        values: "0 0 0 1 1 1 1 1 1 1"
+      - series: 'bgp_max_prefix_exceeded_total{peer="192.0.2.6:179", instance="edge1:9179"}'
+        values: "0x9"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BgpMaxPrefixLimitExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.5:179
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Peer 192.0.2.5:179 exceeded its max-prefix limit"
+              description: >-
+                Peer 192.0.2.5:179 on edge1:9179 breached its configured
+                `max_prefixes` ceiling in the last 10 minutes; the
+                session was torn down with a Cease / Maximum Number of
+                Prefixes Reached NOTIFICATION.
+
+  # ── RpkiVrpTableEmpty ─────────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_vrp_count{af="ipv4", instance="edge1:9179", job="rustbgpd"}'
+        values: "0x40"
+      - series: 'bgp_rpki_vrp_count{af="ipv6", instance="edge1:9179", job="rustbgpd"}'
+        values: "0x40"
+      - series: 'bgp_rpki_vrp_count{af="ipv4", instance="edge2:9179", job="rustbgpd"}'
+        values: "250000x40"
+    alert_rule_test:
+      # Pending, not yet firing (for: 30m).
+      - eval_time: 10m
+        alertname: RpkiVrpTableEmpty
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: RpkiVrpTableEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              job: rustbgpd
+            exp_annotations:
+              summary: "RPKI VRP table empty on edge1:9179"
+              description: >-
+                The merged RPKI VRP table on edge1:9179 has been empty
+                for 30 minutes. All configured RTR caches are down,
+                expired, or delivering no data; prefix origin validation
+                is not filtering anything.
+
+  # ── BgpEventOutboxDegraded ────────────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_event_outbox_degraded{instance="edge1:9179"}'
+        values: "1x10"
+      - series: 'bgp_event_outbox_degraded{instance="edge2:9179"}'
+        values: "0x10"
+    alert_rule_test:
+      # Pending, not yet firing (for: 5m).
+      - eval_time: 3m
+        alertname: BgpEventOutboxDegraded
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BgpEventOutboxDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Event outbox degraded on edge1:9179"
+              description: >-
+                The durable event outbox on edge1:9179 has seen a
+                durability-impacting drop, decode failure, or open
+                failure since start. Check
+                bgp_event_outbox_dropped_total and
+                bgp_event_outbox_open_failures_total, then the daemon
+                log.
+
+  # ── BgpUpdateGroupResidueGrowing ──────────────────────────────
+  - interval: 1m
+    input_series:
+      # Grows 5 entries/minute for three hours — a wedged member.
+      - series: 'bgp_update_group_residue_entries{instance="edge1:9179"}'
+        values: "0+5x180"
+      # Steady (non-zero but flat) residue — must not fire.
+      - series: 'bgp_update_group_residue_entries{instance="edge2:9179"}'
+        values: "500x180"
+    alert_rule_test:
+      # Growth observed but the for: 1h clock hasn't run out.
+      - eval_time: 30m
+        alertname: BgpUpdateGroupResidueGrowing
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: BgpUpdateGroupResidueGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Update-group withdrawal residue growing on edge1:9179"
+              description: >-
+                bgp_update_group_residue_entries on edge1:9179 has grown
+                continuously for over an hour. A dirty update-group
+                member appears wedged; its resync is not draining
+                residue.

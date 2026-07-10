@@ -196,7 +196,7 @@ test_initial_load() {
     # Merged tables reflect exactly the three EoD-completed snapshots.
     assert_metric 'bgp_rpki_vrp_count{af="ipv4"}' 3 \
         "merged VRP table = 1 VRP per cache"
-    assert_metric 'bgp_aspa_records_total' 1 \
+    assert_metric 'bgp_aspa_records' 1 \
         "merged ASPA table = 1 customer record (rtr-v2)"
 
     # Per-cache data observable through route validation states.
@@ -362,14 +362,14 @@ test_aspa_phases() {
     # set (a merge would keep 65003 authorized and stay valid).
     set_rtr_phase 3
     assert_route_field 198.18.4.0 24 aspaState invalid
-    assert_metric 'bgp_aspa_records_total' 1 \
+    assert_metric 'bgp_aspa_records' 1 \
         "replacement kept exactly one customer record"
 
     # Phase 4: ASPA withdraw (empty provider set on the wire) removes
     # the customer record entirely.
     set_rtr_phase 4
     assert_route_field 198.18.4.0 24 aspaState unknown
-    assert_metric 'bgp_aspa_records_total' 0 \
+    assert_metric 'bgp_aspa_records' 0 \
         "empty-provider withdrawal removed the customer record"
 
     # All of phases 2-4 must have ridden incremental Serial Query

@@ -47,6 +47,17 @@ Template variables:
   with an All option. Per-peer series are reaped when a peer is deleted,
   so stale neighbors age out of the picker on the next scrape.
 
+## Alert rules
+
+A ready-to-load Prometheus alert-rule pack (session down/flapping,
+empty Adj-RIB-In, max-prefix breach, empty RPKI VRP table, event-outbox
+degradation, update-group residue growth, daemon down) ships at
+[`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
+with per-rule unit tests in
+[`rustbgpd-alerts_test.yml`](../examples/prometheus/rustbgpd-alerts_test.yml)
+(`promtool test rules`). It assumes the scrape config above
+(`job_name: rustbgpd`).
+
 ## Reading notes
 
 - Counters are plotted with `rate(...[$__rate_interval])`; gauges are
