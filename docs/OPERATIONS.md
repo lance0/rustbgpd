@@ -378,6 +378,14 @@ Metrics and HTTP probes are exposed on the Prometheus endpoint if
 internally and available via gRPC `GetMetrics` and `GetHealth` RPCs, but the
 HTTP `/livez` and `/readyz` probes are disabled.
 
+Metric names are split by prefix on purpose: `bgp_*` covers the BGP core
+(sessions, RIB, policy, RPKI/ASPA, GR, event stream/outbox, FIB) and
+`evpn_*` covers the EVPN/VTEP dataplane surface — the two subsystems have
+different cardinality profiles and are typically dashboarded and alerted
+separately. `bfd_*` names the BFD liveness metrics. A ready-to-load
+Prometheus alert-rule pack covering the high-signal `bgp_*` metrics ships
+at [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml).
+
 ### HTTP probes
 
 The telemetry HTTP listener exposes three read-only paths:
@@ -753,7 +761,7 @@ details stay in the structured daemon log and RPC status.
 |--------|-------------------|
 | `bgp_rpki_vrp_count{af="ipv4"}` | IPv4 VRP entries loaded |
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
-| `bgp_aspa_records_total` | ASPA customer records loaded in the merged table |
+| `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix); the old name is still exported as a deprecated alias for one release |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, or `failed`. |
 
 A sudden drop in VRP count likely means a cache connection was lost or the

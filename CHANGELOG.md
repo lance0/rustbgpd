@@ -331,6 +331,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp policy check --list-deps` prints the resolved graph with
   SHA-256 content hashes for packaging/audit. (LAN-300, ADR-0103)
 
+- **Prometheus alert-rule pack.** A ready-to-load rule file at
+  `examples/prometheus/rustbgpd-alerts.yml` covers the first-order
+  operator questions: daemon down, session not Established (derived
+  from the `bgp_session_established_total` / `bgp_session_flaps_total`
+  counter pair — the daemon exports no per-peer state gauge), session
+  flapping, Established-but-empty Adj-RIB-In, max-prefix breach, empty
+  RPKI VRP table, event-outbox degradation, and sustained update-group
+  withdrawal residue growth. Every expression references only metrics
+  the daemon actually exports (verified against a live two-daemon
+  lab), each rule carries severity labels plus templated
+  summary/description annotations, and every rule has a firing and a
+  non-firing unit test in `rustbgpd-alerts_test.yml`. A path-scoped CI
+  workflow runs `promtool check rules` / `promtool test rules` (pinned
+  promtool) on any change to the pack. Cross-linked from
+  `docs/GRAFANA.md` and the `docs/OPERATIONS.md` metrics catalog.
+  (LAN-318)
+
 ### Changed
 
 - **Release publication is now fail-closed.** The binary-release and
@@ -352,6 +369,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discipline. Measured on the writer flood path (loopback, 100-byte
   frames, release build): write syscalls drop 64× (1.0 → 0.016 per
   frame) and sustained writer throughput rises ~10×. (LAN-332)
+- **`bgp_aspa_records_total` renamed to `bgp_aspa_records`.** The ASPA
+  record count is a gauge and must not carry the counter-only `_total`
+  suffix. Both names are exported this release — the old name's HELP
+  text marks it DEPRECATED — and `bgp_aspa_records_total` will be
+  removed in the next release; repoint dashboards and alerts at
+  `bgp_aspa_records`. The shipped Grafana dashboard and the M84
+  interop assertions already use the new name. (LAN-318)
 
 ### Fixed
 

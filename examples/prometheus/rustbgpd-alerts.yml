@@ -1,0 +1,162 @@
+# Prometheus alert rules for rustbgpd.
+#
+# Load via prometheus.yml:
+#
+#   rule_files:
+#     - rustbgpd-alerts.yml
+#
+# Every expression references only metrics the daemon actually exports
+# (crates/telemetry/src/metrics.rs). The rules assume the scrape config
+# from docs/GRAFANA.md (`job_name: rustbgpd`) — adjust the `job` label
+# in RustbgpdDown if yours differs.
+#
+# The daemon does not export a per-peer session-state gauge; session
+# health is derived from the counter pair
+# `bgp_session_established_total` / `bgp_session_flaps_total`
+# (entering Established increments the former, leaving it increments
+# the latter, so an Established peer always reads established = flaps + 1).
+# Session-level metrics label peers as "<addr>:<port>" (the transport
+# remote address); RIB metrics use the bare configured neighbor address.
+#
+# Not expressible with the current metric surface (noted, not faked):
+#   - prefix-limit "approaching" (>=80%): the daemon exports only the
+#     breach counter `bgp_max_prefix_exceeded_total`, no
+#     current/configured-limit gauge pair.
+#   - policy evaluation errors: no `bgp_policy_eval_errors`-style
+#     counter is exported.
+#
+# Unit tests: rustbgpd-alerts_test.yml (`promtool test rules`).
+
+groups:
+  - name: rustbgpd
+    rules:
+      - alert: RustbgpdDown
+        expr: up{job="rustbgpd"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "rustbgpd is down ({{ $labels.instance }})"
+          description: >-
+            Prometheus has been unable to scrape rustbgpd at
+            {{ $labels.instance }} for 2 minutes. The daemon is down,
+            unreachable, or `prometheus_addr` is no longer configured.
+
+      - alert: BgpSessionNotEstablished
+        # A peer that has left Established and not returned reads
+        # flaps >= established (an Established peer reads
+        # established = flaps + 1). A peer that has never reached
+        # Established since daemon start has neither series and cannot
+        # fire — pair with RustbgpdDown and BgpPeerAdjRibInEmpty.
+        expr: bgp_session_flaps_total >= bgp_session_established_total
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "BGP session to {{ $labels.peer }} not Established"
+          description: >-
+            The BGP session to peer {{ $labels.peer }} on
+            {{ $labels.instance }} left Established more than 2 minutes
+            ago and has not re-established.
+
+      - alert: BgpSessionFlapping
+        expr: increase(bgp_session_flaps_total[15m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BGP session to {{ $labels.peer }} is flapping"
+          description: >-
+            The BGP session to peer {{ $labels.peer }} on
+            {{ $labels.instance }} left Established
+            {{ $value | printf "%.0f" }} times in the last 15 minutes.
+
+      - alert: BgpPeerAdjRibInEmpty
+        # Established (established > flaps) but zero prefixes in
+        # Adj-RIB-In across all families (afi_safi="all" is the
+        # aggregate series). Session metrics label peers as
+        # "<addr>:<port>" while RIB metrics use the bare neighbor
+        # address, so label_replace strips the transport port before
+        # the join. Expected for send-only peers — silence or drop
+        # this rule for those.
+        expr: >-
+          bgp_rib_prefixes{afi_safi="all"} == 0
+          and on (instance, peer)
+          label_replace(
+            bgp_session_established_total > bgp_session_flaps_total,
+            "peer", "$1", "peer", `\[?([^\]]+?)\]?:[0-9]+$`
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No prefixes from {{ $labels.peer }}"
+          description: >-
+            The session to {{ $labels.peer }} on {{ $labels.instance }}
+            is Established but its Adj-RIB-In has held zero prefixes
+            for 10 minutes.
+
+      - alert: BgpMaxPrefixLimitExceeded
+        # Each increment is followed by a Cease NOTIFICATION and
+        # session teardown (docs/OPERATIONS.md "Peer max-prefix
+        # exceeded").
+        expr: increase(bgp_max_prefix_exceeded_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Peer {{ $labels.peer }} exceeded its max-prefix limit"
+          description: >-
+            Peer {{ $labels.peer }} on {{ $labels.instance }} breached
+            its configured `max_prefixes` ceiling in the last 10 minutes;
+            the session was torn down with a Cease / Maximum Number of
+            Prefixes Reached NOTIFICATION.
+
+      - alert: RpkiVrpTableEmpty
+        # Series only exist once an RTR cache has delivered data, so
+        # this cannot fire on deployments without RPKI configured. An
+        # empty merged VRP table afterwards means every configured
+        # cache is down or expired — origin validation is effectively
+        # off (routes fall back to not_found).
+        expr: sum by (instance, job) (bgp_rpki_vrp_count) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPKI VRP table empty on {{ $labels.instance }}"
+          description: >-
+            The merged RPKI VRP table on {{ $labels.instance }} has been
+            empty for 30 minutes. All configured RTR caches are down,
+            expired, or delivering no data; prefix origin validation is
+            not filtering anything.
+
+      - alert: BgpEventOutboxDegraded
+        # Latches to 1 on any durability-impacting drop, decode/codec
+        # failure, or DB-open failure; does not auto-clear (operator
+        # restarts to clear — docs/OPERATIONS.md event-outbox section).
+        expr: bgp_event_outbox_degraded == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event outbox degraded on {{ $labels.instance }}"
+          description: >-
+            The durable event outbox on {{ $labels.instance }} has seen
+            a durability-impacting drop, decode failure, or open failure
+            since start. Check bgp_event_outbox_dropped_total and
+            bgp_event_outbox_open_failures_total, then the daemon log.
+
+      - alert: BgpUpdateGroupResidueGrowing
+        # Withdrawal residue is bounded by the resync timer; a climb
+        # sustained for a full hour means a wedged update-group member
+        # is accumulating residue its resync never clears.
+        expr: delta(bgp_update_group_residue_entries[1h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Update-group withdrawal residue growing on {{ $labels.instance }}"
+          description: >-
+            bgp_update_group_residue_entries on {{ $labels.instance }}
+            has grown continuously for over an hour. A dirty update-group
+            member appears wedged; its resync is not draining residue.
