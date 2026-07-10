@@ -356,12 +356,23 @@ enum ConfigAction {
 enum PolicyAction {
     /// List configured policies (names + statement counts)
     List,
-    /// Check an `.rpol` policy file locally: parse, typecheck, and run
-    /// its in-language `test` blocks. No daemon connection. Exit codes:
-    /// 0 clean, 1 diagnostics, 2 test failures.
+    /// Check an `.rpol` policy file locally: resolve its `import`
+    /// graph, parse, typecheck, and run its in-language `test` blocks
+    /// (from every module). No daemon connection. Exit codes: 0 clean,
+    /// 1 diagnostics, 2 test failures.
     Check {
-        /// Path to the `.rpol` file
+        /// Path to the main `.rpol` file
         file: String,
+        /// Additional policy root for `import` resolution (repeatable;
+        /// the main file's directory is always a root) — mirror of the
+        /// daemon's `[policy] rpol_roots`
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Print the resolved import graph — each module's path,
+        /// SHA-256 content hash, and imports — instead of running
+        /// tests (audit/packaging aid)
+        #[arg(long)]
+        list_deps: bool,
     },
     /// Dry-run a candidate `.rpol` policy against the daemon's live
     /// RIB (ADR-0096): the file compiles server-side and evaluates
@@ -1405,10 +1416,17 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
     // `policy check` runs the .rpol frontend in-process — no daemon.
     if let Command::Policy {
-        action: PolicyAction::Check { file },
+        action:
+            PolicyAction::Check {
+                file,
+                roots,
+                list_deps,
+            },
     } = &cli.command
     {
-        std::process::exit(commands::policy::check_local(file, cli.json));
+        std::process::exit(commands::policy::check_local(
+            file, roots, *list_deps, cli.json,
+        ));
     }
 
     // `diff` owns its 0/1/2 exit-code contract (2 = any operational

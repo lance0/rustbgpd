@@ -16,6 +16,10 @@ use super::diag::{Span, Spanned};
 /// A parsed `.rpol` source file.
 #[derive(Debug, Default)]
 pub struct SourceFile {
+    /// `import "path"` declarations (LAN-300), in source order.
+    /// Consumed by the module resolver ([`super::modules`]); the merged
+    /// compilation unit it produces carries none.
+    pub imports: Vec<Spanned<String>>,
     /// `prefix-set` definitions.
     pub prefix_sets: Vec<PrefixSetDef>,
     /// `community-set` definitions.

@@ -1,0 +1,8 @@
+import "lib/bogons.rpol"
+import "lib/../lib/customers.rpol"
+
+prefix-set import { 10.0.0.0/8 le 32 }
+
+policy p {
+    term t { if route.prefix in import { reject } }
+}

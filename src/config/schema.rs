@@ -939,10 +939,20 @@ pub struct PolicyConfig {
     /// (`"customer-in(200)"`).
     #[serde(default)]
     pub rpol_files: Vec<String>,
+    /// Additional policy roots for `.rpol` `import` resolution
+    /// (LAN-300). Imports resolve against the importing file's
+    /// directory first, then these directories in order, and the
+    /// resolved file must stay inside the main file's directory or one
+    /// of these roots. Relative entries resolve against the config
+    /// file's directory and are rewritten absolute at load, like
+    /// `rpol_files`.
+    #[serde(default)]
+    pub rpol_roots: Vec<String>,
     /// Compiled `.rpol` policy registry (populated at load, not
-    /// serialized). `PartialEq` is source-content-based, so config
-    /// diffs see an edited `.rpol` file as a policy change and an
-    /// unchanged reload as a no-op.
+    /// serialized). `PartialEq` is resolved-content-based across each
+    /// unit's whole module graph, so config diffs see an edit to any
+    /// imported `.rpol` module as a policy change and an unchanged
+    /// reload as a no-op.
     #[serde(skip)]
     pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
 }

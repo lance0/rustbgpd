@@ -24,32 +24,43 @@ mod ast;
 mod diag;
 mod lexer;
 mod lower;
+mod modules;
 mod parser;
 mod testing;
 mod typeck;
 
 pub use diag::{Diagnostic, Diagnostics, Span, Spanned};
+pub use modules::{
+    LoadError, MAX_FILE_BYTES, MAX_GRAPH_BYTES, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
+};
 pub use testing::{TestFailure, TestReport};
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ir::CompiledChain;
 use crate::sets::SetStore;
 
-/// A parsed + typechecked `.rpol` source file, retained (with its
-/// source text) so config chain references — including parameterized
-/// call-forms like `"customer-in(200)"` — can be monomorphized at
-/// chain-resolve time.
+/// A parsed + typechecked `.rpol` compilation unit — the main source
+/// plus every module its `import` graph resolved (LAN-300) — retained
+/// (with all source texts) so config chain references — including
+/// parameterized call-forms like `"customer-in(200)"` — can be
+/// monomorphized at chain-resolve time.
 #[derive(Debug)]
 pub struct RpolFile {
-    source: String,
+    /// Per-module `(path, text, imports, digest)`, indexed by the
+    /// `file` field of every [`Span`]; index 0 is the main file.
+    modules: Vec<ModuleSource>,
+    /// The merged compilation unit (imports dissolved).
     file: ast::SourceFile,
 }
 
 impl RpolFile {
-    /// Parse and typecheck `.rpol` source, retaining it for later
-    /// per-policy compilation.
+    /// Parse and typecheck a single `.rpol` source with no filesystem
+    /// access, retaining it for later per-policy compilation. `import`
+    /// declarations are compile errors here — use [`Self::load`] for
+    /// file-based, import-capable loading.
     ///
     /// # Errors
     ///
@@ -57,15 +68,75 @@ impl RpolFile {
     pub fn parse(source: &str) -> Result<Self, Diagnostics> {
         let (file, _) = front(source)?;
         Ok(Self {
-            source: source.to_string(),
+            modules: vec![ModuleSource::inline(source)],
             file,
         })
     }
 
-    /// The original source text.
+    /// Read `path`, resolve its `import` graph against the importing
+    /// files' directories plus `roots` (LAN-300), and typecheck the
+    /// merged unit. All budgets (depth, per-file and total size, file
+    /// count), path confinement, cycle and duplicate-name checks apply.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::Io`] when the main file or a configured root is
+    /// unreadable; [`LoadError::Compile`] with multi-file diagnostics
+    /// otherwise.
+    pub fn load(path: &Path, roots: &[PathBuf]) -> Result<Self, LoadError> {
+        let graph = modules::resolve(path, roots)?;
+        let type_diags = typeck::typecheck(&graph.merged);
+        if !type_diags.is_empty() {
+            return Err(LoadError::Compile {
+                sources: graph
+                    .modules
+                    .iter()
+                    .map(|m| (m.path.clone(), m.text.clone()))
+                    .collect(),
+                diagnostics: Diagnostics(type_diags),
+            });
+        }
+        Ok(Self {
+            modules: graph.modules,
+            file: graph.merged,
+        })
+    }
+
+    /// The main file's source text.
     #[must_use]
     pub fn source(&self) -> &str {
-        &self.source
+        &self.modules[0].text
+    }
+
+    /// Every module of the compilation unit in resolution (span
+    /// `file`-index) order; index 0 is the main file. This is the
+    /// resolved-content identity: two units are policy-equal exactly
+    /// when these texts are pairwise equal (paths excluded).
+    #[must_use]
+    pub fn modules(&self) -> &[ModuleSource] {
+        &self.modules
+    }
+
+    /// Resolved-content equality (ADR-0103 Decision 5.3): pairwise
+    /// module-text equality in resolution order, display paths
+    /// excluded — moving an unchanged graph to new paths is not a
+    /// policy change, while an edit to any imported leaf is.
+    #[must_use]
+    pub fn content_eq(&self, other: &Self) -> bool {
+        self.modules.len() == other.modules.len()
+            && self
+                .modules
+                .iter()
+                .zip(&other.modules)
+                .all(|(a, b)| a.text == b.text)
+    }
+
+    /// Run the unit's in-language `test` blocks (from every module).
+    #[must_use]
+    pub fn run_tests(&self) -> TestReport {
+        let mut store = SetStore::new();
+        let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
+        testing::run_tests(&self.file.tests, &mut lowerer, &mut store)
     }
 
     /// `(name, parameter count)` for every policy defined in the file,
@@ -173,9 +244,10 @@ impl PartialEq for RpolPolicySet {
     fn eq(&self, other: &Self) -> bool {
         self.policies.len() == other.policies.len()
             && self.policies.iter().all(|(name, entry)| {
-                other.policies.get(name).is_some_and(|o| {
-                    o.params == entry.params && o.file.source() == entry.file.source()
-                })
+                other
+                    .policies
+                    .get(name)
+                    .is_some_and(|o| o.params == entry.params && o.file.content_eq(&entry.file))
             })
     }
 }
@@ -245,9 +317,26 @@ pub fn check_rpol(source: &str) -> CheckReport {
     }
 }
 
-/// Shared frontend: lex + parse + typecheck, all diagnostics combined.
+/// Shared single-source frontend: lex + parse + typecheck, all
+/// diagnostics combined. Inline sources cannot import (there is no
+/// filesystem to resolve against — ADR-0103 Decision 7 permits compile
+/// I/O only through the config loader), so `import` declarations are
+/// rejected here; [`RpolFile::load`] is the import-capable path.
 fn front(source: &str) -> Result<(ast::SourceFile, Vec<Diagnostic>), Diagnostics> {
     let (file, mut diags) = parser::parse(source);
+    for import in &file.imports {
+        diags.push(
+            Diagnostic::new(
+                import.span,
+                "`import` is not available for inline sources",
+                "imports need file-based loading",
+            )
+            .with_note(
+                "load this policy from a file (config `rpol_files` or `rbgp policy check`) \
+                 to use imports",
+            ),
+        );
+    }
     diags.extend(typeck::typecheck(&file));
     if diags.is_empty() {
         Ok((file, Vec::new()))

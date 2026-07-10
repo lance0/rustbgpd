@@ -3962,6 +3962,133 @@ hold_time = 90
         std::fs::remove_file(&rpol_path).ok();
     }
 
+    /// LAN-300: the rpol reload identity covers the whole resolved
+    /// module graph. Editing ONLY an imported leaf (main file and TOML
+    /// byte-identical) reads as an rpol content change — the reload
+    /// sends `SyncRpolPolicies` and the returned snapshot evaluates
+    /// the new leaf content. Reloading again with nothing touched is
+    /// content-equal: no command fires (the #775 skip's input).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario drives two full reload rounds (leaf edit, then no-op) end to end"
+    )]
+    #[tokio::test]
+    async fn reload_rpol_imported_leaf_edit_syncs_and_untouched_graph_is_a_noop() {
+        let dir = unique_temp_path("reload-rpol-modules");
+        std::fs::create_dir(&dir).unwrap();
+        let leaf_path = dir.join("leaf.rpol");
+        std::fs::write(&leaf_path, "prefix-set drop-list { 127.0.0.0/8 le 32 }").unwrap();
+        let main_path = dir.join("main.rpol");
+        std::fs::write(
+            &main_path,
+            "import \"leaf.rpol\"\n\
+             policy edge-in { term drop { if route.prefix in drop-list { reject } } }",
+        )
+        .unwrap();
+        let toml = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\nimport_chain = [\"edge-in\"]\n",
+            baseline_toml(),
+            main_path.to_str().unwrap(),
+        );
+        let path = dir.join("config.toml");
+        std::fs::write(&path, &toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        // Edit ONLY the imported leaf; main.rpol and the TOML are
+        // byte-identical.
+        std::fs::write(&leaf_path, "prefix-set drop-list { 192.0.2.0/24 le 32 }").unwrap();
+
+        let run = |initial: Config| {
+            let live_grpc_tcp = live_grpc_tcp.clone();
+            let live_grpc_uds = live_grpc_uds.clone();
+            let path = path.clone();
+            async move {
+                let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+                let mock = tokio::spawn(async move {
+                    let mut tags = Vec::new();
+                    while let Some(cmd) = peer_mgr_rx.recv().await {
+                        tags.push(cmd_tag(&cmd));
+                        if let PeerManagerCommand::SyncRpolPolicies { reply, .. } = cmd {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    tags
+                });
+                let returned = reload_config(
+                    path.to_str().unwrap(),
+                    &initial,
+                    live_grpc_tcp.as_ref(),
+                    live_grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    None,
+                    None,
+                )
+                .await;
+                drop(peer_mgr_tx);
+                (returned, mock.await.unwrap())
+            }
+        };
+
+        let (returned, tags) = run(initial).await;
+        assert_eq!(
+            tags,
+            vec!["SyncRpolPolicies(1)".to_string()],
+            "a leaf-module edit is an rpol content change"
+        );
+        let reloaded = returned.expect("reload completes");
+        let chain = reloaded
+            .import_chain()
+            .expect("chain resolves")
+            .expect("chain configured");
+        let ctx = |addr: &str, len: u8| rustbgpd_policy::RouteContext {
+            prefix: Some(rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                addr.parse().unwrap(),
+                len,
+            ))),
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str: "",
+            as_path: None,
+            as_path_len: 0,
+            origin_asn: None,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            family: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        };
+        // The NEW leaf content decides: 192.0.2.0/24 now rejects,
+        // 127.0.0.0/8 no longer does.
+        assert_eq!(
+            chain.evaluate(&ctx("192.0.2.0", 24)).action,
+            rustbgpd_policy::PolicyAction::Deny
+        );
+        assert_eq!(
+            chain.evaluate(&ctx("127.0.0.0", 8)).action,
+            rustbgpd_policy::PolicyAction::Permit
+        );
+
+        // Round 2: nothing touched — the resolved graph is
+        // content-equal, so no rpol sync (or any other command) fires.
+        let (returned, tags) = run(reloaded.runtime.clone()).await;
+        assert!(returned.is_some(), "no-op reload completes");
+        assert!(
+            tags.is_empty(),
+            "untouched module graph is a no-op: {tags:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// LAN-284: a REJECTED rpol sync must not publish the candidate
     /// registry to the runtime snapshot. Sessions created after the
     /// failed reload resolve chains from that snapshot, so it has to

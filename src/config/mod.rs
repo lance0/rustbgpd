@@ -97,8 +97,27 @@ impl Config {
     /// `load_toml_with_diagnostics` with `base_dir = None`, so relative
     /// entries resolve against the process CWD and never against a
     /// caller-influenced base.)
+    ///
+    /// In-language `import` declarations (LAN-300) are the opposite:
+    /// they are transitive rather than operator-listed, so they ARE
+    /// confined — every import must resolve inside the importing
+    /// entry's directory or a configured `[policy] rpol_roots` entry
+    /// (enforced by `RpolFile::load`).
     fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
-        use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry};
+        use rustbgpd_policy::rpol::{LoadError, RpolFile, RpolPolicyEntry};
+
+        // Policy roots for `import` resolution (LAN-300): absolutize
+        // against the config directory and rewrite, like `rpol_files`.
+        for root in &mut self.policy.rpol_roots {
+            let mut path = PathBuf::from(&*root);
+            if path.is_relative()
+                && let Some(base) = base_dir
+            {
+                path = base.join(path);
+            }
+            *root = path.display().to_string();
+        }
+        let roots: Vec<PathBuf> = self.policy.rpol_roots.iter().map(PathBuf::from).collect();
 
         let mut owner_by_name: HashMap<String, String> = HashMap::new();
         for entry in &mut self.policy.rpol_files {
@@ -109,31 +128,21 @@ impl Config {
                 path = base.join(path);
             }
             let display = path.display().to_string();
-            // Canonicalize before reading (LAN-218): resolve symlinks and
-            // `..` once, then read that resolved path so the file we open is
-            // the file we resolved (closes a symlink TOCTOU window).
-            // canonicalize() also errors on a missing/unreadable path — we
-            // surface that identically to a read failure.
-            let path = path
-                .canonicalize()
-                .map_err(|e| ConfigError::InvalidRpolFile {
-                    path: display.clone(),
-                    reason: format!("failed to read: {e}"),
-                })?;
-            let source =
-                std::fs::read_to_string(&path).map_err(|e| ConfigError::InvalidRpolFile {
-                    path: display.clone(),
-                    reason: format!("failed to read: {e}"),
-                })?;
-            let file = match RpolFile::parse(&source) {
+            // `RpolFile::load` canonicalizes before reading (LAN-218):
+            // symlinks and `..` resolve once, then that resolved path
+            // is read (closes the symlink TOCTOU window). It also
+            // resolves the file's `import` graph against `roots`
+            // (LAN-300) as one compilation unit — a missing or broken
+            // import anywhere rejects the whole load.
+            let file = match RpolFile::load(&path, &roots) {
                 Ok(file) => Arc::new(file),
-                Err(diagnostics) => {
+                Err(LoadError::Io { path, reason }) => {
+                    return Err(ConfigError::InvalidRpolFile { path, reason });
+                }
+                Err(error @ LoadError::Compile { .. }) => {
                     return Err(ConfigError::InvalidRpolFile {
                         path: display.clone(),
-                        reason: format!(
-                            "compile failed\n{}",
-                            diagnostics.render(&display, &source, false)
-                        ),
+                        reason: format!("compile failed\n{}", error.render(false)),
                     });
                 }
             };

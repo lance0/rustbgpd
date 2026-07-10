@@ -312,6 +312,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   finite-source grammar is what keeps every bound provable or
   meterable. (LAN-303, ADR-0103)
 
+- **rpol modules and imports.** The fifth ADR-0103 Phase B slice:
+  `import "lib/bogons.rpol"` splices another file's definitions —
+  sets, functions, policies, `test` blocks — into one flat-namespace
+  compilation unit, so shared bogon/customer libraries live in one
+  file (qualified names deferred; duplicate names across modules are
+  compile errors naming both files). Modules are a resolution
+  feature with **no IR change**: imports resolve depth-first in
+  declaration order against the importing file's directory plus the
+  new `[policy] rpol_roots` (CLI: repeatable `--root`), canonicalized
+  with escapes above every root rejected, diamonds loaded once,
+  cycles named in the diagnostic, and budgets enforced (nesting ≤ 8,
+  1 MiB/file, 8 MiB / 64 files per graph). Each unit compiles
+  all-or-nothing, and the reload identity covers the whole resolved
+  graph — a leaf-module edit re-syncs every dependent chain while an
+  untouched graph stays a content-equal no-op. Diagnostics carry
+  per-module spans (errors excerpt the file they're in), and
+  `rbgp policy check --list-deps` prints the resolved graph with
+  SHA-256 content hashes for packaging/audit. (LAN-300, ADR-0103)
+
 ### Changed
 
 - **Release publication is now fail-closed.** The binary-release and

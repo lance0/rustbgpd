@@ -141,22 +141,46 @@ struct JsonChains {
 }
 
 /// `rbgp policy check <file.rpol>` — run the `.rpol` frontend
-/// in-process (parse, typecheck, in-language tests); no daemon.
+/// in-process (import resolution, parse, typecheck, in-language
+/// tests); no daemon. `roots` are extra `import` resolution roots
+/// (the file's own directory is always one); `list_deps` prints the
+/// resolved import graph + content hashes instead of running tests.
 ///
 /// Returns the process exit code: 0 clean, 1 diagnostics (or an
 /// unreadable file), 2 test failures. Diagnostics render to stderr,
 /// results to stdout.
-pub fn check_local(path: &str, json: bool) -> i32 {
+pub fn check_local(path: &str, roots: &[String], list_deps: bool, json: bool) -> i32 {
     use std::io::IsTerminal;
+    use std::path::PathBuf;
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => {
-            eprintln!("Error: cannot read {path}: {error}");
+    use rustbgpd_policy::rpol::{LoadError, RpolFile};
+
+    let root_paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    let (file, diagnostics) = match RpolFile::load(std::path::Path::new(path), &root_paths) {
+        Ok(file) => (Some(file), Vec::new()),
+        Err(LoadError::Io { path, reason }) => {
+            eprintln!("Error: cannot read {path}: {reason}");
             return 1;
         }
+        Err(error @ LoadError::Compile { .. }) => {
+            if !json {
+                let color = std::io::stderr().is_terminal();
+                eprint!("{}", error.render(color));
+            }
+            let messages = error
+                .diagnostics()
+                .map(|diags| diags.0.iter().map(|d| d.message.clone()).collect())
+                .unwrap_or_default();
+            (None, messages)
+        }
     };
-    let report = rustbgpd_policy::rpol::check_rpol(&source);
+
+    // --list-deps on a broken graph falls through to the compile
+    // diagnostics below (exit 1).
+    if list_deps && let Some(file) = &file {
+        return print_deps(path, file, json);
+    }
+    let tests = file.as_ref().map(RpolFile::run_tests);
 
     if json {
         #[derive(Serialize)]
@@ -168,26 +192,23 @@ pub fn check_local(path: &str, json: bool) -> i32 {
         struct JsonCheck<'a> {
             file: &'a str,
             ok: bool,
-            diagnostics: Vec<String>,
+            diagnostics: &'a [String],
             tests_total: usize,
             tests_passed: usize,
             failures: Vec<JsonFailure<'a>>,
         }
         let out = JsonCheck {
             file: path,
-            ok: report.is_ok(),
-            diagnostics: report
-                .diagnostics
-                .0
-                .iter()
-                .map(|diag| diag.message.clone())
-                .collect(),
-            tests_total: report.tests.as_ref().map_or(0, |t| t.total),
-            tests_passed: report
-                .tests
+            ok: diagnostics.is_empty()
+                && tests
+                    .as_ref()
+                    .is_none_or(rustbgpd_policy::rpol::TestReport::all_passed),
+            diagnostics: &diagnostics,
+            tests_total: tests.as_ref().map_or(0, |t| t.total),
+            tests_passed: tests
                 .as_ref()
                 .map_or(0, rustbgpd_policy::rpol::TestReport::passed),
-            failures: report.tests.as_ref().map_or_else(Vec::new, |t| {
+            failures: tests.as_ref().map_or_else(Vec::new, |t| {
                 t.failures
                     .iter()
                     .map(|f| JsonFailure {
@@ -200,19 +221,14 @@ pub fn check_local(path: &str, json: bool) -> i32 {
         if output::print_json_pretty(&out).is_err() {
             return 1;
         }
-    } else if !report.diagnostics.is_empty() {
-        let color = std::io::stderr().is_terminal();
-        eprint!("{}", report.diagnostics.render(path, &source, color));
+    } else if !diagnostics.is_empty() {
+        // Rendered excerpts already went to stderr above.
         eprintln!(
             "{path}: {} error{}",
-            report.diagnostics.len(),
-            if report.diagnostics.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
+            diagnostics.len(),
+            if diagnostics.len() == 1 { "" } else { "s" }
         );
-    } else if let Some(tests) = &report.tests {
+    } else if let Some(tests) = &tests {
         if tests.total == 0 {
             println!("{path}: ok (no tests)");
         } else {
@@ -227,17 +243,64 @@ pub fn check_local(path: &str, json: bool) -> i32 {
         }
     }
 
-    if !report.diagnostics.is_empty() {
+    if !diagnostics.is_empty() {
         1
-    } else if report
-        .tests
-        .as_ref()
-        .is_some_and(|tests| !tests.all_passed())
-    {
+    } else if tests.as_ref().is_some_and(|tests| !tests.all_passed()) {
         2
     } else {
         0
     }
+}
+
+/// `rbgp policy check --list-deps` output: the resolved module graph
+/// with content hashes, module 0 first (the main file), imports in
+/// declaration order. Always exit 0 — the graph compiled.
+fn print_deps(path: &str, file: &rustbgpd_policy::rpol::RpolFile, json: bool) -> i32 {
+    let modules = file.modules();
+    if json {
+        #[derive(Serialize)]
+        struct JsonDep<'a> {
+            path: &'a str,
+            sha256: &'a str,
+            imports: Vec<&'a str>,
+        }
+        #[derive(Serialize)]
+        struct JsonDeps<'a> {
+            file: &'a str,
+            modules: Vec<JsonDep<'a>>,
+        }
+        let out = JsonDeps {
+            file: path,
+            modules: modules
+                .iter()
+                .map(|m| JsonDep {
+                    path: &m.path,
+                    sha256: &m.digest,
+                    imports: m
+                        .imports
+                        .iter()
+                        .map(|&id| modules[id as usize].path.as_str())
+                        .collect(),
+                })
+                .collect(),
+        };
+        if output::print_json_pretty(&out).is_err() {
+            return 1;
+        }
+        return 0;
+    }
+    println!(
+        "{path}: {} module{}",
+        modules.len(),
+        if modules.len() == 1 { "" } else { "s" }
+    );
+    for module in modules {
+        println!("  {} sha256:{}", module.path, module.digest);
+        for &id in &module.imports {
+            println!("    imports {}", modules[id as usize].path);
+        }
+    }
+    0
 }
 
 /// Options for `rbgp policy test` (ADR-0096 live-RIB dry run).
@@ -1264,16 +1327,67 @@ mod tests {
                  expect p == reject
              }",
         );
-        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 0);
-        assert_eq!(check_local(tmp.path().to_str().unwrap(), true), 0);
+        assert_eq!(
+            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            0
+        );
+        assert_eq!(
+            check_local(tmp.path().to_str().unwrap(), &[], false, true),
+            0
+        );
     }
 
     #[test]
     fn check_local_diagnostics_exit_one() {
         let tmp = write_rpol("policy p { term t { if route.zzz == 1 { accept } } }");
-        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 1);
+        assert_eq!(
+            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            1
+        );
         // Unreadable file is also exit 1.
-        assert_eq!(check_local("/nonexistent/nope.rpol", false), 1);
+        assert_eq!(check_local("/nonexistent/nope.rpol", &[], false, false), 1);
+    }
+
+    /// LAN-300: `check` resolves the import graph (tests in the main
+    /// file exercise imported definitions), `--root` resolves imports
+    /// outside the main file's directory, and `--list-deps` exits 0 on
+    /// a clean graph / 1 on a broken one.
+    #[test]
+    fn check_local_resolves_imports_and_lists_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(
+            lib.path().join("bogons.rpol"),
+            "prefix-set bogons { 127.0.0.0/8 le 32 }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("main.rpol"),
+            "import \"bogons.rpol\"\n\
+             policy p { term t { if route.prefix in bogons { reject } } }\n\
+             test rejects-loopback {\n\
+                 route { prefix 127.0.0.1/32 }\n\
+                 expect p == reject\n\
+             }",
+        )
+        .unwrap();
+        let main = dir.path().join("main.rpol");
+        let main = main.to_str().unwrap();
+        let root = lib.path().to_str().unwrap().to_string();
+        // Without the root the import cannot resolve.
+        assert_eq!(check_local(main, &[], false, false), 1);
+        // With it: clean check (the cross-module test runs) and deps.
+        assert_eq!(
+            check_local(main, std::slice::from_ref(&root), false, false),
+            0
+        );
+        assert_eq!(
+            check_local(main, std::slice::from_ref(&root), true, false),
+            0
+        );
+        assert_eq!(check_local(main, &[root], true, true), 0);
+        // --list-deps on a broken graph still exits 1.
+        assert_eq!(check_local(main, &[], true, false), 1);
     }
 
     #[test]
@@ -1285,7 +1399,10 @@ mod tests {
                  expect p == accept
              }",
         );
-        assert_eq!(check_local(tmp.path().to_str().unwrap(), false), 2);
+        assert_eq!(
+            check_local(tmp.path().to_str().unwrap(), &[], false, false),
+            2
+        );
     }
 
     #[tokio::test]
