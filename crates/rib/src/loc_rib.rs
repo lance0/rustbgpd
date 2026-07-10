@@ -25,6 +25,14 @@ pub struct LocRib {
     /// reads the stored stamp (not a reconstruction from the monotonic
     /// clock), so an NTP step between install and dump cannot skew the
     /// per-peer header timestamp (LAN-193).
+    ///
+    /// Deliberately NOT slab-backed (LAN-335): this map keeps its route
+    /// bodies inline. Both compact-storage candidates were measured and
+    /// rejected on this lookup-hot recompute path — the prefix trie
+    /// regressed it (see `prefix_map`), and a `u32` slab handle regressed
+    /// `loc_rib_recompute/1` by ~14% (extra indirection + a second probe
+    /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
+    /// saved at the 2p×100k profile shape.
     routes: HashMap<Prefix, (Route, SystemTime)>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,

@@ -1020,7 +1020,7 @@ impl RibManager {
         };
         if !sendable.is_some_and(|f| f.contains(&family)) {
             // Withdraw all previously advertised paths for this prefix
-            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1029,7 +1029,7 @@ impl RibManager {
         // ORF check (RFC 5291): filters the prefix, not individual Add-Path
         // path-ids — gate the whole prefix once, before collecting candidates.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
-            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1148,14 +1148,14 @@ impl RibManager {
             // permitted — an implicit replace otherwise (no spurious
             // withdraw+announce pair when the filtered best flips).
             let staged_winner = next_rank > 1;
-            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
                 if path_id != 0 || !staged_winner {
                     withdraw.push((*prefix, path_id));
                 }
             }
         } else {
             // Withdraw any previously advertised path_ids beyond the new set
-            for &path_id in rib_out.path_ids_for_prefix(prefix) {
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
                 if path_id >= next_rank {
                     withdraw.push((*prefix, path_id));
                 }
@@ -1202,7 +1202,7 @@ impl RibManager {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1230,7 +1230,7 @@ impl RibManager {
                 "route is suppressed by split horizon because it originated from the target peer"
                     .to_string()
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1257,7 +1257,7 @@ impl RibManager {
                 );
                 trace.push("rr_reflection", code, Stop, detail.to_string());
             }
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1272,7 +1272,7 @@ impl RibManager {
             target.gate("family", "family_not_sendable", Stop, || {
                 format!("peer cannot receive {} routes", family_label(family))
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1295,7 +1295,7 @@ impl RibManager {
                  Long-Lived Graceful Restart capability for this family (RFC 9494 §4.4)"
                     .to_string()
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1323,7 +1323,7 @@ impl RibManager {
                     "peer-pushed Outbound Route Filter (RFC 5291) does not permit this prefix"
                         .to_string()
                 });
-                for &path_id in existing_path_ids {
+                for &path_id in &existing_path_ids {
                     withdraw.push((*prefix, path_id));
                 }
                 return;
@@ -1395,7 +1395,7 @@ impl RibManager {
                 prefix: *prefix,
                 path_id: best.path_id,
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1477,7 +1477,7 @@ impl RibManager {
 
         // Clean up any stale multi-path entries if this prefix was previously
         // advertised via Add-Path and is now single-best.
-        for &path_id in existing_path_ids {
+        for &path_id in &existing_path_ids {
             if path_id != 0 {
                 withdraw.push((*prefix, path_id));
             }
@@ -1542,7 +1542,7 @@ impl RibManager {
         // Sendable family check
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1551,7 +1551,7 @@ impl RibManager {
         // Outbound Route Filter check (RFC 5291): silent withdraw, not a
         // policy denial — see `distribute_single_best_prefix`.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1582,7 +1582,7 @@ impl RibManager {
                 orr_spf.cost_to(orr_topology, b.next_hop),
             )
         }) else {
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1599,7 +1599,7 @@ impl RibManager {
             target_is_ebgp,
             llgr,
         ) {
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1641,7 +1641,7 @@ impl RibManager {
                 prefix: *prefix,
                 path_id: best.path_id,
             });
-            for &path_id in existing_path_ids {
+            for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -1669,7 +1669,7 @@ impl RibManager {
 
         // Clean up any stale multi-path entries if this prefix was
         // previously advertised via Add-Path and is now single-best.
-        for &path_id in existing_path_ids {
+        for &path_id in &existing_path_ids {
             if path_id != 0 {
                 withdraw.push((*prefix, path_id));
             }
