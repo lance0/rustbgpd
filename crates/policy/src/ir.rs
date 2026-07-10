@@ -134,6 +134,18 @@ pub enum ValueExpr {
     Const(u32),
     /// A `u32` context field read.
     Field(ValueField),
+    /// A `let`-binding read (LAN-302): one indexed load from the
+    /// evaluation frame ([`TermAction::Bind`] wrote the slot earlier in
+    /// the same walk — definite assignment is a compile-time guarantee).
+    /// `name` is the source binding name, carried for explain rendering
+    /// and eval-error logs; it participates in equality like set names
+    /// do (renaming a binding is a source change).
+    Local {
+        /// Frame slot index (< `LOCAL_FRAME_SLOTS`).
+        slot: u8,
+        /// The binding name as written.
+        name: Box<str>,
+    },
     /// A checked binary arithmetic operation.
     Binary {
         /// The operator.
@@ -160,7 +172,7 @@ impl ValueExpr {
             return true;
         }
         match self {
-            ValueExpr::Const(_) | ValueExpr::Field(_) => false,
+            ValueExpr::Const(_) | ValueExpr::Field(_) | ValueExpr::Local { .. } => false,
             ValueExpr::Binary { lhs, rhs, .. }
             | ValueExpr::Min(lhs, rhs)
             | ValueExpr::Max(lhs, rhs) => lhs.any_node(pred) || rhs.any_node(pred),
@@ -201,6 +213,7 @@ impl fmt::Display for ValueExpr {
             match expr {
                 ValueExpr::Const(value) => write!(f, "{value}")?,
                 ValueExpr::Field(field) => write!(f, "{}", field.as_str())?,
+                ValueExpr::Local { name, .. } => write!(f, "{name}")?,
                 ValueExpr::Binary { op, lhs, rhs } => {
                     let this = binding(expr);
                     render(lhs, f, this)?;
@@ -517,6 +530,28 @@ pub enum TermAction {
     /// `Deny` discards them. The TOML frontend never emits this
     /// variant.
     Continue(RouteModifications),
+    /// Evaluate `expr` and write the result into frame slot `slot` — a
+    /// lowered `.rpol` `let` statement (LAN-302, ADR-0103 Decision 2).
+    /// Like [`Continue`](Self::Continue) it never decides: the walk
+    /// keeps going. The initializer is **eager**: it evaluates whenever
+    /// the walk reaches this term (its guard is the enclosing branch
+    /// condition — `True` for a term-body `let`), used or not, and any
+    /// evaluation error denies the route on the uniform eval-error
+    /// rail. Slots are statically allocated per source term; bindings
+    /// are immutable in the language, so a slot is written once per
+    /// scope activation (sibling scopes may reuse slots — never live
+    /// simultaneously). `name` is carried for explain rendering. The
+    /// TOML frontend never emits this variant, and `apply` targets are
+    /// rejected at typecheck when they declare bindings, so it never
+    /// appears inside an inlined predicate.
+    Bind {
+        /// Frame slot to write (< `LOCAL_FRAME_SLOTS`).
+        slot: u8,
+        /// The source binding name, for explain surfaces.
+        name: Box<str>,
+        /// The initializer (a checked value expression).
+        expr: ValueExpr,
+    },
 }
 
 /// One guarded action inside a [`CompiledPolicy`] — the compiled form
@@ -685,6 +720,13 @@ impl CompiledChain {
                     .flatten()
                     .any(|expr| expr.reads_peer())
             })
+            // A `let` initializer reading `peer.asn` (LAN-302)
+            // evaluates eagerly per route — an unknown peer ASN even
+            // denies — so the binding alone makes verdicts
+            // peer-dependent, whether or not the value is read.
+            || self.policies.iter().flat_map(|p| p.terms.iter()).any(
+                |term| matches!(&term.action, TermAction::Bind { expr, .. } if expr.reads_peer()),
+            )
     }
 
     /// The first `prepend as peer` action in the chain, as the owning
@@ -704,7 +746,7 @@ impl CompiledChain {
             for term in &policy.terms {
                 let mods = match &term.action {
                     TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
-                    TermAction::Deny => continue,
+                    TermAction::Deny | TermAction::Bind { .. } => continue,
                 };
                 if matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _))) {
                     return Some((policy.name.as_deref(), term.name.as_deref()));
@@ -730,7 +772,7 @@ impl CompiledChain {
             .flat_map(|policy| policy.terms.iter())
             .any(|term| match &term.action {
                 TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
-                TermAction::Deny => false,
+                TermAction::Deny | TermAction::Bind { .. } => false,
             })
     }
 }

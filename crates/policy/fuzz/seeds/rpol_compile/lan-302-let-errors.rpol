@@ -1,0 +1,18 @@
+policy eager {
+    term t {
+        set local-pref 500
+        let x = route.med - 100
+        set med x
+        accept
+    }
+}
+
+test underflow-denies {
+    route { med 5 }
+    expect eager == reject
+}
+
+test ok-applies {
+    route { med 200 }
+    expect eager == accept with med 100, local-pref 500
+}

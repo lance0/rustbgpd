@@ -159,7 +159,7 @@ pub fn explain_chain_statements(
                 // clauses, so a denying statement must not claim
                 // modifications in the trace either.
                 let modifications = if entry.action == PolicyAction::Permit {
-                    render_modifications(&entry.modifications, ctx, None)
+                    render_modifications(&entry.modifications, ctx, None, &[])
                 } else {
                     Vec::new()
                 };
@@ -329,6 +329,7 @@ fn render_modifications(
     mods: &RouteModifications,
     ctx: &RouteContext<'_>,
     tables: Option<&CompiledChain>,
+    locals: &[u32],
 ) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -347,7 +348,7 @@ fn render_modifications(
     // term first — but renders honestly if it ever did.
     if let Some(expr) = &mods.set_local_pref_computed {
         let before = ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF);
-        match crate::eval::eval_value(expr, ctx) {
+        match crate::eval::eval_value(expr, ctx, locals) {
             Ok(value) => out.push(format!("local_pref {before} -> {expr} = {value}")),
             Err(kind) => out.push(format!(
                 "local_pref {before} -> {expr} (unresolvable: {kind})"
@@ -356,7 +357,7 @@ fn render_modifications(
     }
     if let Some(expr) = &mods.set_med_computed {
         let before = ctx.med.unwrap_or(IMPLICIT_MED);
-        match crate::eval::eval_value(expr, ctx) {
+        match crate::eval::eval_value(expr, ctx, locals) {
             Ok(value) => out.push(format!("med {before} -> {expr} = {value}")),
             Err(kind) => out.push(format!("med {before} -> {expr} (unresolvable: {kind})")),
         }
@@ -423,6 +424,10 @@ fn render_modifications(
 /// discarded by a deny), rendering a `term_traces` line per evaluated
 /// term. `tables` is the member's donor chain — its set/regex tables
 /// and names are self-contained.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
+)]
 fn trace_rpol_policy(
     policy_index: usize,
     policy_name: Option<String>,
@@ -433,6 +438,10 @@ fn trace_rpol_policy(
     let mut term_traces = Vec::new();
     let mut continued: Option<RouteModifications> = None;
     let mut decided: Option<(usize, &Term)> = None;
+    // LAN-302: the trace walk re-derives `let` bindings term by term
+    // (explain may allocate/zero eagerly; the hot path never records)
+    // and feeds the frame into the shared guard evaluation.
+    let mut locals = [0u32; crate::eval::LOCAL_FRAME_SLOTS];
     // LAN-296/LAN-299: set when a term errors — an unresolvable
     // computed operand or a failed guard value expression. The live
     // evaluator fails the route closed at that term (the eval-error
@@ -440,7 +449,7 @@ fn trace_rpol_policy(
     // in `statement_trace.rs`).
     let mut eval_failed = false;
     for (index, term) in policy.terms.iter().enumerate() {
-        let matched = match tables.guard_matches(&term.guard, ctx) {
+        let matched = match tables.guard_matches(&term.guard, ctx, &locals) {
             Ok(matched) => matched,
             // Guard evaluation error (LAN-299): render the error in
             // place of a verdict (ADR-0103 Decision 6.4) and decide
@@ -467,31 +476,56 @@ fn trace_rpol_policy(
         if !matched {
             continue;
         }
+        // LAN-302: a matched Bind evaluates its initializer eagerly,
+        // exactly like the live walk — an error fails the route
+        // closed; success writes the frame and the walk keeps going.
+        if let TermAction::Bind { slot, expr, .. } = &term.action {
+            match crate::eval::eval_value(expr, ctx, &locals) {
+                Ok(value) => locals[usize::from(*slot)] = value,
+                Err(kind) => {
+                    term_traces.push(format!(
+                        "term {}: evaluation error: {kind} — fail closed => reject",
+                        term.name.as_deref().unwrap_or("<unnamed>"),
+                    ));
+                    eval_failed = true;
+                    decided = Some((index, term));
+                    break;
+                }
+            }
+            continue;
+        }
         // Mirror the live walk's action-execution resolution: an
         // unresolvable computed operand on the matched term (Permit or
         // Continue) decides the route as a fail-closed reject here.
         let action_mods = match &term.action {
             TermAction::Permit(mods) | TermAction::Continue(mods) => Some(mods),
-            TermAction::Deny => None,
+            TermAction::Deny | TermAction::Bind { .. } => None,
         };
-        if let Some(mods) = action_mods
-            && let Err(kind) = tables.resolve_computed(mods, ctx)
-        {
-            term_traces.push(format!(
-                "term {}: evaluation error: {kind} — fail closed => reject",
-                term.name.as_deref().unwrap_or("<unnamed>"),
-            ));
-            eval_failed = true;
-            decided = Some((index, term));
-            break;
-        }
+        let resolved = match action_mods.map(|mods| tables.resolve_computed(mods, ctx, &locals)) {
+            Some(Err(kind)) => {
+                term_traces.push(format!(
+                    "term {}: evaluation error: {kind} — fail closed => reject",
+                    term.name.as_deref().unwrap_or("<unnamed>"),
+                ));
+                eval_failed = true;
+                decided = Some((index, term));
+                break;
+            }
+            Some(Ok(resolved)) => resolved,
+            None => None,
+        };
         match &term.action {
             TermAction::Continue(mods) => {
+                // Merge the term-time resolution (LAN-302 live parity:
+                // a later sibling scope may reuse the frame slots this
+                // term's computed expressions read, so resolving at
+                // trace end could render a different value than the
+                // live walk applied).
                 continued
                     .get_or_insert_with(RouteModifications::default)
-                    .merge_from(mods.clone());
+                    .merge_from(resolved.unwrap_or_else(|| mods.clone()));
             }
-            TermAction::Permit(_) | TermAction::Deny => {
+            TermAction::Permit(_) | TermAction::Deny | TermAction::Bind { .. } => {
                 decided = Some((index, term));
                 break;
             }
@@ -507,7 +541,7 @@ fn trace_rpol_policy(
                 merged.merge_from(mods.clone());
                 (
                     PolicyAction::Permit,
-                    render_modifications(&merged, ctx, Some(tables)),
+                    render_modifications(&merged, ctx, Some(tables), &locals),
                 )
             }
             _ => (PolicyAction::Deny, Vec::new()),
@@ -526,7 +560,9 @@ fn trace_rpol_policy(
         // Fallthrough to the policy default; a permitting default
         // keeps accumulated Continue modifications (live parity).
         let modifications = match (policy.default_action, continued) {
-            (PolicyAction::Permit, Some(mods)) => render_modifications(&mods, ctx, Some(tables)),
+            (PolicyAction::Permit, Some(mods)) => {
+                render_modifications(&mods, ctx, Some(tables), &locals)
+            }
             _ => Vec::new(),
         };
         StatementAttribution {
@@ -551,6 +587,8 @@ fn render_term_action(action: &TermAction) -> String {
         TermAction::Permit(mods) => (Some(mods), "accept"),
         TermAction::Deny => (None, "reject"),
         TermAction::Continue(mods) => (Some(mods), "continue"),
+        // LAN-302: a lowered `let` renders in its source form.
+        TermAction::Bind { name, expr, .. } => return format!("let {name} = {expr}"),
     };
     let mut parts = mods.map_or_else(Vec::new, render_action_stmts);
     parts.push(verdict.to_string());

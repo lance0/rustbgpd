@@ -471,7 +471,7 @@ fn unknown_parameter_suggests() {
     let (_, rendered) =
         diagnostics_of("policy p(peer_lp: u32) { term t { set local-pref peer_pl; accept } }");
     assert!(
-        rendered.contains("unknown parameter `peer_pl`"),
+        rendered.contains("unknown parameter or binding `peer_pl`"),
         "{rendered}"
     );
     assert!(rendered.contains("did you mean `peer_lp`?"), "{rendered}");
@@ -1616,7 +1616,7 @@ fn prepend_ctx(peer_asn: Option<u32>, origin_asn: Option<u32>) -> RouteContext<'
 fn first_term_mods(chain: &crate::ir::CompiledChain) -> &RouteModifications {
     match &chain.policies[0].terms[0].action {
         TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
-        TermAction::Deny => panic!("expected a modifying term"),
+        TermAction::Deny | TermAction::Bind { .. } => panic!("expected a modifying term"),
     }
 }
 
@@ -2201,7 +2201,7 @@ fn value_expression_type_diagnostics() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { set med route.med + peer_lp; accept } }");
     assert!(
-        rendered.contains("unknown parameter `peer_lp`"),
+        rendered.contains("unknown parameter or binding `peer_lp`"),
         "{rendered}"
     );
 }
@@ -2366,5 +2366,588 @@ test builtin-passes-middle {
 "#;
     let report = run_rpol_tests(source).expect("compiles cleanly");
     assert_eq!(report.total, 10);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+// ── `let` bindings (LAN-302) ───────────────────────────────────────
+
+/// The issue's surface example: term-body `let`s lower to Bind terms
+/// with sequential slots, are readable in guards (including as the
+/// LEFT side of a comparison) and in `set` value expressions, and the
+/// policy evaluates them per route.
+#[test]
+fn let_bindings_lower_to_bind_terms_and_evaluate() {
+    let chain = compile_ok(
+        "policy p {
+            term score {
+                let origin = route.origin-as
+                let penalty = route.as-path.len * 10
+                if penalty >= route.med { reject }
+                if origin == 64500 { set med penalty; accept }
+            }
+            term rest { accept }
+         }",
+    );
+
+    // IR shape: two Bind terms, slots 0 and 1, guarded by True.
+    let terms = &chain.policies[0].terms;
+    let binds: Vec<(u8, &str)> = terms
+        .iter()
+        .filter_map(|term| match &term.action {
+            TermAction::Bind { slot, name, .. } => Some((*slot, &**name)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(binds, vec![(0, "origin"), (1, "penalty")]);
+
+    // Route: origin 64500, path len 2 → penalty 20, med 100 → accept
+    // with med 20 (a binding read inside a body's set expression).
+    let mut ctx = absent_ctx();
+    ctx.as_path_len = 2;
+    ctx.origin_asn = Some(64500);
+    ctx.med = Some(100);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(20));
+
+    // Route: med 5 → penalty 20 >= 5 → reject.
+    ctx.med = Some(5);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// Deterministic shadowing: a `let` may shadow a parameter and an
+/// outer binding; the innermost declaration wins in value positions,
+/// and initializers read the scope *before* their own declaration.
+#[test]
+fn let_shadows_parameters_and_outer_bindings() {
+    let mut store = SetStore::new();
+    let file = super::RpolFile::parse(
+        "policy p(x: u32) {
+            term t {
+                let x = x + 1
+                let x = x * 2
+                if route.med >= 1 { let x = x + 100; set med x; set local-pref x }
+                accept
+            }
+         }",
+    )
+    .expect("compiles");
+    let chain = file.compile_policy("p", &[10], &mut store).expect("policy");
+    let mut ctx = absent_ctx();
+    ctx.med = Some(1);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    // param 10 → +1 = 11 → *2 = 22 → body +100 = 122.
+    assert_eq!(result.modifications.set_med, Some(122));
+    assert_eq!(result.modifications.set_local_pref, Some(122));
+}
+
+/// Shadowing a contextual identifier is position-typed (the #764
+/// `origin` precedent): `let origin` wins in value positions while
+/// `prepend as origin` keeps its computed-operand meaning.
+#[test]
+fn let_origin_shadows_only_value_positions() {
+    let chain = compile_ok(
+        "policy p {
+            term t {
+                let origin = 7
+                set med origin
+                prepend as origin 2
+                accept
+            }
+         }",
+    );
+    let mut ctx = absent_ctx();
+    ctx.origin_asn = Some(64496);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.set_med,
+        Some(7),
+        "value position: the binding"
+    );
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        Some((64496, 2)),
+        "operand position: the route's origin AS"
+    );
+}
+
+/// Branch visibility: a `let` inside an `if` (or `else`) body is not
+/// visible outside it — afterwards in the term, or in the other branch.
+#[test]
+fn branch_locals_are_scoped_to_their_body() {
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { if route.med >= 10 { let x = 1; set med x } set local-pref x; accept } }",
+    );
+    assert!(
+        rendered.contains("unknown parameter or binding `x`"),
+        "{rendered}"
+    );
+
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { if route.med >= 10 { let x = 1 } else { set med x } accept } }",
+    );
+    assert!(
+        rendered.contains("unknown parameter or binding `x`"),
+        "{rendered}"
+    );
+
+    // And bindings never cross terms.
+    let (_, rendered) =
+        diagnostics_of("policy p { term a { let x = 1 } term b { set med x; accept } }");
+    assert!(
+        rendered.contains("unknown parameter or binding `x`"),
+        "{rendered}"
+    );
+}
+
+/// Definite assignment: use before definition is a compile error at
+/// the use's span, not a runtime zero.
+#[test]
+fn use_before_definition_is_a_compile_error() {
+    let (diags, rendered) = diagnostics_of("policy p { term t { set med y; let y = 5; accept } }");
+    assert!(
+        rendered.contains("unknown parameter or binding `y`"),
+        "{rendered}"
+    );
+    assert!(!diags.0.is_empty());
+}
+
+/// The `MAX_LOCALS` boundary: 64 bindings in one scope compile; the
+/// 65th is rejected with a span. A term scope plus a full body scope
+/// (64 + 64 = the whole frame) still compiles and evaluates.
+#[test]
+fn slot_exhaustion_at_the_limit_boundary() {
+    let lets = |n: usize| -> String {
+        (0..n).fold(String::new(), |mut src, i| {
+            use std::fmt::Write as _;
+            let _ = write!(src, "let v{i} = {i}; ");
+            src
+        })
+    };
+
+    let ok = format!(
+        "policy p {{ term t {{ {} set med v63; accept }} }}",
+        lets(64)
+    );
+    let chain = compile_ok(&ok);
+    let result = chain.evaluate(&absent_ctx());
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(63));
+
+    let over = format!("policy p {{ term t {{ {} accept }} }}", lets(65));
+    let mut store = SetStore::new();
+    let diags = compile_rpol(&over, &mut store).expect_err("65th binding rejected");
+    let rendered = diags.render("test.rpol", &over, false);
+    assert!(
+        rendered.contains("more than 64 `let` bindings in one scope"),
+        "{rendered}"
+    );
+    // Exactly one diagnostic: the cap fires once, at the 65th.
+    assert_eq!(diags.0.len(), 1, "{rendered}");
+
+    // Both nesting levels full: 64 term-scope + 64 body-scope bindings
+    // fit the 128-slot frame exactly.
+    let full = format!(
+        "policy p {{ term t {{ {} if route.med >= 0 {{ {} set med b63 }} set local-pref v63; accept }} }}",
+        lets(64),
+        (0..64).fold(String::new(), |mut src, i| {
+            use std::fmt::Write as _;
+            let _ = write!(src, "let b{i} = v63 + {i}; ");
+            src
+        }),
+    );
+    let chain = compile_ok(&full);
+    let result = chain.evaluate(&absent_ctx());
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(63 + 63));
+    assert_eq!(result.modifications.set_local_pref, Some(63));
+}
+
+/// Initializers ride the LAN-299 eval-error rails: a checked-arithmetic
+/// failure (or absent operand) in a `let` initializer is the same
+/// uniform Deny — staged modifications discarded, error counter
+/// bumped — whether or not the binding is ever read.
+#[test]
+fn initializer_errors_deny_and_discard_staged_mods() {
+    use crate::eval::PolicyHitCounters;
+
+    let chain = compile_ok(
+        "policy p {
+            term t {
+                set local-pref 500
+                let x = route.med - 100
+                set med x
+                accept
+            }
+         }",
+    );
+    let counters = PolicyHitCounters::for_chain(&chain);
+
+    // med 200: x = 100, everything applies.
+    let mut ctx = absent_ctx();
+    ctx.med = Some(200);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(500));
+    assert_eq!(result.modifications.set_med, Some(100));
+    assert_eq!(counters.eval_errors(), 0);
+
+    // med 5: `5 - 100` underflows in the initializer → uniform Deny,
+    // the staged local-pref discarded, counter bumped.
+    ctx.med = Some(5);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert!(result.modifications.is_empty(), "staged mods discarded");
+    assert_eq!(counters.eval_errors(), 1);
+
+    // The recording walk (dry runs) agrees.
+    let mut hits = chain.zero_term_hits();
+    let recorded = chain.evaluate_recording_hits(&ctx, &mut hits);
+    assert_eq!(recorded.action, PolicyAction::Deny);
+    assert!(recorded.modifications.is_empty());
+
+    // An initializer that never reads its binding still errors: eager,
+    // not lazy (an unused erroring binding denies).
+    let chain = compile_ok(
+        "policy p { term t { let unused = route.origin-as; accept } term rest { accept } }",
+    );
+    let ctx = absent_ctx(); // no origin → absent operand
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// A `let` executes at its statement position: a decision *before* it
+/// short-circuits the walk and the initializer never runs.
+#[test]
+fn let_after_a_decision_never_evaluates() {
+    let chain = compile_ok(
+        "policy p {
+            term t {
+                if route.med >= 100 { accept }
+                let x = route.origin-as
+                if x == 1 { reject }
+                accept
+            }
+         }",
+    );
+    // med 200, absent origin: decided before the let → no error.
+    let mut ctx = absent_ctx();
+    ctx.med = Some(200);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    // med 5, absent origin: the let runs and errors → Deny.
+    ctx.med = Some(5);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    // Same rule inside a branch: an untaken branch's binding never
+    // evaluates; a taken branch's binding evaluates even if unused.
+    let chain =
+        compile_ok("policy p { term t { if route.med >= 10 { let x = route.origin-as } accept } }");
+    let mut ctx = absent_ctx();
+    ctx.med = Some(5);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    ctx.med = Some(20);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// The staged-mutation pin from the issue: reads always observe the
+/// ORIGINAL route — `set med 500` stages, and a following
+/// `let x = route.med` still sees the pre-staging MED. Read-back is
+/// out of scope (it breaks memoization; needs its own ADR).
+#[test]
+fn reads_see_the_original_route_never_staged_writes() {
+    let chain = compile_ok(
+        "policy p {
+            term t {
+                set med 500
+                let x = route.med
+                if x >= 500 { reject }
+                set local-pref x
+                accept
+            }
+         }",
+    );
+    let mut ctx = absent_ctx();
+    ctx.med = Some(7);
+    let result = chain.evaluate(&ctx);
+    // If reads observed staged writes, x would be 500 and the route
+    // would have been rejected.
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(500));
+    assert_eq!(
+        result.modifications.set_local_pref,
+        Some(7),
+        "x = original med"
+    );
+}
+
+/// Reload determinism (ADR-0103 Decision 5): compiling the same source
+/// twice yields structurally identical chains — term split, slot
+/// assignment, everything the live-impact planner diffs.
+#[test]
+fn identical_source_compiles_to_identical_ir() {
+    let source = "policy p {
+        term t {
+            let a = route.med + 1
+            if route.as-path.len >= 2 { let b = a * 2; set med b }
+            if route.as-path.len <= 1 { let c = a + 3; set med c }
+            set local-pref a
+            accept
+        }
+     }";
+    assert_eq!(compile_ok(source), compile_ok(source));
+}
+
+/// Parity: factoring a repeated subexpression through a `let`
+/// evaluates identically to the fully inlined form, across verdicts
+/// and modifications.
+#[test]
+fn let_parity_with_inlined_form() {
+    let with_let = compile_ok(
+        "policy p {
+            term t {
+                let penalty = route.as-path.len * 10
+                if penalty >= route.med { reject }
+                if penalty <= 20 { set med penalty; accept }
+            }
+            term rest { accept }
+         }",
+    );
+    let inlined = compile_ok(
+        "policy p {
+            term t {
+                if route.as-path.len * 10 >= route.med { reject }
+                if route.as-path.len * 10 <= 20 { set med route.as-path.len * 10; accept }
+            }
+            term rest { accept }
+         }",
+    );
+    for len in [0usize, 1, 2, 3, 9] {
+        for med in [0u32, 5, 20, 21, 100] {
+            let mut ctx = absent_ctx();
+            ctx.as_path_len = len;
+            ctx.med = Some(med);
+            assert_eq!(
+                with_let.evaluate(&ctx),
+                inlined.evaluate(&ctx),
+                "len {len} med {med}"
+            );
+        }
+    }
+}
+
+/// `apply` targets may not declare bindings this slice: the target
+/// inlines as a pure predicate with no term walk to execute Bind
+/// terms in (LAN-304 `fn` is the composition vehicle).
+#[test]
+fn apply_of_a_let_policy_is_rejected() {
+    let (_, rendered) = diagnostics_of(
+        "policy uses-let { term t { let x = 1; if route.med >= x { accept } } term rest { reject } }
+         policy outer { term t { if apply(uses-let) { accept } } }",
+    );
+    assert!(
+        rendered.contains("cannot `apply` policy `uses-let`: it declares `let` bindings"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("first `let` is here"), "{rendered}");
+}
+
+/// Bindings are runtime values: compile-time-constant positions
+/// (prepend arguments, `apply` args, `contains`) reject them with a
+/// dedicated diagnostic, not "unknown parameter".
+#[test]
+fn let_in_const_position_is_rejected() {
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { let x = 3; prepend as 65001 x; accept } }");
+    assert!(
+        rendered.contains("prepend count must be a literal"),
+        "{rendered}"
+    );
+
+    let (_, rendered) = diagnostics_of("policy p { term t { let x = 3; prepend as x 2; accept } }");
+    assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
+    assert!(rendered.contains("literal or parameter"), "{rendered}");
+
+    // Enum positions are position-typed: the member spelling wins and
+    // a non-member binding name is a type error, never a u32 read.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { let x = 1; if route.rpki == x { reject } accept } }");
+    assert!(
+        rendered.contains("`x` is a u32 `let` binding; `route.rpki` is an enum field"),
+        "{rendered}"
+    );
+}
+
+/// A binding read on the RIGHT of a plain u32-field comparison lowers
+/// to the checked value-comparison node — fail-closed absent-operand
+/// semantics, like every computed form.
+#[test]
+fn cmp_against_a_binding_lowers_to_value_cmp() {
+    let chain = compile_ok(
+        "policy p { term t { let x = 64500; if route.origin-as == x { reject } } term rest { accept } }",
+    );
+    // The guard is a ValueCmp, not an OriginAsEq scalar node.
+    assert!(
+        chain.policies[0].terms.iter().any(|term| matches!(
+            &term.guard,
+            crate::ir::MatchExpr::ValueCmp(node)
+                if matches!(node.rhs, crate::ir::ValueExpr::Local { slot: 0, .. })
+        )),
+        "expected a ValueCmp guard reading slot 0"
+    );
+    // Present origin: matches → reject.
+    let mut ctx = absent_ctx();
+    ctx.origin_asn = Some(64500);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    // Absent origin: computed form denies (eval error), unlike the
+    // never-match scalar node.
+    assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+}
+
+/// `peer.asn` in a `let` initializer reads peer identity — the chain
+/// must disqualify update-group sharing even if the value is unused.
+/// Bindings over route fields alone never do.
+#[test]
+fn peer_asn_initializer_registers_peer_context() {
+    let peer = compile_ok("policy p { term t { let a = peer.asn; accept } }");
+    assert!(peer.requires_peer_context());
+
+    let route_only = compile_ok("policy p { term t { let a = route.med + 1; set med a; accept } }");
+    assert!(!route_only.requires_peer_context());
+}
+
+/// Explain traces render Bind terms in source form, resolve binding
+/// reads in modification lines, and agree with the live verdict —
+/// including on initializer errors.
+#[test]
+fn let_explain_renders_and_agrees() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let compiled = compile_ok(
+        "policy p {
+            term t {
+                let x = route.med + 1
+                set med x
+                accept
+            }
+         }",
+    );
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(7);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let step = &trace.steps[0];
+    assert!(
+        step.term_traces
+            .iter()
+            .any(|line| line.contains("let x = route.med + 1")),
+        "{:?}",
+        step.term_traces
+    );
+    assert!(
+        step.modifications
+            .iter()
+            .any(|line| line.contains("med 7 -> x = 8")),
+        "{:?}",
+        step.modifications
+    );
+
+    // An erroring initializer renders the error in place of a verdict
+    // and the trace verdict agrees with the live Deny.
+    let compiled =
+        compile_ok("policy p { term t { let x = route.med - 100; accept } term rest { accept } }");
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(5);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    assert!(
+        trace.steps[0].term_traces.iter().any(|line| line
+            .contains("evaluation error: arithmetic underflow")
+            && line.contains("fail closed")),
+        "{:?}",
+        trace.steps[0].term_traces
+    );
+}
+
+/// `let` is contextual, not reserved (ADR-0103 Decision 2.2): sets and
+/// parameters named `let` keep working.
+#[test]
+fn let_is_not_a_reserved_word() {
+    let chain = compile_ok(
+        "asn-set let { 64500 }
+         policy p(let: u32) {
+            term t { if route.med >= let { reject } }
+            term o { if route.origin-as in let { reject } }
+            term rest { accept }
+         }",
+    );
+    // Zero-parameter chain skips the parameterized policy; the file
+    // still typechecks and the set named `let` interned.
+    assert_eq!(chain.asn_set_names[0].as_deref(), Some("let"));
+}
+
+/// In-language `test` fixtures exercise let-heavy policies end to end
+/// through `rbgp policy check`.
+#[test]
+fn in_language_tests_cover_let_bindings() {
+    let source = r#"
+policy dampen {
+    term score {
+        let penalty = route.as-path.len * 10
+        if penalty >= route.med { reject }
+        set med penalty
+        accept
+    }
+}
+policy shadow(base: u32) {
+    term t {
+        let base = base + 1
+        if route.med >= 1 { let base = base * 2; set local-pref base; accept }
+        set local-pref base
+        accept
+    }
+}
+policy eager-error {
+    term t { let x = route.origin-as; accept }
+    term rest { accept }
+}
+
+test dampen-rejects-long-paths {
+    route { as-path "65001 65002 65003"; med 25 }
+    expect dampen == reject
+}
+
+test dampen-scores-short-paths {
+    route { as-path "65001 65002"; med 100 }
+    expect dampen == accept with med 20
+}
+
+test shadow-inner-binding-wins {
+    route { med 5 }
+    expect shadow(10) == accept with local-pref 22
+}
+
+test shadow-outer-binding-on-fallthrough {
+    route { }
+    expect shadow(10) == accept with local-pref 11
+}
+
+test absent-origin-initializer-denies {
+    route { as-path "{64500 64501}" }
+    expect eager-error == reject
+}
+"#;
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert_eq!(report.total, 5);
     assert!(report.all_passed(), "failures: {:?}", report.failures);
 }

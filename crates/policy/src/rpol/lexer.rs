@@ -183,6 +183,12 @@ pub enum Tok {
     /// `==`
     #[token("==")]
     EqEq,
+    /// `=` — `let` binding initializer (LAN-302). Un-lexable before
+    /// bindings landed (`==` already lexed as one token, and logos
+    /// prefers the longer match), so purely additive — ADR-0103
+    /// Decision 2.3.
+    #[token("=")]
+    Eq,
     /// `!=`
     #[token("!=")]
     NotEq,
@@ -274,6 +280,7 @@ impl Tok {
             Tok::Dot => "`.`",
             Tok::Colon => "`:`",
             Tok::EqEq => "`==`",
+            Tok::Eq => "`=`",
             Tok::NotEq => "`!=`",
             Tok::GtEq => "`>=`",
             Tok::LtEq => "`<=`",

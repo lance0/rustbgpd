@@ -1,0 +1,10 @@
+policy shadow(x: u32) {
+    term t {
+        let x = x + 1
+        let x = min(x * 2, 400)
+        if route.med >= x { let x = x + 100; set local-pref x; accept }
+        else { let y = x - 1; set med y }
+        set med x
+        accept
+    }
+}
