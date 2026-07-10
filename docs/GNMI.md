@@ -66,6 +66,13 @@ Supported operations:
 
 - `update` / `replace` the leaf values `neighbor-address`, `peer-as`,
   `description`, and `peer-group`.
+- `update` / `replace` `.../graceful-restart/config/enabled`,
+  `.../graceful-restart/config/restart-time`, and
+  `.../graceful-restart/config/stale-routes-time`, mapped to native
+  `graceful_restart`, `gr_restart_time`, and `gr_stale_routes_time`.
+  `stale-routes-time` accepts whole seconds only; fractional decimal64
+  values are rejected, never rounded. `config/helper-only` returns
+  `UNIMPLEMENTED` — rustbgpd GR helper behavior is not a per-session knob.
 - Create a new static neighbor by setting `peer-as` under a concrete
   `neighbor[neighbor-address=X]` entry. The list key supplies the durable
   `[[neighbors]].address`; if `config/neighbor-address` is also supplied, it
@@ -124,6 +131,12 @@ Supported operations:
   `PRIVATE_AS_REMOVE_ALL`.
 - `update` / `replace` `.../timers/config/hold-time`, mapped to native
   `hold_time`.
+- `update` / `replace` `.../graceful-restart/config/enabled`,
+  `.../graceful-restart/config/restart-time`, and
+  `.../graceful-restart/config/stale-routes-time`, mapped to the native
+  inherited `graceful_restart`, `gr_restart_time`, and
+  `gr_stale_routes_time` group keys, with the same value rules as the
+  static-neighbor graceful-restart scope above.
 - Delete a whole peer-group list entry by deleting
   `.../peer-groups/peer-group[peer-group-name=NAME]`. Per gNMI, deleting a
   missing entry is silently accepted.
