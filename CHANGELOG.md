@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Perf-receipt harnesses committed in-repo (`bench/scale/`).** The two
+  harnesses backing the published perf receipts are now checked in so the
+  receipts are reproducible: `bench/scale/rrharness/` (RibManager flood/churn
+  CPU+memory profiler, backs `docs/perf/rebaseline-2026-07.md`) and
+  `bench/scale/reloadstall/` (route-server-scale policy-reload UPDATE-stall
+  driver, backs `docs/perf/reload-stall-2026-07.md`). Both are standalone
+  crates kept out of the workspace and built explicitly; see
+  `bench/scale/README.md`.
+
 - **Global cross-peer path-attribute interning (LAN-336).** The
   attribute intern table moved from one-per-peer (`AdjRibIn`) to a
   single daemon-wide table owned by the RIB manager — the analog of

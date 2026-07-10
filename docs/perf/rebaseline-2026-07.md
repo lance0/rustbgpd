@@ -32,8 +32,9 @@ only to anchor the shares.
 
 ### Method
 
-The 2026-07-03 rrharness was reconstructed as a scratch crate (kept
-out of the repo, shape pinned here) in a **manager-direct** variant:
+The 2026-07-03 rrharness was reconstructed as a committed harness
+(`bench/scale/rrharness/`, a standalone crate kept out of the
+workspace) in a **manager-direct** variant:
 
 - the real `RibManager` (`RibManager::new` + `mgr.run()`, cluster-id
   set) runs alone on a dedicated OS thread named `ribmgr` under a
@@ -253,11 +254,13 @@ corrections to any plan written against the old attribution:
 
 ## Reproduction
 
-CPU harness (scratch crate, out of repo; shape pinned above): modes
+CPU harness (`bench/scale/rrharness/`, a standalone crate kept out of
+the workspace; shape pinned above): modes
 `flood <n_clients> <n_prefixes> <secs> <out>` and
 `churn <n_clients> <n_cand> <n_prefixes> <secs> <out>`; folded-stack
 output per run classified by the owning-function markers listed in
-Part 1. Runs:
+Part 1. Build with `cd bench/scale/rrharness && cargo build --release`,
+then run `./target/release/rrharness <mode> <args>`. Runs:
 
 ```text
 rrharness flood 256  100000 20 flood-256-{a,b}
