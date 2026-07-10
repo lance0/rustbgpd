@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **M85/M86 core-RR interop labs against BIRD and OpenBGPD.** Two new
+  hosted-CI containerlab jobs pair a rustbgpd route reflector with the
+  route-server incumbents: **M85** (two BIRD 2.0.12 clients + a
+  rustbgpd client, 33 assertions) covers ipv4+ipv6 reflection over v4
+  transport, ORIGINATOR_ID/CLUSTER_LIST in BIRD's own view, no
+  reflect-back, and both sides of BIRD's real GR capability shape —
+  `graceful restart on` stale-preserves through a kill while the
+  default aware mode (capability with restart time 0 and no AFs) is
+  correctly not preserved; **M86** (two OpenBGPD 9.1 clients, 27
+  assertions) covers the same reflection/attribute surface via
+  `bgpctl -j` plus OpenBGPD's helper-only GR truth (R bit, time 0,
+  zero AFs on the wire) — a bgpd kill withdraws immediately with zero
+  stale. Fixture headers record the cross-implementation quirks found
+  while building the labs: BIRD permanently loses its initial v6
+  export if the interface address is still in IPv6 DAD at session
+  establishment, and OpenBGPD needs a per-AF `local-address` to
+  announce v6 NLRI over a v4 session. (LAN-251)
 - **gNMI Set graceful-restart subset.** The OpenConfig
   `graceful-restart/config/{enabled, restart-time, stale-routes-time}`
   leaves are now accepted under both static-neighbor and peer-group

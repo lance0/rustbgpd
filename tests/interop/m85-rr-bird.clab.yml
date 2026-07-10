@@ -1,0 +1,108 @@
+# Containerlab topology: rustbgpd RR ↔ BIRD 2 clients + rustbgpd client
+# (M85 — core route reflection against BIRD, RFC 4456 + RFC 4724)
+#
+# Validates: rustbgpd as an iBGP route reflector for two BIRD 2 clients
+# and one rustbgpd client — IPv4+IPv6 unicast reflection between the
+# BIRD clients (both families over one v4 transport session),
+# ORIGINATOR_ID / CLUSTER_LIST visible in BIRD's own view, no
+# reflect-back to the originating client, and GR helper behavior per
+# BIRD's REAL capability shape:
+#   - bird1 runs `graceful restart on` — it lists the AFs in its GR
+#     capability, so a bird1 kill must leave its routes stale-preserved
+#     on the RR (no withdraws toward the other clients) until
+#     re-establish + EoR clears them.
+#   - bird2 runs BIRD's DEFAULT `graceful restart aware` — BIRD still
+#     sends the GR capability but with restart time 0 and NO address
+#     families (helper-only advertisement). A bird2 kill must therefore
+#     NOT be treated as a graceful restart: the RR withdraws bird2's
+#     routes from the other clients immediately.
+#
+# Each client sits on its own /24 + /64 so reflected next hops are
+# observably the originator's (RFC 4456 §7 — NEXT_HOP untouched); BIRD
+# resolves them via static IGP glue routes.
+#
+# The v6 addresses are assigned `nodad` deliberately: BIRD evaluates the
+# ipv6 channel's export next hop at session establishment, and when the
+# interface address is still tentative (IPv6 DAD, ~1 s) the export fails
+# — BIRD then emits an MP_UNREACH withdraw for its own prefix and never
+# retries until the session bounces. Caught on the wire during lab
+# bring-up; nodad makes the address usable instantly.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   containerlab deploy -t tests/interop/m85-rr-bird.clab.yml
+#   bash tests/interop/scripts/test-m85-rr-bird.sh
+#   containerlab destroy -t tests/interop/m85-rr-bird.clab.yml
+
+name: m85-rr-bird
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m85-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.85.1.1/24 dev eth1
+        - ip -6 addr add 2001:db8:85:1::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - ip addr add 10.85.2.1/24 dev eth2
+        - ip -6 addr add 2001:db8:85:2::1/64 dev eth2 nodad
+        - ip link set eth2 up
+        - ip addr add 10.85.3.1/24 dev eth3
+        - ip -6 addr add 2001:db8:85:3::1/64 dev eth3 nodad
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    bird1:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m85-c1.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.85.1.2/24 dev eth1
+        - ip -6 addr add 2001:db8:85:1::2/64 dev eth1 nodad
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+    bird2:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m85-c2.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.85.2.2/24 dev eth1
+        - ip -6 addr add 2001:db8:85:2::2/64 dev eth1 nodad
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+    client:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m85-client.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.85.3.2/24 dev eth1
+        - ip -6 addr add 2001:db8:85:3::2/64 dev eth1 nodad
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "bird1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "bird2:eth1"]
+    - endpoints: ["rustbgpd:eth3", "client:eth1"]
+
+# RR: AS 65001, router-id / cluster-id 10.85.0.1
+# bird1:  10.85.1.2, advertises 100.85.1.0/24 + 2001:db8:851::/48 (GR on)
+# bird2:  10.85.2.2, advertises 100.85.2.0/24 + 2001:db8:852::/48 (GR aware)
+# client: 10.85.3.2, rustbgpd, receive-only

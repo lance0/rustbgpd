@@ -1,0 +1,25 @@
+# M86 — rustbgpd as a plain iBGP RR client (receive-only). The driver
+# asserts via this node's own rbgp that both OpenBGPD clients' v4+v6
+# routes arrive reflected.
+
+[global]
+asn = 65001
+router_id = "10.86.3.2"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.86.3.1"
+remote_asn = 65001
+description = "rr"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[security.grpc]
+enforcement = "legacy"

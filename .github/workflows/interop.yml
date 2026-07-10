@@ -872,6 +872,90 @@ jobs:
           topology: tests/interop/m83-routeserver-multistack.clab.yml
           script: tests/interop/scripts/test-m83-routeserver-multistack.sh
 
+  m85:
+    name: M85 — RR core reflection + GR against BIRD 2 clients
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        # jq drives the rbgp JSON client-view assertions.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build bird:2-bookworm
+        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
+      - name: Run M85 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M85
+          topology: tests/interop/m85-rr-bird.clab.yml
+          script: tests/interop/scripts/test-m85-rr-bird.sh
+
+  m86:
+    name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        # jq drives the bgpctl -j and rbgp JSON client-view assertions.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Pull openbgpd/openbgpd:9.1
+        # Pinned upstream image from the OpenBGPD portable project; its
+        # entrypoint execs any non-bgpd command, so the topology holds
+        # the container with `sleep infinity` and the driver launches
+        # bgpd itself.
+        run: docker pull openbgpd/openbgpd:9.1
+
+      - name: Run M86 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M86
+          topology: tests/interop/m86-rr-openbgpd.clab.yml
+          script: tests/interop/scripts/test-m86-rr-openbgpd.sh
+
   m25:
     name: M25 — TCP MD5 + GTSM (FRR 10.3.1)
     runs-on: ubuntu-latest

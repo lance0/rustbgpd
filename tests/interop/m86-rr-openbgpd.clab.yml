@@ -1,0 +1,116 @@
+# Containerlab topology: rustbgpd RR ↔ OpenBGPD clients + rustbgpd client
+# (M86 — core route reflection against OpenBGPD, RFC 4456 + RFC 4724)
+#
+# Validates: rustbgpd as an iBGP route reflector for two OpenBGPD 9.1
+# clients and one rustbgpd client — IPv4+IPv6 unicast reflection between
+# the OpenBGPD clients (both families over one v4 transport session),
+# ORIGINATOR_ID / CLUSTER_LIST visible in bgpctl's view, no reflect-back
+# to the originating client, and GR truth per OpenBGPD's REAL capability
+# shape: OpenBGPD is a GR HELPER only — captured on the wire during lab
+# bring-up, its OPEN carries the GR capability with the R bit SET,
+# restart time 0, and ZERO address families (the "helper mode only"
+# form). A bgpd kill must therefore NOT be treated as a graceful
+# restart by the RR: no AF was advertised as preserved, so the routes
+# are withdrawn from the surviving clients immediately.
+#
+# Each client sits on its own /24 + /64 so reflected next hops are
+# observably the originator's (RFC 4456 §7 — NEXT_HOP untouched);
+# OpenBGPD validates next hops against the kernel FIB, so static glue
+# routes are installed at deploy. v6 addresses are `nodad` (the M85
+# lesson: a tentative address at session establishment breaks the
+# initial v6 export).
+#
+# Image: openbgpd/openbgpd:9.1 (Docker Hub, OpenBGPD portable project;
+# pinned). The image entrypoint execs any non-bgpd command, so
+# `cmd: sleep infinity` holds the container and the driver launches
+# bgpd itself.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker pull openbgpd/openbgpd:9.1
+#   containerlab deploy -t tests/interop/m86-rr-openbgpd.clab.yml
+#   bash tests/interop/scripts/test-m86-rr-openbgpd.sh
+#   containerlab destroy -t tests/interop/m86-rr-openbgpd.clab.yml
+
+name: m86-rr-openbgpd
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m86-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.86.1.1/24 dev eth1
+        - ip -6 addr add 2001:db8:86:1::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - ip addr add 10.86.2.1/24 dev eth2
+        - ip -6 addr add 2001:db8:86:2::1/64 dev eth2 nodad
+        - ip link set eth2 up
+        - ip addr add 10.86.3.1/24 dev eth3
+        - ip -6 addr add 2001:db8:86:3::1/64 dev eth3 nodad
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    obgp1:
+      kind: linux
+      image: openbgpd/openbgpd:9.1
+      cmd: sleep infinity
+      binds:
+        - ./configs/bgpd-m86-c1.conf:/etc/bgpd/bgpd.conf:ro
+      exec:
+        # busybox ip has no `nodad`; disable DAD via sysctl instead (the
+        # M85 lesson — a tentative address at session establishment
+        # breaks the initial v6 export).
+        - sysctl -w net.ipv6.conf.eth1.accept_dad=0
+        - ip addr add 10.86.1.2/24 dev eth1
+        - ip -6 addr add 2001:db8:86:1::2/64 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.86.2.0/24 via 10.86.1.1
+        - ip route add 10.86.3.0/24 via 10.86.1.1
+        - ip -6 route add 2001:db8:86:2::/64 via 2001:db8:86:1::1
+        - ip -6 route add 2001:db8:86:3::/64 via 2001:db8:86:1::1
+
+    obgp2:
+      kind: linux
+      image: openbgpd/openbgpd:9.1
+      cmd: sleep infinity
+      binds:
+        - ./configs/bgpd-m86-c2.conf:/etc/bgpd/bgpd.conf:ro
+      exec:
+        - sysctl -w net.ipv6.conf.eth1.accept_dad=0
+        - ip addr add 10.86.2.2/24 dev eth1
+        - ip -6 addr add 2001:db8:86:2::2/64 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.86.1.0/24 via 10.86.2.1
+        - ip route add 10.86.3.0/24 via 10.86.2.1
+        - ip -6 route add 2001:db8:86:1::/64 via 2001:db8:86:2::1
+        - ip -6 route add 2001:db8:86:3::/64 via 2001:db8:86:2::1
+
+    client:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m86-client.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.86.3.2/24 dev eth1
+        - ip -6 addr add 2001:db8:86:3::2/64 dev eth1 nodad
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "obgp1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "obgp2:eth1"]
+    - endpoints: ["rustbgpd:eth3", "client:eth1"]
+
+# RR: AS 65001, router-id / cluster-id 10.86.0.1
+# obgp1:  10.86.1.2, advertises 100.86.1.0/24 + 2001:db8:861::/48
+# obgp2:  10.86.2.2, advertises 100.86.2.0/24 + 2001:db8:862::/48
+# client: 10.86.3.2, rustbgpd, receive-only
