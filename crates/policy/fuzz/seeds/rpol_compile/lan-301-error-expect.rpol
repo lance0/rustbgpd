@@ -1,0 +1,21 @@
+policy overflowing {
+    term guard { if route.med + 1 >= 1 { accept } }
+    term rest { reject }
+}
+
+policy error { term t { accept } }
+
+test any-error {
+    route { med 4294967295 }
+    expect overflowing == error
+}
+
+test kind-pinned {
+    route { med 4294967295 }
+    expect overflowing == error overflow
+}
+
+test contextual-error-name {
+    route { }
+    expect error == accept
+}

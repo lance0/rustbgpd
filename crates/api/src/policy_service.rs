@@ -1588,6 +1588,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                         .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
                     direction: "export".to_string(),
                     routes_evaluated: chain.evals,
+                    eval_errors: chain.eval_errors,
+                    last_error: chain.last_error.unwrap_or_default(),
                     terms: term_stats(chain.terms),
                     // Export chains do not track an install generation yet
                     // (LAN-311); 0 = untracked, per the proto contract.
@@ -1614,6 +1616,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                         peer_address: peer.to_string(),
                         direction: "import".to_string(),
                         routes_evaluated: snapshot.evals,
+                        eval_errors: snapshot.eval_errors,
+                        last_error: snapshot.last_error.unwrap_or_default(),
                         terms: term_stats(snapshot.terms),
                         policy_generation: snapshot.generation,
                     }),
@@ -2850,6 +2854,8 @@ policy customer-in(peer_lp: u32) {
                             rustbgpd_transport::ImportPolicyTermHits {
                                 generation: 3,
                                 evals: 11,
+                                eval_errors: 0,
+                                last_error: None,
                                 terms: vec![rustbgpd_policy::TermHitRow {
                                     policy_index: 0,
                                     policy: Some("customer-in(200)".to_string()),
@@ -2885,6 +2891,11 @@ policy customer-in(peer_lp: u32) {
                         let _ = reply.send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
                             peer,
                             evals: 7,
+                            eval_errors: 2,
+                            last_error: Some(
+                                "overflow in policy customer-in(200) term customer-routes"
+                                    .to_string(),
+                            ),
                             terms: vec![
                                 rustbgpd_policy::TermHitRow {
                                     policy_index: 0,
@@ -2939,6 +2950,13 @@ policy customer-in(peer_lp: u32) {
             chain.policy_generation, 0,
             "export chains do not track an install generation yet (LAN-311)"
         );
+        // LAN-301: eval-error counters and the rendered last error
+        // ride the chain rows.
+        assert_eq!(chain.eval_errors, 2);
+        assert_eq!(
+            chain.last_error,
+            "overflow in policy customer-in(200) term customer-routes"
+        );
         // LAN-305: dataset status rides the same response.
         assert_eq!(resp.datasets.len(), 1);
         let dataset = &resp.datasets[0];
@@ -2976,6 +2994,8 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.terms.len(), 1);
         assert_eq!(chain.terms[0].term, "customer-routes");
         assert_eq!(chain.terms[0].hits, 9);
+        assert_eq!(chain.eval_errors, 0);
+        assert_eq!(chain.last_error, "", "no error since install");
     }
 
     /// `direction = "both"` returns the export block first, then the

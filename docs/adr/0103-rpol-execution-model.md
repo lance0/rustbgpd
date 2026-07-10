@@ -139,6 +139,46 @@ counters, and the `requires_*` analyses, and the bytecode program is a
 derived, cache-like artifact regenerated from it. No consumer may ever
 observe bytecode.
 
+### Re-measurement addendum — 2026-07-10, post-slice-6 (LAN-301)
+
+The Decision 1 benches re-run against the completed evaluator — every
+program slice landed since the original receipt (arithmetic, bindings,
+loops, functions, modules, datasets, fuel at back-edges, per-walk
+dataset pinning). Same bench targets plus the LAN-303 loop shape and a
+new fn-heavy arm (`cargo bench -p rustbgpd-policy --bench
+policy_eval`). Conditions: 64-core x86-64 box, otherwise quiet (load
+average < 2, no concurrent workspace builds), `--noplot`, three full
+process runs, medians of criterion point estimates. Absolute
+nanoseconds are not comparable to the Spike A table (different
+machine); the ratios are the signal.
+
+| Shape | ns/route (median of 3) |
+|---|---|
+| 1-statement chain | 39 |
+| 32-statement walk-everything chain | 385 (~11.2 ns marginal/statement) |
+| 32-statement chain, first-statement deny | 37 |
+| AS-path regex evaluated / short-circuit skipped | 69 / 20 |
+| Community scan evaluated / skipped | 29 / 20 |
+| 1,000-prefix list as IR terms / as one indexed set probe | 4,409 / 28 (**156×**) |
+| Constant actions / arithmetic actions (LAN-299) | 44 / 80 |
+| Community scrub: set probe / per-element fueled loop (LAN-303) | 28 / 73 (~4.5 ns per element incl. fuel) |
+| Damping via `fn` (3 call sites) / hand-inlined `let`s (LAN-304) | 152 / 105 (~15 ns/call — argument-bind slot writes, no frames) |
+| 50k-ASN set probe / dataset probe with per-walk pin (LAN-305) | 20–25 / 28–34 |
+
+**Gate verdict: the re-entry condition does not fire.** Chain-walk
+dispatch is still a ~11 ns/statement marginal term, and match data
+expressed the idiomatic way (indexed sets/datasets) still beats the
+walked form by two orders of magnitude — the set-index ratio *grew*
+(128× → 156×) as the walk gained the extended-IR machinery. Every
+cost the new constructs added prices as expression evaluation
+(checked-arithmetic ops, per-element fuel + slot writes, per-call
+argument binds), not as dispatch — exactly the term bytecode cannot
+help, per Spike B's 0.75–0.94×. No profile shows the fully-walked
+long-chain shape dominating manager CPU. The compact bytecode tier
+stays unbuilt; the gate stays open on the same trigger (a real-
+workload profile with chain-walk dispatch as a dominant manager-CPU
+term).
+
 ## Decision 2 — Value/type model and source-compatible grammar evolution
 
 ### Value model

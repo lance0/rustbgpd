@@ -455,6 +455,13 @@ struct JsonPolicyStats {
     peer_address: String,
     direction: String,
     routes_evaluated: u64,
+    /// Routes denied by an evaluation error since chain install
+    /// (ADR-0103 Decision 4 fail-closed rail).
+    eval_errors: u64,
+    /// Most recent evaluation error (kind + failing policy/term);
+    /// `None` when no evaluation has errored since chain install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
     /// Install identity of the chain instance the counters belong to.
     /// `None` for export chains (install generation not tracked yet,
     /// LAN-311); import chains always report it, so counters that
@@ -521,6 +528,8 @@ pub async fn stats(
                 peer_address: chain.peer_address.clone(),
                 direction: chain.direction.clone(),
                 routes_evaluated: chain.routes_evaluated,
+                eval_errors: chain.eval_errors,
+                last_error: (!chain.last_error.is_empty()).then(|| chain.last_error.clone()),
                 policy_generation: (chain.direction == "import").then_some(chain.policy_generation),
                 terms: chain
                     .terms
@@ -571,6 +580,20 @@ pub async fn stats(
             "{} {} chain — {} routes evaluated since install{generation}",
             chain.peer_address, chain.direction, chain.routes_evaluated
         );
+        // LAN-301: evaluation errors are fail-closed denies — surface
+        // the count and the most recent blame line when nonzero.
+        if chain.eval_errors > 0 {
+            println!(
+                "  {} route{} denied by evaluation errors (fail closed); last: {}",
+                chain.eval_errors,
+                if chain.eval_errors == 1 { "" } else { "s" },
+                if chain.last_error.is_empty() {
+                    "<unknown>"
+                } else {
+                    &chain.last_error
+                },
+            );
+        }
         println!("  {:<32} {:<24} HITS", "POLICY", "TERM");
         for t in &chain.terms {
             let policy = if t.policy.is_empty() {

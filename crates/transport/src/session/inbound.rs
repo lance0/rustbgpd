@@ -38,6 +38,11 @@ fn record_import_policy_eval(
         }
     };
     metrics.record_policy_routes(peer_label, policy, "import", action);
+    // LAN-301: a fail-closed deny also counts on the eval-error
+    // aggregate (direction × closed error kind). Error path only.
+    if let Some(error) = &evaluation.eval_error {
+        metrics.record_policy_eval_error("import", error.kind.label());
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OtcState {

@@ -25,4 +25,4 @@ pub use engine::{
     RouteContext, RouteFamily, RouteModifications, RouteType, TermHitRow, apply_modifications,
     evaluate_chain, evaluate_chain_with_attribution, evaluate_policy, parse_community_match,
 };
-pub use eval::{EvalErrorKind, PolicyHitCounters};
+pub use eval::{EvalError, EvalErrorKind, PolicyHitCounters};

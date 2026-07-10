@@ -479,6 +479,21 @@ daemon process** — use Prometheus `rate()` / `increase()` to read it.
 rate(bgp_policy_routes_total{direction="import", action="deny"}[5m])
 ```
 
+**Policy evaluation errors — Prometheus.** `bgp_policy_eval_errors_total
+{direction, kind}` counts routes denied by the fail-closed evaluation-
+error rail (ADR-0103 Decision 4: checked-arithmetic failure, absent
+operand, fuel/loop-cap exhaustion, ...). These denies also appear in
+`bgp_policy_routes_total` as `action="deny"`; this counter separates
+"the policy said no" from "the policy is broken". Any nonzero rate
+deserves a look — `rbgp policy stats` names the failing chain, policy,
+and term (`eval_errors` count + `last_error` per chain), and the
+rate-limited daemon WARN carries the same blame line.
+
+```promql
+# Any policy erroring anywhere is alert-worthy:
+sum by (kind) (rate(bgp_policy_eval_errors_total[5m])) > 0
+```
+
 **Policy filtering visibility — gRPC scalar aggregates.** `NeighborState`
 carries four per-peer running totals to give operators a cheap
 sanity-check on the labelled Prometheus counter:

@@ -396,6 +396,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in list/detail JSON). With zero peers, `rbgp neighbor` now prints
   `no neighbors configured — add one: rbgp neighbor <addr> add --asn
   <asn>` instead of a bare notice; `-j` still prints `[]`. (LAN-322)
+- **rpol evaluation-error observability surface.** The final ADR-0103
+  slice (LAN-301) finishes the operator surface over the fail-closed
+  evaluation-error rail the runtime slices built: a new
+  `bgp_policy_eval_errors_total{direction, kind}` Prometheus counter
+  aggregates fail-closed denies by direction and the closed
+  `EvalErrorKind` label set (24-series worst case — per-chain detail
+  deliberately lives on the stats RPC, not labels); `GetPolicyStats`
+  / `rbgp policy stats` chain rows gain `eval_errors` (count since
+  chain install) and `last_error` (the most recent error rendered as
+  `<kind> in policy <name> term <name>`), shown above the term table
+  when nonzero. In-language tests gain an error-pinning expectation:
+  `expect p == error` (any evaluation error) and `expect p == error
+  KIND` (kind-pinned, e.g. `error divide-by-zero`; unknown kinds are
+  compile diagnostics with a suggestion). The ADR-0103 Decision 1
+  bytecode re-entry benchmark was re-run against the post-program
+  evaluator (bindings, loops, functions, datasets all landed) and the
+  gate did not fire — dispatch is still not where evaluation cost
+  lives; the receipt addendum is in the ADR. (LAN-301)
 
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
@@ -405,6 +423,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-method tier authorization is not enforced and that tier
   enforcement becomes mandatory in a future release — migrate to
   `enforcement = "tier"` with `[security.grpc.roles]`. (LAN-194)
+- **In-language `test` blocks no longer treat an evaluation error as a
+  `reject` verdict.** Per ADR-0103 Decision 4, an `expect ... ==
+  accept|reject` whose evaluation ERRORS now FAILS the test with the
+  error kind and failing policy/term rendered (previously an error
+  silently satisfied `== reject`, so a broken policy could pass as
+  "rejects correctly"). Migration: expectations that deliberately pin
+  the fail-closed rail switch to the new form — `expect p == error`
+  or `expect p == error <kind>`. (LAN-301)
 
 - **Release publication is now fail-closed.** The binary-release and
   container-image workflows refuse to publish unless the pushed tag

@@ -22,7 +22,8 @@ use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteFamily, Rout
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    CommunityLit, DatasetEntryAst, NextHopArg, PeerField, RouteField, TestDef, WithAssertion,
+    CommunityLit, DatasetEntryAst, ExpectVerdict, NextHopArg, PeerField, RouteField, TestDef,
+    WithAssertion,
 };
 use super::lower::{Lowerer, ext_community_value};
 
@@ -312,13 +313,50 @@ pub(super) fn run_tests(
             // The fixture's `peer { local-as N }` plays the config
             // resolver's role for `prepend as self` (LAN-296).
             chain.local_asn = fixture.local_asn;
-            let result = chain.evaluate(&ctx);
+            let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
             let call = render_call(&expect.policy.node, &args);
+            // ADR-0103 Decision 4: an erroring evaluation is not a
+            // clean verdict. `accept`/`reject` expectations FAIL on an
+            // error with the error rendered; `error [KIND]` pins the
+            // fail-closed rail itself.
+            match (&expect.verdict, &evaluation.eval_error) {
+                (ExpectVerdict::Error(expected_kind), Some(error)) => {
+                    if let Some(expected) = expected_kind
+                        && error.kind.label() != expected.node
+                    {
+                        problems.push(format!(
+                            "{call}: expected error {}, got error {} ({})",
+                            expected.node,
+                            error.kind.label(),
+                            error,
+                        ));
+                    }
+                    continue;
+                }
+                (ExpectVerdict::Error(_), None) => {
+                    problems.push(format!(
+                        "{call}: expected an evaluation error, got {}",
+                        verdict(result.action == PolicyAction::Permit),
+                    ));
+                    continue;
+                }
+                (ExpectVerdict::Accept | ExpectVerdict::Reject, Some(error)) => {
+                    problems.push(format!(
+                        "{call}: expected {}, got evaluation error: {error} \
+                         (use `== error {}` to pin the fail-closed rail)",
+                        verdict(matches!(expect.verdict, ExpectVerdict::Accept)),
+                        error.kind.label(),
+                    ));
+                    continue;
+                }
+                (ExpectVerdict::Accept | ExpectVerdict::Reject, None) => {}
+            }
             let accepted = result.action == PolicyAction::Permit;
-            if accepted != expect.accept {
+            let expect_accept = matches!(expect.verdict, ExpectVerdict::Accept);
+            if accepted != expect_accept {
                 problems.push(format!(
                     "{call}: expected {}, got {}",
-                    verdict(expect.accept),
+                    verdict(expect_accept),
                     verdict(accepted),
                 ));
                 continue;

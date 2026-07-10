@@ -19,10 +19,10 @@ use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry};
 
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    DatasetDecl, DatasetEntryAst, ExpectDef, Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource,
-    ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg,
-    Rhs, RouteField, SourceFile, Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst,
-    WithAssertion,
+    DatasetDecl, DatasetEntryAst, ExpectDef, ExpectVerdict, Expr, FieldPath, FieldRoot, FnDef,
+    FnLet, ForSource, ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst,
+    PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef, TestDatasetDef,
+    TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -1517,7 +1517,7 @@ impl Parser<'_> {
             self.diags.push(Diagnostic::new(
                 self.here(),
                 "test has no `expect`",
-                "expected at least one `expect <policy> == accept|reject`",
+                "expected at least one `expect <policy> == accept|reject|error`",
             ));
             return Err(Fail);
         }
@@ -1675,20 +1675,60 @@ impl Parser<'_> {
             self.expect(Tok::RParen, "`)`")?;
         }
         self.expect(Tok::EqEq, "`==`")?;
-        let accept = match self.peek().map(|t| t.kind) {
+        let verdict = match self.peek().map(|t| t.kind) {
             Some(Tok::AcceptKw) => {
                 self.bump();
-                true
+                ExpectVerdict::Accept
             }
             Some(Tok::RejectKw) => {
                 self.bump();
-                false
+                ExpectVerdict::Reject
             }
-            _ => return Err(self.error_expected("`accept` or `reject`")),
+            // `error` is contextual (LAN-301): this position held only
+            // `accept`/`reject` before, so no reserved word is added.
+            // An optional kind identifier pins the EvalErrorKind label
+            // (kebab-case munch keeps `divide-by-zero` one token).
+            Some(Tok::Ident) if self.peek().is_some_and(|t| self.text(t) == "error") => {
+                self.bump();
+                let kind = if self.at(Tok::Ident) {
+                    let kind = self.expect_ident("an evaluation-error kind")?;
+                    if !crate::eval::EvalErrorKind::LABELS.contains(&kind.node.as_str()) {
+                        let mut diag = Diagnostic::new(
+                            kind.span,
+                            format!("`{}` is not an evaluation-error kind", kind.node),
+                            "unknown error kind",
+                        );
+                        if let Some(suggestion) = super::diag::closest(
+                            &kind.node,
+                            crate::eval::EvalErrorKind::LABELS.iter().copied(),
+                        ) {
+                            diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                        }
+                        self.diags.push(diag);
+                        return Err(Fail);
+                    }
+                    Some(kind)
+                } else {
+                    None
+                };
+                ExpectVerdict::Error(kind)
+            }
+            _ => return Err(self.error_expected("`accept`, `reject`, or `error`")),
         };
         let mut with = Vec::new();
         let mut end = self.here();
-        if self.eat(Tok::WithKw).is_some() {
+        if let Some(with_kw) = self.eat(Tok::WithKw) {
+            if matches!(verdict, ExpectVerdict::Error(_)) {
+                // An erroring evaluation discards every staged
+                // modification (ADR-0103 Decision 4), so there is
+                // nothing for a `with` assertion to check.
+                self.diags.push(Diagnostic::new(
+                    with_kw.span,
+                    "`with` assertions cannot follow `== error`".to_string(),
+                    "an evaluation error discards all modifications",
+                ));
+                return Err(Fail);
+            }
             loop {
                 with.push(self.with_assertion()?);
                 if self.eat(Tok::Comma).is_none() {
@@ -1700,7 +1740,7 @@ impl Parser<'_> {
         Ok(ExpectDef {
             policy,
             args,
-            accept,
+            verdict,
             with,
             span: start.to(end),
         })

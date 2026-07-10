@@ -1967,18 +1967,18 @@ test self-operand {
 
 test missing-origin-fails-closed {
     route { prefix 10.0.0.0/24; as-path "{64500 64501}" }
-    expect origin-pad == reject
+    expect origin-pad == error absent-prepend-operand
 }
 
 test missing-peer-fails-closed {
     route { prefix 10.0.0.0/24 }
-    expect peer-pad == reject
+    expect peer-pad == error absent-prepend-operand
 }
 
 test missing-local-as-fails-closed {
     route { prefix 10.0.0.0/24 }
     peer { asn 65010 }
-    expect self-pad == reject
+    expect self-pad == error absent-prepend-operand
 }
 "#;
     let report = run_rpol_tests(source).expect("compiles");
@@ -2155,6 +2155,13 @@ fn eval_error_denies_discards_mods_and_counts() {
     assert!(result.modifications.is_empty(), "staged mods discarded");
     assert_eq!(counters.eval_errors(), 1);
     assert_eq!(counters.evals(), 2);
+    // LAN-301: the counters retain the last error with blame context
+    // for the stats surface.
+    let last = counters.last_error().expect("last error retained");
+    assert_eq!(last.kind, crate::eval::EvalErrorKind::Overflow);
+    assert_eq!(last.policy.as_deref(), Some("p"));
+    assert_eq!(last.term.as_deref(), Some("guard"));
+    assert_eq!(last.to_string(), "overflow in policy p term guard");
 
     // The recording walk (dry runs) agrees on the verdict.
     let mut hits = chain.zero_term_hits();
@@ -2405,7 +2412,7 @@ policy builtin-edges {
 
 test overflow-denies {
     route { med 4294967295 }
-    expect overflow-guard == reject
+    expect overflow-guard == error overflow
 }
 
 test no-overflow-accepts {
@@ -2415,17 +2422,17 @@ test no-overflow-accepts {
 
 test divide-by-zero-denies {
     route { med 5 }
-    expect div-zero == reject
+    expect div-zero == error divide-by-zero
 }
 
 test modulo-zero-denies {
     route { }
-    expect mod-zero == reject
+    expect mod-zero == error remainder-by-zero
 }
 
 test absent-origin-denies {
     route { as-path "{64500 64501}" }
-    expect absent-origin == reject
+    expect absent-origin == error absent-operand
 }
 
 test present-origin-accepts {
@@ -2456,6 +2463,167 @@ test builtin-passes-middle {
     let report = run_rpol_tests(source).expect("compiles cleanly");
     assert_eq!(report.total, 10);
     assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+// ── LAN-301: `expect ... == error [KIND]` and eval-error observability ──
+
+/// The bare and kind-pinned `error` expectation forms pass on the
+/// rails they pin, and the kind mismatch renders both kinds.
+#[test]
+fn error_expectation_pins_the_fail_closed_rail() {
+    let source = r"
+policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+
+test any-error-passes {
+    route { med 4294967295 }
+    expect overflowing == error
+}
+
+test kind-pinned-passes {
+    route { med 4294967295 }
+    expect overflowing == error overflow
+}
+";
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+/// A clean verdict is not an error (and vice versa): `== error` fails
+/// on a clean reject, `== reject` fails on an erroring evaluation with
+/// the error (kind, policy, term) rendered, and a kind-pinned `error`
+/// fails on a different kind.
+#[test]
+fn error_expectation_mismatches_render_the_divergence() {
+    let source = r"
+policy clean-reject { term t { reject } }
+policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+
+test clean-reject-is-not-an-error {
+    route { }
+    expect clean-reject == error
+}
+
+test error-is-not-a-clean-reject {
+    route { med 4294967295 }
+    expect overflowing == reject
+}
+
+test wrong-kind-fails {
+    route { med 4294967295 }
+    expect overflowing == error divide-by-zero
+}
+";
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert_eq!(report.total, 3);
+    assert_eq!(report.failures.len(), 3, "{:?}", report.failures);
+    let by_name = |name: &str| {
+        report
+            .failures
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("{name} should fail"))
+            .message
+            .clone()
+    };
+    assert!(
+        by_name("clean-reject-is-not-an-error")
+            .contains("expected an evaluation error, got reject"),
+        "{:?}",
+        report.failures
+    );
+    let msg = by_name("error-is-not-a-clean-reject");
+    assert!(
+        msg.contains(
+            "expected reject, got evaluation error: overflow in policy overflowing term t"
+        ),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("use `== error overflow`"),
+        "steers to the pinning form: {msg}"
+    );
+    let msg = by_name("wrong-kind-fails");
+    assert!(
+        msg.contains("expected error divide-by-zero, got error overflow"),
+        "{msg}"
+    );
+}
+
+/// An unknown error kind after `== error` is a compile diagnostic with
+/// a closest-label suggestion, and `with` assertions cannot follow
+/// `== error` (an error discards all modifications).
+#[test]
+fn error_expectation_grammar_diagnostics() {
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { reject } }
+         test t { route { } expect p == error divide-by-zeroo }",
+    );
+    assert!(
+        rendered.contains("`divide-by-zeroo` is not an evaluation-error kind"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("did you mean `divide-by-zero`?"),
+        "{rendered}"
+    );
+
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { reject } }
+         test t { route { } expect p == error with med 5 }",
+    );
+    assert!(
+        rendered.contains("`with` assertions cannot follow `== error`"),
+        "{rendered}"
+    );
+}
+
+/// `error` stays contextual: a policy (or set) named `error` keeps
+/// compiling and keeps being referencable from expects.
+#[test]
+fn policy_named_error_still_works() {
+    let source = r"
+policy error { term t { accept } }
+
+test error-policy-accepts {
+    route { }
+    expect error == accept
+}
+";
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+/// The attribution surface carries the evaluation error (LAN-301):
+/// `eval_error` is `Some` with kind/policy/term on the error rail and
+/// `None` on a clean deny — the discriminator the test runner and the
+/// metrics sites read.
+#[test]
+fn evaluation_carries_eval_error_on_the_error_rail_only() {
+    let chain = compile_ok(
+        "policy p {
+            term guard { if route.med + 1 >= 1 { accept } }
+            term rest { reject }
+         }",
+    );
+    let mut ctx = absent_ctx();
+    ctx.med = Some(u32::MAX);
+    let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+    assert_eq!(result.action, PolicyAction::Deny);
+    let error = evaluation.eval_error.expect("error rail carries blame");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::Overflow);
+    assert_eq!(error.policy.as_deref(), Some("p"));
+    assert_eq!(error.term.as_deref(), Some("guard"));
+
+    ctx.med = Some(1);
+    let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+
+    // Clean deny (guard non-match falls to the reject term): no error.
+    let clean = compile_ok("policy p { term t { reject } }");
+    let (result, evaluation) = clean.evaluate_with_attribution(&absent_ctx());
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(evaluation.eval_error, None);
 }
 
 // ── `let` bindings (LAN-302) ───────────────────────────────────────
@@ -3033,7 +3201,7 @@ test shadow-outer-binding-on-fallthrough {
 
 test absent-origin-initializer-denies {
     route { as-path "{64500 64501}" }
-    expect eager-error == reject
+    expect eager-error == error absent-operand
 }
 "#;
     let report = run_rpol_tests(source).expect("compiles cleanly");

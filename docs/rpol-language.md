@@ -482,9 +482,11 @@ if route.med >= threshold + 20 { set local-pref 90 }
 error — checked-arithmetic failure, inverted clamp, or an **absent
 operand** (`route.origin-as` on an empty/`AS_SET`-only path, unknown
 `peer.asn`) — denies the route: staged modifications are discarded,
-the chain's eval-error counter increments, a rate-limited WARN names
-the failing policy and term, and explain traces render the error in
-place of a verdict. `route.local-pref` and `route.med` read their
+`bgp_policy_eval_errors_total{direction, kind}` and the chain's
+eval-error counter increment (the latter with the failing
+policy/term retained, surfaced by `rbgp policy stats`), a
+rate-limited WARN names the failing policy and term, and explain
+traces render the error in place of a verdict. `route.local-pref` and `route.med` read their
 implicit defaults (100 / 0) when absent, consistent with comparisons.
 Note the deliberate divergence from plain comparisons: an
 arithmetic-free `route.origin-as == 64500` on an origin-less route
@@ -1056,6 +1058,7 @@ test NAME {
     route { FIELD VALUE; ... }
     [peer { address IP; asn N; local-as N; group "NAME" }]
     expect POLICY[(args)] == accept|reject [with ASSERTION, ...]
+    expect POLICY[(args)] == error [KIND]
     [expect ...]
 }
 ```
@@ -1083,6 +1086,26 @@ during evaluation, so the assertion states the **resolved** ASN:
 `with prepend as 65010 3`. `peer { local-as N }` supplies the value
 `prepend as self` resolves to (omitted ⇒ it fails closed and the
 expectation is a `reject`).
+
+**Errors are not verdicts.** An evaluation error (checked-arithmetic
+failure, absent operand, budget exhaustion — the ADR-0103 Decision 4
+fail-closed rail) FAILS an `accept` *or* `reject` expectation, with
+the error kind and the failing policy/term rendered — a test cannot
+accidentally pin a broken policy as "rejects correctly". To pin the
+rail itself, expect it: `expect p == error` passes on any evaluation
+error, and `expect p == error KIND` pins the kind (`error overflow`,
+`error divide-by-zero`, `error absent-prepend-operand`, ...; unknown
+kinds are compile diagnostics with a suggestion). `with` assertions
+cannot follow `== error` — an error discards every staged
+modification. In the daemon the same route is denied; the test form
+exists so CI can prove *which* rail fires:
+
+```rpol
+test missing-origin-fails-closed {
+    route { as-path "{64500 64501}" }
+    expect origin-pad == error absent-prepend-operand
+}
+```
 
 Tests run at check time (`rbgp policy check`, CI) with zero daemon
 involvement. Testing a *candidate* policy against a live RIB is
@@ -1384,7 +1407,15 @@ $ rbgp policy stats --peer 10.0.0.2 --direction both
   does. Export chains do not track an install generation yet.
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.
-- `--json` emits the rows structurally.
+- Chains that have denied routes through the **evaluation-error rail**
+  (ADR-0103 Decision 4) report the count and the most recent blame
+  line above the term table — `2 routes denied by evaluation errors
+  (fail closed); last: overflow in policy pad-med term pad` — the
+  drill-down for a nonzero `bgp_policy_eval_errors_total{direction,
+  kind}` rate. Error counts reset with the chain instance, like every
+  other counter here.
+- `--json` emits the rows structurally (`eval_errors`, `last_error`
+  included).
 
 ## Positioning — how `.rpol` differs from BIRD filters and route-maps
 
@@ -1511,10 +1542,7 @@ hit counters — those come free after the rewrite.
 No `while` and no unbounded iteration of any kind — `for` (LAN-303)
 iterates finite sources only, capped and fuel-metered. No
 user-defined types, no maps (safety is total by construction —
-ADR-0096 Decision 2; the ADR-0103 extension program adds bounded
-constructs slice by slice — checked arithmetic shipped as LAN-299,
-bindings as LAN-302, bounded loops as LAN-303, pure functions as
-LAN-304, modules and imports as LAN-300). No `as-path-set`. No `else if` chains and no nested `if`
+ADR-0096 Decision 2). No `as-path-set`. No `else if` chains and no nested `if`
 (keep terms small; use `&&` or more terms). No mutable state of any
 kind — `let` bindings (LAN-302) are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and
@@ -1523,3 +1551,16 @@ needs its own ADR). EVPN route type takes only an integer literal
 IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the
 supported form.
+
+The ADR-0103 v2 extension program is **complete**: checked arithmetic
+(LAN-299), `let` bindings (LAN-302), bounded loops (LAN-303), pure
+functions (LAN-304), modules and imports (LAN-300), external datasets
+(LAN-305), and the metered-runtime operator surface — eval-error
+counters, `rbgp policy stats` exposure, error-pinning test
+expectations (LAN-301) — have all shipped on the tree-walk evaluator.
+What deliberately did **not** ship: a bytecode tier (deferred behind
+the ADR-0103 Decision 1 re-entry gate — built only if a real-workload
+profile ever shows chain-walk dispatch dominating, which the
+post-program re-measurement did not) and any WASM/host-function
+escape hatch (rejected outright, ADR-0103 Decision 9 — external
+*data* via datasets, never external code in the per-route path).

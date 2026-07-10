@@ -643,6 +643,7 @@ impl RibManager {
                 rustbgpd_policy::PolicyEvaluation {
                     action: PolicyAction::Permit,
                     matched_policy: None,
+                    eval_error: None,
                 },
             ),
         };

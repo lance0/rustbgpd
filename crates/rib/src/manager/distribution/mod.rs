@@ -395,6 +395,7 @@ impl<'a> ExportTarget<'a> {
                     PolicyEvaluation {
                         action: PolicyAction::Permit,
                         matched_policy: None,
+                        eval_error: None,
                     },
                 ),
             },
@@ -444,6 +445,11 @@ fn record_export_policy_eval(
         }
     };
     metrics.record_policy_routes(peer_label, policy, "export", action);
+    // LAN-301: a fail-closed deny also counts on the eval-error
+    // aggregate (direction × closed error kind). Error path only.
+    if let Some(error) = &evaluation.eval_error {
+        metrics.record_policy_eval_error("export", error.kind.label());
+    }
 }
 
 impl RibManager {
