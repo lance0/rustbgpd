@@ -701,6 +701,12 @@ impl Serialize for JsonRouteRef<'_> {
         if !route.validation_state.is_empty() {
             len += 1;
         }
+        if route.stale {
+            len += 1;
+        }
+        if route.llgr_stale {
+            len += 1;
+        }
 
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("prefix", &JsonRoutePrefix(route))?;
@@ -722,6 +728,12 @@ impl Serialize for JsonRouteRef<'_> {
         }
         if !route.validation_state.is_empty() {
             map.serialize_entry("validation_state", &route.validation_state)?;
+        }
+        if route.stale {
+            map.serialize_entry("stale", &route.stale)?;
+        }
+        if route.llgr_stale {
+            map.serialize_entry("llgr_stale", &route.llgr_stale)?;
         }
         map.end()
     }
@@ -2489,6 +2501,26 @@ mod tests {
             serde_json::to_value(JsonRoutes(&[with_med, zero_med])).unwrap();
         assert_eq!(value[0]["med"], 50);
         assert_eq!(value[1]["med"], 0);
+    }
+
+    /// GR stale flags serialize only when set, matching the VPN /
+    /// labeled / RTC / BGP-LS route JSON convention (LAN-347).
+    #[test]
+    fn route_list_json_emits_stale_flags_only_when_set() {
+        let fresh = route_for_json(0, "");
+        let mut stale = route_for_json(0, "");
+        stale.stale = true;
+        let mut llgr = route_for_json(0, "");
+        llgr.stale = true;
+        llgr.llgr_stale = true;
+        let value: serde_json::Value =
+            serde_json::to_value(JsonRoutes(&[fresh, stale, llgr])).unwrap();
+        assert!(value[0].get("stale").is_none());
+        assert!(value[0].get("llgr_stale").is_none());
+        assert_eq!(value[1]["stale"], true);
+        assert!(value[1].get("llgr_stale").is_none());
+        assert_eq!(value[2]["stale"], true);
+        assert_eq!(value[2]["llgr_stale"], true);
     }
 
     #[test]
