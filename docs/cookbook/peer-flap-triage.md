@@ -83,5 +83,5 @@ rbgp neighbor 10.0.0.2 disable --reason "flap triage $(date -u +%F)"
 ```
 
 Disabling keeps the neighbor's config, counters, and history; `enable`
-brings it back. For planned drains prefer `rbgp gshut --peer 10.0.0.2`
+brings it back. For planned drains prefer `rbgp gshut --neighbor 10.0.0.2`
 (RFC 8326) so traffic moves before the session does.

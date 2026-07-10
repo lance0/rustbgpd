@@ -38,5 +38,5 @@ ladder with per-candidate export-policy verdicts (which candidates were
 denied by which policy term, and which one was advertised).
 
 Members are managed dynamically via gRPC as they join and leave — see
-`rbgp neighbor <addr> add --asn <asn> --route-server-client \
+`rbgp neighbor <addr> add --remote-asn <asn> --route-server-client \
 --per-client-best --role rs`.

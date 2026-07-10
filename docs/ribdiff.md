@@ -12,7 +12,7 @@ are the only RPCs issued) and fail-closed: **equality is never asserted
 from incomplete, truncated, over-limit, stale, or malformed input.**
 
 ```console
-$ rbgp diff advertised --peer 192.0.2.1 --against incumbent.ndjson
+$ rbgp diff advertised --neighbor 192.0.2.1 --against incumbent.ndjson
 $ echo $?
 0
 ```
@@ -29,7 +29,7 @@ $ echo $?
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--peer <IP>` | all snapshot peers | Peer to compare; repeatable |
+| `--neighbor <IP>` | all snapshot peers | Peer to compare; repeatable |
 | `--against <PATH>` | required | Incumbent `rbgp-ribsnap/1` NDJSON snapshot |
 | `--family <F>` | ipv4\_unicast + ipv6\_unicast | Family filter; repeatable |
 | `--ignore-attribute <A>` | none | Exclude an attribute from comparison on both sides; repeatable (`origin`, `as_path`, `next_hop`, `med`, `local_pref`, `communities`, `extended_communities`, `large_communities`, `unknown`) |

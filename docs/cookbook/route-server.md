@@ -174,7 +174,7 @@ it, followed by the runner-up actually advertised — instead of the false
 Members can be added and removed at runtime:
 
 ```console
-$ rbgp neighbor 198.51.100.4 add --asn 64503 \
+$ rbgp neighbor 198.51.100.4 add --remote-asn 64503 \
     --route-server-client --per-client-best --role rs
 ```
 

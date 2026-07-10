@@ -36,7 +36,7 @@ If the fleet auto-accepts via a `[[dynamic_neighbors]]` range, a new
 client inside the range needs nothing. Otherwise:
 
 ```bash
-rbgp neighbor 10.0.0.42 add --asn 65000 --description "new-client"
+rbgp neighbor 10.0.0.42 add --remote-asn 65000 --description "new-client"
 # or widen the accept range:
 rbgp dynamic-neighbor add 10.0.9.0/24 --peer-group rr-clients
 ```
@@ -53,7 +53,7 @@ Before touching a live RR, classify the edit — the
 oracle:
 
 ```bash
-rbgp config diff --from-file /etc/rustbgpd/candidate.toml
+rbgp config diff /etc/rustbgpd/candidate.toml
 ```
 
 Not sure what a value on the live RR *currently* is (an inherited
@@ -87,9 +87,9 @@ For anything you would want auto-rolled-back if you cut yourself off,
 use a config transaction with a confirm timer instead of SIGHUP:
 
 ```bash
-rbgp config plan --from-file /etc/rustbgpd/candidate.toml
+rbgp config plan /etc/rustbgpd/candidate.toml
 # plan prints the runtime snapshot token; apply requires it:
-rbgp config apply --from-file /etc/rustbgpd/candidate.toml \
+rbgp config apply /etc/rustbgpd/candidate.toml \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id rr1-edit-$(date -u +%Y%m%d-%H%M) \
   --confirm-timeout 120

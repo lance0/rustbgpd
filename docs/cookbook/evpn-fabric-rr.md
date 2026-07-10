@@ -87,7 +87,7 @@ $ rbgp evpn                          # all reflected EVPN routes
 $ rbgp evpn --route-type 2           # MAC/IP advertisements only
 $ rbgp evpn --route-type 3           # IMET (BUM flooding) entries
 $ rbgp evpn --rd 65000:100           # one EVI's view
-$ rbgp evpn --peer 10.0.0.1          # what leaf-01 contributed
+$ rbgp evpn --neighbor 10.0.0.1      # what leaf-01 contributed
 ```
 
 Expected shape: one row per (RD, route-type, key) with the originating
@@ -126,7 +126,7 @@ number.
 **A leaf's routes aren't reaching another leaf.** (The
 `rbgp rib advertised --explain` gate ladder covers the unicast and
 VPN families, not EVPN — for EVPN, walk the gates by hand; they fail
-in this order.) First `rbgp evpn --peer 10.0.0.1` — did the RR accept
+in this order.) First `rbgp evpn --neighbor 10.0.0.1` — did the RR accept
 the routes from the source leaf at all? Then the two common
 reflection stops: *family* — the quiet leaf didn't negotiate
 `l2vpn_evpn` (check its row in `rbgp neighbor`; an FRR leaf missing

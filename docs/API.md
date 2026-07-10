@@ -496,12 +496,12 @@ outside the reshape family (ADR-0086).
 CLI equivalent:
 
 ```bash
-rbgp config diff --from-file /tmp/new-config.toml
-rbgp --json config diff --from-file /tmp/new-config.toml
-rbgp config plan --from-file /tmp/new-config.toml
-rbgp config apply --from-file /tmp/new-config.toml \
+rbgp config diff /tmp/new-config.toml
+rbgp --json config diff /tmp/new-config.toml
+rbgp config plan /tmp/new-config.toml
+rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
-rbgp config apply --from-file /tmp/new-config.toml \
+rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --client-request-id deploy-2026-06-03-003 \
   --confirm-id deploy-2026-06-03-003 \
@@ -1078,7 +1078,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 rbgp rib fib          # human table
 rbgp rib fib --json   # JSON array for scripts
 rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
-rbgp rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rbgp rib fib --prefix 203.0.113.0/24 --neighbor 198.51.100.2
 rbgp rib fib --page-size 100
 ```
 
@@ -1100,7 +1100,7 @@ longest-prefix or containment matching, so `203.0.113.0/24` does not match
 `203.0.113.128/25`. Empty strings and `FIB_ROUTE_STATE_UNSPECIFIED` mean "no
 filter"; for direct gRPC callers, `prefix_length` must be `0` when `prefix` is
 empty. `rbgp rib fib` exposes the same filters as `--table`, `--state`,
-`--reason`, `--prefix`, and `--peer`. `page_size` and `page_token` enable
+`--reason`, `--prefix`, and `--neighbor`. `page_size` and `page_token` enable
 optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
 `page_size > 0`. The response includes `next_page_token` and `total_count`;

@@ -88,9 +88,9 @@ With the systemd unit, the default CLI address is already
 ```bash
 # Add static peers at runtime; persisted to config when the daemon was started
 # with --config.
-rbgp neighbor 10.0.0.5 add --asn 65005
-rbgp neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
-rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --asn 65101
+rbgp neighbor 10.0.0.5 add --remote-asn 65005
+rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
+rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --remote-asn 65101
 
 # Add a dynamic-neighbor accept range.
 rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
