@@ -303,6 +303,158 @@ fn print_deps(path: &str, file: &rustbgpd_policy::rpol::RpolFile, json: bool) ->
     0
 }
 
+/// `rbgp policy fmt [--check] FILE...` — the canonical `.rpol`
+/// formatter (LAN-323). Rewrites files in place via an atomic
+/// write-temp-rename; `--check` rewrites nothing and prints a diff
+/// for files needing formatting (CI mode); `-` reads stdin and writes
+/// the formatted source to stdout (editor integration).
+///
+/// Returns the process exit code: 0 all files clean/formatted, 1 when
+/// `--check` found differences or any file was unreadable/unformattable
+/// (syntax errors — broken files are refused, never rewritten).
+pub fn fmt_local(files: &[String], check: bool) -> i32 {
+    use std::io::{IsTerminal, Read, Write};
+
+    use rustbgpd_policy::rpol::{FmtError, format_rpol};
+
+    let mut failed = false;
+    for file in files {
+        let from_stdin = file == "-";
+        let source = if from_stdin {
+            let mut buf = String::new();
+            match std::io::stdin().read_to_string(&mut buf) {
+                Ok(_) => buf,
+                Err(error) => {
+                    eprintln!("Error: cannot read stdin: {error}");
+                    failed = true;
+                    continue;
+                }
+            }
+        } else {
+            match std::fs::read_to_string(file) {
+                Ok(source) => source,
+                Err(error) => {
+                    eprintln!("Error: cannot read {file}: {error}");
+                    failed = true;
+                    continue;
+                }
+            }
+        };
+        let name = if from_stdin { "<stdin>" } else { file.as_str() };
+        let formatted = match format_rpol(&source) {
+            Ok(formatted) => formatted,
+            Err(FmtError::Syntax(diags)) => {
+                let color = std::io::stderr().is_terminal();
+                eprint!("{}", diags.render(name, &source, color));
+                eprintln!(
+                    "{name}: not formatted ({} syntax error{} — see `rbgp policy check`)",
+                    diags.len(),
+                    if diags.len() == 1 { "" } else { "s" }
+                );
+                failed = true;
+                continue;
+            }
+            Err(error @ FmtError::Internal(_)) => {
+                eprintln!("Error: {name}: {error}");
+                failed = true;
+                continue;
+            }
+        };
+        if from_stdin {
+            // Stdin always streams the result; --check additionally
+            // signals via the exit code without a diff dump.
+            if check {
+                if formatted != source {
+                    eprintln!("<stdin>: needs formatting");
+                    failed = true;
+                }
+            } else if std::io::stdout().write_all(formatted.as_bytes()).is_err() {
+                failed = true;
+            }
+            continue;
+        }
+        if formatted == source {
+            continue;
+        }
+        if check {
+            println!("Diff in {file}:");
+            print!("{}", line_diff(&source, &formatted));
+            failed = true;
+        } else if let Err(error) = write_atomic(std::path::Path::new(file), &formatted) {
+            eprintln!("Error: {error}");
+            failed = true;
+        }
+    }
+    i32::from(failed)
+}
+
+/// Atomic in-place rewrite: write a sibling temp file, carry over the
+/// original's permissions, and rename over the target — a crash never
+/// leaves a truncated policy file. Failures name the destination path
+/// (the daemon's `write_atomic` discipline, CLI-side).
+fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let inner = || -> std::io::Result<()> {
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        let permissions = std::fs::metadata(path)?.permissions();
+        std::fs::write(&tmp, text)?;
+        std::fs::set_permissions(&tmp, permissions)?;
+        std::fs::rename(&tmp, path)
+    };
+    inner().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to write {}: {error}", path.display()),
+        )
+    })
+}
+
+/// Minimal line diff (`-` old / `+` new, `@ line N` hunk markers) for
+/// `fmt --check` output. LCS over lines; formatting diffs are small
+/// and local, so the quadratic table is bounded by a size guard.
+fn line_diff(old: &str, new: &str) -> String {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    if a.len().saturating_mul(b.len()) > 4_000_000 {
+        return "  (file too large to diff; run `rbgp policy fmt` to rewrite it)\n".to_string();
+    }
+    // LCS length table.
+    let mut lcs = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut out = String::new();
+    let (mut i, mut j) = (0, 0);
+    let mut in_hunk = false;
+    while i < a.len() || j < b.len() {
+        if i < a.len() && j < b.len() && a[i] == b[j] {
+            i += 1;
+            j += 1;
+            in_hunk = false;
+            continue;
+        }
+        if !in_hunk {
+            out.push_str(&format!("  @ line {}\n", i + 1));
+            in_hunk = true;
+        }
+        if j >= b.len() || (i < a.len() && lcs[i + 1][j] >= lcs[i][j + 1]) {
+            out.push_str(&format!("- {}\n", a[i]));
+            i += 1;
+        } else {
+            out.push_str(&format!("+ {}\n", b[j]));
+            j += 1;
+        }
+    }
+    out
+}
+
 /// Options for `rbgp policy test` (ADR-0096 live-RIB dry run).
 pub struct TestOptions<'a> {
     /// Path to the local `.rpol` file (its text is sent to the daemon).
@@ -1929,5 +2081,72 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(captured.address, "10.0.0.2");
+    }
+
+    /// LAN-323: `fmt` rewrites in place (atomically), a second run is
+    /// a no-op, and the rewritten file still checks clean.
+    #[test]
+    fn fmt_local_rewrites_in_place_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.rpol");
+        std::fs::write(&path, "policy p{term t{if route.rpki==invalid{reject}}}").unwrap();
+        let files = vec![path.to_str().unwrap().to_string()];
+        assert_eq!(fmt_local(&files, false), 0);
+        let formatted = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            formatted,
+            "policy p {\n    term t { if route.rpki == invalid { reject } }\n}\n"
+        );
+        // Idempotent: nothing further to rewrite, and --check agrees.
+        assert_eq!(fmt_local(&files, false), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), formatted);
+        assert_eq!(fmt_local(&files, true), 0);
+        // No temp residue from the atomic write.
+        assert!(!dir.path().join("p.rpol.tmp").exists());
+        assert_eq!(check_local(&files[0], &[], false, false), 0);
+    }
+
+    /// LAN-323: `--check` never rewrites, exits 1 on drift, and a
+    /// multi-file invocation aggregates (one dirty file fails the run).
+    #[test]
+    fn fmt_local_check_mode_flags_drift_without_rewriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirty = dir.path().join("dirty.rpol");
+        let clean = dir.path().join("clean.rpol");
+        std::fs::write(&dirty, "policy p{term t{accept}}").unwrap();
+        std::fs::write(&clean, "policy p {\n    term t { accept }\n}\n").unwrap();
+        let both = vec![
+            clean.to_str().unwrap().to_string(),
+            dirty.to_str().unwrap().to_string(),
+        ];
+        assert_eq!(fmt_local(&both[..1], true), 0);
+        assert_eq!(fmt_local(&both, true), 1);
+        // --check rewrote nothing.
+        assert_eq!(
+            std::fs::read_to_string(&dirty).unwrap(),
+            "policy p{term t{accept}}"
+        );
+    }
+
+    /// LAN-323: syntax-broken and unreadable files are refused (exit
+    /// 1) and never rewritten.
+    #[test]
+    fn fmt_local_refuses_broken_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("broken.rpol");
+        std::fs::write(&broken, "policy p { term t {").unwrap();
+        assert_eq!(fmt_local(&[broken.to_str().unwrap().to_string()], false), 1);
+        assert_eq!(
+            std::fs::read_to_string(&broken).unwrap(),
+            "policy p { term t {"
+        );
+        assert_eq!(fmt_local(&["/nonexistent/x.rpol".to_string()], false), 1);
+    }
+
+    #[test]
+    fn line_diff_marks_changed_lines() {
+        let diff = line_diff("a\nb\nc\n", "a\nB\nc\n");
+        assert_eq!(diff, "  @ line 2\n- b\n+ B\n");
+        assert_eq!(line_diff("same\n", "same\n"), "");
     }
 }

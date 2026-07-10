@@ -8,14 +8,10 @@ policy ixp-hygiene {
     # Reject routes carrying an AS_SET (deprecated by RFC 9774).
     # AS_PATHs render AS_SETs in braces, so a literal `{` matches any
     # AS_SET segment.
-    term reject-as-set {
-        if route.as-path matches "\\{" { reject }
-    }
+    term reject-as-set { if route.as-path matches "\\{" { reject } }
     # Reject ASPA-invalid AS paths. Inert (state = unknown) until ASPA
     # objects are loaded from the RPKI cache.
-    term reject-aspa-invalid {
-        if route.aspa == invalid { reject }
-    }
+    term reject-aspa-invalid { if route.aspa == invalid { reject } }
 }
 
 test as-set-is-rejected {

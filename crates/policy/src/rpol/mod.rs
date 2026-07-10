@@ -22,6 +22,7 @@
 
 mod ast;
 mod diag;
+mod fmt;
 mod lexer;
 mod lower;
 mod modules;
@@ -30,6 +31,7 @@ mod testing;
 mod typeck;
 
 pub use diag::{Diagnostic, Diagnostics, Span, Spanned};
+pub use fmt::{FmtError, format_rpol};
 pub use modules::{
     LoadError, MAX_FILE_BYTES, MAX_GRAPH_BYTES, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
 };

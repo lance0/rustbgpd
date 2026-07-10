@@ -404,6 +404,24 @@ enum PolicyAction {
         #[arg(long)]
         list_deps: bool,
     },
+    /// Format `.rpol` files in the one canonical style (LAN-323).
+    /// Rewrites each file in place (atomic write). Formatting never
+    /// adds, removes, or reorders tokens — comments and semicolons
+    /// are preserved, and the output is verified to lex identically
+    /// before anything is written. No daemon connection. Exit codes:
+    /// 0 all files clean/formatted, 1 a file needs formatting under
+    /// --check or an error (unreadable file, syntax errors — broken
+    /// files are refused, never formatted).
+    Fmt {
+        /// `.rpol` files to format; `-` reads stdin and writes the
+        /// formatted source to stdout (editor integration)
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// Rewrite nothing; print a diff and exit 1 when any file is
+        /// not canonically formatted (CI mode)
+        #[arg(long)]
+        check: bool,
+    },
     /// Dry-run a candidate `.rpol` policy against the daemon's live
     /// RIB (ADR-0096): the file compiles server-side and evaluates
     /// read-only over a route snapshot — counts, per-term hit
@@ -1546,6 +1564,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         ));
     }
 
+    // `policy fmt` is also purely local — no daemon.
+    if let Command::Policy {
+        action: PolicyAction::Fmt { files, check },
+    } = &cli.command
+    {
+        std::process::exit(commands::policy::fmt_local(files, *check));
+    }
+
     // `diff` owns its 0/1/2 exit-code contract (2 = any operational
     // error, including an unreachable daemon), so it bypasses the generic
     // connect-then-exit-1 path.
@@ -2399,7 +2425,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             tui::run(connection, interval).await
         }
         Command::Policy { action } => match action {
-            PolicyAction::Check { .. } => unreachable!("handled before connect"),
+            PolicyAction::Check { .. } | PolicyAction::Fmt { .. } => {
+                unreachable!("handled before connect")
+            }
             PolicyAction::Test {
                 file,
                 policy,
