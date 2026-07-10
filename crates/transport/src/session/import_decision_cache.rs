@@ -105,6 +105,7 @@ pub struct CachedPolicyContext {
     pub large_communities: Vec<LargeCommunity>,
     pub as_path_str: String,
     pub as_path_len: usize,
+    pub origin_asn: Option<u32>,
     pub local_pref: Option<u32>,
     pub med: Option<u32>,
 }

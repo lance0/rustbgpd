@@ -378,6 +378,16 @@ impl CompiledChain {
                 self.as_path_regexes[id.0 as usize].is_match(ctx.as_path_str)
             }
             MatchExpr::AsPathLen(cmp) => cmp_len(*cmp, ctx.as_path_len),
+            MatchExpr::OriginAsEq(asn) => ctx.origin_asn == Some(*asn),
+            // `!=` mirrors `==`: an absent origin (empty or AS_SET-only
+            // path) matches neither, so require it present first.
+            MatchExpr::OriginAsNe(asn) => ctx.origin_asn.is_some_and(|origin| origin != *asn),
+            MatchExpr::OriginAsInSet(id) => ctx
+                .origin_asn
+                .is_some_and(|origin| self.asn_sets[id.0 as usize].contains(origin)),
+            MatchExpr::PeerAsInSet(id) => ctx
+                .peer_asn
+                .is_some_and(|asn| self.asn_sets[id.0 as usize].contains(asn)),
             MatchExpr::LocalPref(cmp) => {
                 cmp_value(*cmp, ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF))
             }
@@ -456,6 +466,7 @@ mod tests {
             large_communities: &[],
             as_path_str: "",
             as_path_len: 0,
+            origin_asn: None,
             validation_state: RpkiValidation::NotFound,
             aspa_state: AspaValidation::Unknown,
             peer_address: None,

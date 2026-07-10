@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::super::explain::render_expr;
 use super::*;
 use crate::ir::{Cmp, CompiledChain, MatchExpr, SetId};
-use crate::sets::{CommunitySet, PrefixSet, PrefixSetEntry};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry};
 
 /// A chain whose tables carry one named prefix set, one named
 /// community set (standard criteria), and one regex — enough for every
@@ -25,9 +25,11 @@ fn tables() -> CompiledChain {
         community_sets: vec![Arc::new(CommunitySet::new([CommunityMatch::Standard {
             value: (65000 << 16) | 0x0064,
         }]))],
+        asn_sets: vec![Arc::new(AsnSet::new([64500, 64501]))],
         as_path_regexes: vec![Arc::new(AsPathRegex::new("_65010_").unwrap())],
         prefix_set_names: vec![Some("customers".to_string())],
         community_set_names: vec![Some("cust-tags".to_string())],
+        asn_set_names: vec![Some("cust-asns".to_string())],
         ..CompiledChain::empty()
     }
 }
@@ -95,6 +97,13 @@ fn every_node_type_renders_its_golden_form() {
             "route.as-path matches \"_65010_\"",
         ),
         (MatchExpr::AsPathLen(Cmp::Ge(3)), "route.as-path.len >= 3"),
+        (MatchExpr::OriginAsEq(64500), "route.origin-as == 64500"),
+        (MatchExpr::OriginAsNe(64500), "route.origin-as != 64500"),
+        (
+            MatchExpr::OriginAsInSet(SetId(0)),
+            "route.origin-as in cust-asns",
+        ),
+        (MatchExpr::PeerAsInSet(SetId(0)), "peer.asn in cust-asns"),
         (MatchExpr::LocalPref(Cmp::Le(50)), "route.local-pref <= 50"),
         (MatchExpr::Med(Cmp::Ge(10)), "route.med >= 10"),
         (
@@ -159,6 +168,11 @@ fn unnamed_sets_fall_back_to_indexed_placeholders() {
     assert_eq!(
         render_expr(&MatchExpr::CommunityInSet(SetId(0)), &tables),
         "route.communities in community-set#0"
+    );
+    tables.asn_set_names = vec![None];
+    assert_eq!(
+        render_expr(&MatchExpr::OriginAsInSet(SetId(0)), &tables),
+        "route.origin-as in asn-set#0"
     );
 }
 

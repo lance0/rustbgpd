@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`.rpol` indexed ASN sets and origin-AS predicates.** New `asn-set`
+  declarations (`asn-set customers { 64500, 64501 }`) compile to
+  content-interned hash sets probed in O(1) by two new predicates:
+  `route.origin-as in <set>` / `peer.asn in <set>`, plus
+  `route.origin-as ==`/`!=` comparisons. The route's origin AS (the last
+  ASN of the rightmost non-empty `AS_SEQUENCE`) is computed once where the
+  typed `AS_PATH` is already parsed and carried on the policy context —
+  never re-derived per evaluation. Absent origins (empty or `AS_SET`-only
+  paths) match neither equality nor membership, mirroring the other
+  absent-attribute predicates. `peer.asn in` reads peer identity and
+  therefore excludes its peers from update-group sharing, like the other
+  peer-context guards. ASN sets are an `.rpol`-only surface (no TOML
+  equivalent), following the strict-next-hop precedent. (LAN-249)
+
 - **`bgp_rib_attr_intern_size{peer}` gauge** — unique interned attribute sets
   in each peer's Adj-RIB-In table (attribute-memory dedup); sum across peers
   for the daemon-wide total. Three containerlab soak harnesses (GR-restart

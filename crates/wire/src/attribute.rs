@@ -3463,6 +3463,48 @@ mod tests {
         let buf = [0x40, 0x01, 0x02, 0x00, 0x00];
         assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
+    /// Origin-AS extraction: the last ASN in the rightmost non-empty
+    /// `AS_SEQUENCE`. Absent (`None`) for paths with no usable
+    /// sequence — empty paths and `AS_SET`-only paths.
+    #[test]
+    fn origin_asn_segment_shapes() {
+        let seq = AsPathSegment::AsSequence;
+        let set = AsPathSegment::AsSet;
+        let cases: [(&str, Vec<AsPathSegment>, Option<u32>); 8] = [
+            ("empty path", vec![], None),
+            ("plain sequence", vec![seq(vec![65001, 65002])], Some(65002)),
+            ("AS_SET-only", vec![set(vec![65003, 65004])], None),
+            (
+                "aggregated: sequence then set",
+                vec![seq(vec![65001, 65002]), set(vec![65003, 65004])],
+                Some(65002),
+            ),
+            (
+                "set then sequence",
+                vec![set(vec![65003]), seq(vec![65001, 65002])],
+                Some(65002),
+            ),
+            (
+                "rightmost sequence empty falls back left",
+                vec![seq(vec![65001]), seq(vec![])],
+                Some(65001),
+            ),
+            (
+                "multiple sequences take the rightmost",
+                vec![seq(vec![65001]), seq(vec![65005, 65006])],
+                Some(65006),
+            ),
+            (
+                "4-byte ASN, no truncation",
+                vec![seq(vec![65001, 4_200_000_001])],
+                Some(4_200_000_001),
+            ),
+        ];
+        for (what, segments, expect) in cases {
+            assert_eq!(AsPath { segments }.origin_asn(), expect, "{what}");
+        }
+    }
+
     #[test]
     fn as_path_with_set_and_sequence() {
         // AS_SEQUENCE [65001], AS_SET [65002, 65003]

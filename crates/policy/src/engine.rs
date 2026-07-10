@@ -88,6 +88,13 @@ pub struct RouteContext<'a> {
     pub as_path_str: &'a str,
     /// Number of ASNs in the `AS_PATH` (RFC 4271 length rules).
     pub as_path_len: usize,
+    /// The route's origin AS: the last ASN in the rightmost non-empty
+    /// `AS_SEQUENCE` ([`AsPath::origin_asn`]). `None` when the path has
+    /// no usable sequence (empty or `AS_SET`-only paths) — origin-as
+    /// predicates then match neither `==` nor `!=` nor `in`. Computed
+    /// where the typed `AS_PATH` is already in hand (never reparsed per
+    /// evaluation).
+    pub origin_asn: Option<u32>,
     /// RPKI origin validation state (RFC 6811).
     pub validation_state: RpkiValidation,
     /// ASPA path verification state.

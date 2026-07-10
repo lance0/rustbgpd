@@ -1648,6 +1648,7 @@ fn run_test_policy(
             large_communities: route.large_communities(),
             as_path_str: &as_path_str,
             as_path_len: route.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+            origin_asn: route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn),
             validation_state: route.validation_state,
             aspa_state: route.aspa_state,
             peer_address: ctx_peer,

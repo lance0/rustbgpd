@@ -63,6 +63,9 @@ pub enum Tok {
     /// `community-set`
     #[token("community-set")]
     CommunitySetKw,
+    /// `asn-set`
+    #[token("asn-set")]
+    AsnSetKw,
     /// `policy`
     #[token("policy")]
     PolicyKw,
@@ -212,6 +215,7 @@ impl Tok {
             Tok::Str => "string",
             Tok::PrefixSetKw => "`prefix-set`",
             Tok::CommunitySetKw => "`community-set`",
+            Tok::AsnSetKw => "`asn-set`",
             Tok::PolicyKw => "`policy`",
             Tok::TermKw => "`term`",
             Tok::TestKw => "`test`",

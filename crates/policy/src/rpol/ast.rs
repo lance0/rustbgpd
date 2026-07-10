@@ -20,6 +20,8 @@ pub struct SourceFile {
     pub prefix_sets: Vec<PrefixSetDef>,
     /// `community-set` definitions.
     pub community_sets: Vec<CommunitySetDef>,
+    /// `asn-set` definitions.
+    pub asn_sets: Vec<AsnSetDef>,
     /// `policy` definitions, in source order.
     pub policies: Vec<PolicyDef>,
     /// `test` blocks.
@@ -44,6 +46,15 @@ pub struct PrefixEntryAst {
     pub ge: Option<u8>,
     /// Maximum candidate length (inclusive).
     pub le: Option<u8>,
+}
+
+/// `asn-set NAME { 64500, 64501, ... }`.
+#[derive(Debug)]
+pub struct AsnSetDef {
+    /// Set name.
+    pub name: Spanned<String>,
+    /// Member ASNs (u32 literals; range-checked at parse).
+    pub entries: Vec<Spanned<u32>>,
 }
 
 /// `community-set NAME { literals }`.

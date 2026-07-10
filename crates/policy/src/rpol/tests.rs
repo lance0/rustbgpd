@@ -62,6 +62,7 @@ fn route_ctx(prefix: Prefix, communities: &[u32], rpki: RpkiValidation) -> Route
         large_communities: &[],
         as_path_str: "",
         as_path_len: 0,
+        origin_asn: None,
         validation_state: rpki,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         peer_address: None,
@@ -284,12 +285,14 @@ fn as_path_and_peer_predicates_lower_and_evaluate() {
     let long = RouteContext {
         as_path_str: "65005 65001 65002",
         as_path_len: 3,
+        origin_asn: None,
         ..base
     };
     assert_eq!(chain.evaluate(&long).action, PolicyAction::Deny);
     let leaf = RouteContext {
         as_path_str: "65010 65011",
         as_path_len: 2,
+        origin_asn: None,
         peer_group: Some("leaf"),
         ..base
     };
@@ -1004,6 +1007,7 @@ fn absent_ctx() -> RouteContext<'static> {
         large_communities: &[],
         as_path_str: "",
         as_path_len: 0,
+        origin_asn: None,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         peer_address: None,
@@ -1148,5 +1152,228 @@ fn route_type_ne_absent_does_not_match() {
         chain.evaluate(&base).action,
         PolicyAction::Permit,
         "absent route-type must not match `!= external`"
+    );
+}
+
+// ── asn-sets and origin-as predicates (LAN-249) ────────────────────
+
+const ASN_SET_EXAMPLE: &str = r"
+asn-set customers { 64500, 64501, 64502, 64500 }
+
+policy origin-filter {
+    term customer-origins {
+        if route.origin-as in customers { accept }
+    }
+    term rest { reject }
+}
+
+policy peer-filter {
+    term customer-peers {
+        if peer.asn in customers { accept }
+    }
+    term rest { reject }
+}
+
+policy exact-origin {
+    term hit { if route.origin-as == 64500 { accept } }
+    term not-hit { if route.origin-as != 64500 { reject } }
+}
+";
+
+#[test]
+fn asn_set_lowers_to_indexed_set() {
+    let chain = compile_ok(ASN_SET_EXAMPLE);
+    assert_eq!(chain.asn_sets.len(), 1);
+    // Duplicates canonicalized away; members sorted.
+    assert_eq!(chain.asn_sets[0].asns(), &[64500, 64501, 64502]);
+    assert_eq!(chain.asn_set_names, vec![Some("customers".to_string())]);
+    let origin_filter = &chain.policies[0];
+    assert_eq!(
+        origin_filter.terms[0].guard,
+        MatchExpr::OriginAsInSet(SetId(0))
+    );
+    let peer_filter = &chain.policies[1];
+    assert_eq!(peer_filter.terms[0].guard, MatchExpr::PeerAsInSet(SetId(0)));
+    let exact = &chain.policies[2];
+    assert_eq!(exact.terms[0].guard, MatchExpr::OriginAsEq(64500));
+    assert_eq!(exact.terms[1].guard, MatchExpr::OriginAsNe(64500));
+    // peer.asn membership reads peer identity; origin-as does not.
+    assert!(chain.requires_peer_context());
+}
+
+/// Absent origin (empty or AS_SET-only path) matches neither `in` nor
+/// `==` nor `!=` — three-valued, mirroring the other absent-attribute
+/// predicates.
+#[test]
+fn origin_as_predicates_evaluate_three_valued() {
+    let chain = compile_ok(ASN_SET_EXAMPLE);
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let eval = |policy: usize, ctx: &RouteContext<'_>| {
+        let single = crate::ir::CompiledChain {
+            policies: vec![chain.policies[policy].clone()],
+            ..chain.clone()
+        };
+        single.evaluate(ctx).action
+    };
+
+    // origin-filter: member accepts, non-member rejects, absent rejects.
+    let member = RouteContext {
+        origin_asn: Some(64501),
+        ..base
+    };
+    let non_member = RouteContext {
+        origin_asn: Some(65000),
+        ..base
+    };
+    assert_eq!(eval(0, &member), PolicyAction::Permit);
+    assert_eq!(eval(0, &non_member), PolicyAction::Deny);
+    assert_eq!(
+        eval(0, &base),
+        PolicyAction::Deny,
+        "absent origin: no match"
+    );
+
+    // peer-filter: same probe against peer.asn.
+    let peer_member = RouteContext {
+        peer_asn: Some(64502),
+        ..base
+    };
+    let peer_non_member = RouteContext {
+        peer_asn: Some(65000),
+        ..base
+    };
+    assert_eq!(eval(1, &peer_member), PolicyAction::Permit);
+    assert_eq!(eval(1, &peer_non_member), PolicyAction::Deny);
+    assert_eq!(eval(1, &base), PolicyAction::Deny, "unknown peer ASN");
+
+    // exact-origin: == hits only 64500; != hits any other present
+    // origin; an absent origin matches neither and falls through to
+    // the default permit.
+    let exact_hit = RouteContext {
+        origin_asn: Some(64500),
+        ..base
+    };
+    let exact_other = RouteContext {
+        origin_asn: Some(64501),
+        ..base
+    };
+    assert_eq!(eval(2, &exact_hit), PolicyAction::Permit);
+    assert_eq!(eval(2, &exact_other), PolicyAction::Deny, "`!=` rejects");
+    assert_eq!(
+        eval(2, &base),
+        PolicyAction::Permit,
+        "absent origin matches neither == nor != and falls through"
+    );
+}
+
+#[test]
+fn asn_set_diagnostics() {
+    // Unknown set name suggests the near-miss.
+    let (_, rendered) = diagnostics_of(
+        "asn-set customers { 64500 }
+         policy p { term t { if route.origin-as in customer { accept } } }",
+    );
+    assert!(rendered.contains("unknown asn-set"), "{rendered}");
+    assert!(rendered.contains("did you mean `customers`?"), "{rendered}");
+
+    // Wrong set kind gets a targeted note.
+    let (_, rendered) = diagnostics_of(
+        "prefix-set nets { 10.0.0.0/8 }
+         policy p { term t { if peer.asn in nets { accept } } }",
+    );
+    assert!(
+        rendered.contains("`nets` is a prefix-set; ASN membership needs an asn-set"),
+        "{rendered}"
+    );
+
+    // Ordering comparisons are rejected on origin-as.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.origin-as >= 64500 { accept } } }");
+    assert!(
+        rendered.contains("supports only `==` and `!=`"),
+        "{rendered}"
+    );
+
+    // ASN literals are u32 — no 16-bit truncation, out-of-range rejected.
+    let (_, rendered) = diagnostics_of("asn-set wide { 5000000000 }");
+    assert!(rendered.contains("does not fit in u32"), "{rendered}");
+
+    // Duplicate set names are rejected.
+    let (_, rendered) = diagnostics_of("asn-set a { 1 }\nasn-set a { 2 }");
+    assert!(rendered.contains("duplicate asn-set `a`"), "{rendered}");
+
+    // `in` on a field with no set kind names all three.
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.med in something { accept } } }");
+    assert!(rendered.contains("asn-sets"), "{rendered}");
+}
+
+/// 4-byte ASNs are first-class set members and comparison operands.
+#[test]
+fn four_byte_asns_compile_and_match() {
+    let chain = compile_ok(
+        "asn-set wide { 4200000001, 64500 }
+         policy p {
+             term hit { if route.origin-as in wide { accept } }
+             term rest { reject }
+         }",
+    );
+    let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let wide = RouteContext {
+        origin_asn: Some(4_200_000_001),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&wide).action, PolicyAction::Permit);
+    assert_eq!(chain.evaluate(&base).action, PolicyAction::Deny);
+}
+
+/// The in-language test runner derives the fixture origin from the
+/// `as-path` string exactly like `AsPath::origin_asn` on the typed
+/// path: last ASN of the rightmost non-empty `AS_SEQUENCE`; `AS_SET`
+/// members (`{...}`) never contribute; empty/AS_SET-only paths have
+/// no origin and match nothing.
+#[test]
+fn fixture_origin_derives_from_as_path_string() {
+    let source = r#"
+asn-set customers { 64500, 64501 }
+
+policy origin-filter {
+    term customer-origins {
+        if route.origin-as in customers { accept }
+    }
+    term rest { reject }
+}
+
+test sequence-origin-matches {
+    route { prefix 10.0.0.0/24; as-path "65010 64500" }
+    expect origin-filter == accept
+}
+
+test aggregated-path-uses-sequence-tail {
+    route { prefix 10.0.0.0/24; as-path "64501 {64999 65000}" }
+    expect origin-filter == accept
+}
+
+test as-set-only-path-has-no-origin {
+    route { prefix 10.0.0.0/24; as-path "{64500 64501}" }
+    expect origin-filter == reject
+}
+
+test empty-path-has-no-origin {
+    route { prefix 10.0.0.0/24 }
+    expect origin-filter == reject
+}
+
+test non-member-origin-rejected {
+    route { prefix 10.0.0.0/24; as-path "64500 65010" }
+    expect origin-filter == reject
+}
+"#;
+    let report = run_rpol_tests(source).expect("compiles");
+    assert_eq!(report.total, 5);
+    assert!(
+        report.failures.is_empty(),
+        "unexpected failures: {:?}",
+        report.failures
     );
 }
