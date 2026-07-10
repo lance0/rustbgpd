@@ -503,10 +503,23 @@ impl PeerManager {
         // then fire Route Refresh against the session, which would
         // re-evaluate AdjRibIn against the *old* policy and silently
         // keep forbidden routes flowing.
-        let import_apply_result = managed
-            .handle
-            .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
-            .await;
+        //
+        // A side whose resolved chain is CONTENT-EQUAL to the installed
+        // one (`PolicyChain: PartialEq` — the same equality the
+        // update-group registry keys on) is skipped entirely: no
+        // session command, so no import-generation bump and no term-hit
+        // counter reset on a peer an rpol/catalog edit didn't actually
+        // touch. Every reinstall fan-out (SIGHUP rpol overlay, catalog
+        // edits, the ADR-0076 txn executor, honor-knob toggles) routes
+        // through here, so this is the one place the scoping lives.
+        let import_apply_result = if import_changed {
+            managed
+                .handle
+                .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+                .await
+        } else {
+            Ok(())
+        };
         let import_apply_failed = if let Err(error) = &import_apply_result {
             warn!(
                 %address,
@@ -515,14 +528,20 @@ impl PeerManager {
             );
             true
         } else {
-            managed.import_policy = import_policy;
+            if import_changed {
+                managed.import_policy = import_policy;
+            }
             false
         };
 
-        let export_apply_result = managed
-            .handle
-            .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
-            .await;
+        let export_apply_result = if export_changed {
+            managed
+                .handle
+                .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+                .await
+        } else {
+            Ok(())
+        };
         let export_apply_failed = if let Err(error) = &export_apply_result {
             warn!(
                 %address,
@@ -531,7 +550,9 @@ impl PeerManager {
             );
             true
         } else {
-            managed.export_policy.clone_from(&export_policy);
+            if export_changed {
+                managed.export_policy.clone_from(&export_policy);
+            }
             false
         };
 
@@ -626,7 +647,7 @@ impl PeerManager {
             ));
         }
 
-        if is_established {
+        if is_established && needs_export_apply {
             // The RIB step sits between session-side hot-apply (already
             // succeeded if we reached here) and Route Refresh. If it
             // fails, we still need to preserve any unfired refresh
@@ -636,6 +657,14 @@ impl PeerManager {
             // `pending_refresh` carry — the same silent-skip class as
             // the cross-side bail bug. Use explicit match so the Err
             // arms can re-arm `pending_refresh` before returning.
+            //
+            // Gated on export-apply intent (content moved, or a prior
+            // call's unfired intent): re-sending a content-equal chain
+            // would swap the RIB's installed instance out from under a
+            // grouped peer's shared staging handle — the group keeps
+            // evaluating (and counting term hits) on the old instance
+            // while the stats query snapshots the fresh one, freezing
+            // the reported counters.
             let (reply_tx, reply_rx) = oneshot::channel();
             let send_outcome = self
                 .rib_tx

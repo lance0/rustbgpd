@@ -630,7 +630,18 @@ impl RibManager {
             return;
         }
 
-        self.peer_export_policies.insert(peer, export_policy);
+        // A content-equal replacement keeps the installed chain
+        // INSTANCE, not just the group key: an update group's staging
+        // handle shares the installed instance's ADR-0096 term-hit
+        // counters (`PolicyChain::share`), so swapping in a fresh
+        // (zeroed) content-equal instance would freeze what the
+        // term-hits query reports while evaluations keep landing on
+        // the group's old instance. The peer manager already skips
+        // content-equal reinstalls at the fan-out; this guards the
+        // seam itself for any other sender.
+        if self.peer_export_policies.get(&peer) != Some(&export_policy) {
+            self.peer_export_policies.insert(peer, export_policy);
+        }
         // Update-group membership recompute on the policy replacement
         // seam (per-peer gRPC edits, ADR-0076 live-impact txns, and
         // SIGHUP rpol overlays all funnel through this handler).
@@ -2061,6 +2072,7 @@ impl RibManager {
                                 .unicast
                                 .extend(lost);
                         }
+                        self.refresh_group_residue_gauge();
                     }
                 }
             } else {

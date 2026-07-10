@@ -129,6 +129,9 @@ pub struct BgpMetrics {
     update_group_members: IntGaugeVec,
     update_group_regroups: IntCounter,
     update_group_fallback_peers: IntGauge,
+    update_group_residue_entries: IntGauge,
+    update_group_interned_chains: IntGauge,
+    update_group_keys: IntGauge,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -619,6 +622,33 @@ impl BgpMetrics {
              send, ORR vantage, or negotiated ORF) and therefore permanently on \
              the per-peer distribution path. Per-peer reasons surface in the \
              neighbor status API.",
+        )
+        .expect("valid metric definition");
+
+        let update_group_residue_entries = IntGauge::new(
+            "bgp_update_group_residue_entries",
+            "Withdrawal residue currently held for dirty update-group members: \
+             group tombstones (unicast + VPN) plus per-member pending extra \
+             withdraws. Bounded in practice by the resync timer; a sustained \
+             climb means a wedged member is accumulating residue its resync \
+             never clears.",
+        )
+        .expect("valid metric definition");
+
+        let update_group_interned_chains = IntGauge::new(
+            "bgp_update_group_interned_chains",
+            "Distinct export-chain contents interned by the update-group \
+             registry since process start. Append-only for the process \
+             lifetime (no eviction): a deployment cycling generated policy \
+             contents shows unbounded growth here before it costs memory.",
+        )
+        .expect("valid metric definition");
+
+        let update_group_keys = IntGauge::new(
+            "bgp_update_group_keys",
+            "Distinct update-group fingerprint keys created since process \
+             start. Append-only for the process lifetime: an emptied group \
+             keeps its slot so a recurring key reuses its stable id.",
         )
         .expect("valid metric definition");
 
@@ -1392,6 +1422,15 @@ impl BgpMetrics {
             .register(Box::new(update_group_fallback_peers.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_group_residue_entries.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(update_group_interned_chains.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(update_group_keys.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -1666,6 +1705,9 @@ impl BgpMetrics {
             update_group_members,
             update_group_regroups,
             update_group_fallback_peers,
+            update_group_residue_entries,
+            update_group_interned_chains,
+            update_group_keys,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -2149,6 +2191,25 @@ impl BgpMetrics {
     /// Set the number of peers on the ungrouped (per-peer) fallback path.
     pub fn set_update_group_fallback_peers(&self, count: i64) {
         self.update_group_fallback_peers.set(count);
+    }
+
+    /// Set the total withdrawal-residue entry count (group tombstones +
+    /// per-member pending extra withdraws) held for dirty update-group
+    /// members.
+    pub fn set_update_group_residue_entries(&self, count: i64) {
+        self.update_group_residue_entries.set(count);
+    }
+
+    /// Set the number of export-chain contents interned by the
+    /// update-group registry (append-only for the process lifetime).
+    pub fn set_update_group_interned_chains(&self, count: i64) {
+        self.update_group_interned_chains.set(count);
+    }
+
+    /// Set the number of update-group fingerprint keys created
+    /// (append-only for the process lifetime).
+    pub fn set_update_group_keys(&self, count: i64) {
+        self.update_group_keys.set(count);
     }
 
     /// Record a `PeerUp` that replaced a still-registered outbound sender

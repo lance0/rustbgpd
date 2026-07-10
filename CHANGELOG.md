@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Update-group growth and residue observability.** Three new metrics
+  make the registry's append-only growth and the dirty-member
+  withdrawal residue visible before they matter:
+  `bgp_update_group_interned_chains` and `bgp_update_group_keys` track
+  the distinct export-chain contents and fingerprint keys ever created
+  (append-only for the process lifetime — the early-warning signal for
+  a deployment cycling generated policy contents), and
+  `bgp_update_group_residue_entries` tracks group tombstones plus
+  per-member pending extra withdraws, emitted at every mutation site
+  (growth and clear) and returning to zero when the resync drains a
+  dirty member. (LAN-311)
+
 - **Import-side policy hit counters readable via `rbgp policy stats`.**
   `GetPolicyStats` / `rbgp policy stats` now accept
   `--direction import|export|both`: import chains report the same
@@ -256,6 +268,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fail the build if either file is missing from an artifact. (LAN-278)
 
 ### Fixed
+
+- **Policy reinstallation is scoped to peers whose resolved chain
+  content actually moved.** SIGHUP reloads, rpol overlay swaps, catalog
+  edits, and live-impact transactions re-resolve every affected peer's
+  chains, but previously reinstalled them even when the resolved
+  content was identical (`PolicyChain` content equality — the same
+  keying the update-group registry uses). A content-equal reinstall now
+  sends nothing: the session keeps its import chain instance (no
+  install-generation bump, no term-hit counter reset on peers an
+  unrelated edit never touched) and the RIB keeps its export chain
+  instance, so a grouped peer's export term-hit counters — accumulated
+  through the group's shared staging handle — keep counting instead of
+  freezing behind a fresh snapshot instance the stats query reads.
+  Peers whose chain content did change get exactly the previous
+  behavior: session installs, RIB replacement, regroup, counter reset,
+  and Route Refresh. (LAN-311)
 
 - **Fatal RTR errors now flush the affected cache's data and emit Error
   Reports per draft-ietf-sidrops-8210bis-26, instead of retaining until
