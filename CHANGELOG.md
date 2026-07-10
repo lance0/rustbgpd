@@ -473,6 +473,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from a secret-bearing config cannot silently boot as-is. Secretless
   dumps round-trip: they reload through `rustbgpd --check` and re-dump
   to the identical document. (LAN-325)
+- **MRT `TABLE_DUMP_V2` reader.** `rustbgpd-mrt` gains the read half of
+  RFC 6396: `SnapshotReader` validates the `PEER_INDEX_TABLE`, then
+  streams decoded RIB entries (prefix, peer, originated time, path
+  attributes, Add-Path ids per RFC 8050) for every subtype the writer
+  emits, including EVPN `RIB_GENERIC` records. Input is treated as
+  hostile: all length fields are bounds-checked, malformed data yields
+  typed errors instead of panics, unknown record types are skipped and
+  counted, and hard caps bound per-record size (16 MiB), total entries
+  (2^28), and gzip decompression (4 GiB). Groundwork for MRT warm-boot
+  restore. (LAN-337)
 
 ### Changed
 - **CLI consistency sweep (LAN-329).** One noun, one file-arg style, one
