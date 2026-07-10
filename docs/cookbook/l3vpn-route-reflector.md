@@ -110,7 +110,7 @@ The VPN table and the membership driving the filter:
 $ rbgp rib vpn                          # VPNv4/VPNv6: RD, prefix, label, RTs
 $ rbgp rib vpn -a vpnv6                 # VPNv6 only
 $ rbgp rib rtc                          # RT-Constrain NLRIs per peer
-$ rbgp rib rtc --peer 10.0.0.11         # what pe-1 says it imports
+$ rbgp rib rtc --neighbor 10.0.0.11     # what pe-1 says it imports
 $ rbgp rib advertised 10.0.0.12 -a l3vpn_ipv4_unicast   # what pe-2 gets
 ```
 
@@ -142,7 +142,7 @@ First suspect: empty RTC membership — strict fail-closed is the
 designed behavior, not a bug. Check what the PE has advertised:
 
 ```console
-$ rbgp rib rtc --peer 10.0.0.11
+$ rbgp rib rtc --neighbor 10.0.0.11
 ```
 
 Empty output = the PE negotiated SAFI 132 but announced no RT
@@ -170,5 +170,5 @@ returns, both the routes and its membership expire with LLGR.
 
 **A VRF is torn down on a PE but its routes linger on other PEs.**
 Check the withdraw actually arrived: `rbgp events --prefix <pfx>`
-shows the per-prefix route-event history, and `rbgp rib vpn --peer
+shows the per-prefix route-event history, and `rbgp rib vpn --neighbor
 <pe>` shows what the RR still holds from that PE.

@@ -897,7 +897,7 @@ the static TOML form above:
 
 ```sh
 rbgp dynamic-neighbor list
-rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members [--asn 65010] [--description "..."]
+rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members [--remote-asn 65010] [--description "..."]
 rbgp dynamic-neighbor delete 10.0.0.0/24
 ```
 
@@ -2250,15 +2250,15 @@ executors exist.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.
-Operators can drive the workflow through `rbgp config plan --from-file`
-and `rbgp config apply --from-file --expected-runtime-snapshot-token`;
+Operators can drive the workflow through `rbgp config plan <config.toml>`
+and `rbgp config apply <config.toml> --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
-the normal apply invocation — `rbgp config apply --from-file <config.toml>
+the normal apply invocation — `rbgp config apply <config.toml>
 --expected-runtime-snapshot-token <token> --confirm-id <id> --confirm-timeout
 <seconds>` — or set the matching gRPC fields directly. The confirm flags are
-additions; `--from-file` and `--expected-runtime-snapshot-token` are still
+additions; the candidate file and `--expected-runtime-snapshot-token` are still
 required. The timeout defaults to 600 seconds
 and is capped at 86400. The change applies immediately, then remains pending
 until `rbgp config confirm <id>` (or `ConfirmConfigTransaction`) makes it

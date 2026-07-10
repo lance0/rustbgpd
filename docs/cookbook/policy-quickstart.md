@@ -176,7 +176,7 @@ against the live RIB — read-only, no route state or session touched:
 
 ```console
 $ rbgp policy test edge.rpol --policy "customer-in(150)" \
-    --direction import --peer 192.0.2.10
+    --direction import --neighbor 192.0.2.10
 ```
 
 Output: accept/reject counts, per-term hit counters, and before/after
@@ -215,7 +215,7 @@ And the live counters — which terms are actually doing work since the
 chain was installed (counters reset on chain replace):
 
 ```console
-$ rbgp policy stats --peer 192.0.2.20
+$ rbgp policy stats --neighbor 192.0.2.20
 ```
 
 ## 6. The update-group footnote
@@ -246,5 +246,5 @@ by design.
 composition — another member of the effective chain rejected first —
 or a peer-context mismatch between the test's `peer` fixture and the
 real neighbor. `rbgp policy chain show --neighbor <addr>` prints the
-effective chain order; `rbgp policy test` with `--peer` reproduces
+effective chain order; `rbgp policy test` with `--neighbor` reproduces
 the live evaluation against the real peer context.

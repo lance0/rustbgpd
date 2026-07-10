@@ -208,7 +208,7 @@ IXP member C (AS 64503) ──┘
 
 ```bash
 # Add member at runtime (persisted to config automatically)
-rbgp neighbor 198.51.100.10 add --asn 64510 \
+rbgp neighbor 198.51.100.10 add --remote-asn 64510 \
   --description "new-member" \
   --families ipv4_unicast,ipv6_unicast \
   --max-prefixes 10000

@@ -348,7 +348,7 @@ cutover blockers.
 
    ```bash
    rbgp diff advertised --against incumbent.ndjson          # all snapshot members
-   rbgp diff advertised --peer <member> --against incumbent.ndjson
+   rbgp diff advertised --neighbor <member> --against incumbent.ndjson
    ```
 
    Exit code 0 means complete inputs with no semantic differences, 1

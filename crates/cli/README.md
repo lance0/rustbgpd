@@ -23,13 +23,13 @@ rbgp top          # live terminal dashboard
 ### Config Transactions
 
 ```bash
-rbgp config diff --from-file config.toml
-rbgp config plan --from-file config.toml
-rbgp config apply --from-file config.toml \
+rbgp config diff config.toml
+rbgp config plan config.toml
+rbgp config apply config.toml \
   --expected-runtime-snapshot-token kv1:...
 
 # Confirmed apply: rolls back unless confirmed before the timeout.
-rbgp config apply --from-file config.toml \
+rbgp config apply config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id deploy-123 \
   --confirm-timeout 120
@@ -92,9 +92,9 @@ rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
 rbgp policy check <file.rpol>                          # parse + typecheck an .rpol file in-process (no daemon)
-rbgp policy test <file.rpol> --policy <name> --direction import|export [--peer <addr>]   # dry-run over the live RIB
-rbgp policy stats [--peer <addr>]                     # live per-term hit counters
-rbgp policy counters [--peer <addr>]                  # alias
+rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
+rbgp policy stats [--neighbor <addr>]                     # live per-term hit counters
+rbgp policy counters [--neighbor <addr>]                  # alias
 
 rbgp flowspec
 rbgp fib-table list
@@ -131,7 +131,7 @@ rbgp watch              # legacy route-update stream
 
 rbgp topology           # RFC 9107 ORR topology graph from BGP-LS
 rbgp orr                # RFC 9107 ORR per-vantage status
-rbgp gshut [--peer <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
+rbgp gshut [--neighbor <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
 rbgp shutdown
 rbgp completions bash

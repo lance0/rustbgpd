@@ -97,13 +97,13 @@ transaction with an optimistic runtime snapshot token:
 rbgp config effective
 rbgp -j config effective
 
-rbgp config diff --from-file /tmp/new-config.toml
-rbgp --json config diff --from-file /tmp/new-config.toml
+rbgp config diff /tmp/new-config.toml
+rbgp --json config diff /tmp/new-config.toml
 
-rbgp config plan --from-file /tmp/new-config.toml
-rbgp --json config plan --from-file /tmp/new-config.toml
+rbgp config plan /tmp/new-config.toml
+rbgp --json config plan /tmp/new-config.toml
 
-rbgp config apply --from-file /tmp/new-config.toml \
+rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
@@ -113,7 +113,7 @@ immediately, starts the timer, and rolls back when the timer expires unless the
 same handle is confirmed:
 
 ```bash
-rbgp config apply --from-file /tmp/new-config.toml \
+rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id deploy-20260605-1 \
   --confirm-timeout 120
@@ -943,8 +943,8 @@ prefixes received). Display-only: `-j` output always carries every field.
 ### Add a peer at runtime
 
 ```bash
-rbgp neighbor 10.0.0.5 add --asn 65005 --description "new-peer"
-rbgp neighbor 203.0.113.2 add --asn 65002 --role provider --strict-role
+rbgp neighbor 10.0.0.5 add --remote-asn 65005 --description "new-peer"
+rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 ```
 
 The peer is persisted to the config file automatically. `--role` enables RFC
@@ -973,7 +973,7 @@ restart (`AddDynamicNeighbor` / `DeleteDynamicNeighbor`, tier `mutating`).
 not enable BFD, the prefix must be valid, and the effective prefix must not
 duplicate an existing range. `delete` stops *future* accepts only —
 already-established dynamic peers keep running and drain when they next
-return to Idle. Omitting `--asn` uses the accept-any sentinel (`remote_asn = 0`);
+return to Idle. Omitting `--remote-asn` uses the accept-any sentinel (`remote_asn = 0`);
 once a peer is accepted, operational state surfaces the ASN learned from the
 peer's OPEN. When the daemon was started with `--config`, changes persist to the
 TOML file (atomic write) before the RPC returns and survive a restart.
@@ -1229,7 +1229,7 @@ rbgp rib
 rbgp rib fib
 rbgp -j rib fib
 rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
-rbgp rib fib --prefix 203.0.113.0/24 --peer 198.51.100.2
+rbgp rib fib --prefix 203.0.113.0/24 --neighbor 198.51.100.2
 rbgp rib fib --page-size 100
 ```
 
@@ -1422,7 +1422,7 @@ already moved.
 
 ```bash
 # Start the drain on one peer
-rbgp gshut --peer 10.0.0.2
+rbgp gshut --neighbor 10.0.0.2
 
 # Or drain every currently-managed peer at once
 rbgp gshut
@@ -1432,7 +1432,7 @@ rbgp gshut
 # the actual maintenance — restart, config edit, etc.
 
 # Clear the community when maintenance ends
-rbgp gshut --peer 10.0.0.2 --clear
+rbgp gshut --neighbor 10.0.0.2 --clear
 rbgp gshut --clear
 ```
 
@@ -1589,7 +1589,7 @@ own `cluster_id` (under `[global]`) drives the RFC 4456 ORIGINATOR_ID
 rbgp evpn                             # all EVPN routes
 rbgp evpn --route-type 2              # MAC/IP only
 rbgp evpn --rd 65000:100              # filter by RD
-rbgp evpn --peer 10.0.1.1             # filter by source peer
+rbgp evpn --neighbor 10.0.1.1         # filter by source peer
 rbgp evpn diagnose                    # alpha VTEP summary
 rbgp evpn runtime                     # committed EVPN generation / mutation state
 rbgp evpn clear-duplicate-mac --vni 100 --mac aa:bb:cc:dd:ee:ff

@@ -1405,7 +1405,7 @@ move (`SensitiveRead` authorization).
 
 ```console
 $ rbgp policy test policies/core.rpol --policy "customer-in(200)" \
-    --direction import --peer 10.0.0.2 --show-changes 2
+    --direction import --neighbor 10.0.0.2 --show-changes 2
 policy "customer-in(200)" (import) over 1204 routes:
   accepted 990  rejected 214  modified 990
 Term hits:
@@ -1422,8 +1422,8 @@ Changes (up to 2):
 ```
 
 - `--direction import` evaluates Adj-RIB-In routes (all peers, or one
-  with `--peer`); `--direction export` evaluates Loc-RIB best routes,
-  with `--peer` setting the peer context guards see (`peer.address`,
+  with `--neighbor`); `--direction export` evaluates Loc-RIB best routes,
+  with `--neighbor` setting the peer context guards see (`peer.address`,
   `peer.asn`, `peer.group`).
 - `--family ipv4_unicast|ipv6_unicast` filters the snapshot; V1 scope
   is IPv4/IPv6 unicast routes (other families are not walked).
@@ -1478,7 +1478,7 @@ cost), and the query snapshots them without resetting anything
 (`SensitiveRead`).
 
 ```console
-$ rbgp policy stats --peer 10.0.0.2 --direction both
+$ rbgp policy stats --neighbor 10.0.0.2 --direction both
 10.0.0.2 export chain — 1204 routes evaluated since install
   POLICY                           TERM                     HITS
   customer-in(200)                 rpki-guard               3
