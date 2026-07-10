@@ -1240,7 +1240,11 @@ path-id correction is unsound without per-member state).
 `rbgp neighbor show <peer>` prints the membership (`group:N`) or the
 fallback reason on its `Update Group` line. Metrics:
 `bgp_update_groups`, `bgp_update_group_members{group}`,
-`bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`.
+`bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`,
+`bgp_update_group_interned_chains` and `bgp_update_group_keys`
+(registry growth — append-only for the process lifetime), and
+`bgp_update_group_residue_entries` (withdrawal residue held while a
+member is dirty; returns to zero when its resync completes).
 
 ---
 

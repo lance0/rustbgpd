@@ -531,14 +531,21 @@ fi
 
 # The reload reinstalled src's chain — its install generation bumps,
 # so counters that reset read as a chain replacement (#761 contract).
-# NOTE: down's generation bumps too (a content-equal reinstall —
-# explicitly documented #761 behavior); the WIRE-visible scoping is
-# the Route Refresh assertion above, so only src's bump is asserted.
+# down's chain re-resolved content-equal, so it is NOT reinstalled
+# (LAN-311 reinstall scoping): its generation — and its live hit
+# counters — survive the reload, matching the wire-visible Route
+# Refresh scoping asserted above.
 gen_src_after=$(import_chain_gen "$SRC_PEER")
 if [ "$gen_src_after" -gt "$gen_src_before" ]; then
     ok "src import-chain install generation bumped ($gen_src_before -> $gen_src_after)"
 else
     fail "src import-chain generation did not bump ($gen_src_before -> $gen_src_after)"
+fi
+gen_down_after=$(import_chain_gen "$DOWN_PEER")
+if [ "$gen_down_after" -eq "$gen_down_before" ]; then
+    ok "down import-chain generation unchanged ($gen_down_before) — content-equal chain not reinstalled"
+else
+    fail "down import-chain generation moved ($gen_down_before -> $gen_down_after) despite a content-equal re-resolve"
 fi
 
 # ---------------------------------------------------------------------------

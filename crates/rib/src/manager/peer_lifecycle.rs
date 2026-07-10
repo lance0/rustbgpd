@@ -459,6 +459,9 @@ impl RibManager {
         self.pending_regroup_baseline.remove(&peer);
         self.pending_extra_withdraws.remove(&peer);
         self.remove_update_group_member(peer);
+        // The extra-withdraw drop above mutates residue even for a peer
+        // whose membership removal doesn't touch a group.
+        self.refresh_group_residue_gauge();
         self.clear_peer_refresh_state(peer);
     }
 

@@ -834,6 +834,7 @@ impl RibManager {
                             .vpn
                             .extend(lost);
                     }
+                    self.refresh_group_residue_gauge();
                 }
                 continue;
             }

@@ -845,8 +845,11 @@ $ rbgp policy stats --peer 10.0.0.2 --direction both
 
 - Counters read as **since chain install**: replacing a peer's chain
   (policy reload / hot-apply / gNMI Set) installs a fresh instance and
-  resets its counters to zero. A session flap does not reset the
-  RIB-side export counters (the chain instance survives).
+  resets its counters to zero. A reload that re-resolves a peer to a
+  **content-equal** chain skips the reinstall entirely — the installed
+  instance and its counters survive; only peers whose resolved chain
+  content moved reset. A session flap does not reset the RIB-side
+  export counters (the chain instance survives).
 - TOML chain members count too; their unnamed statements report by
   `term_index` (`statement 0`, `statement 1`, ...).
 - `--direction` selects **export** (the default), **import**, or
@@ -854,9 +857,11 @@ $ rbgp policy stats --peer 10.0.0.2 --direction both
   are read from each live session task, so a peer without a live
   session reports no import chain.
 - Import chains report their **install generation** (bumps on every
-  chain install, content-equal reinstalls included), so counters that
-  reset to zero read as a chain replacement, not continuous history.
-  Export chains do not track an install generation yet.
+  chain install), so counters that reset to zero read as a chain
+  replacement, not continuous history. A session's initial chain
+  reports generation 0; content-equal re-resolves are not reinstalled,
+  so the generation moves only when the peer's resolved chain content
+  does. Export chains do not track an install generation yet.
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.
 - `--json` emits the rows structurally.

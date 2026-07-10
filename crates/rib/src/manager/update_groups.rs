@@ -926,6 +926,27 @@ impl RibManager {
         }
     }
 
+    /// Re-derive the withdrawal-residue gauge: group tombstones
+    /// (unicast + VPN) plus per-member pending extra withdraws. Called
+    /// from EVERY residue mutation site — growth and clear alike, never
+    /// behind a clear guard — so a soak slope-gate on the metric can
+    /// actually fail (the gate-metric rule). O(groups +
+    /// members-with-residue) integer sums over small maps.
+    pub(in crate::manager) fn refresh_group_residue_gauge(&self) {
+        let residue = self
+            .group_ribs
+            .values()
+            .map(|group| group.tombstones.len() + group.vpn_tombstones.len())
+            .sum::<usize>()
+            + self
+                .pending_extra_withdraws
+                .values()
+                .map(|extras| extras.unicast.len() + extras.vpn.len())
+                .sum::<usize>();
+        self.metrics
+            .set_update_group_residue_entries(i64::try_from(residue).unwrap_or(i64::MAX));
+    }
+
     /// A grouped member's resync succeeded (or had nothing to send):
     /// drop its regroup residue and its group dirty flag; the last
     /// dirty member syncing clears the tombstones.
@@ -947,6 +968,7 @@ impl RibManager {
                 group.vpn_tombstones.clear();
             }
         }
+        self.refresh_group_residue_gauge();
     }
 
     /// Whether `peer` is a grouped member whose VPN advertised state is
@@ -1108,6 +1130,7 @@ impl RibManager {
                         .extend(lost);
                 }
             }
+            self.refresh_group_residue_gauge();
         }
         out
     }
@@ -1257,6 +1280,7 @@ impl RibManager {
             group
                 .vpn_tombstones
                 .extend(out.deltas.iter().filter(|d| d.new.is_none()).map(|d| d.key));
+            self.refresh_group_residue_gauge();
         }
         out
     }
@@ -1470,6 +1494,7 @@ impl RibManager {
                     .or_default()
                     .vpn
                     .extend(vpn_withdraw.iter().map(|key| key.nlri_key));
+                self.refresh_group_residue_gauge();
             }
             return;
         }
@@ -1514,6 +1539,7 @@ impl RibManager {
                 .or_default()
                 .vpn
                 .extend(withdraw_keys);
+            self.refresh_group_residue_gauge();
         }
     }
 
@@ -1843,6 +1869,9 @@ impl RibManager {
             }
         }
         self.refresh_update_group_gauges();
+        // The regroup carry (a dirty leaver's tombstones riding into
+        // its extra withdraws) mutates residue on this path too.
+        self.refresh_group_residue_gauge();
     }
 
     /// Add a member; a group seen for the first time snapshots its
@@ -1909,6 +1938,7 @@ impl RibManager {
         if group.members.is_empty() {
             self.group_ribs.remove(&gid);
         }
+        self.refresh_group_residue_gauge();
     }
 
     /// Drop a departing peer's membership and group state (the
@@ -2011,6 +2041,18 @@ impl RibManager {
         self.metrics
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));
         self.metrics.set_update_group_fallback_peers(fallback);
+        // Registry growth (LAN-311 observability, no eviction): both
+        // vecs are append-only for the process lifetime, so the gauges
+        // read as "distinct contents / keys ever seen" — the signal a
+        // policy-content-churn deployment watches before the growth
+        // costs memory. Every intern happens inside a membership
+        // recompute, and every recompute/removal ends here.
+        self.metrics.set_update_group_interned_chains(
+            i64::try_from(self.update_groups.chains.len()).unwrap_or(i64::MAX),
+        );
+        self.metrics.set_update_group_keys(
+            i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
+        );
         for id in 0..self.update_groups.groups.len() {
             match member_counts.get(&id) {
                 Some(count) => self

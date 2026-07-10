@@ -5849,6 +5849,202 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
     );
 }
 
+/// LAN-311: a policy fan-out (SIGHUP rpol overlay, catalog edit, and
+/// the ADR-0076 txn snapshot all funnel through
+/// `update_runtime_policies_for_peer_key`) must scope reinstallation to
+/// peers whose resolved chain CONTENT moved. A peer re-resolving to a
+/// content-equal chain gets no session command at all — the session
+/// bumps its import-policy generation (and swaps the counter-bearing
+/// chain instance) inside the `UpdateImportPolicy` handler, so "no
+/// command" IS the #761 generation-unchanged / counters-survive
+/// guarantee (the M80 finding: SIGHUP bumped generation 0→1 on peers
+/// whose chains didn't change) — and no RIB `ReplacePeerExportPolicy`.
+/// The peer whose content moved gets exactly the prior behavior:
+/// session installs, RIB replace, and a Route Refresh.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn content_equal_policy_fanout_skips_unaffected_peers() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    use rustbgpd_transport::PeerCommand;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Default)]
+    struct SessionCounters {
+        import_installs: AtomicU32,
+        export_installs: AtomicU32,
+        refreshes: AtomicU32,
+    }
+
+    fn fake_session(addr: IpAddr) -> (PeerHandle, Arc<SessionCounters>) {
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+        let counters = Arc::new(SessionCounters::default());
+        let counters_in_task = counters.clone();
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        counters_in_task
+                            .import_installs
+                            .fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        counters_in_task
+                            .export_installs
+                            .fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        counters_in_task.refreshes.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Established,
+                            peer_ip: addr,
+                            peer_asn: None,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: None,
+                            local_role: None,
+                            remote_role: None,
+                            role_negotiated: false,
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            otc_routes_blocked: 0,
+                            import_policy_routes_permitted: 0,
+                            import_policy_routes_denied: 0,
+                            flap_count: 0,
+                            uptime_secs: 1,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        (PeerHandle::from_parts(session_tx, task), counters)
+    }
+
+    fn permit_policy_chain() -> PolicyChain {
+        use rustbgpd_policy::{Policy, PolicyAction};
+        PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Permit,
+        }])
+    }
+
+    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (handle_a, counters_a) = fake_session(a);
+    let (handle_b, counters_b) = fake_session(b);
+
+    // RIB drainer counting ReplacePeerExportPolicy per peer.
+    let rib_replaces_a = Arc::new(AtomicU32::new(0));
+    let rib_replaces_b = Arc::new(AtomicU32::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let (replaces_a, replaces_b) = (rib_replaces_a.clone(), rib_replaces_b.clone());
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = update {
+                if peer == a {
+                    replaces_a.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    replaces_b.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(&mut mgr, a, handle_a, false);
+    insert_test_managed_peer(&mut mgr, b, handle_b, false);
+
+    // Initial install through the atomic fan-out both edits ride.
+    let target = |address: IpAddr, chain: PolicyChain| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: Some(chain.clone()),
+        export_policy: Some(chain),
+    };
+    mgr.apply_resolved_policy_snapshot(vec![
+        target(a, permit_policy_chain()),
+        target(b, permit_policy_chain()),
+    ])
+    .await
+    .expect("initial install");
+    assert_eq!(counters_a.import_installs.load(Ordering::SeqCst), 1);
+    assert_eq!(counters_a.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(rib_replaces_a.load(Ordering::SeqCst), 1);
+
+    // The M80 shape: an edit re-resolves BOTH peers, but only B's chain
+    // content moved; A resolves to a content-equal (fresh-instance)
+    // chain.
+    mgr.apply_resolved_policy_snapshot(vec![
+        target(a, permit_policy_chain()),
+        target(b, deny_policy_chain()),
+    ])
+    .await
+    .expect("scoped re-apply");
+
+    // (ii) Unaffected peer: NO reinstall of any kind — generation and
+    // live counters in the session survive untouched.
+    assert_eq!(
+        counters_a.import_installs.load(Ordering::SeqCst),
+        1,
+        "content-equal re-resolve must not send UpdateImportPolicy \
+         (each send bumps the session's import generation and resets its counters)"
+    );
+    assert_eq!(
+        counters_a.export_installs.load(Ordering::SeqCst),
+        1,
+        "content-equal re-resolve must not send UpdateExportPolicy"
+    );
+    assert_eq!(
+        rib_replaces_a.load(Ordering::SeqCst),
+        1,
+        "content-equal re-resolve must not send ReplacePeerExportPolicy \
+         (a fresh instance would strand the update group's term-hit counters)"
+    );
+    assert_eq!(
+        counters_a.refreshes.load(Ordering::SeqCst),
+        1,
+        "content-equal re-resolve must not fire Route Refresh"
+    );
+
+    // (iii) Changed peer: full reinstall — session installs, RIB
+    // replace, Route Refresh — and bookkeeping advances to the new
+    // chain.
+    assert_eq!(counters_b.import_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(counters_b.export_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(rib_replaces_b.load(Ordering::SeqCst), 2);
+    assert_eq!(counters_b.refreshes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        mgr.peers.get(&key(b)).unwrap().import_policy,
+        Some(deny_policy_chain()),
+        "changed peer's bookkeeping must advance to the new chain"
+    );
+
+    rib_drainer.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn gshut_toggle_times_out_when_rib_reply_wedges() {
     use rustbgpd_transport::PeerCommand;

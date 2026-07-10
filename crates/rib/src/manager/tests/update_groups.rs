@@ -406,6 +406,16 @@ async fn content_identical_policy_replace_is_key_stable() {
 
     assert_eq!(query_update_group(&tx, peer).await, "group:0");
     assert_metric(regroups_total(&metrics), 0.0, "regroups_total");
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_interned_chains", &[]),
+        1.0,
+        "bgp_update_group_interned_chains",
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_keys", &[]),
+        1.0,
+        "bgp_update_group_keys",
+    );
 
     // Reinstall a content-identical chain: freshly constructed, so a
     // distinct instance with a cold compiled-IR cache. Same content ⇒
@@ -430,6 +440,11 @@ async fn content_identical_policy_replace_is_key_stable() {
         0.0,
         "content-identical reinstall must not count as a regroup",
     );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_interned_chains", &[]),
+        1.0,
+        "content-identical reinstall must not grow the interned-chain registry",
+    );
 
     // A materially different chain regroups the peer.
     let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -445,6 +460,19 @@ async fn content_identical_policy_replace_is_key_stable() {
 
     assert_eq!(query_update_group(&tx, peer).await, "group:1");
     assert_metric(regroups_total(&metrics), 1.0, "regroups_total");
+    // Registry growth is append-only: the new content and key ADD to
+    // the registry (LAN-311 growth observability; slot 0 is retained
+    // for key-stable reuse, not evicted).
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_interned_chains", &[]),
+        2.0,
+        "bgp_update_group_interned_chains after a content change",
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_keys", &[]),
+        2.0,
+        "bgp_update_group_keys after a content change",
+    );
 
     // And replacing with a peer-context chain moves it to the fallback
     // path with the recorded reason (also a regroup).
@@ -463,6 +491,234 @@ async fn content_identical_policy_replace_is_key_stable() {
         gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
         1.0,
         "bgp_update_group_fallback_peers",
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-311 item 2: the withdrawal-residue gauge follows tombstones
+/// held while a member is dirty and returns to zero when the resync
+/// clears them — emitted at growth AND clear (the gate-metric rule),
+/// so a soak slope-gate on it can actually fail.
+#[tokio::test]
+async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
+    tokio::time::pause();
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
+    let quiesce = async || {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+    };
+    let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 5, 9)),
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    };
+
+    // Grouped member with a capacity-1 outbound channel so a second
+    // update jams it (the wedged-writer shape from the seam sweep).
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 5, 1));
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    assert_eq!(query_update_group(&tx, peer).await, "group:0");
+
+    let p1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let p2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let mk = |p: Ipv4Prefix| crate::test_support::make_route(p, Ipv4Addr::new(10, 0, 5, 9));
+
+    // p1 fills the channel; p2's emission fails → member goes dirty;
+    // p1 withdrawn WHILE dirty → tombstone.
+    send_routes(vec![mk(p1)], vec![]).await;
+    send_routes(vec![mk(p2)], vec![]).await;
+    send_routes(vec![], vec![(Prefix::V4(p1), 0)]).await;
+    quiesce().await;
+    assert_metric(
+        residue(),
+        1.0,
+        "tombstone recorded while a member is dirty must show in the residue gauge",
+    );
+
+    // Free the channel and let the resync timer clear the residue.
+    let jammed = out_rx.recv().await.unwrap();
+    assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    let resync = out_rx.recv().await.unwrap();
+    assert!(
+        resync
+            .withdraw
+            .iter()
+            .any(|(prefix, _)| *prefix == Prefix::V4(p1)),
+        "resync must (over-)withdraw the tombstoned prefix"
+    );
+    quiesce().await;
+    assert_metric(
+        residue(),
+        0.0,
+        "a completed resync (last dirty member) must clear the residue gauge",
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-311 item 3 (the term-hit freeze): a content-equal chain
+/// reinstall must keep the INSTALLED chain instance, not just the
+/// group key. The group's staging handle shares the installed
+/// instance's ADR-0096 term-hit counters (`PolicyChain::share`), so
+/// swapping in a fresh content-equal instance leaves evaluations
+/// landing on the group's old instance while the term-hits query
+/// snapshots the new (forever-zero) one — grouped peers read frozen
+/// counters. A content-CHANGED chain still installs fresh (counters
+/// reset — "since install" semantics).
+#[tokio::test]
+async fn content_identical_replace_keeps_export_term_hit_counters() {
+    async fn send_route(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, prefix: Ipv4Prefix) {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![crate::test_support::make_route(
+                prefix,
+                Ipv4Addr::new(10, 0, 4, 9),
+            )],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    /// (total evaluations, deny-term guard hits) of the peer's
+    /// installed chain instance.
+    async fn hits_for(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryExportPolicyTermHits {
+            peer: Some(peer),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let hits = reply_rx.await.unwrap();
+        assert_eq!(hits.len(), 1, "peer must report an installed chain");
+        (hits[0].evals, hits[0].terms[0].hits)
+    }
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 9));
+    let mut spec = PeerUpSpec::ibgp(peer);
+    spec.export_policy = Some(deny_chain(denied));
+    let mut out_rx = peer_up(&tx, spec).await;
+    assert_eq!(query_update_group(&tx, peer).await, "group:0");
+
+    // One permitted route: the shared group staging pass evaluates the
+    // chain once, through the handle sharing the installed instance's
+    // counters.
+    send_route(
+        &tx,
+        source,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+    )
+    .await;
+    assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(hits_for(&tx, peer).await, (1, 0));
+
+    // Content-equal reinstall (fresh instance, zeroed counters — the
+    // SIGHUP / txn no-op shape). The installed instance must survive.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: Some(deny_chain(denied)),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+
+    send_route(
+        &tx,
+        source,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24),
+    )
+    .await;
+    assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        hits_for(&tx, peer).await,
+        (2, 0),
+        "term-hit counters must survive a content-equal reinstall and keep counting \
+         (a frozen/zero reading means the query snapshots a fresh instance while the \
+         group keeps evaluating the old one)"
+    );
+
+    // The denied prefix evaluates (and matches the deny term) without
+    // emitting — still on the surviving instance. The query rides the
+    // same serial channel, so its reply proves the route was staged.
+    send_route(&tx, source, denied).await;
+    assert_eq!(hits_for(&tx, peer).await, (3, 1));
+
+    // A content-CHANGED chain installs fresh: the peer regroups and the
+    // query snapshots the NEW instance — the join-time table rebuild
+    // re-evaluates the three staged prefixes (evals 3) but the old
+    // instance's deny-term history is gone (its deny matches nothing
+    // in the table), pinning "reset on material change".
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: Some(deny_chain(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24))),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+    assert_eq!(query_update_group(&tx, peer).await, "group:1");
+    assert_eq!(
+        hits_for(&tx, peer).await,
+        (3, 0),
+        "a content-changed install must evaluate through a fresh instance \
+         (rebuild evals only; no carried deny-term history)"
     );
 
     drop(tx);
