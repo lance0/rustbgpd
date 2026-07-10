@@ -8,16 +8,16 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
 /// MRT message type for `TABLE_DUMP_V2`.
-const TABLE_DUMP_V2: u16 = 13;
+pub(crate) const TABLE_DUMP_V2: u16 = 13;
 /// `TABLE_DUMP_V2` subtypes.
-const PEER_INDEX_TABLE: u16 = 1;
-const RIB_IPV4_UNICAST: u16 = 2;
-const RIB_IPV6_UNICAST: u16 = 4;
+pub(crate) const PEER_INDEX_TABLE: u16 = 1;
+pub(crate) const RIB_IPV4_UNICAST: u16 = 2;
+pub(crate) const RIB_IPV6_UNICAST: u16 = 4;
 /// RFC 6396 §4.3.5 — generic RIB record carrying any AFI/SAFI.
 /// Used here for L2VPN/EVPN (AFI 25 / SAFI 70).
-const RIB_GENERIC: u16 = 6;
-const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
-const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
+pub(crate) const RIB_GENERIC: u16 = 6;
+pub(crate) const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
+pub(crate) const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
 /// An individual RIB entry within a RIB_* record.
 pub struct RibEntry {
     /// Index into the `PEER_INDEX_TABLE`.
