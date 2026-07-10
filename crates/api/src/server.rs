@@ -1139,7 +1139,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(access_mode, asn, router_id.clone(), listen_port),
+        GlobalService::new(asn, router_id.clone(), listen_port),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
@@ -1342,7 +1342,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
-        GlobalService::new(access_mode, asn, router_id.clone(), listen_port),
+        GlobalService::new(asn, router_id.clone(), listen_port),
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(

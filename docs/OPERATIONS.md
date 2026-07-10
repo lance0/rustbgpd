@@ -200,10 +200,9 @@ effective-impact view:
   control-plane-only `honor_blackhole`. SIGHUP reconciles all of these.
 - **Restart-required changes** — `[global]` ASN/router-id/families,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
-  `[rpki]`, `[bmp]`, `[mrt]`, unsupported EVPN shapes,
-  `apply_bum_enforcement`, and inline `policy.import` / `policy.export`
-  legacy statements. Supported EVPN edits are shape-aware and appear under
-  Reload-applied. Surfaced with a one-line migration hint where applicable.
+  `[rpki]`, `[bmp]`, `[mrt]`, unsupported EVPN shapes, and
+  `apply_bum_enforcement`. Supported EVPN edits are shape-aware and appear
+  under Reload-applied.
 - **Effectively impacted neighbors (via inheritance)** — every
   neighbor whose resolved import / export chain would move at reload,
   with the upstream change(s) responsible (peer-group / policy /
@@ -258,8 +257,7 @@ fields.
 "Restart-required" in `--diff`): `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
-`[mrt]`, inline `policy.import` / `policy.export` legacy global-fallback
-statements, and `apply_bum_enforcement`. EVPN table edits are
+`[mrt]`, and `apply_bum_enforcement`. EVPN table edits are
 coordinator-gated rather than blanket restart-required: SIGHUP uses the
 same daemon actor converger as `EvpnService.ApplyEvpnRuntime` for supported
 L2VNI/IP-VRF/ES shapes, additive build-up, atomic tenant teardown,
@@ -1453,16 +1451,11 @@ loser would survive the equal-cost multipath cut.
 
 ### Looking glass (birdwatcher-compatible REST API)
 
-Optional HTTP server for external looking glass frontends (Alice-LG, etc.).
-Configure in TOML:
-
-```toml
-[global.telemetry.looking_glass]
-addr = "0.0.0.0:8080"
-```
-
-Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
-`/routes/peer/{peer}`. Omit the section entirely to disable.
+For external looking glass frontends (Alice-LG, etc.), run the external
+`examples/birdwatcher-adapter` binary — it serves the birdwatcher REST
+endpoints (`/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
+`/routes/peer/{peer}`) from the daemon's gRPC API. The in-daemon
+`[global.telemetry.looking_glass]` server has been removed.
 
 ### EVPN Route Reflector + Bidirectional VTEP
 

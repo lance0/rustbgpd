@@ -212,7 +212,6 @@ pinned per ADR-0057.
 |---|---|---|
 | `prometheus_addr` | restart-required | The exporter listener binds at startup. |
 | `log_format` | restart-required | The `tracing` subscriber is initialized at startup. |
-| `looking_glass.*` | restart-required | Bound to the gRPC server set up at startup. |
 
 ### `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 
@@ -238,8 +237,6 @@ chains all add/change/remove cleanly via reload.
 | `neighbor_sets` (named) | live | Add/remove/edit named neighbor sets; the resolved set drives per-peer chain bindings. |
 | `import_chain` (named) | live | Reorder, add, or remove named imports. |
 | `export_chain` (named) | live | Reorder, add, or remove named exports. |
-| `[policy.import]` (inline, top-level) | validation-only | Parsed for backward compatibility but **does not hot-apply**. Logged as `WARN` during reload when changed: "evaluated at session start and requires a full restart to apply. Migrate to named definitions plus import_chain/export_chain for hot-reload support." |
-| `[policy.export]` (inline, top-level) | validation-only | Same. |
 | `[policy.explain] enabled` (ADR-0073) | restart-required (per peer) | Read by `build_transport_config` when a session is constructed, so the new value is adopted into the config snapshot (sessions established *after* the reload honour it) but live sessions keep their current import-explain write behaviour until they re-establish. Logged as `WARN` during reload when changed. Diagnostic retention only — never affects which routes are accepted. |
 | `[policy.explain] cache_size` (ADR-0073) | restart-required (per peer) | Same — the per-session LRU is sized at session construction. A live session's cache is not resized in place; the new capacity applies on its next establishment. |
 

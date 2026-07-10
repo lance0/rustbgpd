@@ -466,11 +466,6 @@ pub(crate) async fn apply_reload_outcome(
 /// this function logs them and pins the in-memory snapshot back to the
 /// live listener state for the gRPC sections (so the next reload keeps
 /// comparing against what the listener actually serves).
-///
-/// Inline `policy.import` / `policy.export` statements (the
-/// non-named global-fallback statements) are detected and warned but
-/// not applied — operators should migrate to named definitions plus
-/// `import_chain` / `export_chain` for hot-reload support, or restart.
 #[expect(
     clippy::too_many_lines,
     reason = "reload threads validation, three diff buckets, ordered reconcile steps, and failure aggregation through a single function"
@@ -498,7 +493,6 @@ pub(crate) async fn reload_config(
             return None;
         }
     };
-    desired_config.warn_if_deprecated_global_inline_policy();
     let mut new_config = desired_config.clone();
 
     let honor_graceful_shutdown_changed =
@@ -729,15 +723,6 @@ pub(crate) async fn reload_config(
             "[policy.explain] changed — the new enabled/cache_size apply to sessions \
              established after this reload (restart-required per peer); existing \
              sessions are unaffected until they re-establish."
-        );
-    }
-
-    if policy_diff.import_changed || policy_diff.export_changed {
-        warn!(
-            "[policy.import] / [policy.export] inline statements changed — these \
-             are evaluated at session start and require a full restart to apply. \
-             Migrate to named definitions plus import_chain/export_chain for \
-             hot-reload support."
         );
     }
 

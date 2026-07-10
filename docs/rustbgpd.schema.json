@@ -139,9 +139,7 @@
           "cache_size": 4096,
           "enabled": true
         },
-        "export": [],
         "export_chain": [],
-        "import": [],
         "import_chain": [],
         "neighbor_sets": {},
         "rpol_files": [],
@@ -1210,19 +1208,6 @@
       },
       "additionalProperties": false
     },
-    "LookingGlassConfig": {
-      "type": "object",
-      "properties": {
-        "addr": {
-          "description": "Listen address for the looking glass HTTP server (e.g., \"0.0.0.0:8080\").",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "addr"
-      ]
-    },
     "ManagedBridgeNetdevConfig": {
       "description": "One managed Linux bridge row (ADR-0091 bridge-first tranche).",
       "type": "object",
@@ -2115,28 +2100,12 @@
             "enabled": true
           }
         },
-        "export": {
-          "description": "Global export policy statements applied to all peers.",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PolicyStatementConfig"
-          }
-        },
         "export_chain": {
           "description": "Global export policy chain (references named definitions).",
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
-          }
-        },
-        "import": {
-          "description": "Global import policy statements applied to all peers.",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PolicyStatementConfig"
           }
         },
         "import_chain": {
@@ -2501,18 +2470,6 @@
         "log_format": {
           "description": "Log output format (`\"json\"`).",
           "type": "string"
-        },
-        "looking_glass": {
-          "description": "Optional birdwatcher-compatible looking glass HTTP server.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LookingGlassConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "prometheus_addr": {
           "description": "Prometheus metrics HTTP listener address (e.g., \"0.0.0.0:9179\").\nIf absent, no metrics HTTP server is started. Metrics are still\ncollected for gRPC health and internal counters.",

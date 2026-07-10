@@ -40,7 +40,6 @@ mod fib_runtime;
 mod fib_table_control;
 mod gnmi_set_bridge;
 mod kernel_route_notify;
-mod looking_glass;
 mod metrics_server;
 mod peer_manager;
 mod policy_admin;
@@ -616,10 +615,6 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     let remove_marker = "-".red().to_string();
     let change_marker = "~".yellow().to_string();
     let restart_marker = "!".yellow().to_string();
-    let inline_policy_hint =
-        "(migrate inline policy to named definitions + import_chain/export_chain for hot reload)"
-            .dimmed()
-            .to_string();
     let style = config::ConfigDiffTextStyle {
         reload_header: reload_header.into(),
         restart_header: restart_header.into(),
@@ -627,7 +622,6 @@ fn print_config_diff(diff: &config::ConfigDiff) {
         remove_marker: remove_marker.into(),
         change_marker: change_marker.into(),
         restart_marker: restart_marker.into(),
-        inline_policy_hint: inline_policy_hint.into(),
         no_changes: "No changes.".into(),
     };
     print!("{}", config::format_config_diff_with_style(diff, &style));
@@ -668,10 +662,6 @@ async fn trigger_import_validation_refresh(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one linear eprintln per banner line; splitting it would scatter the banner's visual order across helpers"
-)]
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
     let ebgp = config
         .neighbors
@@ -735,14 +725,6 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
         }
         eprintln!("  |- {}", parts.join(", "));
     }
-    if config.uses_deprecated_global_inline_policy() {
-        eprintln!(
-            "  |- DEPRECATED: global inline [[policy.import]]/[[policy.export]] — \
-             will be removed in a future release; migrate to named policy chains \
-             or .rpol files (docs/CONFIGURATION.md)"
-        );
-    }
-
     // Listeners
     for listener in grpc_listeners {
         let label = match &listener.endpoint {
@@ -764,11 +746,6 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     // Metrics
     if let Some(addr) = config.prometheus_addr() {
         eprintln!("  |- metrics: http://{addr}/metrics");
-    }
-
-    // Looking glass
-    if let Some(addr) = config.looking_glass_addr() {
-        eprintln!("  |- looking glass: http://{addr}/status");
     }
 
     // Optional subsystems
@@ -1253,8 +1230,7 @@ async fn run<T>(
         neighbors = config.neighbors.len(),
         "starting rustbgpd"
     );
-    config.warn_if_deprecated_global_inline_policy();
-    config.warn_if_deprecated_looking_glass();
+    config.warn_if_legacy_grpc_enforcement();
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {
@@ -1720,17 +1696,6 @@ async fn run<T>(
                 );
             }
         }
-    }
-
-    // Spawn birdwatcher-compatible looking glass HTTP server (if configured)
-    if let Some(lg_addr) = config.looking_glass_addr() {
-        let lg_state = std::sync::Arc::new(looking_glass::LookingGlassState::new(
-            rib_query_tx.clone(),
-            peer_mgr_tx.clone(),
-            config.global.asn,
-            config.global.router_id.clone(),
-        ));
-        tokio::spawn(looking_glass::serve(lg_addr, lg_state));
     }
 
     // Resolve declared EVPN instances once at startup and hand the
@@ -3289,7 +3254,6 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     log_format: "json".to_string(),
                     grpc_tcp: None,
                     grpc_uds: None,
-                    looking_glass: None,
                 },
                 dynamic_neighbor_limit: None,
                 worker_threads: None,

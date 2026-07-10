@@ -64,12 +64,16 @@ address = "10.0.0.100:5000"
 # --- Global export policy: deny everything ---
 # A collector never advertises routes to peers.
 
-[[policy.export]]
+[policy]
+export_chain = ["deny-all"]
+
+[policy.definitions.deny-all]
+[[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "0.0.0.0/0"
 le = 32
 
-[[policy.export]]
+[[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "::/0"
 le = 128

@@ -289,31 +289,16 @@ Required. Configures observability and management endpoints.
 `prometheus_addr`, when present, must be a valid `ip:port` socket address. The
 same listener serves `/metrics`, `/livez`, and `/readyz`.
 
-### `[global.telemetry.looking_glass]` (deprecated)
+### `[global.telemetry.looking_glass]` (removed)
 
-> **Deprecated — will be removed in a future release.** The daemon's
-> durable API is gRPC + `rbgp`; the birdwatcher REST surface moved to a
-> maintained external adapter, `examples/birdwatcher-adapter`, which
-> serves the identical endpoints and response shapes from the daemon's
-> gRPC API. Configuring this section logs a deprecation warning at
-> startup; behavior is otherwise unchanged until removal. See the
-> adapter README for the endpoint→gRPC mapping and migration notes.
-
-Optional birdwatcher-compatible HTTP server for looking glass frontends
-(Alice-LG, etc.).
-
-| Field  | Type   | Required | Description                              |
-|--------|--------|----------|------------------------------------------|
-| `addr` | string | yes      | `host:port` for the looking glass server |
-
-When configured, rustbgpd starts an HTTP server exposing birdwatcher-compatible
-endpoints (`/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
-`/routes/peer/{peer}`). Omit the section entirely to disable.
-
-```toml
-[global.telemetry.looking_glass]
-addr = "0.0.0.0:8080"
-```
+The in-daemon birdwatcher-compatible looking glass HTTP server has been
+removed. The daemon's durable API is gRPC + `rbgp`; the birdwatcher REST
+surface lives in a maintained external adapter, `examples/birdwatcher-adapter`,
+which serves the identical endpoints and response shapes (`/status`,
+`/protocols/bgp`, `/routes/protocol/{id}`, `/routes/peer/{peer}`) from the
+daemon's gRPC API. A config that still sets `[global.telemetry.looking_glass]`
+fails to load with a migration error. See the adapter README for the
+endpoint→gRPC mapping.
 
 gRPC listeners are configured with optional subtables:
 
@@ -1384,7 +1369,7 @@ when they next receive routes.
 Drop RPKI-invalid routes (recommended):
 
 ```toml
-[[policy.export]]
+[[policy.definitions.rpki-filter.statements]]
 match_rpki_validation = "invalid"
 action = "deny"
 ```
@@ -1392,12 +1377,12 @@ action = "deny"
 Prefer valid routes with higher LOCAL_PREF:
 
 ```toml
-[[policy.export]]
+[[policy.definitions.rpki-prefer.statements]]
 match_rpki_validation = "valid"
 action = "permit"
 set_local_pref = 200
 
-[[policy.export]]
+[[policy.definitions.rpki-prefer.statements]]
 match_rpki_validation = "not_found"
 action = "permit"
 set_local_pref = 100
@@ -1417,39 +1402,22 @@ See [ADR-0034](adr/0034-rpki-origin-validation.md) for design details.
 
 ## `[policy]`
 
-Optional. Defines global import and export policy that applies to all neighbors
-that do not declare their own per-neighbor policy.
+Optional. Defines named policy definitions, global policy chains, and
+`.rpol` policy files that apply to all neighbors that do not declare
+their own per-neighbor policy.
 
-### Inline policy (deprecated)
+### Inline policy (removed)
 
-> **DEPRECATED.** The global inline fallback (`[[policy.import]]` /
-> `[[policy.export]]`) predates the current policy architecture and
-> will be **removed in a future release**. It is restart-required on
-> change (no SIGHUP hot-apply), and it is invisible to config
-> transactions and the impact planner. The daemon logs a loud
-> deprecation warning at startup and on every reload while it is
-> present. Migrate to [named policy definitions](#named-policy-definitions)
-> plus `import_chain` / `export_chain`, or to
-> [`.rpol` policy files](rpol-language.md) via `policy.rpol_files`.
-> Per-neighbor inline policy (`[[neighbors.import_policy]]` /
-> `[[neighbors.export_policy]]`) is **not** deprecated.
-
-```toml
-[[policy.import]]
-prefix = "10.0.0.0/8"
-ge = 8
-le = 24
-action = "permit"
-set_local_pref = 150
-
-[[policy.import]]
-prefix = "0.0.0.0/0"
-action = "deny"
-
-[[policy.export]]
-prefix = "172.16.0.0/12"
-action = "deny"
-```
+The global inline fallback (`[[policy.import]]` / `[[policy.export]]`)
+has been removed: it predated the current policy architecture, was
+restart-required on change (no SIGHUP hot-apply), and was invisible to
+config transactions and the impact planner. A config that still sets it
+fails to load with a migration error. Move the statements to
+[named policy definitions](#named-policy-definitions) referenced from
+`import_chain` / `export_chain`, or to
+[`.rpol` policy files](rpol-language.md) via `policy.rpol_files`.
+Per-neighbor inline policy (`[[neighbors.import_policy]]` /
+`[[neighbors.export_policy]]`) is **unchanged**.
 
 ### Named policy definitions
 
@@ -1652,9 +1620,9 @@ per-peer** on reload; see [`reload-matrix.md`](reload-matrix.md) and the
 
 ## Policy entries
 
-Both global (`[[policy.import]]` / `[[policy.export]]`) and per-neighbor
-(`[[neighbors.import_policy]]` / `[[neighbors.export_policy]]`) entries share
-the same schema.
+Named-definition statements (`[[policy.definitions.<name>.statements]]`)
+and per-neighbor inline entries (`[[neighbors.import_policy]]` /
+`[[neighbors.export_policy]]`) share the same schema.
 
 ### Match conditions
 
@@ -1738,7 +1706,7 @@ inclusive AS_PATH length. Either field may be used independently or together
 as a range. `AS_SET` counts as 1 per RFC 4271.
 
 ```toml
-[[policy.import]]
+[[policy.definitions.path-length-guard.statements]]
 match_as_path_length_ge = 3
 match_as_path_length_le = 8
 action = "deny"
@@ -1773,7 +1741,7 @@ It applies to unicast routes. FlowSpec routes do not expose a policy-matchable
 next hop because FlowSpec `MP_REACH_NLRI` carries NH length 0.
 
 ```toml
-[[policy.export]]
+[[policy.definitions.ixp-export.statements]]
 match_neighbor_set = "ixp-clients"
 match_route_type = "external"
 match_next_hop = "2001:db8::1"
@@ -1792,7 +1760,7 @@ within `[ge, le]`.
 Example -- deny all specifics of 10.0.0.0/8 longer than /24:
 
 ```toml
-[[policy.import]]
+[[policy.definitions.deny-specifics.statements]]
 prefix = "10.0.0.0/8"
 ge = 25
 le = 32
@@ -1810,11 +1778,7 @@ For each neighbor, import and export policies are resolved independently:
 2. If the neighbor has per-neighbor **inline policy** (`[[neighbors.import_policy]]`
    or `[[neighbors.export_policy]]`), those are wrapped in a single-element chain.
 3. Otherwise, the global **chain** (`import_chain` / `export_chain`) is used.
-4. Otherwise, the global **inline policy** (`[[policy.import]]` / `[[policy.export]]`)
-   is wrapped in a single-element chain. *(Deprecated — see
-   [Inline policy (deprecated)](#inline-policy-deprecated); will be removed
-   in a future release.)*
-5. If none of the above exist, all routes are permitted (no filtering).
+4. If none of the above exist, all routes are permitted (no filtering).
 
 Per-neighbor policy completely replaces the global policy for that direction --
 the two are never merged. Inline and chain on the same neighbor/direction is a
@@ -1844,32 +1808,36 @@ log_format = "json"
 # token_file = "/etc/rustbgpd/grpc.token"
 
 # Global import policy: deny default route and RFC 1918, permit up to /24
-[[policy.import]]
+[policy]
+import_chain = ["edge-import"]
+
+[policy.definitions.edge-import]
+[[policy.definitions.edge-import.statements]]
 prefix = "0.0.0.0/0"
 action = "deny"
 
-[[policy.import]]
+[[policy.definitions.edge-import.statements]]
 prefix = "10.0.0.0/8"
 le = 32
 action = "deny"
 
-[[policy.import]]
+[[policy.definitions.edge-import.statements]]
 prefix = "172.16.0.0/12"
 le = 32
 action = "deny"
 
-[[policy.import]]
+[[policy.definitions.edge-import.statements]]
 prefix = "192.168.0.0/16"
 le = 32
 action = "deny"
 
 # Prefer routes from AS 65100
-[[policy.import]]
+[[policy.definitions.edge-import.statements]]
 match_as_path = "^65100_"
 action = "permit"
 set_local_pref = 200
 
-[[policy.import]]
+[[policy.definitions.edge-import.statements]]
 prefix = "0.0.0.0/0"
 le = 24
 action = "permit"

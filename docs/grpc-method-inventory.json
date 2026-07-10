@@ -6,12 +6,12 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 98,
+  "method_count": 97,
   "tier_counts": {
     "read": 0,
     "sensitive_read": 56,
     "mutating": 19,
-    "operator_only": 23
+    "operator_only": 22
   },
   "methods": [
     { "service": "gnmi.gNMI", "method": "Capabilities", "path": "/gnmi.gNMI/Capabilities", "tier": "sensitive_read" },
@@ -19,7 +19,6 @@
     { "service": "gnmi.gNMI", "method": "Set", "path": "/gnmi.gNMI/Set", "tier": "operator_only" },
     { "service": "gnmi.gNMI", "method": "Subscribe", "path": "/gnmi.gNMI/Subscribe", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.GlobalService", "method": "GetGlobal", "path": "/rustbgpd.v1.GlobalService/GetGlobal", "tier": "sensitive_read" },
-    { "service": "rustbgpd.v1.GlobalService", "method": "SetGlobal", "path": "/rustbgpd.v1.GlobalService/SetGlobal", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ConfigService", "method": "DiffRuntimeConfig", "path": "/rustbgpd.v1.ConfigService/DiffRuntimeConfig", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ConfigService", "method": "PlanConfigTransaction", "path": "/rustbgpd.v1.ConfigService/PlanConfigTransaction", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ConfigService", "method": "ApplyConfigTransaction", "path": "/rustbgpd.v1.ConfigService/ApplyConfigTransaction", "tier": "operator_only" },

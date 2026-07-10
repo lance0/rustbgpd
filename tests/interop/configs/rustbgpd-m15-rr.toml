@@ -11,7 +11,11 @@ log_format = "json"
 address = "0.0.0.0:50051"
 
 # Import policy: set LOCAL_PREF 150 on all routes
-[[policy.import]]
+[policy]
+import_chain = ["lp-150"]
+
+[policy.definitions.lp-150]
+[[policy.definitions.lp-150.statements]]
 prefix = "0.0.0.0/0"
 le = 32
 action = "permit"

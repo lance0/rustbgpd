@@ -161,13 +161,14 @@ exposes operational detail, `/readyz` exposes only core actor readiness, and
 loopback-vs-management-network discipline to `prometheus_addr` that you apply
 to gRPC.
 
-## Looking glass endpoint
+## Looking glass adapter
 
-The optional birdwatcher-compatible looking glass HTTP server
-(`[global.telemetry.looking_glass]`) is read-only and unauthenticated. It
-exposes neighbor state, received routes, and peer addresses. Apply the same
-network-level access controls as Prometheus. If not needed, omit the config
-section entirely — no HTTP server is started.
+The in-daemon looking glass HTTP server has been removed. The
+birdwatcher-compatible REST surface is served by the external
+`examples/birdwatcher-adapter` binary over the daemon's gRPC API. The
+adapter is read-only and unauthenticated: it exposes neighbor state,
+received routes, and peer addresses, so apply the same network-level
+access controls as Prometheus.
 
 ## TCP MD5 and GTSM
 

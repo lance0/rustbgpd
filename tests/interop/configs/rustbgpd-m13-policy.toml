@@ -39,14 +39,16 @@ set_local_pref = 200
 # --- Import chain: all three fire in sequence (chain accumulates) ---
 [policy]
 import_chain = ["deny-long-prefixes", "tag-internal", "set-lp-upstream"]
+export_chain = ["export-shape"]
 
-# --- Export policy (inline, first-match is fine here) ---
+# --- Export policy (single named policy, first-match is fine here) ---
 
-[[policy.export]]
+[policy.definitions.export-shape]
+[[policy.definitions.export-shape.statements]]
 prefix = "10.10.0.0/16"
 action = "deny"
 
-[[policy.export]]
+[[policy.definitions.export-shape.statements]]
 prefix = "0.0.0.0/0"
 le = 24
 action = "permit"

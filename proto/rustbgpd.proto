@@ -73,8 +73,6 @@ message ConfigError {
 
 service GlobalService {
   rpc GetGlobal(GetGlobalRequest) returns (GlobalState);
-  // Reserved for future use. Always returns UNIMPLEMENTED.
-  rpc SetGlobal(SetGlobalRequest) returns (SetGlobalResponse);
 }
 
 message GetGlobalRequest {}
@@ -98,16 +96,6 @@ message GlobalState {
   // TCP_AO_SUPPORT_UNSUPPORTED or TCP_AO_SUPPORT_PROBE_FAILED.
   string tcp_ao_detail = 5;
 }
-
-// Reserved for future use. Always returns UNIMPLEMENTED.
-message SetGlobalRequest {
-  uint32 asn = 1;
-  string router_id = 2;
-  uint32 listen_port = 3;
-}
-
-// Reserved for future use. Always returns UNIMPLEMENTED.
-message SetGlobalResponse {}
 
 // ---------------------------------------------------------------------------
 // ConfigService — live runtime config diagnostics

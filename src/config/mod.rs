@@ -59,6 +59,12 @@ impl Config {
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
+                // Retired keys reject as unknown fields; replace the bare
+                // serde diagnostic with a migration pointer when one is
+                // responsible for the failure.
+                if let Some(migration) = retired_key_error(content) {
+                    return Err(migration);
+                }
                 let error = ConfigError::Parse(e);
                 return Err(diagnostic::render_diagnostic(content, source_name, &error)
                     .unwrap_or_else(|| format!("error: {error}")));
@@ -395,14 +401,6 @@ impl Config {
             .map(|s| s.parse().expect("validated in Config::load"))
     }
 
-    pub fn looking_glass_addr(&self) -> Option<SocketAddr> {
-        self.global
-            .telemetry
-            .looking_glass
-            .as_ref()
-            .map(|lg| lg.addr.parse().expect("validated in Config::load"))
-    }
-
     pub fn listen_addr(&self) -> SocketAddr {
         SocketAddr::new(
             std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -548,105 +546,57 @@ impl Config {
         None
     }
 
-    /// True when the deprecated global inline policy fallback
-    /// (`[[policy.import]]` / `[[policy.export]]`) is present.
-    ///
-    /// This is the pre-ADR-0076/0096 legacy surface: evaluated only
-    /// when the global chains are empty, restart-required on change
-    /// (no hot-reload), and invisible to the transaction planner.
-    /// Per-neighbor inline policy is NOT covered — only the global
-    /// fallback is deprecated.
-    pub fn uses_deprecated_global_inline_policy(&self) -> bool {
-        !self.policy.import.is_empty() || !self.policy.export.is_empty()
-    }
-
-    /// Emit the load-time deprecation warning for the global inline
-    /// policy fallback, if present. Called wherever a config enters
-    /// the daemon (startup, SIGHUP reload).
-    pub fn warn_if_deprecated_global_inline_policy(&self) {
-        if self.uses_deprecated_global_inline_policy() {
+    /// Emit the startup warning for the pre-ADR-0064 legacy gRPC
+    /// authorization mode, if active. Tier enforcement becomes
+    /// mandatory in a future release.
+    pub fn warn_if_legacy_grpc_enforcement(&self) {
+        if matches!(
+            self.security.grpc.enforcement,
+            schema::GrpcEnforcementConfig::Legacy
+        ) {
             tracing::warn!(
-                "DEPRECATED: global inline [[policy.import]] / [[policy.export]] \
-                 statements are deprecated and will be removed in a future release. \
-                 They are restart-required on change and invisible to config \
-                 transactions. Migrate to named policy chains ([policy.definitions] \
-                 + import_chain/export_chain) or .rpol files (policy.rpol_files) — \
-                 see docs/CONFIGURATION.md, \"Inline policy\"."
+                "security.grpc.enforcement = \"legacy\" is active: per-method tier \
+                 authorization is NOT enforced on read_write listeners. Tier \
+                 enforcement becomes mandatory in a future release — migrate to \
+                 enforcement = \"tier\" with [security.grpc.roles]; see \
+                 docs/adr/0064-grpc-authorization.md."
             );
         }
     }
 
-    /// Emit the startup deprecation warning for the in-daemon
-    /// birdwatcher-compatible looking glass HTTP server, if configured.
-    ///
-    /// The daemon's durable API identity is gRPC + rbgp; the birdwatcher
-    /// REST surface moved to the external `examples/birdwatcher-adapter`
-    /// binary, which serves the identical contract over gRPC. The
-    /// in-daemon server keeps working unchanged until removal.
-    pub fn warn_if_deprecated_looking_glass(&self) {
-        if self.global.telemetry.looking_glass.is_some() {
-            tracing::warn!(
-                "DEPRECATED: the in-daemon looking glass HTTP server \
-                 ([global.telemetry.looking_glass]) is deprecated and will be \
-                 removed in a future release. Run the external adapter instead: \
-                 examples/birdwatcher-adapter serves the same birdwatcher REST \
-                 endpoints from the daemon's gRPC API — see \
-                 docs/CONFIGURATION.md \"[global.telemetry.looking_glass] \
-                 (deprecated)\" and the CHANGELOG Deprecated entry."
-            );
-        }
-    }
-
-    /// Resolve the global import policy chain.
-    ///
-    /// If `import_chain` is set, resolves named policies. Otherwise wraps
-    /// the inline `import` entries as a single-policy chain.
+    /// Resolve the global import policy chain (named policies referenced
+    /// by `[policy] import_chain`). `None` when no chain is configured.
     pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.import_chain.is_empty() {
-            let policy = parse_policy(
-                &self.policy.import,
-                &self.policy.neighbor_sets,
-                &self.peer_groups,
-            )?;
-
-            Ok(policy.map(|p| PolicyChain::new(vec![p])))
-        } else {
-            let chain = resolve_chain(
-                &self.policy.import_chain,
-                &self.policy.definitions,
-                &self.policy.rpol,
-                &self.policy.dataset_bindings,
-                &self.policy.neighbor_sets,
-                &self.peer_groups,
-                ChainDirection::Import,
-                self.global.asn,
-            )?;
-
-            Ok(chain)
+            return Ok(None);
         }
+        resolve_chain(
+            &self.policy.import_chain,
+            &self.policy.definitions,
+            &self.policy.rpol,
+            &self.policy.dataset_bindings,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+            ChainDirection::Import,
+            self.global.asn,
+        )
     }
 
     /// Resolve the global export policy chain.
     pub fn export_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.export_chain.is_empty() {
-            Ok(parse_policy(
-                &self.policy.export,
-                &self.policy.neighbor_sets,
-                &self.peer_groups,
-            )?
-            .map(|p| PolicyChain::new(vec![p])))
-        } else {
-            resolve_chain(
-                &self.policy.export_chain,
-                &self.policy.definitions,
-                &self.policy.rpol,
-                &self.policy.dataset_bindings,
-                &self.policy.neighbor_sets,
-                &self.peer_groups,
-                ChainDirection::Export,
-                self.global.asn,
-            )
+            return Ok(None);
         }
+        resolve_chain(
+            &self.policy.export_chain,
+            &self.policy.definitions,
+            &self.policy.rpol,
+            &self.policy.dataset_bindings,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+            ChainDirection::Export,
+            self.global.asn,
+        )
     }
 
     /// Build the implicit RFC 8326 chain-tail import rule:
@@ -741,7 +691,7 @@ impl Config {
     /// Resolve the effective import/export policy chains for one neighbor.
     ///
     /// Per-neighbor named chain overrides per-neighbor inline policy, which
-    /// overrides the corresponding global named chain or global inline policy.
+    /// overrides the corresponding global named chain.
     ///
     /// When `[global] honor_graceful_shutdown = true` and/or
     /// `[global] honor_blackhole = true` AND the neighbor is EBGP, the
@@ -1792,6 +1742,48 @@ fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, 
     std::borrow::Cow::Borrowed(content)
 }
 
+/// Detect removed config keys in a TOML document that failed typed
+/// deserialization and return a migration error naming the
+/// replacement. Returns `None` when the failure has some other cause
+/// (including TOML that is not even syntactically valid — the normal
+/// parse diagnostic covers that).
+fn retired_key_error(content: &str) -> Option<String> {
+    let table: toml::Table = content.parse().ok()?;
+    let nested = |path: &[&str]| -> bool {
+        let (last, parents) = path.split_last().expect("retired-key path is non-empty");
+        let mut current = &table;
+        for key in parents {
+            match current.get(*key) {
+                Some(toml::Value::Table(t)) => current = t,
+                _ => return false,
+            }
+        }
+        current.contains_key(*last)
+    };
+    if nested(&["global", "telemetry", "looking_glass"]) {
+        return Some(
+            "error: [global.telemetry.looking_glass] has been removed: the in-daemon \
+             birdwatcher looking glass HTTP server is gone. Run the external adapter \
+             instead — examples/birdwatcher-adapter serves the same birdwatcher REST \
+             endpoints from the daemon's gRPC API. Remove the \
+             [global.telemetry.looking_glass] section from this config."
+                .to_string(),
+        );
+    }
+    if nested(&["policy", "import"]) || nested(&["policy", "export"]) {
+        return Some(
+            "error: the global inline policy fallback ([[policy.import]] / \
+             [[policy.export]]) has been removed. Migrate the statements to named \
+             policies ([policy.definitions.<name>] or .rpol files via [policy] \
+             rpol_files) referenced from [policy] import_chain / export_chain — see \
+             docs/CONFIGURATION.md \"Named policy definitions\". Per-neighbor and per-group \
+             inline policy (import_policy / export_policy) is unchanged."
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn effective_grpc_max_tier(
     access_mode: GrpcAccessMode,
     configured: Option<GrpcMaxTierConfig>,
@@ -2152,7 +2144,6 @@ pub struct PeerGroupDiff {
 }
 
 /// Differences between two policy configurations.
-#[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, serde::Serialize)]
 pub struct PolicyDiff {
     pub definitions_added: Vec<String>,
@@ -2161,8 +2152,6 @@ pub struct PolicyDiff {
     pub neighbor_sets_added: Vec<String>,
     pub neighbor_sets_removed: Vec<String>,
     pub neighbor_sets_changed: Vec<String>,
-    pub import_changed: bool,
-    pub export_changed: bool,
     pub import_chain_changed: bool,
     pub export_chain_changed: bool,
     /// The `[policy] rpol_files` list or any referenced `.rpol` file's
@@ -2180,8 +2169,6 @@ impl PolicyDiff {
             || !self.neighbor_sets_added.is_empty()
             || !self.neighbor_sets_removed.is_empty()
             || !self.neighbor_sets_changed.is_empty()
-            || self.import_changed
-            || self.export_changed
             || self.import_chain_changed
             || self.export_chain_changed
             || self.rpol_changed
@@ -2481,8 +2468,6 @@ impl ConfigDiff {
             || self.rpki_changed
             || self.bmp_changed
             || self.mrt_changed
-            || self.policy.import_changed
-            || self.policy.export_changed
             || self.evpn_runtime_change_class.is_restart_required()
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
@@ -2876,17 +2861,6 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[policy.explain]".to_string());
     }
-    if diff.policy.import_changed {
-        class
-            .restart_required_sections
-            .push("[policy.import] inline".to_string());
-    }
-    if diff.policy.export_changed {
-        class
-            .restart_required_sections
-            .push("[policy.export] inline".to_string());
-    }
-
     class
 }
 
@@ -3023,8 +2997,6 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
-            "inline_policy_import_changed": diff.policy.import_changed,
-            "inline_policy_export_changed": diff.policy.export_changed,
         },
         "informational": serde_json::Value::Object(serde_json::Map::new()),
     })
@@ -3042,7 +3014,6 @@ pub struct ConfigDiffTextStyle<'a> {
     pub remove_marker: std::borrow::Cow<'a, str>,
     pub change_marker: std::borrow::Cow<'a, str>,
     pub restart_marker: std::borrow::Cow<'a, str>,
-    pub inline_policy_hint: std::borrow::Cow<'a, str>,
     pub no_changes: std::borrow::Cow<'a, str>,
 }
 
@@ -3055,9 +3026,6 @@ impl Default for ConfigDiffTextStyle<'_> {
             remove_marker: "-".into(),
             change_marker: "~".into(),
             restart_marker: "!".into(),
-            inline_policy_hint:
-                "(migrate inline policy to named definitions + import_chain/export_chain for hot reload)"
-                    .into(),
             no_changes: "No changes.".into(),
         }
     }
@@ -3284,19 +3252,10 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.policy_explain_changed {
         restart_sections.push("[policy.explain] (per-peer; applies on next session)");
     }
-    if p.import_changed {
-        restart_sections.push("[policy.import] (inline)");
-    }
-    if p.export_changed {
-        restart_sections.push("[policy.export] (inline)");
-    }
     if !restart_sections.is_empty() {
         let _ = writeln!(out, "{}", style.restart_header);
         for section in &restart_sections {
             let _ = writeln!(out, "  {} {section} changed", style.restart_marker);
-        }
-        if p.import_changed || p.export_changed {
-            let _ = writeln!(out, "    {}", style.inline_policy_hint);
         }
         out.push('\n');
     }
@@ -4902,8 +4861,6 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         neighbor_sets_added,
         neighbor_sets_removed,
         neighbor_sets_changed,
-        import_changed: old.import != new.import,
-        export_changed: old.export != new.export,
         import_chain_changed: old.import_chain != new.import_chain,
         export_chain_changed: old.export_chain != new.export_chain,
         rpol_changed: old.rpol_files != new.rpol_files || old.rpol != new.rpol,

@@ -512,16 +512,6 @@ pub struct TelemetryConfig {
     /// gRPC Unix-domain-socket listener.
     #[serde(default)]
     pub grpc_uds: Option<GrpcUdsListenerConfig>,
-    /// Optional birdwatcher-compatible looking glass HTTP server.
-    #[serde(default)]
-    pub looking_glass: Option<LookingGlassConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LookingGlassConfig {
-    /// Listen address for the looking glass HTTP server (e.g., "0.0.0.0:8080").
-    pub addr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -991,12 +981,6 @@ fn default_bfd_multiplier() -> u32 {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
-    /// Global import policy statements applied to all peers.
-    #[serde(default)]
-    pub import: Vec<PolicyStatementConfig>,
-    /// Global export policy statements applied to all peers.
-    #[serde(default)]
-    pub export: Vec<PolicyStatementConfig>,
     /// Named policy definitions, reusable across neighbors and directions.
     #[serde(default)]
     pub definitions: HashMap<String, NamedPolicyConfig>,

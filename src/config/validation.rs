@@ -100,15 +100,6 @@ impl Config {
                 })?;
         }
 
-        // Validate looking_glass addr if configured
-        if let Some(ref lg) = self.global.telemetry.looking_glass {
-            lg.addr
-                .parse::<SocketAddr>()
-                .map_err(|e| ConfigError::InvalidGrpcConfig {
-                    reason: format!("invalid looking_glass.addr {:?}: {e}", lg.addr),
-                })?;
-        }
-
         let telemetry = &self.global.telemetry;
         let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
         let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
@@ -209,17 +200,6 @@ impl Config {
         }
 
         // Eagerly validate all policies at load time
-        let _global_import = parse_policy(
-            &self.policy.import,
-            &self.policy.neighbor_sets,
-            &self.peer_groups,
-        )?;
-        parse_policy(
-            &self.policy.export,
-            &self.policy.neighbor_sets,
-            &self.peer_groups,
-        )?;
-
         for (name, set) in &self.policy.neighbor_sets {
             parse_neighbor_set(name, set, &self.peer_groups)?;
         }

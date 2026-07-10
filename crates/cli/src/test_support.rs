@@ -530,13 +530,6 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
             tcp_ao_detail: String::new(),
         }))
     }
-
-    async fn set_global(
-        &self,
-        _request: Request<server_proto::SetGlobalRequest>,
-    ) -> Result<Response<server_proto::SetGlobalResponse>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
-    }
 }
 
 struct MockControlService {
