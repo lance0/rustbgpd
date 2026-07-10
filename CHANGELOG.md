@@ -250,6 +250,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (§5.12), and 10 on stalled transfers — sent best-effort before the
   session drops, and never in response to a received Error Report
   (§5.11). (LAN-314)
+- **A Serial Notify received before RTR version negotiation completes no
+  longer fails the session.** Per draft-ietf-sidrops-8210bis-26 §5.2/§7,
+  a cache may send a Serial Notify at any time — including between the
+  router's first query and the response that opens the session — and the
+  router must ignore it regardless of its Protocol Version field. The
+  client previously applied the negotiated-version guard to every PDU,
+  so a differently-versioned Serial Notify in that window (e.g. from a
+  version-0 cache, or a v2 notify during a v1-pinned reconnect) tore the
+  session down before negotiation could complete. Serial Notify frames
+  are now discarded while negotiation is pending — a correct-version
+  notify is equally a no-op, since the query it would trigger is already
+  outstanding (§7) — and the version guard applies from the cache's
+  first response PDU onward, preserving the post-negotiation
+  unexpected-version handling (Error Report code 8) and the held-epoch
+  version pinning on reconnect. (LAN-314)
 - **Malformed ASPA announcements are rejected instead of poisoning the ASPA
   table.** Per draft-ietf-sidrops-8210bis-26 §5.12 ("ASPA Provider List
   Error"), an ASPA announcement carrying no Provider ASNs — previously
