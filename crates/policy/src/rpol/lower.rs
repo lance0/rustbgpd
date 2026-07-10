@@ -68,6 +68,60 @@ use super::ast::{
 };
 use super::typeck::{Field, resolve_field, value_field_of};
 
+/// Static slot allocation for `let` bindings (LAN-302): one register
+/// file per **source term** (bindings never cross terms), slots handed
+/// out in declaration order. Entering an `if`/`else` body saves a
+/// [`mark`](Self::mark) and leaving [`reset`](Self::reset)s to it, so
+/// sibling scopes reuse slots — they are never live simultaneously —
+/// and the frame stays within `2 × MAX_LOCALS` slots
+/// (`crate::eval::LOCAL_FRAME_SLOTS`) forever. Lookup scans innermost
+/// last (reverse), giving deterministic shadowing of outer bindings
+/// and parameters. Purely a function of the source, so identical
+/// source always compiles to identical slot assignments (ADR-0103
+/// Decision 5 determinism).
+#[derive(Default)]
+struct LetEnv {
+    lets: Vec<(String, u8)>,
+    next_slot: u8,
+}
+
+impl LetEnv {
+    /// The slot of the innermost visible binding named `name`.
+    fn lookup(&self, name: &str) -> Option<u8> {
+        self.lets
+            .iter()
+            .rev()
+            .find(|(local, _)| local == name)
+            .map(|&(_, slot)| slot)
+    }
+
+    /// Declare a binding, allocating the next slot. The typechecker's
+    /// per-scope `MAX_LOCALS` cap bounds `next_slot` below the frame
+    /// size (two nesting levels × 64).
+    fn declare(&mut self, name: &str) -> u8 {
+        let slot = self.next_slot;
+        assert!(
+            usize::from(slot) < crate::eval::LOCAL_FRAME_SLOTS,
+            "typechecked: per-scope caps bound the frame"
+        );
+        self.next_slot += 1;
+        self.lets.push((name.to_string(), slot));
+        slot
+    }
+
+    /// Snapshot the scope for a nested `if`/`else` body.
+    fn mark(&self) -> (usize, u8) {
+        (self.lets.len(), self.next_slot)
+    }
+
+    /// Leave a nested scope: its names go out of scope and its slots
+    /// become reusable by sibling scopes.
+    fn reset(&mut self, (len, next_slot): (usize, u8)) {
+        self.lets.truncate(len);
+        self.next_slot = next_slot;
+    }
+}
+
 /// Encode a community literal's concrete wire value (for
 /// `add`/`remove` actions and test assertions). RT/RO literals pick
 /// the RFC 4360 type from the global admin's shape, matching the
@@ -267,6 +321,16 @@ impl<'a> Lowerer<'a> {
 
     /// Lower one `.rpol` term to its IR terms (see module docs for the
     /// fallthrough encoding).
+    ///
+    /// `let` statements (LAN-302) lower to [`TermAction::Bind`] terms
+    /// guarded by their enclosing branch condition — `True` in term-body
+    /// position, the `if` guard (or its negation for `else`) inside a
+    /// body — so the initializer evaluates exactly when the statement
+    /// would execute (eager, fail-closed) and the slot is written
+    /// before any IR term that reads it. Pending modification staging
+    /// does not need flushing around a Bind: definite assignment means
+    /// staged computed expressions only ever read slots whose Bind
+    /// terms were emitted earlier.
     fn lower_term(
         &mut self,
         term: &super::ast::TermDef,
@@ -275,6 +339,8 @@ impl<'a> Lowerer<'a> {
     ) -> Vec<(MatchExpr, TermAction)> {
         let mut out: Vec<(MatchExpr, TermAction)> = Vec::new();
         let mut pending = RouteModifications::default();
+        // Slots reset per source term: bindings never cross terms.
+        let mut lets = LetEnv::default();
         for stmt in &term.stmts {
             match stmt {
                 Stmt::Action(ActionStmt::Accept(_)) => {
@@ -288,8 +354,23 @@ impl<'a> Lowerer<'a> {
                     out.push((MatchExpr::True, TermAction::Deny));
                     return out;
                 }
+                // Term-body `let`: lower the initializer against the
+                // scope *before* declaring, so `let x = x + 1` reads
+                // the prior `x` (shadowing, not self-reference).
+                Stmt::Action(ActionStmt::Let { name, init, .. }) => {
+                    let expr = lower_value(init, env, &lets);
+                    let slot = lets.declare(&name.node);
+                    out.push((
+                        MatchExpr::True,
+                        TermAction::Bind {
+                            slot,
+                            name: name.node.clone().into_boxed_str(),
+                            expr,
+                        },
+                    ));
+                }
                 Stmt::Action(action) => {
-                    apply_action(&mut pending, action, env);
+                    apply_action(&mut pending, action, env, &lets);
                 }
                 Stmt::If(if_stmt) => {
                     if !pending.is_empty() {
@@ -298,9 +379,18 @@ impl<'a> Lowerer<'a> {
                             TermAction::Continue(std::mem::take(&mut pending)),
                         ));
                     }
-                    let guard = self.lower_expr(&if_stmt.cond, env, store);
-                    let then_arm = lower_body(&if_stmt.then_actions, env);
+                    let guard = self.lower_expr(&if_stmt.cond, env, &lets, store);
+                    let scope = lets.mark();
+                    let (then_binds, then_arm) = lower_body(&if_stmt.then_actions, env, &mut lets);
+                    lets.reset(scope);
                     let needs_else_guard = if_stmt.else_actions.is_some();
+                    // Body `let`s become Bind terms guarded by the
+                    // branch condition, ahead of the body's action
+                    // term (guards are pure, so re-evaluating the
+                    // condition per term cannot diverge).
+                    for bind in then_binds {
+                        out.push((guard.clone(), bind));
+                    }
                     if let Some(action) = then_arm {
                         out.push((guard.clone(), action));
                     } else if needs_else_guard {
@@ -310,12 +400,17 @@ impl<'a> Lowerer<'a> {
                             TermAction::Continue(RouteModifications::default()),
                         ));
                     }
-                    if let Some(action) = if_stmt
-                        .else_actions
-                        .as_ref()
-                        .and_then(|actions| lower_body(actions, env))
-                    {
-                        out.push((MatchExpr::Not(Box::new(guard)), action));
+                    if let Some(else_actions) = &if_stmt.else_actions {
+                        let scope = lets.mark();
+                        let (else_binds, else_arm) = lower_body(else_actions, env, &mut lets);
+                        lets.reset(scope);
+                        let negated = MatchExpr::Not(Box::new(guard));
+                        for bind in else_binds {
+                            out.push((negated.clone(), bind));
+                        }
+                        if let Some(action) = else_arm {
+                            out.push((negated, action));
+                        }
                     }
                 }
             }
@@ -330,13 +425,14 @@ impl<'a> Lowerer<'a> {
         &mut self,
         expr: &Expr,
         env: &HashMap<&str, u32>,
+        lets: &LetEnv,
         store: &mut SetStore,
     ) -> MatchExpr {
         match expr {
             Expr::And(lhs, rhs) => {
                 let mut children = vec![
-                    self.lower_expr(lhs, env, store),
-                    self.lower_expr(rhs, env, store),
+                    self.lower_expr(lhs, env, lets, store),
+                    self.lower_expr(rhs, env, lets, store),
                 ];
                 // Guards are pure; order And-children cheapest-first
                 // (the IR invariant shared with the TOML compiler).
@@ -344,11 +440,13 @@ impl<'a> Lowerer<'a> {
                 MatchExpr::And(children)
             }
             Expr::Or(lhs, rhs) => MatchExpr::Or(vec![
-                self.lower_expr(lhs, env, store),
-                self.lower_expr(rhs, env, store),
+                self.lower_expr(lhs, env, lets, store),
+                self.lower_expr(rhs, env, lets, store),
             ]),
-            Expr::Not(inner, _) => MatchExpr::Not(Box::new(self.lower_expr(inner, env, store))),
-            Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env),
+            Expr::Not(inner, _) => {
+                MatchExpr::Not(Box::new(self.lower_expr(inner, env, lets, store)))
+            }
+            Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env, lets),
             // LAN-299: value comparisons keep their shape (constant
             // subtrees folded) — deliberately NOT rewritten to the
             // legacy scalar nodes even when one side folds to a
@@ -361,8 +459,8 @@ impl<'a> Lowerer<'a> {
                     CmpOp::Ge => ValueCmpOp::Ge,
                     CmpOp::Le => ValueCmpOp::Le,
                 },
-                lhs: lower_value(lhs, env),
-                rhs: lower_value(rhs, env),
+                lhs: lower_value(lhs, env, lets),
+                rhs: lower_value(rhs, env, lets),
             })),
             Expr::In { field, set } => match resolve_field(field).expect("typechecked") {
                 Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
@@ -416,8 +514,34 @@ fn lower_cmp(
     op: CmpOp,
     rhs: &Rhs,
     env: &HashMap<&str, u32>,
+    lets: &LetEnv,
 ) -> MatchExpr {
     let resolved = resolve_field(field).expect("typechecked");
+    // LAN-302: a `let` binding on the right of a u32-field comparison
+    // is a runtime value, so the comparison lowers to the checked
+    // value-comparison node (fail-closed absent-operand semantics,
+    // like every computed form) rather than a constant-bound scalar
+    // node. Gated on u32 fields: on enum-typed fields the member
+    // spelling wins (position-typed resolution — bindings are read
+    // only in value positions), mirroring the typechecker.
+    if let Rhs::Ident(name) = rhs
+        && let Some(field) = value_field_of(resolved)
+        && let Some(slot) = lets.lookup(&name.node)
+    {
+        return MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+            op: match op {
+                CmpOp::Eq => ValueCmpOp::Eq,
+                CmpOp::Ne => ValueCmpOp::Ne,
+                CmpOp::Ge => ValueCmpOp::Ge,
+                CmpOp::Le => ValueCmpOp::Le,
+            },
+            lhs: ValueExpr::Field(field),
+            rhs: ValueExpr::Local {
+                slot,
+                name: name.node.clone().into_boxed_str(),
+            },
+        }));
+    }
     match resolved {
         Field::LocalPref => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::LocalPref),
         Field::Med => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::Med),
@@ -570,40 +694,64 @@ fn lower_cmp(
     }
 }
 
-/// Lower an `if` body (a flat action list) to its term action:
+/// Lower an `if` body (a flat action list) to its `let` bindings
+/// (LAN-302 — [`TermAction::Bind`]s the caller emits ahead of the
+/// action term, guarded by the branch condition) and its term action:
 /// `Some(Permit)` on `accept`, `Some(Deny)` on `reject`,
 /// `Some(Continue)` when it only modifies, `None` when it does nothing.
-fn lower_body(actions: &[ActionStmt], env: &HashMap<&str, u32>) -> Option<TermAction> {
+/// The caller wraps this in a `lets` scope mark/reset — body bindings
+/// are not visible outside the body.
+fn lower_body(
+    actions: &[ActionStmt],
+    env: &HashMap<&str, u32>,
+    lets: &mut LetEnv,
+) -> (Vec<TermAction>, Option<TermAction>) {
+    let mut binds = Vec::new();
     let mut mods = RouteModifications::default();
     for action in actions {
         match action {
-            ActionStmt::Accept(_) => return Some(TermAction::Permit(mods)),
-            ActionStmt::Reject(_) => return Some(TermAction::Deny),
-            other => apply_action(&mut mods, other, env),
+            ActionStmt::Accept(_) => return (binds, Some(TermAction::Permit(mods))),
+            ActionStmt::Reject(_) => return (binds, Some(TermAction::Deny)),
+            ActionStmt::Let { name, init, .. } => {
+                let expr = lower_value(init, env, lets);
+                let slot = lets.declare(&name.node);
+                binds.push(TermAction::Bind {
+                    slot,
+                    name: name.node.clone().into_boxed_str(),
+                    expr,
+                });
+            }
+            other => apply_action(&mut mods, other, env, lets),
         }
     }
-    if mods.is_empty() {
+    let action = if mods.is_empty() {
         None
     } else {
         Some(TermAction::Continue(mods))
-    }
+    };
+    (binds, action)
 }
 
-fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMap<&str, u32>) {
+fn apply_action(
+    mods: &mut RouteModifications,
+    action: &ActionStmt,
+    env: &HashMap<&str, u32>,
+    lets: &LetEnv,
+) {
     match action {
-        ActionStmt::Accept(_) | ActionStmt::Reject(_) => {
-            unreachable!("verdicts handled by callers")
+        ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::Let { .. } => {
+            unreachable!("verdicts and `let` handled by callers")
         }
         // LAN-299: a computed set value that folds to a constant
         // (literal, parameter, or constant arithmetic) lowers to the
         // literal field — `set med 25 + 25` compiles to exactly what
         // `set med 50` does. Only expressions that read route/peer
         // fields stay computed (resolved per route by the evaluator).
-        ActionStmt::SetLocalPref(expr, _) => match lower_value(expr, env) {
+        ActionStmt::SetLocalPref(expr, _) => match lower_value(expr, env, lets) {
             ValueExpr::Const(value) => mods.set_local_pref = Some(value),
             computed => mods.set_local_pref_computed = Some(std::sync::Arc::new(computed)),
         },
-        ActionStmt::SetMed(expr, _) => match lower_value(expr, env) {
+        ActionStmt::SetMed(expr, _) => match lower_value(expr, env, lets) {
             ValueExpr::Const(value) => mods.set_med = Some(value),
             computed => mods.set_med_computed = Some(std::sync::Arc::new(computed)),
         },
@@ -672,27 +820,39 @@ fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMa
     }
 }
 
-/// Lower a value expression to IR with parameters substituted, folding
-/// constant subtrees bottom-up with checked arithmetic (LAN-299). A
-/// constant step that fails its check (e.g. `4294967295 + p` with
-/// `p = 1` at instantiation — invisible to the typechecker, which only
-/// sees literals) is left unfolded and fails per route on the
-/// eval-error rail: fail closed, never wrap.
-fn lower_value(expr: &ValueExprAst, env: &HashMap<&str, u32>) -> ValueExpr {
+/// Lower a value expression to IR with parameters substituted and
+/// `let` bindings resolved to frame slots (innermost first — LAN-302
+/// shadowing), folding constant subtrees bottom-up with checked
+/// arithmetic (LAN-299). A constant step that fails its check (e.g.
+/// `4294967295 + p` with `p = 1` at instantiation — invisible to the
+/// typechecker, which only sees literals) is left unfolded and fails
+/// per route on the eval-error rail: fail closed, never wrap.
+fn lower_value(expr: &ValueExprAst, env: &HashMap<&str, u32>, lets: &LetEnv) -> ValueExpr {
     match expr {
         ValueExprAst::Lit(value, _) => ValueExpr::Const(*value),
-        ValueExprAst::Ident(name) => ValueExpr::Const(
-            *env.get(name.node.as_str())
-                .expect("typechecked: parameter in scope"),
-        ),
+        ValueExprAst::Ident(name) => {
+            // Innermost binding shadows parameters (and outer
+            // bindings) in value positions — the typechecker resolves
+            // by the same rule.
+            if let Some(slot) = lets.lookup(&name.node) {
+                return ValueExpr::Local {
+                    slot,
+                    name: name.node.clone().into_boxed_str(),
+                };
+            }
+            ValueExpr::Const(
+                *env.get(name.node.as_str())
+                    .expect("typechecked: parameter in scope"),
+            )
+        }
         ValueExprAst::Field(path) => {
             let field = value_field_of(resolve_field(path).expect("typechecked"))
                 .expect("typechecked: u32 field operand");
             ValueExpr::Field(field)
         }
         ValueExprAst::Binary { op, lhs, rhs, .. } => {
-            let lhs = lower_value(lhs, env);
-            let rhs = lower_value(rhs, env);
+            let lhs = lower_value(lhs, env, lets);
+            let rhs = lower_value(rhs, env, lets);
             if let (ValueExpr::Const(l), ValueExpr::Const(r)) = (&lhs, &rhs)
                 && let Ok(folded) = checked_arith(*op, *l, *r)
             {
@@ -705,7 +865,8 @@ fn lower_value(expr: &ValueExprAst, env: &HashMap<&str, u32>) -> ValueExpr {
             }
         }
         ValueExprAst::Call { name, args, .. } => {
-            let mut args: Vec<ValueExpr> = args.iter().map(|arg| lower_value(arg, env)).collect();
+            let mut args: Vec<ValueExpr> =
+                args.iter().map(|arg| lower_value(arg, env, lets)).collect();
             let consts: Vec<Option<u32>> = args
                 .iter()
                 .map(|arg| match arg {
@@ -818,6 +979,12 @@ fn accept_predicate(policy: &CompiledPolicy) -> MatchExpr {
     for term in &policy.terms {
         match term.action {
             TermAction::Continue(_) => {}
+            // LAN-302: the typechecker rejects `apply` of a policy
+            // that declares bindings, so an inlined predicate never
+            // contains Bind terms.
+            TermAction::Bind { .. } => {
+                unreachable!("typechecked: apply targets declare no `let` bindings")
+            }
             TermAction::Permit(_) => {
                 let mut children = not_prior.clone();
                 children.push(term.guard.clone());

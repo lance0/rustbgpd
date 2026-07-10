@@ -335,6 +335,21 @@ pub enum ActionStmt {
         /// Whole-statement span.
         span: Span,
     },
+    /// `let <name> = <value-expr>` (LAN-302): an immutable, lexically
+    /// scoped `u32` binding, legal in statement position — a term body
+    /// or an `if`/`else` body. `let` is a contextual identifier
+    /// (statement position admits no other bare identifier), not a
+    /// reserved word — ADR-0103 Decision 2.2. Parsed alongside actions
+    /// because statement position is exactly where actions live;
+    /// the typechecker scopes it and the lowerer emits a `Bind` term.
+    Let {
+        /// The binding name.
+        name: Spanned<String>,
+        /// The initializer (a checked u32 value expression).
+        init: ValueExprAst,
+        /// Whole-statement span.
+        span: Span,
+    },
 }
 
 impl ActionStmt {
@@ -348,7 +363,8 @@ impl ActionStmt {
             | ActionStmt::SetMed(_, span)
             | ActionStmt::SetNextHop(_, span)
             | ActionStmt::Community { span, .. }
-            | ActionStmt::Prepend { span, .. } => *span,
+            | ActionStmt::Prepend { span, .. }
+            | ActionStmt::Let { span, .. } => *span,
         }
     }
 }

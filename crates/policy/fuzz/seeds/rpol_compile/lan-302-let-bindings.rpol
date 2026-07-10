@@ -1,0 +1,9 @@
+policy score {
+    term t {
+        let origin = route.origin-as
+        let penalty = route.as-path.len * 10
+        if penalty >= route.med { reject }
+        if origin == 64500 { set med penalty; accept }
+    }
+    term rest { accept }
+}

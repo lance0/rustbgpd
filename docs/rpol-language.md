@@ -114,7 +114,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -184,9 +184,10 @@ policy NAME[(param: u32, ...)] {
 }
 ```
 
-- Terms evaluate in order. Statements inside a term are: bare actions,
-  or `if <expr> { actions... } [else { actions... }]`. `if` bodies are
-  flat action lists — **no nested `if`** in V1 (split the condition
+- Terms evaluate in order. Statements inside a term are: bare
+  actions, `let` bindings (see "Bindings"), or `if <expr> {
+  actions... } [else { actions... }]`. `if` bodies are flat
+  action/`let` lists — **no nested `if`** in V1 (split the condition
   with `&&` or use another term).
 - **Verdicts**: `accept` permits the route (with all modifications
   executed so far in this policy); `reject` denies it (a denied route
@@ -216,6 +217,12 @@ to one or more IR terms:
   `Continue` IR term (a small IR addition made for this frontend:
   guard matched → apply modifications → keep walking this policy's
   terms).
+- Each `let` becomes a `Bind` IR term (LAN-302): guard = the
+  enclosing branch condition (`True` in term-body position; the `if`
+  guard — or its negation for `else` — for a body binding), action =
+  evaluate the initializer and write its frame slot. Like `Continue`
+  it never decides; body bindings re-evaluate the branch guard, which
+  is pure and cannot diverge.
 - When one `.rpol` term produces multiple IR terms they are named
   `<term>.<n>` (1-based); a lone IR term keeps the plain term name.
   Explain surfaces will render these names.
@@ -276,13 +283,13 @@ prefix-set precedent).
 
 ### Value expressions — checked u32 arithmetic
 
-u32 value positions — the right side of a u32 comparison, and the
+u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
 (ADR-0103, LAN-299): arithmetic over integer literals, parameters,
-u32-typed fields (`route.local-pref`, `route.med`,
-`route.as-path.len`, `route.origin-as`, `peer.asn`), and three bounded
-builtins. A comparison's left side may also carry arithmetic when it
-starts with a field.
+`let` bindings (below), u32-typed fields (`route.local-pref`,
+`route.med`, `route.as-path.len`, `route.origin-as`, `peer.asn`), and
+three bounded builtins. A comparison's left side may also carry
+arithmetic when it starts with a field or a binding.
 
 ```rpol
 set med route.med + 50
@@ -363,6 +370,131 @@ u32 with a pinned failure contract (deny + counter + explain), and
 the `min` cap makes the local-pref doubling total instead of relying
 on it.
 
+### Bindings — `let`
+
+`let <name> = <value expression>` names a computed `u32` in statement
+position — a term body, or an `if`/`else` body (ADR-0103, LAN-302):
+
+```rpol
+policy dampen {
+    term score {
+        let origin = route.origin-as
+        let penalty = route.as-path.len * 10
+        if penalty >= route.med { reject }
+        if origin == 64500 { set med penalty; accept }
+    }
+    term rest { accept }
+}
+```
+
+`let` is a contextual identifier, not a reserved word: statement
+position admits no other bare identifier, so sets, policies, and
+parameters named `let` keep working.
+
+**Immutable, u32-only.** There is no assignment, no `var`, and no
+mutation: a binding's value is fixed by its initializer for the rest
+of its scope. Bindings hold `u32` values only this slice — the
+initializer is a value expression, so the bindable inputs are integer
+literals, parameters, other bindings, and the u32 fields
+(`route.local-pref`, `route.med`, `route.as-path.len`,
+`route.origin-as`, `peer.asn`); binding a non-u32 field is a compile
+error naming the u32 field set.
+
+**Scope and shadowing (normative).**
+
+- A term body is a scope; each `if`/`else` body is a nested scope.
+  A binding is visible from its statement to the end of its scope —
+  a term-body binding reaches into later `if` bodies of the same
+  term; a body binding is invisible outside its body. Bindings never
+  cross terms, and never escape the policy (no globals, no
+  cross-route state, no closures — the purity contract).
+- A `let` may shadow an earlier binding, including one in the same
+  scope, and a policy parameter: the **innermost declaration wins**
+  at each use. The initializer is resolved *before* its own name is
+  declared, so `let x = x + 1` reads the outer `x` — shadowing, never
+  self-reference.
+- Resolution is **position-typed**, the same rule that lets a
+  parameter named `origin` keep its meaning under `prepend as`
+  (LAN-296): bindings are readable only in value positions. Enum
+  members (`valid`, `internal`, …) still win in enum comparisons,
+  `min`/`max`/`clamp` followed by `(` are still builtin calls, and
+  `prepend as origin` still means the origin operand even with a
+  `let origin` in scope. Compile-time-constant positions (`apply`
+  arguments, prepend operands/counts, `contains`) reject bindings
+  with a dedicated diagnostic — they are runtime values.
+- **Use before definition is a compile error** at the use's span, as
+  is any unknown name (with did-you-mean suggestions over parameters
+  and visible bindings).
+
+**Evaluation is eager and fail-closed.** The initializer evaluates
+when its statement executes — reached in the term walk, branch taken —
+whether or not the value is ever read. It rides the same rails as all
+checked arithmetic (LAN-299): overflow, underflow, division/modulo by
+zero, or an absent operand (`route.origin-as` on an origin-less route,
+unknown `peer.asn`) **denies the route** — staged modifications are
+discarded, the eval-error counter increments, explain renders the
+error in place of a verdict. A statement position the walk never
+reaches (an earlier verdict decided, the branch not taken) never
+evaluates. A binding whose comparison uses a plain u32 field
+(`route.origin-as == x`) makes that comparison a *value* comparison:
+fail-closed on absent operands, unlike the never-match plain form.
+
+**Reads see the original route — never staged writes.** Route
+mutation stays transactional: `set`/`add`/`remove`/`prepend` stage
+modifications applied only after a complete successful evaluation, so
+`set med 500` followed by `let x = route.med` binds the route's MED
+*as it arrived*, not 500. Read-back of staged writes is deliberately
+out of scope (it would break the memoization contract — `ExportMemo`
+keys on source attributes plus modifications — and needs its own ADR
+if ever demanded).
+
+**Static slots, zero allocation.** Bindings compile to fixed slots in
+a 128-slot register file (two nesting levels × the 64-binding
+per-scope cap): slot assignment is a pure function of the source
+(identical source → identical compiled form, so unchanged reloads
+still diff as no-ops), sibling scopes reuse slots, and the frame is a
+lazily-materialized stack array — policies without bindings pay
+nothing, and no evaluation ever heap-allocates for bindings. The
+**65th `let` in one scope is a compile error** at its span. The cost
+DP charges each binding its initializer cost plus one slot step; each
+read costs one step, so factoring a repeated subexpression through a
+`let` is never more expensive than inlining it (and evaluates
+identically — pinned by test).
+
+**`apply` restriction.** A policy that declares `let` bindings cannot
+be a target of `apply` this slice: `apply` inlines its target as a
+pure predicate expression, which has no term walk to execute bindings
+in. The compile error points at the offending `apply` and the target's
+first `let`; factor the shared value into the applying policy, or wait
+for user functions (LAN-304), the designed vehicle for composing
+computed values.
+
+Migration example — factoring a repeated computed value:
+
+```rpol
+# Before: the padded MED is computed twice and must be kept in sync.
+policy pad-med-inline {
+    term dampen { if route.med + 50 >= 1001 { reject } }
+    term pad { set med route.med + 50; accept }
+}
+
+# After: one binding, one place to change the padding.
+policy pad-med {
+    term pad {
+        let padded = route.med + 50
+        if padded >= 1001 { reject }
+        set med padded
+        accept
+    }
+}
+```
+
+**Update-group note.** A binding whose initializer reads `peer.asn`
+reads peer identity — even if the value is never used, an unknown
+peer ASN already denies — so it keeps its peers out of shared update
+groups, exactly like a `peer.asn` guard operand. Bindings over route
+fields alone never disqualify grouping.
+
 ### `route.family` — one chain, many families
 
 `route.family` is the route's **typed** AFI/SAFI family, carried by the
@@ -411,6 +543,9 @@ Two consequences worth internalizing:
   `reject`s is constant-true under `apply`. Predicate policies should
   decide both ways (see `bogon-filter` above: match → `accept`,
   final term → `reject`).
+- A policy that declares `let` bindings cannot be applied (LAN-302):
+  the inlined predicate has no term walk to execute bindings in. The
+  compile error names the target's first `let`.
 
 ## Actions
 
@@ -541,8 +676,10 @@ asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
-stmt        := if-stmt | action [";"]
-if-stmt     := "if" expr "{" (action [";"])* "}" ["else" "{" (action [";"])* "}"]
+stmt        := if-stmt | let-stmt | action [";"]
+let-stmt    := "let" IDENT "=" value [";"]        # contextual `let` (LAN-302)
+if-stmt     := "if" expr "{" body-stmt* "}" ["else" "{" body-stmt* "}"]
+body-stmt   := let-stmt | action [";"]
 action      := "accept" | "reject"
              | "set" ("local-pref" | "med") value
              | "set" "next-hop" (IP | "self")
@@ -551,12 +688,13 @@ action      := "accept" | "reject"
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate
+             | IDENT [arith-tail] ("=="|"!="|">="|"<=") value     # binding/parameter LHS
 predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" community
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
 value       := mul (("+"|"-") mul)*                            # checked u32
 mul         := atom (("*"|"/"|"%") atom)*
-atom        := INT | IDENT | field | "(" value ")"
+atom        := INT | IDENT | field | "(" value ")"        # IDENT: parameter or `let` binding
              | ("min"|"max") "(" value "," value ")"
              | "clamp" "(" value "," value "," value ")"
 field       := ("route" | "peer") ("." IDENT)+
@@ -848,8 +986,10 @@ No loops, no user-defined types, no maps (safety is total by
 construction — ADR-0096 Decision 2; the ADR-0103 extension program
 adds bounded constructs slice by slice — checked arithmetic shipped
 as LAN-299). No `as-path-set`. No `else if` chains and no nested `if`
-(keep terms small; use `&&` or more terms). No `let` bindings (the
-next ADR-0103 slice). EVPN route type takes only an integer literal
+(keep terms small; use `&&` or more terms). No mutable state of any
+kind — `let` bindings (LAN-302) are immutable, and reads never
+observe staged `set` writes (read-back would break memoization and
+needs its own ADR). EVPN route type takes only an integer literal
 (no parameters — the value is wire-encoded u8). Full-form all-numeric
 IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the

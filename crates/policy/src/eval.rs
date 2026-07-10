@@ -58,6 +58,13 @@ pub enum EvalErrorKind {
     /// unknown context value, or zero (ASN 0 is prohibited on the
     /// wire, RFC 7607).
     AbsentPrependOperand(PrependAs),
+    /// A `let`-binding slot was read with no frame written (LAN-302).
+    /// Unreachable through the compiler — definite assignment and
+    /// static slot allocation guarantee every `Local` read follows its
+    /// `Bind` in walk order — so this is the fail-closed disposition
+    /// of a compiler bug, mirroring how stale hit-counter shapes
+    /// degrade instead of panicking on the production path.
+    UnboundLocal,
 }
 
 impl EvalErrorKind {
@@ -72,6 +79,7 @@ impl EvalErrorKind {
             EvalErrorKind::ClampInverted => "clamp-inverted",
             EvalErrorKind::AbsentField(_) => "absent-operand",
             EvalErrorKind::AbsentPrependOperand(_) => "absent-prepend-operand",
+            EvalErrorKind::UnboundLocal => "unbound-local",
         }
     }
 }
@@ -96,17 +104,56 @@ impl fmt::Display for EvalErrorKind {
                 }
                 write!(f, ")")
             }
+            EvalErrorKind::UnboundLocal => {
+                write!(f, "internal error: unbound `let` slot (fail closed)")
+            }
         }
     }
 }
 
-/// Evaluate a compiled value expression against a route context.
-/// Pure and allocation-free; every arithmetic step is checked
-/// (ADR-0103 Decision 2 — the SIGFPE class is unrepresentable).
-/// Recursion depth is bounded by the frontend (`MAX_EXPR_DEPTH`).
-pub(crate) fn eval_value(expr: &ValueExpr, ctx: &RouteContext<'_>) -> Result<u32, EvalErrorKind> {
+/// Size of the per-evaluation `let`-binding register file (LAN-302):
+/// the language has exactly two nesting levels (a term body and one
+/// `if`/`else` body), each capped at `MAX_LOCALS` = 64 bindings per
+/// scope by the typechecker, so at most 2 × 64 slots are ever live.
+/// Slots reset per source term and sibling scopes reuse, keeping the
+/// frame this small forever (ADR-0103 Decision 3 caps the frame at
+/// 1,024 slots; we need an eighth of that).
+pub(crate) const LOCAL_FRAME_SLOTS: usize = 128;
+
+/// The fixed-size evaluation frame `let` bindings live in: a stack
+/// array, allocated (and zeroed) lazily only when a policy's walk
+/// reaches its first [`TermAction::Bind`] — policies without bindings
+/// never touch it, preserving the V1 hot-path cost exactly.
+type LocalFrame = [u32; LOCAL_FRAME_SLOTS];
+
+/// The frame as a read slice: empty when no binding has executed yet
+/// (a `Local` read against it is the fail-closed
+/// [`EvalErrorKind::UnboundLocal`] compiler-bug rail).
+#[inline]
+fn locals_slice(locals: Option<&LocalFrame>) -> &[u32] {
+    locals.map_or(&[], |frame| &frame[..])
+}
+
+/// Evaluate a compiled value expression against a route context and
+/// the current `let`-binding frame (`&[]` when the caller has none —
+/// expressions without `Local` reads never index it). Pure and
+/// allocation-free; every arithmetic step is checked (ADR-0103
+/// Decision 2 — the SIGFPE class is unrepresentable). Recursion depth
+/// is bounded by the frontend (`MAX_EXPR_DEPTH`).
+pub(crate) fn eval_value(
+    expr: &ValueExpr,
+    ctx: &RouteContext<'_>,
+    locals: &[u32],
+) -> Result<u32, EvalErrorKind> {
     match expr {
         ValueExpr::Const(value) => Ok(*value),
+        // One indexed load; the slot was written by this walk's Bind
+        // term (definite assignment). `get` degrades a compiler bug to
+        // a fail-closed eval error instead of a panic.
+        ValueExpr::Local { slot, .. } => locals
+            .get(*slot as usize)
+            .copied()
+            .ok_or(EvalErrorKind::UnboundLocal),
         ValueExpr::Field(field) => match field {
             ValueField::LocalPref => Ok(ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF)),
             ValueField::Med => Ok(ctx.med.unwrap_or(IMPLICIT_MED)),
@@ -121,16 +168,16 @@ pub(crate) fn eval_value(expr: &ValueExpr, ctx: &RouteContext<'_>) -> Result<u32
                 .ok_or(EvalErrorKind::AbsentField(ValueField::PeerAsn)),
         },
         ValueExpr::Binary { op, lhs, rhs } => {
-            let lhs = eval_value(lhs, ctx)?;
-            let rhs = eval_value(rhs, ctx)?;
+            let lhs = eval_value(lhs, ctx, locals)?;
+            let rhs = eval_value(rhs, ctx, locals)?;
             checked_arith(*op, lhs, rhs)
         }
-        ValueExpr::Min(a, b) => Ok(eval_value(a, ctx)?.min(eval_value(b, ctx)?)),
-        ValueExpr::Max(a, b) => Ok(eval_value(a, ctx)?.max(eval_value(b, ctx)?)),
+        ValueExpr::Min(a, b) => Ok(eval_value(a, ctx, locals)?.min(eval_value(b, ctx, locals)?)),
+        ValueExpr::Max(a, b) => Ok(eval_value(a, ctx, locals)?.max(eval_value(b, ctx, locals)?)),
         ValueExpr::Clamp(x, lo, hi) => {
-            let x = eval_value(x, ctx)?;
-            let lo = eval_value(lo, ctx)?;
-            let hi = eval_value(hi, ctx)?;
+            let x = eval_value(x, ctx, locals)?;
+            let lo = eval_value(lo, ctx, locals)?;
+            let hi = eval_value(hi, ctx, locals)?;
             if lo > hi {
                 return Err(EvalErrorKind::ClampInverted);
             }
@@ -436,9 +483,12 @@ impl CompiledChain {
             // `None` after the loop = fell through to default_action.
             let mut permit_mods: Option<Option<RouteModifications>> = None;
             let mut denied = false;
+            // LAN-302: same lazy `let` frame as the live walk.
+            let mut locals: Option<LocalFrame> = None;
             for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
                 let mut err = None;
-                let matched = self.eval_expr(&term.guard, ctx, &mut err);
+                let matched =
+                    self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
                 if err.is_some() {
                     // Guard evaluation error: fail closed (LAN-299).
                     denied = true;
@@ -448,7 +498,7 @@ impl CompiledChain {
                     *hit += 1;
                     match &term.action {
                         TermAction::Permit(mods) => {
-                            match self.resolve_computed(mods, ctx) {
+                            match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
                                 Ok(resolved) => {
                                     permit_mods =
                                         Some(Some(resolved.unwrap_or_else(|| mods.clone())));
@@ -464,7 +514,9 @@ impl CompiledChain {
                             break;
                         }
                         TermAction::Continue(mods) => {
-                            if let Ok(resolved) = self.resolve_computed(mods, ctx) {
+                            if let Ok(resolved) =
+                                self.resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
+                            {
                                 continued
                                     .get_or_insert_with(RouteModifications::default)
                                     .merge_from(resolved.unwrap_or_else(|| mods.clone()));
@@ -472,6 +524,16 @@ impl CompiledChain {
                                 denied = true;
                                 break;
                             }
+                        }
+                        // LAN-302: eager `let`, identical to the live
+                        // walk — initializer error fails closed.
+                        TermAction::Bind { slot, expr, .. } => {
+                            let Ok(value) = eval_value(expr, ctx, locals_slice(locals.as_ref()))
+                            else {
+                                denied = true;
+                                break;
+                            };
+                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[*slot as usize] = value;
                         }
                     }
                 }
@@ -513,9 +575,13 @@ impl CompiledChain {
         hits: Option<&[AtomicU64]>,
     ) -> PolicyDecision<'a> {
         let mut continued: Option<RouteModifications> = None;
+        // LAN-302: the `let`-binding register file, materialized (one
+        // stack zeroing, no heap) only when the walk reaches a Bind
+        // term — binding-free policies never touch it.
+        let mut locals: Option<LocalFrame> = None;
         for (term_index, term) in policy.terms.iter().enumerate() {
             let mut err = None;
-            let matched = self.eval_expr(&term.guard, ctx, &mut err);
+            let matched = self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
             if let Some(kind) = err {
                 // Guard evaluation error (LAN-299): terminal for the
                 // route regardless of the guard's boolean outcome.
@@ -538,10 +604,11 @@ impl CompiledChain {
                         // before the modifications leave the
                         // evaluator; an unresolvable operand fails the
                         // route closed on the eval-error rail.
-                        let resolved = match self.resolve_computed(mods, ctx) {
-                            Ok(resolved) => resolved,
-                            Err(kind) => return PolicyDecision::Error { kind, term_index },
-                        };
+                        let resolved =
+                            match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
+                                Ok(resolved) => resolved,
+                                Err(kind) => return PolicyDecision::Error { kind, term_index },
+                            };
                         return match (continued, resolved) {
                             (Some(mut acc), resolved) => {
                                 acc.merge_from(resolved.unwrap_or_else(|| mods.clone()));
@@ -555,13 +622,28 @@ impl CompiledChain {
                     }
                     TermAction::Deny => return PolicyDecision::Deny,
                     TermAction::Continue(mods) => {
-                        let resolved = match self.resolve_computed(mods, ctx) {
-                            Ok(resolved) => resolved,
-                            Err(kind) => return PolicyDecision::Error { kind, term_index },
-                        };
+                        let resolved =
+                            match self.resolve_computed(mods, ctx, locals_slice(locals.as_ref())) {
+                                Ok(resolved) => resolved,
+                                Err(kind) => return PolicyDecision::Error { kind, term_index },
+                            };
                         continued
                             .get_or_insert_with(RouteModifications::default)
                             .merge_from(resolved.unwrap_or_else(|| mods.clone()));
+                    }
+                    // LAN-302: eager `let` — evaluate the initializer
+                    // (against the frame as written so far; earlier
+                    // bindings are readable), write the slot, keep
+                    // walking. An initializer error is terminal on the
+                    // uniform eval-error rail, used or not.
+                    TermAction::Bind { slot, expr, .. } => {
+                        match eval_value(expr, ctx, locals_slice(locals.as_ref())) {
+                            Ok(value) => {
+                                locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[*slot as usize] =
+                                    value;
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
+                        }
                     }
                 }
             }
@@ -590,6 +672,7 @@ impl CompiledChain {
         &self,
         mods: &RouteModifications,
         ctx: &RouteContext<'_>,
+        locals: &[u32],
     ) -> Result<Option<RouteModifications>, EvalErrorKind> {
         if mods.as_path_prepend_computed.is_none()
             && mods.set_local_pref_computed.is_none()
@@ -606,11 +689,11 @@ impl CompiledChain {
             resolved.as_path_prepend_computed = None;
         }
         if let Some(expr) = &mods.set_local_pref_computed {
-            resolved.set_local_pref = Some(eval_value(expr, ctx)?);
+            resolved.set_local_pref = Some(eval_value(expr, ctx, locals)?);
             resolved.set_local_pref_computed = None;
         }
         if let Some(expr) = &mods.set_med_computed {
-            resolved.set_med = Some(eval_value(expr, ctx)?);
+            resolved.set_med = Some(eval_value(expr, ctx, locals)?);
             resolved.set_med_computed = None;
         }
         Ok(Some(resolved))
@@ -623,13 +706,17 @@ impl CompiledChain {
     /// `PolicyStatement::matches`). `Err` when the guard contains a
     /// value expression that failed to evaluate — the live walk denies
     /// the route there (LAN-299), and explain must render the same.
+    /// `locals` is the caller's `let` frame (LAN-302): the explain
+    /// trace walk re-derives bindings term by term and passes its own
+    /// frame here, so guard evaluation stays shared.
     pub(crate) fn guard_matches(
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
+        locals: &[u32],
     ) -> Result<bool, EvalErrorKind> {
         let mut err = None;
-        let matched = self.eval_expr(expr, ctx, &mut err);
+        let matched = self.eval_expr(expr, ctx, locals, &mut err);
         match err {
             Some(kind) => Err(kind),
             None => Ok(matched),
@@ -656,17 +743,23 @@ impl CompiledChain {
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
+        locals: &[u32],
         err: &mut Option<EvalErrorKind>,
     ) -> bool {
         match expr {
             MatchExpr::True => true,
-            MatchExpr::And(children) => {
-                children.iter().all(|child| self.eval_expr(child, ctx, err))
-            }
-            MatchExpr::Or(children) => children.iter().any(|child| self.eval_expr(child, ctx, err)),
-            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx, err),
+            MatchExpr::And(children) => children
+                .iter()
+                .all(|child| self.eval_expr(child, ctx, locals, err)),
+            MatchExpr::Or(children) => children
+                .iter()
+                .any(|child| self.eval_expr(child, ctx, locals, err)),
+            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx, locals, err),
             MatchExpr::ValueCmp(node) => {
-                match (eval_value(&node.lhs, ctx), eval_value(&node.rhs, ctx)) {
+                match (
+                    eval_value(&node.lhs, ctx, locals),
+                    eval_value(&node.rhs, ctx, locals),
+                ) {
                     (Ok(lhs), Ok(rhs)) => match node.op {
                         ValueCmpOp::Eq => lhs == rhs,
                         ValueCmpOp::Ne => lhs != rhs,

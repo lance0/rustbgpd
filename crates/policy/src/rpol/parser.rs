@@ -681,10 +681,26 @@ impl Parser<'_> {
                 let span = token.span.to(count.span());
                 Ok(ActionStmt::Prepend { asn, count, span })
             }
+            // Statement-initial contextual `let` (LAN-302, ADR-0103
+            // Decision 2.2): no other statement begins with a bare
+            // identifier, so consuming `let` here is purely additive —
+            // sets, policies, and parameters named `let` keep working.
+            Tok::Ident if self.text(token) == "let" => self.let_stmt(),
             _ => Err(self.error_expected(
-                "an action (`accept`, `reject`, `set`, `add`, `remove`, or `prepend`)",
+                "an action (`accept`, `reject`, `set`, `add`, `remove`, `prepend`) or `let`",
             )),
         }
+    }
+
+    /// `let <name> = <value expression>` (LAN-302); the caller has
+    /// peeked the contextual `let` identifier.
+    fn let_stmt(&mut self) -> PResult<ActionStmt> {
+        let start = self.bump().expect("caller peeked `let`").span;
+        let name = self.expect_ident("a binding name")?;
+        self.expect(Tok::Eq, "`=` (`let <name> = <value expression>`)")?;
+        let init = self.value_expr(0)?;
+        let span = start.to(init.span());
+        Ok(ActionStmt::Let { name, init, span })
     }
 
     // ── expressions ─────────────────────────────────────────────────
@@ -744,8 +760,22 @@ impl Parser<'_> {
         if self.at(Tok::RouteKw) || self.at(Tok::PeerKw) {
             return self.predicate_expr();
         }
+        // LAN-302: an identifier-initial condition is a value
+        // comparison whose left side starts with a binding, parameter,
+        // or builtin call (`if penalty >= route.med`). Previously a
+        // parse error here, so purely additive.
+        if self.at(Tok::Ident) {
+            let name = self.expect_ident("a condition")?;
+            let atom = if self.at(Tok::LParen) {
+                self.value_call(name, depth)?
+            } else {
+                ValueExprAst::Ident(name)
+            };
+            let lhs = self.value_expr_from_atom(atom)?;
+            return self.value_cmp_tail(lhs);
+        }
         Err(self.error_expected(
-            "a condition (`route.<field> ...`, `peer.<field> ...`, `apply(...)`, `!`, or `(`)",
+            "a condition (`route.<field> ...`, `peer.<field> ...`, `apply(...)`, a value comparison, `!`, or `(`)",
         ))
     }
 

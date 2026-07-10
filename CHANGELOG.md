@@ -220,6 +220,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matrix end-to-end (capture → canonical records → in-sync, divergent,
   and incomplete verdicts). Capture workflow documented in
   docs/ribdiff.md and the route-server migration cookbook. (LAN-309)
+- **`.rpol` immutable `let` bindings with static slot allocation.**
+  `let <name> = <value expression>` names a computed u32 in statement
+  position — term bodies and `if`/`else` bodies — with lexical block
+  scope and deterministic shadowing (innermost wins; a binding may
+  shadow an outer binding or a parameter, and resolution stays
+  position-typed, so enum members, builtins, and the `prepend as
+  origin` operand keep their meanings). Bindings are immutable and
+  u32-only; initializers are checked value expressions riding the
+  uniform fail-closed eval-error rails (an overflow or absent operand
+  in an initializer denies the route and discards staged
+  modifications, eagerly — used or not). Locals compile to fixed
+  slots in a 128-slot register file (64 per scope, the 65th is a
+  compile error with a span; slot assignment is a pure function of
+  the source, so unchanged reloads still diff as no-ops) materialized
+  lazily on the stack — binding-free policies pay nothing and no
+  evaluation heap-allocates. Reads always observe the route as it
+  arrived, never staged `set` writes (read-back stays excluded per
+  ADR-0103); use-before-definition and unknown names are spanned
+  compile errors; `apply` targets may not declare bindings this slice
+  (the inlined predicate has no term walk — LAN-304 functions are the
+  composition vehicle). Explain traces render `let` statements in
+  source form and resolve binding reads on demand; `peer.asn`
+  initializers register peer context for update-group
+  fingerprinting. (LAN-302, ADR-0103)
 
 ### Changed
 

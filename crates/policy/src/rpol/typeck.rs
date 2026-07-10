@@ -103,6 +103,38 @@ const MAX_EVAL_COST: u64 = 1_000_000;
 /// The value-expression builtins (LAN-299) and their arities.
 const VALUE_BUILTINS: &[(&str, usize)] = &[("min", 2), ("max", 2), ("clamp", 3)];
 
+/// Maximum `let` bindings per lexical scope (LAN-302, ADR-0103
+/// Decision 3). A scope is one term body or one `if`/`else` body; the
+/// grammar has exactly those two nesting levels, so the evaluation
+/// frame is statically `2 × MAX_LOCALS` slots
+/// (`crate::eval::LOCAL_FRAME_SLOTS`) — no runtime growth, ever.
+const MAX_LOCALS: usize = 64;
+
+/// Name-resolution scope for one policy body (LAN-302): the declared
+/// parameters plus the `let` bindings currently visible, in
+/// declaration order. Lookup is by reverse scan, so the innermost
+/// declaration wins — deterministic shadowing of outer bindings and
+/// of parameters. Bindings are visible only in **value positions**
+/// (comparison operands, `set local-pref`/`set med` expressions);
+/// position-typed identifiers — enum members, `origin` in
+/// `prepend as`, builtin call names — resolve exactly as before, the
+/// same per-position rule that lets a parameter named `origin` keep
+/// its meaning (LAN-296).
+struct Scope<'a> {
+    params: Vec<&'a str>,
+    lets: Vec<String>,
+}
+
+impl Scope<'_> {
+    fn is_param(&self, name: &str) -> bool {
+        self.params.contains(&name)
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        self.lets.iter().any(|local| local == name)
+    }
+}
+
 /// Enum members per enum-typed field, in language spelling.
 pub(super) const RPKI_MEMBERS: &[&str] = &["valid", "invalid", "not-found"];
 pub(super) const ASPA_MEMBERS: &[&str] = &["valid", "invalid", "unknown"];
@@ -239,8 +271,15 @@ impl Checker<'_> {
     fn check_policy(&mut self, policy: &PolicyDef) {
         self.duplicate_check("parameter", policy.params.iter());
         self.duplicate_check("term", policy.terms.iter().map(|t| &t.name));
-        let params: Vec<&str> = policy.params.iter().map(|p| p.node.as_str()).collect();
+        let mut scope = Scope {
+            params: policy.params.iter().map(|p| p.node.as_str()).collect(),
+            lets: Vec::new(),
+        };
         for term in &policy.terms {
+            // Each term body is its own scope: bindings never cross
+            // terms (LAN-302).
+            scope.lets.clear();
+            let mut term_locals = 0usize;
             let mut terminated: Option<Span> = None;
             for stmt in &term.stmts {
                 if let Some(verdict_span) = terminated {
@@ -259,17 +298,29 @@ impl Checker<'_> {
                     break;
                 }
                 match stmt {
+                    // A term-body `let`: check the initializer against
+                    // the scope *before* declaring (so `let x = x + 1`
+                    // reads the outer/prior `x`), then bring the name
+                    // into scope for everything after it.
+                    Stmt::Action(ActionStmt::Let { name, init, .. }) => {
+                        self.check_value_expr(init, &scope);
+                        if term_locals == MAX_LOCALS {
+                            self.locals_exceeded(name.span);
+                        }
+                        term_locals += 1;
+                        scope.lets.push(name.node.clone());
+                    }
                     Stmt::Action(action) => {
-                        self.check_action(action, &params);
+                        self.check_action(action, &scope);
                         if matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)) {
                             terminated = Some(action.span());
                         }
                     }
                     Stmt::If(if_stmt) => {
-                        self.check_expr(&if_stmt.cond, &params);
-                        self.check_action_list(&if_stmt.then_actions, &params);
+                        self.check_expr(&if_stmt.cond, &scope);
+                        self.check_action_list(&if_stmt.then_actions, &mut scope);
                         if let Some(else_actions) = &if_stmt.else_actions {
-                            self.check_action_list(else_actions, &params);
+                            self.check_action_list(else_actions, &mut scope);
                         }
                     }
                 }
@@ -277,7 +328,12 @@ impl Checker<'_> {
         }
     }
 
-    fn check_action_list(&mut self, actions: &[ActionStmt], params: &[&str]) {
+    /// One `if`/`else` body — its own lexical scope (LAN-302): `let`
+    /// bindings declared here are visible to the rest of the body and
+    /// nowhere else.
+    fn check_action_list(&mut self, actions: &[ActionStmt], scope: &mut Scope) {
+        let mark = scope.lets.len();
+        let mut body_locals = 0usize;
         let mut terminated: Option<Span> = None;
         for action in actions {
             if let Some(verdict_span) = terminated {
@@ -291,18 +347,45 @@ impl Checker<'_> {
                 );
                 break;
             }
-            self.check_action(action, params);
+            if let ActionStmt::Let { name, init, .. } = action {
+                self.check_value_expr(init, scope);
+                if body_locals == MAX_LOCALS {
+                    self.locals_exceeded(name.span);
+                }
+                body_locals += 1;
+                scope.lets.push(name.node.clone());
+                continue;
+            }
+            self.check_action(action, scope);
             if matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)) {
                 terminated = Some(action.span());
             }
         }
+        scope.lets.truncate(mark);
     }
 
-    fn check_action(&mut self, action: &ActionStmt, params: &[&str]) {
+    /// The 65th `let` of one scope (LAN-302, `MAX_LOCALS`): fires once,
+    /// at the first binding past the limit.
+    fn locals_exceeded(&mut self, span: Span) {
+        self.diags.push(
+            Diagnostic::new(
+                span,
+                format!("more than {MAX_LOCALS} `let` bindings in one scope"),
+                "binding limit exceeded",
+            )
+            .with_note(
+                "bindings compile to a fixed frame of 64 slots per scope (ADR-0103); \
+                 split the term or fold intermediate values",
+            ),
+        );
+    }
+
+    fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>) {
         match action {
             ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::SetNextHop(..) => {}
+            ActionStmt::Let { .. } => unreachable!("`let` is scoped by the statement walkers"),
             ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
-                self.check_value_expr(expr, params);
+                self.check_value_expr(expr, scope);
             }
             ActionStmt::Community { kind, lit, .. } => {
                 if lit.node.kind() != *kind {
@@ -326,11 +409,14 @@ impl Checker<'_> {
                 // identifier that is not a declared parameter —
                 // LAN-296) needs no parameter check; the operand
                 // decision itself is shared with lowering via
-                // `PrependAsArg::operand`.
-                if asn.operand(|name| params.contains(&name)).is_none()
+                // `PrependAsArg::operand`. `let` bindings deliberately
+                // do not resolve here: this is not a value position
+                // (LAN-302 scoping rule), so `prepend as origin` keeps
+                // its operand meaning even under a `let origin`.
+                if asn.operand(|name| scope.is_param(name)).is_none()
                     && let PrependAsArg::Value(arg) = asn
                 {
-                    self.check_u32_arg(arg, params);
+                    self.check_u32_arg(arg, scope);
                 }
                 match count {
                     U32Arg::Lit(value, span) => {
@@ -357,17 +443,20 @@ impl Checker<'_> {
     }
 
     /// Typecheck a value expression (LAN-299): operands must be u32 —
-    /// literals, declared parameters, u32-typed fields — builtins must
-    /// be `min`/`max`/`clamp` with the right arity, and every
-    /// statically-evaluable subexpression must evaluate cleanly under
-    /// checked arithmetic (`4294967295 + 1` is a compile error at its
-    /// span, not a per-route runtime error).
-    fn check_value_expr(&mut self, expr: &ValueExprAst, params: &[&str]) {
+    /// literals, declared parameters, `let` bindings (LAN-302),
+    /// u32-typed fields — builtins must be `min`/`max`/`clamp` with
+    /// the right arity, and every statically-evaluable subexpression
+    /// must evaluate cleanly under checked arithmetic (`4294967295 +
+    /// 1` is a compile error at its span, not a per-route runtime
+    /// error).
+    fn check_value_expr(&mut self, expr: &ValueExprAst, scope: &Scope<'_>) {
         match expr {
             ValueExprAst::Lit(..) => {}
-            ValueExprAst::Ident(name) => {
-                self.check_u32_arg(&U32Arg::Param(name.clone()), params);
-            }
+            // A bare identifier in a value position resolves innermost
+            // `let` first, then parameters (LAN-302 shadowing). A name
+            // followed by `(` is a builtin call (the `Call` arm), the
+            // same per-position rule parameters already follow.
+            ValueExprAst::Ident(name) => self.check_value_ident(name, scope),
             ValueExprAst::Field(path) => match resolve_field(path) {
                 Err(diag) => self.diags.push(diag),
                 Ok(resolved) => {
@@ -387,8 +476,8 @@ impl Checker<'_> {
                 }
             },
             ValueExprAst::Binary { op, lhs, rhs, span } => {
-                self.check_value_expr(lhs, params);
-                self.check_value_expr(rhs, params);
+                self.check_value_expr(lhs, scope);
+                self.check_value_expr(rhs, scope);
                 // Constant folding diagnostic, reported at the
                 // smallest failing subexpression: both children fold
                 // cleanly, this operator fails.
@@ -404,7 +493,7 @@ impl Checker<'_> {
             }
             ValueExprAst::Call { name, args, span } => {
                 for arg in args {
-                    self.check_value_expr(arg, params);
+                    self.check_value_expr(arg, scope);
                 }
                 let Some(&(_, arity)) = VALUE_BUILTINS
                     .iter()
@@ -457,20 +546,60 @@ impl Checker<'_> {
         }
     }
 
-    fn check_u32_arg(&mut self, arg: &U32Arg, params: &[&str]) {
-        if let U32Arg::Param(name) = arg
-            && !params.contains(&name.node.as_str())
-        {
-            let mut diag = Diagnostic::new(
-                name.span,
-                format!("unknown parameter `{}`", name.node),
-                "not a parameter of this policy",
-            );
-            if let Some(suggestion) = closest(&name.node, params.iter().copied()) {
-                diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-            }
-            self.diags.push(diag);
+    /// A bare identifier in a value position (LAN-302): innermost
+    /// `let` binding, else parameter, else a spanned unknown-name
+    /// diagnostic suggesting across both.
+    fn check_value_ident(&mut self, name: &Spanned<String>, scope: &Scope<'_>) {
+        if scope.is_local(&name.node) || scope.is_param(&name.node) {
+            return;
         }
+        let mut diag = Diagnostic::new(
+            name.span,
+            format!("unknown parameter or binding `{}`", name.node),
+            "not a parameter or `let` binding in scope",
+        );
+        if let Some(suggestion) = closest(
+            &name.node,
+            scope
+                .params
+                .iter()
+                .copied()
+                .chain(scope.lets.iter().map(String::as_str)),
+        ) {
+            diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+        }
+        self.diags.push(diag);
+    }
+
+    /// A compile-time-constant u32 position (prepend operands/counts,
+    /// `apply` arguments, `contains` ASNs): literals and parameters
+    /// only. `let` bindings are runtime values and get a dedicated
+    /// diagnostic instead of "unknown parameter" (LAN-302).
+    fn check_u32_arg(&mut self, arg: &U32Arg, scope: &Scope<'_>) {
+        let U32Arg::Param(name) = arg else { return };
+        if scope.is_param(&name.node) {
+            return;
+        }
+        if scope.is_local(&name.node) {
+            self.diags.push(
+                Diagnostic::new(
+                    name.span,
+                    format!("`{}` is a `let` binding", name.node),
+                    "this position needs a literal or parameter",
+                )
+                .with_note("bindings are runtime values; this argument is fixed at compile time"),
+            );
+            return;
+        }
+        let mut diag = Diagnostic::new(
+            name.span,
+            format!("unknown parameter `{}`", name.node),
+            "not a parameter of this policy",
+        );
+        if let Some(suggestion) = closest(&name.node, scope.params.iter().copied()) {
+            diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+        }
+        self.diags.push(diag);
     }
 
     // ── expressions ─────────────────────────────────────────────────
@@ -479,20 +608,20 @@ impl Checker<'_> {
         clippy::too_many_lines,
         reason = "exhaustive per-field/type dispatch; splitting would scatter the match"
     )]
-    fn check_expr(&mut self, expr: &Expr, params: &[&str]) {
+    fn check_expr(&mut self, expr: &Expr, scope: &Scope<'_>) {
         match expr {
             Expr::Or(lhs, rhs) | Expr::And(lhs, rhs) => {
-                self.check_expr(lhs, params);
-                self.check_expr(rhs, params);
+                self.check_expr(lhs, scope);
+                self.check_expr(rhs, scope);
             }
-            Expr::Not(inner, _) => self.check_expr(inner, params),
-            Expr::Cmp { field, op, rhs, .. } => self.check_cmp(field, *op, rhs, params),
+            Expr::Not(inner, _) => self.check_expr(inner, scope),
+            Expr::Cmp { field, op, rhs, .. } => self.check_cmp(field, *op, rhs, scope),
             // LAN-299: both sides of a value comparison are u32 value
             // expressions; all four operators apply (the checked
             // evaluation model has no unordered u32 fields).
             Expr::ValueCmp { lhs, rhs, .. } => {
-                self.check_value_expr(lhs, params);
-                self.check_value_expr(rhs, params);
+                self.check_value_expr(lhs, scope);
+                self.check_value_expr(rhs, scope);
             }
             Expr::In { field, set } => self.check_in(field, set),
             Expr::Has { field, lit } => match resolve_field(field) {
@@ -547,10 +676,14 @@ impl Checker<'_> {
             }
             Expr::Contains { field, asn } => {
                 self.require_as_path(field, "contains");
-                self.check_u32_arg(asn, params);
+                self.check_u32_arg(asn, scope);
             }
             Expr::Apply { policy, args, span } => {
-                let Some(target) = self.policy(&policy.node) else {
+                // Borrow the target through the file field directly so
+                // its lifetime is independent of `self` (diagnostics
+                // below need `&mut self`).
+                let file = self.file;
+                let Some(target) = file.policies.iter().find(|p| p.name.node == policy.node) else {
                     let mut diag = Diagnostic::new(
                         policy.span,
                         format!("unknown policy `{}`", policy.node),
@@ -585,8 +718,31 @@ impl Checker<'_> {
                         .with_label(target.name.span, "policy defined here"),
                     );
                 }
+                // LAN-302: `apply` inlines its target as a pure
+                // predicate expression — there is no term walk to
+                // execute the target's `Bind` terms in, so a target
+                // that declares bindings is rejected here rather than
+                // given silently divergent semantics. LAN-304 `fn` is
+                // the designed vehicle for composing computed values.
+                if let Some(let_span) = first_let(target) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            *span,
+                            format!(
+                                "cannot `apply` policy `{}`: it declares `let` bindings",
+                                policy.node
+                            ),
+                            "`apply` targets cannot use `let`",
+                        )
+                        .with_label(let_span, "first `let` is here")
+                        .with_note(
+                            "`apply` inlines the target as a pure predicate; factor the \
+                             shared value into the applying policy instead",
+                        ),
+                    );
+                }
                 for arg in args {
-                    self.check_u32_arg(arg, params);
+                    self.check_u32_arg(arg, scope);
                 }
             }
         }
@@ -604,7 +760,7 @@ impl Checker<'_> {
         }
     }
 
-    fn check_cmp(&mut self, field: &FieldPath, op: CmpOp, rhs: &Rhs, params: &[&str]) {
+    fn check_cmp(&mut self, field: &FieldPath, op: CmpOp, rhs: &Rhs, scope: &Scope<'_>) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
             Err(diag) => {
@@ -612,6 +768,9 @@ impl Checker<'_> {
                 return;
             }
         };
+        if binding_value_cmp(rhs, resolved, scope) {
+            return;
+        }
         let eq_only = |checker: &mut Self| {
             if matches!(op, CmpOp::Ge | CmpOp::Le) {
                 checker.diags.push(Diagnostic::new(
@@ -623,11 +782,11 @@ impl Checker<'_> {
         };
         match resolved {
             Field::LocalPref | Field::Med | Field::AsPathLen => {
-                self.expect_u32_rhs(field, rhs, params);
+                self.expect_u32_rhs(field, rhs, scope);
             }
             Field::PeerAsn | Field::OriginAs => {
                 eq_only(self);
-                self.expect_u32_rhs(field, rhs, params);
+                self.expect_u32_rhs(field, rhs, scope);
             }
             Field::EvpnRouteType => {
                 eq_only(self);
@@ -635,19 +794,19 @@ impl Checker<'_> {
             }
             Field::Rpki => {
                 eq_only(self);
-                self.expect_enum_rhs(field, rhs, RPKI_MEMBERS, params);
+                self.expect_enum_rhs(field, rhs, RPKI_MEMBERS, scope);
             }
             Field::Aspa => {
                 eq_only(self);
-                self.expect_enum_rhs(field, rhs, ASPA_MEMBERS, params);
+                self.expect_enum_rhs(field, rhs, ASPA_MEMBERS, scope);
             }
             Field::RouteType => {
                 eq_only(self);
-                self.expect_enum_rhs(field, rhs, ROUTE_TYPE_MEMBERS, params);
+                self.expect_enum_rhs(field, rhs, ROUTE_TYPE_MEMBERS, scope);
             }
             Field::Family => {
                 eq_only(self);
-                self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, params);
+                self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, scope);
             }
             Field::NextHop => {
                 eq_only(self);
@@ -758,11 +917,11 @@ impl Checker<'_> {
         }
     }
 
-    fn expect_u32_rhs(&mut self, field: &FieldPath, rhs: &Rhs, params: &[&str]) {
+    fn expect_u32_rhs(&mut self, field: &FieldPath, rhs: &Rhs, scope: &Scope<'_>) {
         match rhs {
             Rhs::Int(..) => {}
             Rhs::Ident(name) => {
-                self.check_u32_arg(&U32Arg::Param(name.clone()), params);
+                self.check_u32_arg(&U32Arg::Param(name.clone()), scope);
             }
             other => self
                 .diags
@@ -770,7 +929,13 @@ impl Checker<'_> {
         }
     }
 
-    fn expect_enum_rhs(&mut self, field: &FieldPath, rhs: &Rhs, members: &[&str], params: &[&str]) {
+    fn expect_enum_rhs(
+        &mut self,
+        field: &FieldPath,
+        rhs: &Rhs,
+        members: &[&str],
+        scope: &Scope<'_>,
+    ) {
         let Rhs::Ident(name) = rhs else {
             self.diags.push(type_mismatch(
                 field,
@@ -787,7 +952,13 @@ impl Checker<'_> {
             format!("`{}` is not a valid `{}` value", name.node, field.render()),
             format!("expected one of {}", member_list(members)),
         );
-        if params.contains(&name.node.as_str()) {
+        if scope.is_local(&name.node) {
+            diag = diag.with_note(format!(
+                "`{}` is a u32 `let` binding; `{}` is an enum field",
+                name.node,
+                field.render()
+            ));
+        } else if scope.is_param(&name.node) {
             diag = diag.with_note(format!(
                 "`{}` is a u32 parameter; `{}` is an enum field",
                 name.node,
@@ -1223,6 +1394,13 @@ fn bound_policy<'a>(
                         .iter()
                         .chain(if_stmt.else_actions.iter().flatten())
                     {
+                        // A body `let` (LAN-302) lowers to its own Bind
+                        // term that re-evaluates the branch guard (the
+                        // else side adds a negation) — charge one arm
+                        // per binding on top of its initializer cost.
+                        if matches!(action, ActionStmt::Let { .. }) {
+                            arms.push(cost.saturating_add(1));
+                        }
                         action_cost = action_cost.saturating_add(action_value_cost(action));
                     }
                 }
@@ -1312,14 +1490,48 @@ fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
     }
 }
 
+/// LAN-302: a `let` binding on the right of a u32-field comparison
+/// makes it a value comparison (that is what it lowers to), so all
+/// four operators apply and both sides are u32 — nothing further to
+/// check. Non-u32 fields keep their per-field diagnostics (enum
+/// members win in enum positions; bindings resolve only in value
+/// positions).
+fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
+    matches!(rhs, Rhs::Ident(name)
+        if scope.is_local(&name.node) && value_field_of(resolved).is_some())
+}
+
 /// The value-expression steps an action contributes to the
 /// evaluation-cost budget (LAN-299: only the computed `set` values
-/// carry expressions; everything else is constant-time).
+/// carry expressions; everything else is constant-time. LAN-302: a
+/// `let` charges its initializer plus one slot-write step; each read
+/// already costs one step as a `value_cost` operand).
 fn action_value_cost(action: &ActionStmt) -> u64 {
     match action {
         ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => value_cost(expr),
+        ActionStmt::Let { init, .. } => value_cost(init).saturating_add(1),
         _ => 0,
     }
+}
+
+/// Span of the first `let` statement anywhere in a policy — term
+/// bodies and `if`/`else` bodies — or `None`. Backs the LAN-302
+/// `apply`-target rejection.
+fn first_let(def: &PolicyDef) -> Option<Span> {
+    fn in_actions(actions: &[ActionStmt]) -> Option<Span> {
+        actions.iter().find_map(|action| match action {
+            ActionStmt::Let { span, .. } => Some(*span),
+            _ => None,
+        })
+    }
+    def.terms.iter().find_map(|term| {
+        term.stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Action(ActionStmt::Let { span, .. }) => Some(*span),
+            Stmt::Action(_) => None,
+            Stmt::If(if_stmt) => in_actions(&if_stmt.then_actions)
+                .or_else(|| if_stmt.else_actions.as_deref().and_then(in_actions)),
+        })
+    })
 }
 
 /// Worst-case evaluation steps of a value expression (LAN-299): one
