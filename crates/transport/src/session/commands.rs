@@ -152,6 +152,21 @@ impl PeerSession {
                 });
                 ControlFlow::Continue(())
             }
+            PeerCommand::QueryImportPolicyTermHits { reply } => {
+                // Read-only snapshot of the live counters (ADR-0096
+                // Decision 3.3). No counter moves; a session without an
+                // installed import chain has nothing to report.
+                let snapshot =
+                    self.import_policy
+                        .as_ref()
+                        .map(|chain| crate::handle::ImportPolicyTermHits {
+                            generation: self.import_policy_generation,
+                            evals: chain.hit_counters().evals(),
+                            terms: chain.term_hit_rows(),
+                        });
+                let _ = reply.send(snapshot);
+                ControlFlow::Continue(())
+            }
             PeerCommand::UpdateExportPolicy { policy, reply } => {
                 self.export_policy = policy;
                 let _ = reply.send(Ok(()));

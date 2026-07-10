@@ -625,7 +625,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
 | `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). For `.rpol` chain members the statement trace names the deciding term and carries per-term trace lines (ADR-0096). Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
 | `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled server-side) read-only over a live Adj-RIB-In / Loc-RIB snapshot: accepted/rejected/modified counts, per-term hit counters, before/after attribute diff samples. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
-| `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; export direction in V1 — import counters accumulate but have no read surface yet). CLI: `rbgp policy stats`. `SensitiveRead` tier. |
+| `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; direction `import`, `export`, or `both` — import chains also report their install generation). CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,

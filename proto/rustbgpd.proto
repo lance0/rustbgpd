@@ -527,12 +527,14 @@ service PolicyService {
   // policy chains (ADR-0096 Decision 3.3, the IOS-XR "show pcl" idea).
   // Counters accumulate on the live evaluation path since a chain
   // instance was installed and reset when the chain is replaced
-  // (policy reload / hot-apply installs a fresh instance). V1 surfaces
-  // the export direction (the RIB manager owns those chains); import
-  // counters accumulate in the session tasks but have no read surface
-  // yet.
+  // (policy reload / hot-apply installs a fresh instance). Export
+  // chains are read from the RIB manager; import chains are read from
+  // each live session task (a peer with no live session reports no
+  // import chain).
   //
-  // Side-effect free read; does not reset any counter.
+  // Side-effect free read; does not reset any counter. Explain queries
+  // and TestPolicy dry runs never move these counters either — only
+  // live route evaluation counts.
   rpc GetPolicyStats(GetPolicyStatsRequest) returns (GetPolicyStatsResponse);
 }
 
@@ -1045,9 +1047,9 @@ message GetPolicyStatsRequest {
   // Optional peer filter (IPv4 or IPv6 literal). Empty = every peer
   // with an installed chain.
   string peer_address = 1;
-  // Direction filter: "export" (the default when empty). "import" is
-  // reserved — the daemon rejects it until the import-side read
-  // surface lands.
+  // Direction filter: "export" (the default when empty), "import", or
+  // "both". "both" returns export chains first, then import chains,
+  // each block sorted by peer address.
   string direction = 2;
 }
 
@@ -1074,12 +1076,21 @@ message PolicyChainStats {
   // fallback chain instance (peers evaluated against the fallback
   // before any per-peer install).
   string peer_address = 1;
-  // "export" (import arrives with the import-side read surface).
+  // "import" or "export".
   string direction = 2;
   // Routes evaluated through this chain since install — the
   // denominator for the per-term hit counts.
   uint64 routes_evaluated = 3;
   repeated PolicyTermStat terms = 4;
+  // Install identity of the chain the counters belong to. Import
+  // chains report the session-local import-policy generation
+  // (ADR-0073): it starts at 0 when the session task constructs and
+  // advances on every chain install — including a content-equal
+  // reinstall — so counters that reset to zero are attributable to a
+  // replacement rather than read as continuous history. Export chains
+  // do not track an install generation yet and always report 0
+  // (LAN-311).
+  uint64 policy_generation = 5;
 }
 
 message GetPolicyStatsResponse {

@@ -411,16 +411,17 @@ enum PolicyAction {
         action: PolicyChainAction,
     },
     /// Show live per-term policy hit counters (ADR-0096): how many
-    /// routes matched each term of the installed export chains since
-    /// chain install. Counters reset when a chain is replaced (policy
-    /// reload / hot-apply). Import counters have no read surface yet.
+    /// routes matched each term of the installed import/export chains
+    /// since chain install. Counters reset when a chain is replaced
+    /// (policy reload / hot-apply); import chains report their install
+    /// generation so a replacement is visible.
     #[command(visible_alias = "counters")]
     Stats {
         /// Restrict to one peer's installed chain
         #[arg(long)]
         peer: Option<String>,
-        /// Direction: export (default). import is reserved
-        #[arg(long, default_value = "export")]
+        /// Direction: export (default), import, or both
+        #[arg(long, default_value = "export", value_parser = ["import", "export", "both"])]
         direction: String,
     },
     /// Explain the import-policy decision for a prefix on a neighbor

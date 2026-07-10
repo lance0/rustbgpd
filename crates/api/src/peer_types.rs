@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{ImportExplainReply, RemovePrivateAs, TcpAoConfig};
+use rustbgpd_transport::{ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoConfig};
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
@@ -905,6 +905,17 @@ pub enum PeerManagerCommand {
         path_id: Option<u32>,
         /// Reply channel; `None` = no live session for `address`.
         reply: oneshot::Sender<Option<ImportExplainReply>>,
+    },
+    /// Snapshot the live import-chain per-term hit counters of peer
+    /// sessions (ADR-0096 Decision 3.3, import direction). Read-only —
+    /// no counter moves. Peers without a live session or without an
+    /// installed import chain are omitted from the reply.
+    QueryImportPolicyTermHits {
+        /// Optional peer filter; `None` = every session.
+        peer: Option<IpAddr>,
+        /// Reply channel: `(peer address, snapshot)` sorted by peer
+        /// address for deterministic output.
+        reply: oneshot::Sender<Vec<(IpAddr, ImportPolicyTermHits)>>,
     },
     /// Query a single named policy definition.
     GetPolicy {

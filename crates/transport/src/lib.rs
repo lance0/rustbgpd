@@ -31,8 +31,8 @@ pub use event_sink::{
     NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,
 };
 pub use handle::{
-    PeerCommand, PeerCommandError, PeerHandle, PeerSessionState, PeerShutdownError,
-    SessionIdentity, SessionLifecycleNotification, SessionNotification,
+    ImportPolicyTermHits, PeerCommand, PeerCommandError, PeerHandle, PeerSessionState,
+    PeerShutdownError, SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionRole, StateQueryOutcome,
 };
 pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};

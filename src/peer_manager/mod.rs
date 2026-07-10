@@ -833,6 +833,37 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::QueryImportPolicyTermHits { peer, reply } => {
+                            // Read-only snapshot forwarded to each session
+                            // task (the import chain and its counters live
+                            // there). Bounded per session like explain: a
+                            // wedged task drops out of the answer instead of
+                            // parking the actor. Sessions without an
+                            // installed import chain reply None and are
+                            // omitted.
+                            let keys: Vec<_> = match peer {
+                                Some(address) => self
+                                    .unique_peer_key_for_address(address)
+                                    .into_iter()
+                                    .collect(),
+                                None => self.peers.keys().cloned().collect(),
+                            };
+                            let mut out = Vec::new();
+                            for key in keys {
+                                let Some(managed) = self.peers.get(&key) else {
+                                    continue;
+                                };
+                                if let Some(snapshot) = managed
+                                    .handle
+                                    .query_import_policy_term_hits_timeout(EXPLAIN_QUERY_TIMEOUT)
+                                    .await
+                                {
+                                    out.push((key.address, snapshot));
+                                }
+                            }
+                            out.sort_unstable_by_key(|(address, _)| *address);
+                            let _ = reply.send(out);
+                        }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));
                         }

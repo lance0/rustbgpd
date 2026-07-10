@@ -4981,6 +4981,140 @@ async fn explain_import_policy_command_does_not_touch_counters() {
     assert_eq!(session.import_policy_routes_permitted, permitted_before);
     assert_eq!(session.import_policy_routes_denied, denied_before);
 }
+/// The import-side stats read surface (LAN-248): the query command
+/// snapshots the live per-term hit counters plus the install
+/// generation, an explain read never moves them, and a chain
+/// reinstall — content-equal included — advances the generation and
+/// resets the counters instead of presenting continuous history.
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test keeps snapshot, explain-non-counting, and reinstall assertions together"
+)]
+#[tokio::test]
+async fn query_import_policy_term_hits_snapshots_without_counting() {
+    use rustbgpd_policy::NamedPolicy;
+
+    async fn snapshot(session: &mut PeerSession) -> Option<crate::handle::ImportPolicyTermHits> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let flow = session
+            .handle_command(PeerCommand::QueryImportPolicyTermHits { reply: reply_tx })
+            .await;
+        assert_eq!(flow, ControlFlow::Continue(()));
+        reply_rx.await.expect("session replied")
+    }
+    async fn install(session: &mut PeerSession, chain: PolicyChain) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = session
+            .handle_command(PeerCommand::UpdateImportPolicy {
+                policy: Some(chain),
+                reply: reply_tx,
+            })
+            .await;
+        reply_rx
+            .await
+            .expect("session replied")
+            .expect("install succeeds");
+    }
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // No import chain installed → nothing to report.
+    assert!(snapshot(&mut session).await.is_none());
+
+    let permit_all = PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let chain = PolicyChain::from_named(vec![NamedPolicy {
+        name: Some("edge-import".to_string()),
+        policy: Policy {
+            entries: vec![permit_all],
+            default_action: PolicyAction::Permit,
+        },
+        rpol: None,
+    }]);
+    install(&mut session, chain.clone()).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let first = snapshot(&mut session).await.expect("chain installed");
+    assert_eq!(
+        first.generation, 1,
+        "session constructs at generation 0; one install advances it"
+    );
+    assert_eq!(first.evals, 1, "one route evaluated through the chain");
+    assert_eq!(first.terms.len(), 1);
+    assert_eq!(first.terms[0].policy.as_deref(), Some("edge-import"));
+    assert_eq!(first.terms[0].hits, 1);
+
+    // An explain read must not move the term-hit counters (LAN-248
+    // pin, same contract as the permit/deny counters above).
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(prefix),
+            path_id: None,
+            reply: reply_tx,
+        })
+        .await;
+    reply_rx.await.expect("session replied");
+    let second = snapshot(&mut session).await.expect("chain installed");
+    assert_eq!(second.evals, first.evals, "explain must not bump evals");
+    assert_eq!(
+        second.terms[0].hits, first.terms[0].hits,
+        "explain must not bump term hits"
+    );
+
+    // A content-equal reinstall is a fresh chain instance: counters
+    // reset and the generation advances, so the read surface never
+    // presents the new instance as continuous history.
+    install(&mut session, chain).await;
+    let third = snapshot(&mut session).await.expect("chain installed");
+    assert_eq!(third.generation, 2);
+    assert_eq!(third.evals, 0);
+    assert_eq!(third.terms[0].hits, 0);
+}
 /// Statement-level explain (the ADR-0073 deferred enrichment): a
 /// current-generation Hit re-derives WHICH statement inside the matched
 /// chain decided, through the real command dispatch path. A

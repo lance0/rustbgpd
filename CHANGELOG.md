@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Import-side policy hit counters readable via `rbgp policy stats`.**
+  `GetPolicyStats` / `rbgp policy stats` now accept
+  `--direction import|export|both`: import chains report the same
+  per-term hit rows as export chains (already accumulating in each
+  session task — pure read surface, no new hot-path work), read from
+  the live session tasks with the same peer filtering and JSON shape.
+  Import chains additionally report their install generation
+  (`policy_generation`, bumps on every chain install including
+  content-equal reinstalls), so counters that reset to zero read as a
+  chain replacement rather than continuous history; export chains do
+  not track an install generation yet. Explain queries and dry runs
+  remain non-counting, now pinned by test on the import path. (LAN-248)
+
 - **`.rpol` indexed ASN sets and origin-AS predicates.** New `asn-set`
   declarations (`asn-set customers { 64500, 64501 }`) compile to
   content-interned hash sets probed in O(1) by two new predicates:

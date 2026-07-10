@@ -111,7 +111,7 @@ shape itself does not raise the tier.
 | `ClearNeighborImportChain` | `mutating` | Per-neighbor. |
 | `ExplainImportPolicy` | `sensitive_read` | ADR-0073. Reads the per-session import-decision cache to explain why a prefix was permitted / denied / withdrawn on import. Side-effect-free; no RIB or counter mutation. |
 | `TestPolicy` | `sensitive_read` | ADR-0096. Compiles a submitted .rpol policy server-side and dry-runs it read-only over a live-RIB snapshot (counts, per-term hits, before/after diffs). Side-effect-free; no RIB, session, or counter mutation. |
-| `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed export chains (since chain install; reset on chain replace). Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
+| `GetPolicyStats` | `sensitive_read` | ADR-0096 Decision 3.3. Snapshots the live per-term guard-hit counters of installed import/export chains (since chain install; reset on chain replace — import chains also report their install generation). Discloses policy structure and traffic shape. Side-effect-free; does not reset counters. |
 | `ClearNeighborExportChain` | `mutating` | Per-neighbor. |
 
 ### PeerGroupService (6 RPCs)

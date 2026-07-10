@@ -1713,30 +1713,56 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
 
     async fn get_policy_stats(
         &self,
-        _request: Request<server_proto::GetPolicyStatsRequest>,
+        request: Request<server_proto::GetPolicyStatsRequest>,
     ) -> Result<Response<server_proto::GetPolicyStatsResponse>, Status> {
-        Ok(Response::new(server_proto::GetPolicyStatsResponse {
-            chains: vec![server_proto::PolicyChainStats {
-                peer_address: "10.0.0.2".to_string(),
-                direction: "export".to_string(),
-                routes_evaluated: 7,
-                terms: vec![
-                    server_proto::PolicyTermStat {
-                        policy_index: 0,
-                        policy: "customer-in(200)".to_string(),
-                        term_index: 0,
-                        term: "customer-routes".to_string(),
-                        hits: 5,
-                    },
-                    server_proto::PolicyTermStat {
-                        policy_index: 0,
-                        policy: "customer-in(200)".to_string(),
-                        term_index: 1,
-                        term: String::new(),
-                        hits: 2,
-                    },
-                ],
+        let req = request.into_inner();
+        let export_chain = server_proto::PolicyChainStats {
+            peer_address: "10.0.0.2".to_string(),
+            direction: "export".to_string(),
+            routes_evaluated: 7,
+            policy_generation: 0,
+            terms: vec![
+                server_proto::PolicyTermStat {
+                    policy_index: 0,
+                    policy: "customer-in(200)".to_string(),
+                    term_index: 0,
+                    term: "customer-routes".to_string(),
+                    hits: 5,
+                },
+                server_proto::PolicyTermStat {
+                    policy_index: 0,
+                    policy: "customer-in(200)".to_string(),
+                    term_index: 1,
+                    term: String::new(),
+                    hits: 2,
+                },
+            ],
+        };
+        let import_chain = server_proto::PolicyChainStats {
+            peer_address: "10.0.0.2".to_string(),
+            direction: "import".to_string(),
+            routes_evaluated: 11,
+            policy_generation: 3,
+            terms: vec![server_proto::PolicyTermStat {
+                policy_index: 0,
+                policy: "customer-in(200)".to_string(),
+                term_index: 0,
+                term: "customer-routes".to_string(),
+                hits: 9,
             }],
+        };
+        let chains = match req.direction.as_str() {
+            "" | "export" => vec![export_chain],
+            "import" => vec![import_chain],
+            "both" => vec![export_chain, import_chain],
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unexpected direction {other:?}"
+                )));
+            }
+        };
+        Ok(Response::new(server_proto::GetPolicyStatsResponse {
+            chains,
         }))
     }
 
