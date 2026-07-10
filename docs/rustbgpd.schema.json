@@ -133,6 +133,7 @@
       "description": "Routing policy: inline statements, named definitions, chains,\nand `.rpol` files.",
       "$ref": "#/$defs/PolicyConfig",
       "default": {
+        "datasets": {},
         "definitions": {},
         "explain": {
           "cache_size": 4096,
@@ -406,6 +407,20 @@
       "additionalProperties": false,
       "required": [
         "address"
+      ]
+    },
+    "DatasetFileConfig": {
+      "description": "One `[policy.datasets.<name>]` binding (LAN-305).",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path of the dataset snapshot file: one entry per line, `#`\ncomments, entries in `.rpol` set-literal syntax for the\ndeclared kind. Producers should write-temp-then-rename so the\ndaemon never reads a torn file.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
       ]
     },
     "DynamicNeighborConfig": {
@@ -2076,6 +2091,14 @@
     "PolicyConfig": {
       "type": "object",
       "properties": {
+        "datasets": {
+          "description": "External dataset file bindings (LAN-305): `[policy.datasets.<name>]`\nmaps each `dataset` declared in an `.rpol` file to the snapshot\nfile its content loads from. Every declared dataset needs an\nentry and every entry needs a declaration — both directions are\nload errors. Relative paths resolve against the config file's\ndirectory and are rewritten absolute at load, like `rpol_files`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DatasetFileConfig"
+          },
+          "default": {}
+        },
         "definitions": {
           "description": "Named policy definitions, reusable across neighbors and directions.",
           "type": "object",

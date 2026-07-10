@@ -1820,6 +1820,14 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         };
         Ok(Response::new(server_proto::GetPolicyStatsResponse {
             chains,
+            datasets: vec![server_proto::PolicyDatasetStatus {
+                name: "customers".to_string(),
+                kind: "asn-set".to_string(),
+                generation: 7,
+                records: 42,
+                path: "/var/lib/rustbgpd/datasets/customers.list".to_string(),
+                last_error: "line 3: bad".to_string(),
+            }],
         }))
     }
 

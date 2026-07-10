@@ -463,11 +463,17 @@ fn trace_rpol_policy(
     // rail), and the trace must agree (pinned by the agreement matrix
     // in `statement_trace.rs`).
     let mut eval_failed = false;
+    // LAN-305: pin dataset generations once for the whole trace walk,
+    // exactly like the live evaluator — the trace's probes and its
+    // generation annotations come from the same snapshots.
+    let pinned_frame = tables.pin_datasets();
+    let pinned = pinned_frame.as_ref().unwrap_or(&crate::eval::NO_DATASETS);
     for (index, term) in policy.terms.iter().enumerate() {
         let matched = match tables.guard_matches(
             &term.guard,
             ctx,
             crate::eval::locals_slice(locals.as_ref()),
+            pinned,
         ) {
             Ok(matched) => matched,
             // Guard evaluation error (LAN-299): render the error in
@@ -476,9 +482,10 @@ fn trace_rpol_policy(
             // walk.
             Err(kind) => {
                 term_traces.push(format!(
-                    "term {}: {} => evaluation error: {kind} — fail closed => reject",
+                    "term {}: {}{} => evaluation error: {kind} — fail closed => reject",
                     term.name.as_deref().unwrap_or("<unnamed>"),
                     render_expr(&term.guard, tables),
+                    dataset_note(&term.guard, tables, pinned),
                 ));
                 eval_failed = true;
                 decided = Some((index, term));
@@ -486,9 +493,10 @@ fn trace_rpol_policy(
             }
         };
         term_traces.push(format!(
-            "term {}: {} => {} [{}]",
+            "term {}: {}{} => {} [{}]",
             term.name.as_deref().unwrap_or("<unnamed>"),
             render_expr(&term.guard, tables),
+            dataset_note(&term.guard, tables, pinned),
             render_term_action(&term.action, tables),
             if matched { "matched" } else { "not matched" },
         ));
@@ -522,7 +530,7 @@ fn trace_rpol_policy(
         // plus the deciding iteration, never per-iteration output
         // (ADR-0103 Decision 6).
         if let TermAction::ForEach(node) = &term.action {
-            match tables.eval_for_each(node, ctx, &mut locals, &mut continued, fuel) {
+            match tables.eval_for_each(node, ctx, &mut locals, &mut continued, fuel, pinned) {
                 Ok(outcome) => {
                     let summary = match (&outcome.flow, outcome.decided_at) {
                         (crate::eval::LoopFlow::Completed, _) => format!(
@@ -667,7 +675,11 @@ fn trace_rpol_policy(
             policy_name,
             statement_index: Some(index),
             action,
-            matched_conditions: vec![format!("guard {}", render_expr(&term.guard, tables))],
+            matched_conditions: vec![format!(
+                "guard {}{}",
+                render_expr(&term.guard, tables),
+                dataset_note(&term.guard, tables, pinned)
+            )],
             modifications,
             term_name: term.name.clone(),
             term_traces,
@@ -980,6 +992,27 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                     .join(" || ")
             }
         }
+        // LAN-305: dataset probes render like their set siblings, by
+        // dataset name (the chain's dataset table always carries one).
+        // Generation annotation is appended at the trace layer
+        // (`dataset_note`), where the walk's pinned snapshots live.
+        MatchExpr::InDataset { probe, id } => {
+            let name = dataset_label(tables, *id);
+            match probe {
+                crate::ir::DatasetProbe::Prefix => format!("route.prefix in {name}"),
+                crate::ir::DatasetProbe::OriginAs => format!("route.origin-as in {name}"),
+                crate::ir::DatasetProbe::PeerAs => format!("peer.asn in {name}"),
+                crate::ir::DatasetProbe::Community => format!("route.communities in {name}"),
+                crate::ir::DatasetProbe::LocalAsn { name: binding, .. }
+                | crate::ir::DatasetProbe::LocalCommunity { name: binding, .. } => {
+                    format!("{binding} in {name}")
+                }
+                crate::ir::DatasetProbe::ConstAsn(value)
+                | crate::ir::DatasetProbe::ConstCommunity(value) => {
+                    format!("{value} in {name}")
+                }
+            }
+        }
         MatchExpr::Not(inner) => {
             // Always parenthesized: `!(...)` is unambiguous regardless
             // of the inner expression's shape.
@@ -1028,4 +1061,49 @@ fn set_label(names: &[Option<String>], id: u32, kind: &str) -> String {
         .cloned()
         .flatten()
         .unwrap_or_else(|| format!("{kind}#{id}"))
+}
+
+/// The declared name of a chain's dataset binding.
+fn dataset_label(tables: &CompiledChain, id: crate::ir::DatasetId) -> String {
+    tables
+        .datasets
+        .get(id.0 as usize)
+        .map_or_else(|| format!("dataset#{}", id.0), |slot| slot.name.to_string())
+}
+
+/// The LAN-305 generation annotation for a guard: one
+/// ` [dataset <kind> <name>, gen <G>]` note per dataset the guard
+/// probes, from the trace walk's pinned snapshots — the operator sees
+/// which data generation the rendered verdict was computed against,
+/// without the content ever being dumped. Empty for dataset-free
+/// guards.
+fn dataset_note(
+    expr: &MatchExpr,
+    tables: &CompiledChain,
+    pinned: &crate::eval::PinnedDatasets,
+) -> String {
+    let mut note = String::new();
+    for (index, slot) in tables.datasets.iter().enumerate() {
+        let id = u32::try_from(index).unwrap_or(u32::MAX);
+        if !expr.any_node(&|node| matches!(node, MatchExpr::InDataset { id: d, .. } if d.0 == id)) {
+            continue;
+        }
+        let generation = pinned
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|snapshot| snapshot.generation);
+        match generation {
+            Some(generation) => {
+                let _ = write!(
+                    note,
+                    " [dataset {} {}, gen {generation}]",
+                    slot.kind, slot.name
+                );
+            }
+            None => {
+                let _ = write!(note, " [dataset {} {}, unpinned]", slot.kind, slot.name);
+            }
+        }
+    }
+    note
 }

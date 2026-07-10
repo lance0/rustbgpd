@@ -12732,3 +12732,237 @@ fn config_json_schema_committed_copy_is_fresh() {
          --dump-config-schema > docs/rustbgpd.schema.json` (or rerun this test with BLESS=1)"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// External policy datasets (LAN-305)
+// ─────────────────────────────────────────────────────────────────────
+
+const DATASET_RPOL: &str = r"
+dataset asn-set customers
+
+policy origin-guard {
+    term customers { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+";
+
+/// Config dir with an rpol-declared dataset bound to
+/// `datasets/customers.list`. Returns the tempdir (keep alive).
+fn dataset_config_dir(dataset_file: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::create_dir(dir.path().join("datasets")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), DATASET_RPOL).expect("write rpol");
+    fs::write(dir.path().join("datasets/customers.list"), dataset_file).expect("write dataset");
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[policy.datasets.customers]
+path = "datasets/customers.list"
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    dir
+}
+
+fn origin_ctx(origin: u32) -> rustbgpd_policy::RouteContext<'static> {
+    rustbgpd_policy::RouteContext {
+        prefix: Some(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        ))),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path: None,
+        as_path_len: 0,
+        origin_asn: Some(origin),
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        family: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    }
+}
+
+/// Initial load: declaration + `[policy.datasets]` binding + file →
+/// a generation-1 handle, chains resolve and probe it.
+#[test]
+fn dataset_binds_at_load_and_chains_probe_it() {
+    let dir = dataset_config_dir("# customers\n64500\n");
+    let config = load_dir(&dir).expect("config with a dataset loads");
+    let handle = config
+        .policy
+        .dataset_bindings
+        .get("customers")
+        .expect("bound");
+    assert_eq!(handle.pin().generation, 1);
+    assert!(config.policy.dataset_events.swapped.is_empty());
+
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("chains resolve");
+    let import = import.expect("import chain configured");
+    assert!(import.references_dataset("customers"));
+    assert_eq!(
+        import.evaluate(&origin_ctx(64500)).action,
+        rustbgpd_policy::PolicyAction::Permit
+    );
+    assert_eq!(
+        import.evaluate(&origin_ctx(64999)).action,
+        rustbgpd_policy::PolicyAction::Deny
+    );
+}
+
+/// Both directions of declaration ↔ binding coverage, and an
+/// unreadable file at initial load, are load errors.
+#[test]
+fn dataset_binding_validation_rejects_mismatches() {
+    // Declared but no [policy.datasets] entry.
+    let dir = dataset_config_dir("64500\n");
+    let toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        toml.replace(
+            "[policy.datasets.customers]\npath = \"datasets/customers.list\"\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let err = load_dir(&dir).expect_err("missing binding entry");
+    assert!(
+        err.contains("has no [policy.datasets.customers] entry"),
+        "{err}"
+    );
+
+    // Entry without a declaration.
+    let dir = dataset_config_dir("64500\n");
+    let toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        toml.replace(
+            "[policy.datasets.customers]\npath = \"datasets/customers.list\"",
+            "[policy.datasets.customers]\npath = \"datasets/customers.list\"\n\n\
+             [policy.datasets.orphan]\npath = \"datasets/customers.list\"",
+        ),
+    )
+    .unwrap();
+    let err = load_dir(&dir).expect_err("orphan binding entry");
+    assert!(
+        err.contains("does not match any `dataset` declaration"),
+        "{err}"
+    );
+
+    // Initial load with an unparseable file: hard error (no prior
+    // snapshot exists to keep).
+    let dir = dataset_config_dir("not-an-asn\n");
+    let err = load_dir(&dir).expect_err("bad file at initial load");
+    assert!(err.contains("line 1"), "{err}");
+}
+
+/// The SIGHUP shape (`load_with_diagnostics_and_datasets`): declared
+/// datasets reuse the running handles — changed content swaps in
+/// place (generation bump + `dataset_events.swapped`), content-equal
+/// re-reads are no-ops, and a bad file keeps the prior snapshot with
+/// the error recorded instead of rejecting the reload. Chain identity
+/// is untouched throughout (the #775 content-equal reinstall skip
+/// sees no change).
+#[test]
+fn dataset_reload_reuses_handles_swaps_scoped_and_keeps_prior_on_failure() {
+    let dir = dataset_config_dir("64500\n");
+    let path = dir.path().join("config.toml");
+    let path = path.to_str().unwrap();
+    let initial = Config::load_with_diagnostics(path).expect("initial load");
+    let handle = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+    let (chain_before, _) = initial
+        .effective_policy_chains_for_neighbor(&initial.neighbors[0])
+        .expect("chains resolve");
+
+    // Content change: same handle, generation bump, swapped recorded.
+    fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+    let reloaded =
+        Config::load_with_diagnostics_and_datasets(path, Some(&initial.policy.dataset_bindings))
+            .expect("reload with changed dataset");
+    assert!(std::sync::Arc::ptr_eq(
+        &handle,
+        reloaded.policy.dataset_bindings.get("customers").unwrap()
+    ));
+    assert_eq!(handle.pin().generation, 2);
+    assert_eq!(reloaded.policy.dataset_events.swapped, vec!["customers"]);
+    assert!(reloaded.policy.dataset_events.failed.is_empty());
+    // The chain installed from the OLD config now permits the new
+    // member — the swap reached it without any reinstall — and the
+    // re-resolved chain is content-equal (no Route Refresh storm).
+    let chain_before = chain_before.expect("import chain");
+    assert_eq!(
+        chain_before.evaluate(&origin_ctx(64999)).action,
+        rustbgpd_policy::PolicyAction::Permit
+    );
+    let (chain_after, _) = reloaded
+        .effective_policy_chains_for_neighbor(&reloaded.neighbors[0])
+        .expect("chains resolve");
+    assert_eq!(Some(&chain_before), chain_after.as_ref());
+
+    // Content-equal re-read (reordered + comments): no swap, no event.
+    fs::write(
+        dir.path().join("datasets/customers.list"),
+        "# reordered\n64999\n64500\n",
+    )
+    .unwrap();
+    let unchanged =
+        Config::load_with_diagnostics_and_datasets(path, Some(&reloaded.policy.dataset_bindings))
+            .expect("content-equal reload");
+    assert_eq!(handle.pin().generation, 2);
+    assert!(unchanged.policy.dataset_events.swapped.is_empty());
+
+    // Bad file: reload still succeeds, prior snapshot retained, error
+    // surfaced on the handle and in the events.
+    fs::write(
+        dir.path().join("datasets/customers.list"),
+        "garbage entry\n",
+    )
+    .unwrap();
+    let failed =
+        Config::load_with_diagnostics_and_datasets(path, Some(&unchanged.policy.dataset_bindings))
+            .expect("reload survives a bad dataset file");
+    assert_eq!(handle.pin().generation, 2, "prior snapshot retained");
+    assert_eq!(failed.policy.dataset_events.failed.len(), 1);
+    assert_eq!(failed.policy.dataset_events.failed[0].0, "customers");
+    let status = handle.status();
+    assert!(status.last_error.is_some(), "{status:?}");
+    assert_eq!(
+        failed
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .unwrap()
+            .pin()
+            .data
+            .records(),
+        2,
+        "old data still probing"
+    );
+}

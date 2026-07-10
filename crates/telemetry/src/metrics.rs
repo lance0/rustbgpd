@@ -169,6 +169,9 @@ pub struct BgpMetrics {
     // ── Validation-cache import refresh ───────────────────────
     validation_import_refreshes: IntCounterVec,
 
+    // ── Policy dataset refresh failures (LAN-305) ─────────────
+    policy_dataset_refresh_errors: IntCounterVec,
+
     // ── Enhanced Route Refresh ────────────────────────────────
     route_refresh_in_progress: IntGaugeVec,
     route_refresh_stale_entries: IntGaugeVec,
@@ -859,6 +862,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let policy_dataset_refresh_errors = IntCounterVec::new(
+            Opts::new(
+                "bgp_policy_dataset_refresh_errors_total",
+                "Policy dataset (LAN-305) refresh failures by dataset; the prior snapshot keeps serving probes.",
+            ),
+            &["dataset"],
+        )
+        .expect("valid metric definition");
+
         let route_refresh_in_progress = IntGaugeVec::new(
             Opts::new(
                 "bgp_route_refresh_in_progress",
@@ -1503,6 +1515,9 @@ impl BgpMetrics {
             .register(Box::new(validation_import_refreshes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(policy_dataset_refresh_errors.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_refresh_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -1737,6 +1752,7 @@ impl BgpMetrics {
             rpki_vrp_count,
             aspa_records,
             validation_import_refreshes,
+            policy_dataset_refresh_errors,
             route_refresh_in_progress,
             route_refresh_stale_entries,
             evpn_local_originations,
@@ -2538,6 +2554,14 @@ impl BgpMetrics {
         self.validation_import_refreshes
             .with_label_values(&[dependency, outcome])
             .inc_by(count);
+    }
+
+    /// Count one failed policy-dataset refresh (LAN-305). The label is
+    /// bounded by the config's declared dataset names.
+    pub fn record_policy_dataset_refresh_error(&self, dataset: &str) {
+        self.policy_dataset_refresh_errors
+            .with_label_values(&[dataset])
+            .inc();
     }
 
     /// Set whether an inbound Enhanced Route Refresh window is active.

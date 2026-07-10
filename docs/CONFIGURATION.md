@@ -1588,6 +1588,40 @@ Test `.rpol` policies without touching the daemon
 blocks locally) or against the daemon's live RIB read-only
 (`rbgp policy test` — see [`rpol-language.md`](rpol-language.md)).
 
+### External policy datasets (`[policy.datasets]`, LAN-305)
+
+Each `dataset` declared in a loaded `.rpol` file binds to a snapshot
+file here:
+
+```toml
+[policy.datasets.customers]
+path = "/var/lib/rustbgpd/datasets/customers.list"
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `path` | string | (required) | Snapshot file for the declared dataset: one entry per line, `#` comments, entries in the declared kind's set-literal syntax. Relative paths resolve against the config file's directory and are rewritten absolute at load. |
+
+- The dataset's **kind** lives in the `.rpol` declaration
+  (`dataset asn-set customers`), not here — the config only maps
+  names to files. Every declared dataset needs an entry and every
+  entry needs a declaration; both directions are load errors.
+- Files are read at config load and re-read on every SIGHUP reload
+  (the refresh trigger — there is no file watcher or dedicated RPC).
+  Changed content swaps atomically (generation bump) and refreshes
+  only the peers whose chains reference the dataset; unchanged
+  content is a no-op; a file that fails to load or parse **keeps the
+  prior snapshot** with a WARN, a
+  `bgp_policy_dataset_refresh_errors_total{dataset}` counter
+  increment, and a `last refresh FAILED` row in `rbgp policy stats`.
+  At initial load (or for a newly declared dataset) the file must
+  load cleanly.
+- Bounds: 64 MiB and 1,000,000 records per file; at most 16 datasets
+  per `.rpol` compilation unit.
+- Producers should write-temp-then-rename so a refresh never reads a
+  torn file. Full format, semantics, and the operator how-to:
+  [`rpol-language.md`](rpol-language.md) § Datasets.
+
 ### Import-decision explain (`[policy.explain]`)
 
 Optional. Controls the per-session import-decision cache that backs

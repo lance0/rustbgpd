@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use crate::engine::{AsPathRegex, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
+    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, MatchExpr, PolicySource, RegexId,
+    SetId, Term, TermAction,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 
@@ -78,6 +79,7 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
         prefix_set_names: sets.prefix_set_names,
         community_set_names: sets.community_set_names,
         asn_set_names: sets.asn_set_names,
+        datasets: sets.datasets,
         local_asn,
     }
 }
@@ -142,6 +144,13 @@ fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> 
         MatchExpr::AsPathMatches(id) => {
             MatchExpr::AsPathMatches(sets.regex_id(donor.as_path_regexes[id.0 as usize].clone()))
         }
+        // LAN-305: dataset probes remap into the merged dataset table.
+        // Dataset names are daemon-global (one handle per name), so
+        // deduping by name is exact across donors.
+        MatchExpr::InDataset { probe, id } => MatchExpr::InDataset {
+            probe: probe.clone(),
+            id: sets.dataset_id(&donor.datasets[id.0 as usize]),
+        },
         MatchExpr::And(children) => MatchExpr::And(
             children
                 .iter()
@@ -262,6 +271,7 @@ struct ChainSets {
     prefix_set_names: Vec<Option<String>>,
     community_set_names: Vec<Option<String>>,
     asn_set_names: Vec<Option<String>>,
+    datasets: Vec<DatasetSlot>,
 }
 
 impl ChainSets {
@@ -302,6 +312,18 @@ impl ChainSets {
                 self.asn_sets.len() - 1
             });
         SetId(u32::try_from(index).expect("set table fits u32"))
+    }
+
+    fn dataset_id(&mut self, slot: &DatasetSlot) -> DatasetId {
+        let index = self
+            .datasets
+            .iter()
+            .position(|existing| existing.name == slot.name)
+            .unwrap_or_else(|| {
+                self.datasets.push(slot.clone());
+                self.datasets.len() - 1
+            });
+        DatasetId(u32::try_from(index).expect("dataset table fits u32"))
     }
 
     fn regex_id(&mut self, regex: Arc<AsPathRegex>) -> RegexId {

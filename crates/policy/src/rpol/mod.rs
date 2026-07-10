@@ -39,8 +39,22 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::datasets::{DatasetBindings, DatasetData, DatasetKind, MissingDatasets};
 use crate::ir::CompiledChain;
 use crate::sets::SetStore;
+
+/// Parse dataset file text as `kind` (LAN-305) — the operator file
+/// format: one entry per line, `#` comments, whitespace-tolerant,
+/// entries in the exact literal grammar `.rpol` set definitions use.
+/// Public for the daemon's dataset loader and the fuzz harness; see
+/// [`crate::datasets::load_dataset_file`] for the file-reading wrapper.
+///
+/// # Errors
+///
+/// The first parse failure, prefixed with its 1-based line number.
+pub fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<DatasetData, String> {
+    parser::parse_dataset_text(text, kind)
+}
 
 /// A parsed + typechecked `.rpol` compilation unit — the main source
 /// plus every module its `import` graph resolved (LAN-300) — retained
@@ -132,11 +146,26 @@ impl RpolFile {
     }
 
     /// Run the unit's in-language `test` blocks (from every module).
+    /// Dataset references (LAN-305) resolve through each test's own
+    /// `dataset NAME { ... }` overrides — tests never read operator
+    /// files; a test whose policy probes an un-overridden dataset
+    /// fails with a message naming it.
     #[must_use]
     pub fn run_tests(&self) -> TestReport {
         let mut store = SetStore::new();
         let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
         testing::run_tests(&self.file.tests, &mut lowerer, &mut store)
+    }
+
+    /// `(name, kind)` for every `dataset` declared in the compilation
+    /// unit (main file plus imports), in source order. The daemon
+    /// config validates these against `[policy.datasets]` bindings at
+    /// apply time.
+    pub fn dataset_decls(&self) -> impl Iterator<Item = (&str, DatasetKind)> {
+        self.file
+            .datasets
+            .iter()
+            .map(|decl| (decl.name.node.as_str(), decl.kind))
     }
 
     /// `(name, parameter count)` for every policy defined in the file,
@@ -149,13 +178,17 @@ impl RpolFile {
     }
 
     /// Monomorphize one policy with concrete arguments into a
-    /// single-policy [`CompiledChain`] carrying the file's set tables.
+    /// single-policy [`CompiledChain`] carrying the file's set tables,
+    /// binding dataset references (LAN-305) through an empty binding
+    /// set — a convenience for dataset-free files (tests, benches).
     /// Returns `None` for an unknown policy name.
     ///
     /// # Panics
     ///
     /// If `args.len()` does not match the policy's declared parameter
-    /// count — callers check arity first (via [`Self::policies`]).
+    /// count — callers check arity first (via [`Self::policies`]) —
+    /// or if the policy references a dataset (use
+    /// [`Self::compile_policy_bound`] with real bindings).
     #[must_use]
     pub fn compile_policy(
         &self,
@@ -163,6 +196,27 @@ impl RpolFile {
         args: &[u32],
         store: &mut SetStore,
     ) -> Option<CompiledChain> {
+        self.compile_policy_bound(name, args, store, &DatasetBindings::new())
+            .map(|result| result.expect("policy references no datasets"))
+    }
+
+    /// [`Self::compile_policy`] with explicit dataset bindings
+    /// (LAN-305): the daemon's chain resolver passes the config-built
+    /// registry bindings; referenced-but-unbound (or kind-mismatched)
+    /// datasets yield `Err` naming them.
+    ///
+    /// # Panics
+    ///
+    /// If `args.len()` does not match the policy's declared parameter
+    /// count — callers check arity first (via [`Self::policies`]).
+    #[must_use]
+    pub fn compile_policy_bound(
+        &self,
+        name: &str,
+        args: &[u32],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
         let def = self.file.policies.iter().find(|p| p.name.node == name)?;
         assert_eq!(
             def.params.len(),
@@ -170,7 +224,13 @@ impl RpolFile {
             "rpol chain reference arity is checked at config resolve"
         );
         let mut lowerer = lower::Lowerer::new(&self.file, store);
-        Some(lowerer.instantiate_chain(name, args, store))
+        let chain = lowerer.instantiate_chain(name, args, store, datasets);
+        let missing = lowerer.take_missing_datasets();
+        Some(if missing.is_empty() {
+            Ok(chain)
+        } else {
+            Err(MissingDatasets(missing))
+        })
     }
 }
 
@@ -267,7 +327,28 @@ pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain,
     let (file, diags) = front(source)?;
     debug_assert!(diags.is_empty());
     let mut lowerer = lower::Lowerer::new(&file, store);
-    Ok(lowerer.zero_param_chain(store))
+    let chain = lowerer.zero_param_chain(store, &DatasetBindings::new());
+    // Inline compilation has no config to bind datasets from
+    // (LAN-305): a zero-parameter policy probing one is an error here,
+    // like `import` — file-based loading through the daemon config is
+    // the dataset-capable path.
+    let missing = lowerer.take_missing_datasets();
+    if missing.is_empty() {
+        Ok(chain)
+    } else {
+        Err(Diagnostics(vec![Diagnostic::new(
+            Span::in_file(0..0, 0),
+            format!(
+                "inline compilation cannot bind dataset{} {}",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", ")
+            ),
+            "datasets need config bindings",
+        )
+        .with_note(
+            "load this policy through the daemon config (`rpol_files` + `[policy.datasets]`), or probe it from a `test` block with a `dataset` override",
+        )]))
+    }
 }
 
 /// Parse, typecheck, and run the in-language `test` blocks.

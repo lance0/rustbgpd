@@ -216,6 +216,7 @@ pub(super) fn resolve(main_path: &Path, roots: &[PathBuf]) -> Result<ResolvedGra
         merged.prefix_sets.extend(module.prefix_sets);
         merged.community_sets.extend(module.community_sets);
         merged.asn_sets.extend(module.asn_sets);
+        merged.datasets.extend(module.datasets);
         merged.fns.extend(module.fns);
         merged.policies.extend(module.policies);
         merged.tests.extend(module.tests);

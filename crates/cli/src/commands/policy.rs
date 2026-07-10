@@ -473,6 +473,28 @@ struct JsonPolicyTermStat {
     hits: u64,
 }
 
+/// One external dataset status row (LAN-305).
+#[derive(Debug, Serialize)]
+struct JsonPolicyDataset {
+    name: String,
+    kind: String,
+    generation: u64,
+    records: u64,
+    path: String,
+    /// Most recent refresh failure; `None` when the last refresh
+    /// succeeded. While set, the prior snapshot keeps serving probes.
+    last_error: Option<String>,
+}
+
+/// Combined `rbgp policy stats --json` document (LAN-305 added the
+/// dataset block alongside the chain counters).
+#[derive(Debug, Serialize)]
+struct JsonPolicyStatsDoc {
+    chains: Vec<JsonPolicyStats>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    datasets: Vec<JsonPolicyDataset>,
+}
+
 /// `rbgp policy stats [--peer ADDR] [--direction import|export|both]`
 /// — live per-term hit counters of the installed chains (ADR-0096).
 pub async fn stats(
@@ -492,7 +514,7 @@ pub async fn stats(
         .into_inner();
 
     if json {
-        let out: Vec<JsonPolicyStats> = resp
+        let chains: Vec<JsonPolicyStats> = resp
             .chains
             .iter()
             .map(|chain| JsonPolicyStats {
@@ -513,13 +535,28 @@ pub async fn stats(
                     .collect(),
             })
             .collect();
-        output::print_json_pretty(&out)?;
+        let datasets: Vec<JsonPolicyDataset> = resp
+            .datasets
+            .iter()
+            .map(|d| JsonPolicyDataset {
+                name: d.name.clone(),
+                kind: d.kind.clone(),
+                generation: d.generation,
+                records: d.records,
+                path: d.path.clone(),
+                last_error: (!d.last_error.is_empty()).then(|| d.last_error.clone()),
+            })
+            .collect();
+        output::print_json_pretty(&JsonPolicyStatsDoc { chains, datasets })?;
         return Ok(());
     }
 
-    if resp.chains.is_empty() {
+    if resp.chains.is_empty() && resp.datasets.is_empty() {
         println!("No installed policy chains");
         return Ok(());
+    }
+    if resp.chains.is_empty() {
+        println!("No installed policy chains");
     }
     for chain in &resp.chains {
         // Import chains carry an install generation (bumps on every
@@ -547,6 +584,27 @@ pub async fn stats(
                 t.term.clone()
             };
             println!("  {policy:<32} {term:<24} {}", t.hits);
+        }
+    }
+    // LAN-305: external dataset status — generation, size, and the
+    // last refresh failure (prior snapshot still serving while set).
+    if !resp.datasets.is_empty() {
+        println!("Datasets:");
+        println!(
+            "  {:<24} {:<14} {:>4}  {:>8}  PATH",
+            "NAME", "KIND", "GEN", "RECORDS"
+        );
+        for d in &resp.datasets {
+            println!(
+                "  {:<24} {:<14} {:>4}  {:>8}  {}",
+                d.name, d.kind, d.generation, d.records, d.path
+            );
+            if !d.last_error.is_empty() {
+                println!(
+                    "    last refresh FAILED ({}); prior snapshot still serving",
+                    d.last_error
+                );
+            }
         }
     }
     Ok(())

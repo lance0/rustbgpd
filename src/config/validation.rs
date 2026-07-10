@@ -230,6 +230,7 @@ impl Config {
                 group,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 self.global.asn,
@@ -246,6 +247,7 @@ impl Config {
             &self.policy.import_chain,
             &self.policy.definitions,
             &self.policy.rpol,
+            &self.policy.dataset_bindings,
             &self.policy.neighbor_sets,
             &self.peer_groups,
             ChainDirection::Import,
@@ -255,6 +257,7 @@ impl Config {
             &self.policy.export_chain,
             &self.policy.definitions,
             &self.policy.rpol,
+            &self.policy.dataset_bindings,
             &self.policy.neighbor_sets,
             &self.peer_groups,
             ChainDirection::Export,
@@ -702,6 +705,7 @@ impl Config {
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Import,
@@ -711,6 +715,7 @@ impl Config {
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Export,
@@ -1760,11 +1765,16 @@ fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), Con
     clippy::too_many_lines,
     reason = "peer-group validation mirrors the full inheritable neighbor surface"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors resolve_chain's namespace threading"
+)]
 fn validate_peer_group(
     name: &str,
     group: &PeerGroupConfig,
     definitions: &std::collections::HashMap<String, super::NamedPolicyConfig>,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
+    datasets: &rustbgpd_policy::datasets::DatasetBindings,
     neighbor_sets: &std::collections::HashMap<String, super::NeighborSetConfig>,
     peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
     local_asn: u32,
@@ -1883,6 +1893,7 @@ fn validate_peer_group(
         &group.import_policy_chain,
         definitions,
         rpol,
+        datasets,
         neighbor_sets,
         peer_groups,
         ChainDirection::Import,
@@ -1892,6 +1903,7 @@ fn validate_peer_group(
         &group.export_policy_chain,
         definitions,
         rpol,
+        datasets,
         neighbor_sets,
         peer_groups,
         ChainDirection::Export,

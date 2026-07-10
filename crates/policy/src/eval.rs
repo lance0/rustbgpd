@@ -20,15 +20,34 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use std::sync::Arc;
+
+use crate::datasets::{DatasetData, DatasetSnapshot, MAX_UNIT_DATASETS};
 use crate::engine::{
     IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult, PrependAs,
     RouteContext, RouteModifications,
 };
 use crate::ir::{
-    ArithOp, Cmp, CompiledChain, CompiledPolicy, ForEachNode, LoopSource, MatchExpr, TermAction,
-    ValueCmpOp, ValueExpr, ValueField,
+    ArithOp, Cmp, CompiledChain, CompiledPolicy, DatasetProbe, ForEachNode, LoopSource, MatchExpr,
+    TermAction, ValueCmpOp, ValueExpr, ValueField,
 };
 use crate::sets::prefix_entry_matches;
+
+/// The per-walk dataset pin frame (LAN-305, ADR-0103 Decision 8.5):
+/// slot `i` holds the snapshot pinned for the chain's `DatasetId(i)`.
+/// Built once at walk start by [`CompiledChain::pin_datasets`] and
+/// read-only thereafter, so every probe in one walk — however many
+/// guards reference the same dataset — sees exactly one generation,
+/// even when a swap lands mid-walk. Chains without datasets pass the
+/// shared empty frame; the fixed array is stack storage, sized by the
+/// compile-time `MAX_UNIT_DATASETS` budget, so the pin allocates
+/// nothing.
+pub(crate) type PinnedDatasets = [Option<Arc<DatasetSnapshot>>; MAX_UNIT_DATASETS];
+
+/// The dataset-free pin frame — what every chain compiled without
+/// dataset references walks with, at zero per-route cost beyond one
+/// branch.
+pub(crate) static NO_DATASETS: PinnedDatasets = [const { None }; MAX_UNIT_DATASETS];
 
 /// Worst-case per-route evaluation steps (ADR-0103 Decision 3,
 /// `MAX_EVAL_COST`): the compile-time budget the typecheck cost DP
@@ -99,6 +118,13 @@ pub enum EvalErrorKind {
     /// fail-closed disposition of a compiler bug, like
     /// [`UnboundLocal`](Self::UnboundLocal).
     StrayLoopControl,
+    /// A dataset probe found no pinned snapshot in its slot, or a
+    /// snapshot of the wrong kind (LAN-305). Unreachable through the
+    /// compiler — lowering binds every referenced dataset or fails the
+    /// compile, and kind agreement is a typecheck guarantee — so this
+    /// is the fail-closed disposition of a compiler bug, like
+    /// [`UnboundLocal`](Self::UnboundLocal).
+    DatasetUnpinned,
 }
 
 impl EvalErrorKind {
@@ -117,6 +143,7 @@ impl EvalErrorKind {
             EvalErrorKind::FuelExhausted => "fuel-exhausted",
             EvalErrorKind::LoopLimitExceeded => "loop-limit-exceeded",
             EvalErrorKind::StrayLoopControl => "stray-loop-control",
+            EvalErrorKind::DatasetUnpinned => "dataset-unpinned",
         }
     }
 }
@@ -160,6 +187,12 @@ impl fmt::Display for EvalErrorKind {
                 write!(
                     f,
                     "internal error: break/continue outside a loop (fail closed)"
+                )
+            }
+            EvalErrorKind::DatasetUnpinned => {
+                write!(
+                    f,
+                    "internal error: dataset snapshot unpinned or wrong kind (fail closed)"
                 )
             }
         }
@@ -523,12 +556,31 @@ impl CompiledChain {
         (result, MAX_EVAL_COST - fuel)
     }
 
+    /// Pin every referenced dataset's current snapshot — the per-walk
+    /// pinning step (LAN-305, ADR-0103 Decision 8.5). One wait-free
+    /// load per referenced dataset; the returned frame is stack
+    /// storage. `None` when the chain references no datasets (the hot
+    /// path: one branch, nothing built).
+    pub(crate) fn pin_datasets(&self) -> Option<PinnedDatasets> {
+        if self.datasets.is_empty() {
+            return None;
+        }
+        let mut pinned: PinnedDatasets = [const { None }; MAX_UNIT_DATASETS];
+        for (slot, binding) in pinned.iter_mut().zip(&self.datasets) {
+            *slot = Some(binding.handle.pin());
+        }
+        Some(pinned)
+    }
+
     fn evaluate_fueled<const COUNT: bool, const ATTR: bool>(
         &self,
         ctx: &RouteContext<'_>,
         hits: Option<&PolicyHitCounters>,
         fuel: &mut u64,
     ) -> (PolicyResult, PolicyEvaluation) {
+        // LAN-305: pin dataset generations ONCE for the whole walk.
+        let pinned_frame = self.pin_datasets();
+        let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
         let mut accumulated = RouteModifications::default();
         for (policy_index, policy) in self.policies.iter().enumerate() {
             let policy_hits = if COUNT {
@@ -542,7 +594,7 @@ impl CompiledChain {
             } else {
                 None
             };
-            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel) {
+            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned) {
                 PolicyDecision::Deny => {
                     return (
                         PolicyResult::deny(),
@@ -649,6 +701,9 @@ impl CompiledChain {
         assert_eq!(hits.len(), self.policies.len(), "hits shaped like chain");
         // LAN-303: dry runs are metered identically to the live walk.
         let mut fuel: u64 = MAX_EVAL_COST;
+        // LAN-305: and pin dataset generations once, identically.
+        let pinned_frame = self.pin_datasets();
+        let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
         let mut accumulated = RouteModifications::default();
         for (policy, policy_hits) in self.policies.iter().zip(hits.iter_mut()) {
             assert_eq!(policy_hits.len(), policy.terms.len());
@@ -661,8 +716,13 @@ impl CompiledChain {
             let mut locals: Option<LocalFrame> = None;
             for (term, hit) in policy.terms.iter().zip(policy_hits.iter_mut()) {
                 let mut err = None;
-                let matched =
-                    self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
+                let matched = self.eval_expr(
+                    &term.guard,
+                    ctx,
+                    locals_slice(locals.as_ref()),
+                    pinned,
+                    &mut err,
+                );
                 if err.is_some() {
                     // Guard evaluation error: fail closed (LAN-299).
                     denied = true;
@@ -723,6 +783,7 @@ impl CompiledChain {
                                 &mut locals,
                                 &mut continued,
                                 &mut fuel,
+                                pinned,
                             ) else {
                                 denied = true;
                                 break;
@@ -780,12 +841,17 @@ impl CompiledChain {
     /// eventual Permit merges them (the deciding term's own
     /// modifications winning scalar conflicts, mirroring chain-level
     /// merge), while a Deny — matched term or default — discards them.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per term action; splitting would scatter the walk semantics"
+    )]
     fn evaluate_policy<'a, const COUNT: bool>(
         &self,
         policy: &'a CompiledPolicy,
         ctx: &RouteContext<'_>,
         hits: Option<&[AtomicU64]>,
         fuel: &mut u64,
+        pinned: &PinnedDatasets,
     ) -> PolicyDecision<'a> {
         let mut continued: Option<RouteModifications> = None;
         // LAN-302: the `let`-binding register file, materialized (one
@@ -794,7 +860,13 @@ impl CompiledChain {
         let mut locals: Option<LocalFrame> = None;
         for (term_index, term) in policy.terms.iter().enumerate() {
             let mut err = None;
-            let matched = self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
+            let matched = self.eval_expr(
+                &term.guard,
+                ctx,
+                locals_slice(locals.as_ref()),
+                pinned,
+                &mut err,
+            );
             if let Some(kind) = err {
                 // Guard evaluation error (LAN-299): terminal for the
                 // route regardless of the guard's boolean outcome.
@@ -864,7 +936,14 @@ impl CompiledChain {
                     // evaluation) is terminal on the uniform rail,
                     // attributed to the loop's term.
                     TermAction::ForEach(node) => {
-                        match self.eval_for_each(node, ctx, &mut locals, &mut continued, fuel) {
+                        match self.eval_for_each(
+                            node,
+                            ctx,
+                            &mut locals,
+                            &mut continued,
+                            fuel,
+                            pinned,
+                        ) {
                             Ok(outcome) => match outcome.flow {
                                 LoopFlow::Completed => {}
                                 LoopFlow::Permit(mods) => {
@@ -937,6 +1016,7 @@ impl CompiledChain {
         locals: &mut Option<LocalFrame>,
         continued: &mut Option<RouteModifications>,
         fuel: &mut u64,
+        pinned: &PinnedDatasets,
     ) -> Result<LoopOutcome, (EvalErrorKind, u32)> {
         let elements: ElementIter<'_> = match node.source {
             LoopSource::Communities => ElementIter::Slice(ctx.communities.iter()),
@@ -972,8 +1052,13 @@ impl CompiledChain {
             let mut continue_iter = false;
             for term in &node.body {
                 let mut err = None;
-                let matched =
-                    self.eval_expr(&term.guard, ctx, locals_slice(locals.as_ref()), &mut err);
+                let matched = self.eval_expr(
+                    &term.guard,
+                    ctx,
+                    locals_slice(locals.as_ref()),
+                    pinned,
+                    &mut err,
+                );
                 if let Some(kind) = err {
                     return Err((kind, iterations - 1));
                 }
@@ -1033,7 +1118,7 @@ impl CompiledChain {
                     // body.
                     TermAction::ForEach(inner) => {
                         let outcome = self
-                            .eval_for_each(inner, ctx, locals, continued, fuel)
+                            .eval_for_each(inner, ctx, locals, continued, fuel, pinned)
                             .map_err(|(kind, _)| (kind, iterations - 1))?;
                         match outcome.flow {
                             LoopFlow::Completed => {}
@@ -1112,15 +1197,19 @@ impl CompiledChain {
     /// the route there (LAN-299), and explain must render the same.
     /// `locals` is the caller's `let` frame (LAN-302): the explain
     /// trace walk re-derives bindings term by term and passes its own
-    /// frame here, so guard evaluation stays shared.
+    /// frame here, so guard evaluation stays shared. `pinned` is the
+    /// caller's dataset pin frame (LAN-305): explain pins once per
+    /// trace walk — [`pin_datasets`](Self::pin_datasets) — so its
+    /// probes see one generation, exactly like the live walk.
     pub(crate) fn guard_matches(
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
         locals: &[u32],
+        pinned: &PinnedDatasets,
     ) -> Result<bool, EvalErrorKind> {
         let mut err = None;
-        let matched = self.eval_expr(expr, ctx, locals, &mut err);
+        let matched = self.eval_expr(expr, ctx, locals, pinned, &mut err);
         match err {
             Some(kind) => Err(kind),
             None => Ok(matched),
@@ -1143,22 +1232,76 @@ impl CompiledChain {
     /// Short-circuited subtrees are never evaluated, so an error on a
     /// path the walk never reaches does not fire (lazy, like the
     /// arithmetic itself).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per MatchExpr node; splitting would scatter the evaluation table"
+    )]
     fn eval_expr(
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
         locals: &[u32],
+        pinned: &PinnedDatasets,
         err: &mut Option<EvalErrorKind>,
     ) -> bool {
         match expr {
             MatchExpr::True => true,
             MatchExpr::And(children) => children
                 .iter()
-                .all(|child| self.eval_expr(child, ctx, locals, err)),
+                .all(|child| self.eval_expr(child, ctx, locals, pinned, err)),
             MatchExpr::Or(children) => children
                 .iter()
-                .any(|child| self.eval_expr(child, ctx, locals, err)),
-            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx, locals, err),
+                .any(|child| self.eval_expr(child, ctx, locals, pinned, err)),
+            MatchExpr::Not(inner) => !self.eval_expr(inner, ctx, locals, pinned, err),
+            // LAN-305: probe the snapshot pinned at walk start — the
+            // same indexed structures as the `*InSet` nodes, at the
+            // same cost. An unpinned slot or kind mismatch is the
+            // fail-closed compiler-bug rail.
+            MatchExpr::InDataset { probe, id } => {
+                let Some(snapshot) = pinned.get(id.0 as usize).and_then(Option::as_ref) else {
+                    err.get_or_insert(EvalErrorKind::DatasetUnpinned);
+                    return false;
+                };
+                match (probe, &snapshot.data) {
+                    (DatasetProbe::Prefix, DatasetData::Prefix(set)) => {
+                        ctx.prefix.is_some_and(|candidate| set.matches(candidate))
+                    }
+                    (DatasetProbe::OriginAs, DatasetData::Asn(set)) => {
+                        ctx.origin_asn.is_some_and(|origin| set.contains(origin))
+                    }
+                    (DatasetProbe::PeerAs, DatasetData::Asn(set)) => {
+                        ctx.peer_asn.is_some_and(|asn| set.contains(asn))
+                    }
+                    (DatasetProbe::Community, DatasetData::Community(set)) => set.matches(ctx),
+                    (DatasetProbe::LocalAsn { slot, .. }, DatasetData::Asn(set)) => {
+                        if let Some(value) = locals.get(usize::from(*slot)) {
+                            set.contains(*value)
+                        } else {
+                            err.get_or_insert(EvalErrorKind::UnboundLocal);
+                            false
+                        }
+                    }
+                    (DatasetProbe::LocalCommunity { slot, .. }, DatasetData::Community(set)) => {
+                        if let Some(value) = locals.get(usize::from(*slot)) {
+                            set.contains_standard(*value)
+                        } else {
+                            err.get_or_insert(EvalErrorKind::UnboundLocal);
+                            false
+                        }
+                    }
+                    (DatasetProbe::ConstAsn(value), DatasetData::Asn(set)) => set.contains(*value),
+                    (DatasetProbe::ConstCommunity(value), DatasetData::Community(set)) => {
+                        set.contains_standard(*value)
+                    }
+                    // Kind mismatch: unreachable through the compiler
+                    // (typecheck pins probe/kind agreement); fail
+                    // closed rather than misread the data.
+                    _ => {
+                        err.get_or_insert(EvalErrorKind::DatasetUnpinned);
+                        false
+                    }
+                }
+            }
             MatchExpr::ValueCmp(node) => {
                 match (
                     eval_value(&node.lhs, ctx, locals),

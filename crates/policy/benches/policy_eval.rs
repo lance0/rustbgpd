@@ -613,12 +613,89 @@ fn bench_loop_eval(c: &mut Criterion) {
     group.finish();
 }
 
+/// LAN-305 dataset parity: a dataset probe runs the SAME indexed
+/// structure as its in-language set sibling (`AsnSet` here), so the
+/// pair pins the per-walk pin overhead (one wait-free handle load +
+/// snapshot Arc clone at walk start) as the ONLY delta — probe cost
+/// itself is identical by construction. 50k members so a structural
+/// regression (e.g. a scan sneaking in) would show as a step change.
+fn bench_dataset_parity(c: &mut Criterion) {
+    use std::sync::Arc;
+
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::AsnSet;
+
+    let members: Vec<u32> = (0..50_000u32).map(|i| 64_512 + i).collect();
+    let member_list = members
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut store = SetStore::new();
+    let set_chain = rustbgpd_policy::rpol::compile_rpol(
+        &format!(
+            "asn-set customers {{ {member_list} }}
+             policy p {{ term t {{ if route.origin-as in customers {{ accept }} }} term r {{ reject }} }}"
+        ),
+        &mut store,
+    )
+    .expect("compiles");
+
+    let file = RpolFile::parse(
+        "dataset asn-set customers
+         policy p { term t { if route.origin-as in customers { accept } } term r { reject } }",
+    )
+    .expect("compiles");
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::new(DatasetHandle::new(
+        "customers",
+        DatasetKind::Asn,
+        DatasetData::Asn(AsnSet::new(members.iter().copied())),
+    )));
+    let dataset_chain = file
+        .compile_policy_bound("p", &[], &mut store, &bindings)
+        .expect("policy exists")
+        .expect("bindings complete");
+
+    let communities: Vec<u32> = Vec::new();
+    let as_path_str = String::new();
+    let mut ctx = predicate_ctx(
+        matching_prefix(),
+        &communities,
+        &as_path_str,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    ctx.origin_asn = Some(64_512 + 25_000); // hit
+    let mut miss_ctx = ctx;
+    miss_ctx.origin_asn = Some(1);
+
+    let mut group = c.benchmark_group("dataset_parity");
+    for (label, route) in [("hit", &ctx), ("miss", &miss_ctx)] {
+        group.bench_function(format!("asn_set_50k_{label}"), |b| {
+            b.iter(|| {
+                let r = std::hint::black_box(&set_chain).evaluate(route);
+                std::hint::black_box(r);
+            });
+        });
+        group.bench_function(format!("asn_dataset_50k_{label}"), |b| {
+            b.iter(|| {
+                let r = std::hint::black_box(&dataset_chain).evaluate(route);
+                std::hint::black_box(r);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_policy_eval,
     bench_policy_predicate_eval,
     bench_set_heavy,
     bench_value_expr,
-    bench_loop_eval
+    bench_loop_eval,
+    bench_dataset_parity
 );
 criterion_main!(benches);

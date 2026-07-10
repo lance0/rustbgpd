@@ -12,6 +12,9 @@ description = "Minimal policy engine — prefix allow/deny, max-prefix enforceme
 readme = "README.md"
 
 [dependencies]
+# Generation-pinned dataset snapshot handles (LAN-305): evaluation
+# pins with one wait-free load (ADR-0103 Decision 7 bans locks there).
+arc-swap.workspace = true
 # `.rpol` frontend: lexer + diagnostics (logos: MIT OR Apache-2.0; ariadne: MIT).
 ariadne = "0.6"
 logos = "0.16"
