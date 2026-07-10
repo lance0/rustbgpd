@@ -194,6 +194,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   update-group fingerprinting; route-field arithmetic never
   disqualifies grouping.
 
+- **`rbgp diff snapshot from-bmp`: RFC 8671 post-policy Adj-RIB-Out BMP
+  importer.** A fifth snapshot adapter converts an offline capture of
+  an incumbent's raw BMP version 3 byte stream into an `rbgp-ribsnap/1`
+  snapshot for `rbgp diff advertised`. Only Route Monitoring messages
+  flagged O=1/L=1 contribute routes: the Adj-RIB-In feed (O=0) is
+  skipped with a note and a pre-policy Adj-RIB-Out stream (O=1/L=0) is
+  refused as non-comparable. Embedded UPDATEs are decoded with
+  `rustbgpd-wire` under the Add-Path state negotiated in each Peer Up's
+  OPENs (RFC 7911 send/receive directionality per family) and the
+  per-message 2-/4-octet AS flag; state is kept per (connection
+  generation, peer, family, NLRI, source path ID) so live updates
+  interleaved with the initial dump supersede it, and a reconnect, Peer
+  Up, or Peer Down invalidates exactly the affected generation. A
+  peer/family is complete only after its End-of-RIB — an incomplete
+  dump is refused (exit 2, nothing emitted), and RFC 8671 stat types
+  15/17 arriving after End-of-RIB are cross-checked against the folded
+  counts (never required for completeness). Attributes outside the
+  snapshot's typed set (ORIGINATOR_ID, CLUSTER_LIST, OTC, unknowns) are
+  preserved byte-exact in a new optional `unknown_attrs` route-record
+  field, compared byte-exact by the diff engine and excludable with the
+  new `--ignore-attribute unknown`. Hard bounds on input bytes, message
+  length, peers, routes, and paths per NLRI refuse over-limit input;
+  golden byte fixtures framed by the daemon's own BMP encoder pin the
+  matrix end-to-end (capture → canonical records → in-sync, divergent,
+  and incomplete verdicts). Capture workflow documented in
+  docs/ribdiff.md and the route-server migration cookbook. (LAN-309)
+
 ### Changed
 
 - **Release publication is now fail-closed.** The binary-release and

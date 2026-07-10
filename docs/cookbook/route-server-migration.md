@@ -258,6 +258,38 @@ capture (`adj-rib-out-capture`) is comparable. `--view loc-rib` and
 `--view adj-rib-in` are refused with exit 2 — a Loc-RIB compared against
 an Adj-RIB-Out reports every export-policy effect as divergence.
 
+### BMP (RFC 8671 post-policy Adj-RIB-Out)
+
+If the incumbent supports BMP with the RFC 8671 post-policy Adj-RIB-Out
+view, its BMP feed is a wire-true multi-member capture — no per-member
+CLI exports, and it carries attributes no CLI view renders (preserved
+as `unknown_attrs`). Point the incumbent's BMP export at a listener,
+capture the raw bytes from the **start** of the BMP session, and stop
+only after every member's initial dump has completed:
+
+```bash
+nc -l 11019 > incumbent.bmp
+rbgp diff snapshot from-bmp incumbent.bmp > incumbent.ndjson
+```
+
+Prerequisites and limitations:
+
+- The incumbent must be configured to export the **post-policy
+  Adj-RIB-Out** monitoring view (O=1/L=1). The default Adj-RIB-In feed
+  is skipped with a note; a pre-policy Adj-RIB-Out feed (L=0) is
+  refused as non-comparable.
+- The capture must include the session start (Initiation and Peer Ups
+  carry the negotiated OPENs that drive Add-Path decoding) and each
+  member's End-of-RIB. **A peer/family without End-of-RIB is an
+  incomplete dump and the conversion is refused (exit 2)** — a
+  truncated capture must never read as "in sync". Exclude peers you
+  don't care about with `--peer` if they never completed.
+- Live churn during the capture is fine: updates that interleave with
+  the initial dump supersede it, and post-End-of-RIB stats (RFC 8671
+  types 15/17) are cross-checked against the folded state.
+- Offline only: capture to a file first; the adapter does not read from
+  a socket. Full contract in [`docs/ribdiff.md`](../ribdiff.md).
+
 ### Example reports
 
 From the M83 multi-stack lab (FRR member AS 65003 advertising three

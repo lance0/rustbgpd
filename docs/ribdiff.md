@@ -32,7 +32,7 @@ $ echo $?
 | `--peer <IP>` | all snapshot peers | Peer to compare; repeatable |
 | `--against <PATH>` | required | Incumbent `rbgp-ribsnap/1` NDJSON snapshot |
 | `--family <F>` | ipv4\_unicast + ipv6\_unicast | Family filter; repeatable |
-| `--ignore-attribute <A>` | none | Exclude an attribute from comparison on both sides; repeatable (`origin`, `as_path`, `next_hop`, `med`, `local_pref`, `communities`, `extended_communities`, `large_communities`) |
+| `--ignore-attribute <A>` | none | Exclude an attribute from comparison on both sides; repeatable (`origin`, `as_path`, `next_hop`, `med`, `local_pref`, `communities`, `extended_communities`, `large_communities`, `unknown`) |
 | `--max-routes <N>` | 4,000,000 | Maximum retained routes per side; exceeding refuses the comparison |
 | `--max-input-bytes <N>` | 1 GiB | Maximum snapshot bytes read; exceeding refuses the comparison |
 | `--detail <N>` | 20 | Maximum difference rows in human output (`--json` is always complete) |
@@ -127,6 +127,13 @@ duplicates; multiplicity is compared):
 - `extended_communities`: raw 8-octet values as unsigned integers
   (big-endian wire order).
 - `large_communities`: `"global:data1:data2"` strings.
+- `unknown_attrs`: optional; attributes outside the typed set, preserved
+  as `{"type_code":N,"flags":N,"value":"<hex>"}` wire triples (the
+  from-bmp adapter emits them; e.g. ORIGINATOR_ID or OTC). Compared
+  byte-exact by the engine — but the live gRPC side cannot see unknown
+  attributes, so a snapshot carrying them diverges against a live
+  comparison unless `--ignore-attribute unknown` is passed (an explicit
+  operator decision, never a silent drop).
 - `path_id`: optional; diagnostics only, never compared.
 
 Unknown fields are rejected (typo protection). All fields except
@@ -186,7 +193,7 @@ Or with `jq`, from a JSON export shaped like
 
 ## Snapshot adapters
 
-Four adapters turn an incumbent's own output into `rbgp-ribsnap/1`
+Five adapters turn an incumbent's own output into `rbgp-ribsnap/1`
 NDJSON. Each is a versioned contract: the header's `source` field is
 `<adapter>/<contract-version> view=adj-rib-out-capture [label]`, so a
 report always names which adapter (and which of its revisions) produced
@@ -205,6 +212,7 @@ the incumbent side. Common rules:
 | Adapter | Capture command (verified against) | Form |
 |---------|-------------------------------------|------|
 | `from-mrt/1` | `rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <ip> --peer-asn <asn>` (RFC 6396 `TABLE_DUMP_V2`, RFC 8050 Add-Path subtypes) | in-binary subcommand |
+| `from-bmp/1` | `rbgp diff snapshot from-bmp <capture> [--peer <ip>]` (RFC 7854 BMP v3 byte stream carrying the RFC 8671 post-policy Adj-RIB-Out view, O=1/L=1) | in-binary subcommand |
 | `bird2-export/1` | `birdc show route export <member-proto> all` (BIRD 2.0.12) | [`scripts/ribsnap/bird2-export-to-ribsnap.py`](../scripts/ribsnap/bird2-export-to-ribsnap.py) |
 | `frr-advertised/1` | `vtysh -c "show ip bgp neighbor <ip> advertised-routes detail json"` (FRR 10.3.1) | [`scripts/ribsnap/frr-advertised-to-ribsnap.py`](../scripts/ribsnap/frr-advertised-to-ribsnap.py) |
 | `gobgp-adjout/1` | `gobgp neighbor <ip> adj-out -j` (GoBGP 3.37.0) | [`scripts/ribsnap/gobgp-adjout-to-ribsnap.py`](../scripts/ribsnap/gobgp-adjout-to-ribsnap.py) |
@@ -241,6 +249,62 @@ RFC 8050 Add-Path entries carry their path identifier through as
 `path_id`. Extended and large communities are emitted from the raw
 attribute bytes.
 
+### `rbgp diff snapshot from-bmp` — RFC 8671 post-policy BMP captures
+
+If the incumbent exports BMP with the RFC 8671 post-policy Adj-RIB-Out
+view enabled, its own BMP feed is a wire-true source of what it sent
+each member — including attributes no CLI view renders. Capture the
+feed's raw bytes **from the start of the BMP session** (the adapter is
+offline; streaming-socket ingestion is out of scope), then convert:
+
+```bash
+# Stand in as the incumbent's BMP station and capture the raw stream;
+# stop once every peer's dump has completed (End-of-RIB seen).
+nc -l 11019 > incumbent.bmp        # or: socat TCP-LISTEN:11019 - > incumbent.bmp
+rbgp diff snapshot from-bmp incumbent.bmp > incumbent.ndjson
+```
+
+The capture must begin at session start because the Peer Up messages
+carry the negotiated OPENs — without them the adapter cannot know the
+per-family Add-Path state (RFC 7911: path IDs appear in the incumbent's
+UPDATEs toward a member iff the incumbent advertised *send* and the
+member advertised *receive*) and refuses rather than misparse NLRI.
+
+View selection is per Route Monitoring message, from its per-peer
+header flags (O/L flags on Peer Up/Down select nothing):
+
+- **O=1, L=1** (post-policy Adj-RIB-Out) — the comparison source; folded
+  into the snapshot.
+- **O=0** (pre-policy Adj-RIB-In, the RFC 7854 default most feeds also
+  carry) — skipped with a stderr note, never folded.
+- **O=1, L=0** (pre-policy Adj-RIB-Out) — refused (exit 2): a
+  pre-policy view compared against a post-policy Adj-RIB-Out would
+  report every export-policy effect as divergence, or mask a real one.
+
+State is kept per (connection generation, peer, family, NLRI, source
+path ID); a later update supersedes an earlier one, so live updates
+interleaved with the initial dump fold correctly. A reconnect (new
+Initiation) invalidates everything; a Peer Up resets its peer; a Peer
+Down discards it. **A peer/family is complete only after its End-of-RIB
+in the current generation** — a capture cut before End-of-RIB is
+refused (exit 2, nothing emitted), because `rbgp-ribsnap/1`'s counted
+trailer would otherwise present a truncated view as complete and the
+downstream diff could assert a false "in sync". Use `--peer` to emit a
+complete subset when an uninteresting peer never finished. RFC 8671
+stat types 15/17 arriving after End-of-RIB are cross-checked against
+the folded counts (a mismatch means a decode gap and refuses);
+completeness never requires them.
+
+Scope and bounds: BMP version 3 streams; global-instance peers
+(RD/local-instance peers are skipped with a note); IPv4/IPv6 unicast
+NLRI (other families are skipped with a note). ORIGINATOR_ID,
+CLUSTER_LIST, OTC, and any attribute the decoder does not type are
+preserved byte-exact as `unknown_attrs` — compare with
+`--ignore-attribute unknown` if accepting that gRPC cannot verify them.
+Hard limits (not flags) bound input bytes (1 GiB), per-message length
+(1 MiB), peers (4096), routes (4M), and paths per NLRI (64); exceeding
+any refuses the conversion.
+
 ### Golden fixtures
 
 Each converter is pinned by golden tests in `cargo test -p rustbgpctl`
@@ -251,7 +315,11 @@ FRR 10.3.1, GoBGP 3.37.0) must convert byte-for-byte to its checked-in
 the same capture's wire-truth values. An upstream output-format change
 breaks these tests first. The fixture-refresh procedure (redeploy the
 lab, recapture, re-run the converters with `BLESS=1`) is documented in
-the test module.
+the test module. The from-bmp golden is built synthetically instead,
+framed by the daemon's own RFC-pinned BMP encoder (an M83 capture would
+carry rustbgpd's own view, not an incumbent's), and its end-to-end
+tests prove capture → canonical records → in-sync, divergent, and
+incomplete verdicts.
 
 ## JSON report
 

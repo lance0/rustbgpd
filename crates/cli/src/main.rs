@@ -707,7 +707,8 @@ enum DiffAction {
 
         /// Attribute to exclude from comparison on both sides (origin,
         /// as_path, next_hop, med, local_pref, communities,
-        /// extended_communities, large_communities); may be repeated
+        /// extended_communities, large_communities, unknown); may be
+        /// repeated
         #[arg(long)]
         ignore_attribute: Vec<String>,
 
@@ -766,6 +767,44 @@ enum SnapshotAction {
         /// ASN of that peer
         #[arg(long)]
         peer_asn: u32,
+
+        /// Free-form provenance label appended to the header `source`
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Capture-round generation stamped into the header
+        #[arg(long, default_value_t = 1)]
+        generation: u64,
+    },
+
+    /// Convert a captured RFC 7854/8671 BMP byte stream into a snapshot
+    ///
+    /// Input is an offline file of raw BMP version 3 messages captured
+    /// from the START of the incumbent's BMP session (e.g. the TCP
+    /// payload of its BMP export); streaming-socket ingestion is out of
+    /// scope. Only Route Monitoring for the post-policy Adj-RIB-Out view
+    /// (O=1, L=1) contributes routes: Adj-RIB-In messages (O=0) are
+    /// skipped with a note, and a pre-policy Adj-RIB-Out stream (O=1,
+    /// L=0) is refused as non-comparable. Add-Path decoding follows the
+    /// negotiation in each Peer Up's OPENs; live updates interleaved
+    /// with the initial dump supersede dump entries; a reconnect or
+    /// Peer Down invalidates the affected state. Every emitted
+    /// peer/family must have reached End-of-RIB — an incomplete dump is
+    /// refused, never emitted. See docs/ribdiff.md.
+    #[command(after_help = "Exit codes:\n  \
+        0  snapshot emitted on stdout\n  \
+        2  refused: pre-policy view, incomplete (missing End-of-RIB), \
+        malformed, truncated, out-of-sequence, or over-limit input \
+        (nothing emitted)")]
+    FromBmp {
+        /// Path to the captured BMP byte stream
+        file: PathBuf,
+
+        /// Peer address to emit; may be repeated. Omit to emit every
+        /// complete global-instance peer (all of which must then be
+        /// complete)
+        #[arg(long)]
+        peer: Vec<String>,
 
         /// Free-form provenance label appended to the header `source`
         #[arg(long)]
@@ -1436,6 +1475,29 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             generation: *generation,
         };
         std::process::exit(commands::ribsnap::from_mrt(&opts));
+    }
+
+    // `diff snapshot from-bmp` is likewise a pure offline adapter.
+    if let Command::Diff {
+        action:
+            DiffAction::Snapshot {
+                action:
+                    SnapshotAction::FromBmp {
+                        file,
+                        peer,
+                        source,
+                        generation,
+                    },
+            },
+    } = &cli.command
+    {
+        let opts = commands::ribsnap_bmp::FromBmpOpts {
+            file,
+            peers: peer,
+            source: source.as_deref(),
+            generation: *generation,
+        };
+        std::process::exit(commands::ribsnap_bmp::from_bmp(&opts));
     }
 
     let addr = cli.addr.clone();
