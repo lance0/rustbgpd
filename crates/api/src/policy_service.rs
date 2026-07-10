@@ -1338,9 +1338,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
 
-        // `None` (no live session) and an empty match set (never seen)
-        // both render as a single synthetic NOT_SEEN so the operator
-        // always gets a definite answer rather than an empty list.
+        // LAN-320 tri-state: the operator always gets a definite answer,
+        // and it is the *honest* one. `None` (no live session for the
+        // address) renders as NO_SESSION; a live session whose cache
+        // never records decisions renders as CACHE_DISABLED; only an
+        // enabled cache with no record is a genuine NOT_SEEN.
+        let no_session = reply.is_none();
+        let cache_enabled = reply.as_ref().is_some_and(|r| r.cache_enabled);
         let (current_generation, mut matches) = match reply {
             Some(r) => {
                 let proto_matches: Vec<proto::ImportExplainMatch> = r
@@ -1361,7 +1365,16 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             None => (0, Vec::new()),
         };
         if matches.is_empty() {
-            matches.push(resolved_match_to_proto(
+            let outcome = if no_session {
+                proto::ImportExplainOutcome::NoSession
+            } else if cache_enabled {
+                proto::ImportExplainOutcome::NotSeen
+            } else {
+                proto::ImportExplainOutcome::CacheDisabled
+            };
+            // Same synthetic empty-field shape as NOT_SEEN, differing
+            // only in the outcome value.
+            let mut synthetic = resolved_match_to_proto(
                 &req.peer_address,
                 &req.prefix,
                 req.prefix_length,
@@ -1371,7 +1384,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     result: LookupResult::NotSeen,
                     statements: Vec::new(),
                 },
-            ));
+            );
+            synthetic.outcome = outcome as i32;
+            matches.push(synthetic);
         }
 
         Ok(Response::new(proto::ExplainImportPolicyResponse {
@@ -1922,6 +1937,81 @@ mod tests {
             ..Default::default()
         };
         assert!(proto_statement_to_input(proto).is_err());
+    }
+
+    fn explain_request() -> proto::ExplainImportPolicyRequest {
+        proto::ExplainImportPolicyRequest {
+            peer_address: "10.0.0.2".to_string(),
+            afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            path_id: None,
+        }
+    }
+
+    /// Drive `ExplainImportPolicy` against a fake peer manager that
+    /// answers with `reply`, returning the single synthetic match's
+    /// outcome (LAN-320 tri-state pins).
+    async fn explain_outcome_for(reply: Option<ImportExplainReply>) -> i32 {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::ExplainImportPolicy { reply: tx, .. } => {
+                        let _ = tx.send(reply.clone());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let resp = PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
+            .await
+            .expect("explain succeeds")
+            .into_inner();
+        assert_eq!(resp.matches.len(), 1, "one synthetic match expected");
+        resp.matches[0].outcome
+    }
+
+    /// LAN-320: no live session must NOT read as `not_seen` — during an
+    /// incident that sends the operator down a false path.
+    #[tokio::test]
+    async fn explain_no_session_reports_no_session() {
+        assert_eq!(
+            explain_outcome_for(None).await,
+            proto::ImportExplainOutcome::NoSession as i32
+        );
+    }
+
+    /// LAN-320: a live session whose cache never records decisions
+    /// (`[policy.explain] enabled = false`) must report `CACHE_DISABLED`,
+    /// not `not_seen`.
+    #[tokio::test]
+    async fn explain_cache_disabled_reports_cache_disabled() {
+        assert_eq!(
+            explain_outcome_for(Some(ImportExplainReply {
+                current_generation: 0,
+                cache_enabled: false,
+                matches: Vec::new(),
+            }))
+            .await,
+            proto::ImportExplainOutcome::CacheDisabled as i32
+        );
+    }
+
+    /// LAN-320: with the cache enabled and a live session, an unseen
+    /// prefix is the genuine evaluated `not_seen` answer.
+    #[tokio::test]
+    async fn explain_enabled_unseen_prefix_reports_not_seen() {
+        assert_eq!(
+            explain_outcome_for(Some(ImportExplainReply {
+                current_generation: 0,
+                cache_enabled: true,
+                matches: Vec::new(),
+            }))
+            .await,
+            proto::ImportExplainOutcome::NotSeen as i32
+        );
     }
 
     #[tokio::test]

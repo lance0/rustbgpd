@@ -668,8 +668,8 @@ struct JsonImportExplainMatch {
     evaluated_at_unix_ns: Option<i64>,
     policy_generation: Option<u64>,
     // Unconditional key (run-stable): empty for outcomes that carry no
-    // statement trace (stale / withdrawn / evicted / not_seen, or a
-    // chain-less peer).
+    // statement trace (stale / withdrawn / evicted / not_seen /
+    // cache_disabled / no_session, or a chain-less peer).
     statements: Vec<JsonImportExplainStatement>,
 }
 
@@ -724,7 +724,27 @@ fn outcome_label(outcome: i32) -> &'static str {
         Ok(proto::ImportExplainOutcome::Evicted) => "evicted",
         Ok(proto::ImportExplainOutcome::Stale) => "stale",
         Ok(proto::ImportExplainOutcome::NotSeen) => "not_seen",
+        Ok(proto::ImportExplainOutcome::CacheDisabled) => "cache_disabled",
+        Ok(proto::ImportExplainOutcome::NoSession) => "no_session",
         Ok(proto::ImportExplainOutcome::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+/// The two LAN-320 outcomes that mean "the question could not be
+/// evaluated" (as opposed to `not_seen`, which is an evaluated answer).
+/// Rendered as errors with a nonzero exit; in JSON mode the response is
+/// still printed first so scripts see the distinct outcome value.
+fn unanswerable_error(outcome: i32, neighbor: &str) -> Option<CliError> {
+    match proto::ImportExplainOutcome::try_from(outcome) {
+        Ok(proto::ImportExplainOutcome::CacheDisabled) => Some(CliError::Rpc(
+            "import-decision cache is disabled on this daemon\n  \
+             hint: set [policy.explain] enabled = true and reload (memory cost is per cached route)"
+                .to_string(),
+        )),
+        Ok(proto::ImportExplainOutcome::NoSession) => {
+            Some(CliError::Rpc(format!("no live session with {neighbor}")))
+        }
+        _ => None,
     }
 }
 
@@ -788,6 +808,14 @@ pub async fn explain_import(
         .await?
         .into_inner();
 
+    // LAN-320: cache-disabled / no-session mean the daemon could not
+    // evaluate the question — surface an error (nonzero exit) instead
+    // of a lookalike answer. These arrive as a single synthetic match.
+    let unanswerable = resp
+        .matches
+        .iter()
+        .find_map(|m| unanswerable_error(m.outcome, neighbor));
+
     if json {
         let out = JsonImportExplain {
             peer_address: resp.peer_address.clone(),
@@ -797,7 +825,15 @@ pub async fn explain_import(
             matches: resp.matches.iter().map(match_to_json).collect(),
         };
         output::print_json_pretty(&out)?;
-        return Ok(());
+        // The JSON body already carries the distinct outcome; the
+        // error exit still signals "not an evaluated answer".
+        return match unanswerable {
+            Some(err) => Err(err),
+            None => Ok(()),
+        };
+    }
+    if let Some(err) = unanswerable {
+        return Err(err);
     }
 
     println!(
@@ -1516,6 +1552,86 @@ mod tests {
         explain_import(text_conn, "192.0.2.1", "192.0.2.0/24", None, false)
             .await
             .unwrap();
+    }
+
+    /// LAN-320 pin: `cache_disabled` is an error with the config hint
+    /// (nonzero exit via `Err`), in both text and JSON modes — never a
+    /// `not_seen` lookalike.
+    #[tokio::test]
+    async fn explain_cache_disabled_errors_with_hint() {
+        let server = spawn_mock_server(None).await;
+        *server.state.explain_import_synthetic_outcome.lock().await =
+            Some(rustbgpd_api::proto::ImportExplainOutcome::CacheDisabled);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain_import(connection, "10.0.0.2", "10.0.0.0/24", None, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(
+            err.to_string(),
+            "import-decision cache is disabled on this daemon\n  \
+             hint: set [policy.explain] enabled = true and reload (memory cost is per cached route)"
+        );
+        // JSON mode prints the body (distinct outcome value) but still
+        // returns the error so the exit code stays nonzero.
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        let err = explain_import(json_conn, "10.0.0.2", "10.0.0.0/24", None, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Rpc(_)));
+    }
+
+    /// LAN-320 pin: `no_session` names the neighbor and errors (nonzero
+    /// exit) — the question could not be evaluated.
+    #[tokio::test]
+    async fn explain_no_session_errors_with_neighbor() {
+        let server = spawn_mock_server(None).await;
+        *server.state.explain_import_synthetic_outcome.lock().await =
+            Some(rustbgpd_api::proto::ImportExplainOutcome::NoSession);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain_import(connection, "10.0.0.2", "10.0.0.0/24", None, false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no live session with 10.0.0.2");
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        let err = explain_import(json_conn, "10.0.0.2", "10.0.0.0/24", None, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Rpc(_)));
+    }
+
+    /// LAN-320 pin: `not_seen` stays an evaluated answer — normal
+    /// rendering, `Ok` (exit 0) — in both text and JSON modes.
+    #[tokio::test]
+    async fn explain_not_seen_stays_ok() {
+        let server = spawn_mock_server(None).await;
+        *server.state.explain_import_synthetic_outcome.lock().await =
+            Some(rustbgpd_api::proto::ImportExplainOutcome::NotSeen);
+        let connection = connect(&server.addr, None).await.unwrap();
+        explain_import(connection, "10.0.0.2", "10.0.0.0/24", None, false)
+            .await
+            .unwrap();
+        let json_conn = connect(&server.addr, None).await.unwrap();
+        explain_import(json_conn, "10.0.0.2", "10.0.0.0/24", None, true)
+            .await
+            .unwrap();
+    }
+
+    /// LAN-320: the JSON outcome strings for the tri-state are stable.
+    #[test]
+    fn outcome_labels_cover_tristate() {
+        assert_eq!(
+            outcome_label(proto::ImportExplainOutcome::NotSeen as i32),
+            "not_seen"
+        );
+        assert_eq!(
+            outcome_label(proto::ImportExplainOutcome::CacheDisabled as i32),
+            "cache_disabled"
+        );
+        assert_eq!(
+            outcome_label(proto::ImportExplainOutcome::NoSession as i32),
+            "no_session"
+        );
     }
 
     #[tokio::test]

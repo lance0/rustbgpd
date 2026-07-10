@@ -190,10 +190,17 @@ pub struct ResolvedMatch {
 ///
 /// `matches` is empty only when the prefix was never seen on this
 /// session and no eviction record survives — the caller renders that
-/// as a single synthetic `NOT_SEEN`.
+/// as a single synthetic `NOT_SEEN` when `cache_enabled` is set, or
+/// as `CACHE_DISABLED` when it is not (a disabled cache records
+/// nothing, so an empty match set says nothing about the prefix).
 #[derive(Debug, Clone)]
 pub struct ImportExplainReply {
     pub current_generation: u64,
+    /// Whether this session records import decisions at all
+    /// (`[policy.explain] enabled`, snapshotted at session build).
+    /// `false` means the empty cache is a configuration fact, not an
+    /// evaluated "never seen" answer (LAN-320).
+    pub cache_enabled: bool,
     pub matches: Vec<ResolvedMatch>,
 }
 

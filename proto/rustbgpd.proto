@@ -837,15 +837,28 @@ message ClearNeighborExportChainResponse {}
 //                it no longer reflects current policy.
 //   NOT_SEEN   — the peer has not advertised this prefix on this
 //                session and the cache has no record of an
-//                eviction.
+//                eviction. This is an *evaluated* answer: the
+//                session is live and its cache is enabled.
+//   CACHE_DISABLED — the session is live but records no import
+//                decisions (`[policy.explain] enabled = false` when
+//                the session was built), so the question cannot be
+//                answered for any prefix. Kept distinct from
+//                NOT_SEEN so a misconfigured daemon never
+//                masquerades as an evaluated answer.
+//   NO_SESSION — no live session exists for the requested peer
+//                address (or its task could not be reached in
+//                time), so there is no session-local cache to
+//                consult.
 enum ImportExplainOutcome {
-  IMPORT_EXPLAIN_OUTCOME_UNSPECIFIED = 0;
-  IMPORT_EXPLAIN_OUTCOME_PERMIT      = 1;
-  IMPORT_EXPLAIN_OUTCOME_DENY        = 2;
-  IMPORT_EXPLAIN_OUTCOME_WITHDRAWN   = 3;
-  IMPORT_EXPLAIN_OUTCOME_EVICTED     = 4;
-  IMPORT_EXPLAIN_OUTCOME_STALE       = 5;
-  IMPORT_EXPLAIN_OUTCOME_NOT_SEEN    = 6;
+  IMPORT_EXPLAIN_OUTCOME_UNSPECIFIED    = 0;
+  IMPORT_EXPLAIN_OUTCOME_PERMIT         = 1;
+  IMPORT_EXPLAIN_OUTCOME_DENY           = 2;
+  IMPORT_EXPLAIN_OUTCOME_WITHDRAWN      = 3;
+  IMPORT_EXPLAIN_OUTCOME_EVICTED        = 4;
+  IMPORT_EXPLAIN_OUTCOME_STALE          = 5;
+  IMPORT_EXPLAIN_OUTCOME_NOT_SEEN       = 6;
+  IMPORT_EXPLAIN_OUTCOME_CACHE_DISABLED = 7;
+  IMPORT_EXPLAIN_OUTCOME_NO_SESSION     = 8;
 }
 
 message ExplainImportPolicyRequest {
@@ -990,7 +1003,8 @@ message ExplainImportPolicyResponse {
 
   // One match per cached (peer, prefix, path_id) entry the
   // request resolves to. Always populated with at least one
-  // element — a NOT_SEEN outcome carries a synthetic match with
+  // element — a NOT_SEEN / CACHE_DISABLED / NO_SESSION outcome
+  // carries a synthetic match with
   // empty fields beyond the echoed request. When the request
   // specifies `path_id` the response has exactly one element;
   // when it does not, every matching path_id appears (Add-Path

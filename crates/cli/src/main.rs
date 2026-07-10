@@ -444,7 +444,9 @@ enum PolicyAction {
     /// Explain the import-policy decision for a prefix on a neighbor
     /// (ADR-0073): why it was permitted / denied / withdrawn, or
     /// not-seen / evicted / stale. Reads the per-session decision
-    /// cache; requires `[policy.explain].enabled` on the daemon.
+    /// cache; requires `[policy.explain].enabled` on the daemon
+    /// (errors distinctly when the cache is disabled or the neighbor
+    /// has no live session — those are not `not_seen`).
     Explain {
         /// Neighbor (peer) address whose import-decision cache to read
         #[arg(long)]

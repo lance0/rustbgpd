@@ -1158,9 +1158,9 @@ impl PeerHandle {
     /// TCP write back-pressure cannot service the command, so the
     /// caller must not block indefinitely. Returns `None` on timeout,
     /// on a full command channel, or if the session task has exited —
-    /// the caller (`PeerManager`) renders that as "no live session", a
-    /// `NOT_SEEN`-equivalent, which is the correct answer for a peer
-    /// whose session-local cache is gone.
+    /// the caller (`PeerManager`) renders that as `NO_SESSION`: the
+    /// session-local cache is unreachable, which is honestly distinct
+    /// from an evaluated `NOT_SEEN` answer (LAN-320).
     pub async fn explain_import_policy_timeout(
         &self,
         afi: Afi,

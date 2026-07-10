@@ -941,7 +941,9 @@ Each result reports an outcome:
 | `withdrawn` | Was permitted, then withdrawn by the peer (tombstone; policy context dropped). |
 | `evicted` | Was cached but pushed out by the per-peer cap — raise `cache_size`. |
 | `stale` | A decision exists but the peer's import policy has changed since; the historical decision is shown with its original generation. |
-| `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart), or explain is disabled. |
+| `not_seen` | The peer hasn't advertised this prefix on the current session (cache resets on flap / restart). This is an evaluated answer: the session is live and the cache is enabled. |
+| `cache_disabled` | The session records no decisions (`[policy.explain] enabled = false`). The CLI renders this as an error with a config hint and exits nonzero — it is never folded into `not_seen`. |
+| `no_session` | No live session with the requested neighbor, so there is no session-local cache to consult. The CLI renders this as an error and exits nonzero. |
 
 A `permit` / `deny` result additionally carries a **statement trace** —
 which statement inside the matched chain decided, per policy evaluated:
@@ -976,7 +978,7 @@ never affects which routes are accepted):
 
 - `enabled` (default `true`) — set `false` on hot full-table peers to
   skip the write-path cost entirely (the daemon then answers
-  `not_seen`).
+  `cache_disabled`, and the CLI errors with a hint).
 - `cache_size` (default `4096`) — a fabric / partial-table size. For
   reliable full-table explain, raise it toward the peer's
   expected retained-prefix count and budget the memory.

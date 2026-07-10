@@ -891,7 +891,7 @@ pub enum PeerManagerCommand {
     /// ADR-0073: query a peer's per-session import-decision cache.
     /// Side-effect-free. `reply` carries `None` when the peer has no
     /// live session (its session-local cache is gone), which the
-    /// caller renders as a synthetic `NOT_SEEN`.
+    /// caller renders as a synthetic `NO_SESSION` (LAN-320).
     ExplainImportPolicy {
         /// Peer whose import-decision cache to consult.
         address: IpAddr,

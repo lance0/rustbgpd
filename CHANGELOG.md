@@ -343,6 +343,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp policy explain` no longer reports `not_seen` when the truth
+  is a disabled cache or a missing session.** The explain RPC
+  previously folded "no live session with this peer" and
+  "`[policy.explain] enabled = false`" into the same synthetic
+  `NOT_SEEN` as a genuinely unseen prefix. The response now carries
+  distinct `CACHE_DISABLED` and `NO_SESSION` outcomes (additive enum
+  values; sessions report their own cache flag, so a session built
+  before an explain reload answers for itself). The CLI renders
+  `cache_disabled` as an error with a config hint and `no_session` as
+  "no live session with <peer>", both exiting nonzero — the question
+  was not evaluated; `not_seen` keeps its exit-0 evaluated-answer
+  semantics, and `--json` carries the distinct outcome values.
+  (LAN-320)
+
 - **`rbgp` errors are now actionable.** Connect failures name the
   endpoint the CLI actually dialed and the failure class (`cannot
   reach rustbgpd at unix:///var/lib/rustbgpd/grpc.sock (socket does
