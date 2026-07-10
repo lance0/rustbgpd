@@ -64,6 +64,8 @@ fn full_mods() -> RouteModifications {
         as_path_prepend: Some((65001, 2)),
         // TOML statements never carry computed operands (rpol-only).
         as_path_prepend_computed: None,
+        set_local_pref_computed: None,
+        set_med_computed: None,
     }
 }
 

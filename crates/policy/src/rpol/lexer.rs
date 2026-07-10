@@ -6,8 +6,10 @@
 //!   (`local-pref`, `communities`, …) and enum members (`valid`,
 //!   `internal`, …) are *contextual* identifiers matched by the parser.
 //! - Identifiers are kebab-case: `[A-Za-z_][A-Za-z0-9_]*(-[part])*`.
-//!   There is no arithmetic in the language, so `-` inside a name is
-//!   unambiguous.
+//!   Maximal munch is permanent (ADR-0103 Decision 2.1): `a-b` is one
+//!   identifier, so binary `-` (LAN-299 arithmetic) requires
+//!   whitespace — `route.med - 1` subtracts, `route.med-1` is an
+//!   unknown-field error.
 //! - Community, prefix, and IP literals are single tokens resolved by
 //!   maximal munch: `10.0.0.0/8` is one prefix token, `65000:100` one
 //!   standard-community token, `65000:1:2` one large-community token,
@@ -199,6 +201,25 @@ pub enum Tok {
     /// `!`
     #[token("!")]
     Bang,
+    /// `+` (LAN-299 checked arithmetic; un-lexable before arithmetic
+    /// landed, so purely additive — ADR-0103 Decision 2.3).
+    #[token("+")]
+    Plus,
+    /// `-` as an operator token. Kebab-case maximal munch is permanent
+    /// (ADR-0103 Decision 2.1): the identifier rule consumes `a-b` as
+    /// one name, so subtraction requires whitespace (`a - b`);
+    /// `route.med-1` is an unknown-field error, not `med - 1`.
+    #[token("-")]
+    Minus,
+    /// `*`
+    #[token("*")]
+    Star,
+    /// `/`
+    #[token("/")]
+    Slash,
+    /// `%`
+    #[token("%")]
+    Percent,
 }
 
 impl Tok {
@@ -259,6 +280,11 @@ impl Tok {
             Tok::AndAnd => "`&&`",
             Tok::OrOr => "`||`",
             Tok::Bang => "`!`",
+            Tok::Plus => "`+`",
+            Tok::Minus => "`-`",
+            Tok::Star => "`*`",
+            Tok::Slash => "`/`",
+            Tok::Percent => "`%`",
         }
     }
 }
@@ -324,6 +350,36 @@ mod tests {
         assert_eq!(kinds("RT:65001:100"), vec![Tok::ExtCommunityLit]);
         assert_eq!(kinds("RO:192.0.2.1:5"), vec![Tok::ExtCommunityLit]);
         assert_eq!(kinds("42"), vec![Tok::Int]);
+    }
+
+    /// LAN-299 / ADR-0103 Decision 2.1: kebab-case maximal munch is
+    /// permanent — `med-1` is one identifier; binary `-` needs
+    /// whitespace. The other operators cannot collide with names.
+    #[test]
+    fn arithmetic_operators_vs_kebab_munch() {
+        assert_eq!(
+            kinds("med - 1"),
+            vec![Tok::Ident, Tok::Minus, Tok::Int],
+            "spaced minus is subtraction"
+        );
+        assert_eq!(kinds("med-1"), vec![Tok::Ident], "unspaced minus munches");
+        assert_eq!(
+            kinds("1 + 2 * 3 / 4 % 5"),
+            vec![
+                Tok::Int,
+                Tok::Plus,
+                Tok::Int,
+                Tok::Star,
+                Tok::Int,
+                Tok::Slash,
+                Tok::Int,
+                Tok::Percent,
+                Tok::Int
+            ]
+        );
+        // Prefix literals own `/` inside maximal munch; arithmetic `/`
+        // only appears where a prefix cannot lex.
+        assert_eq!(kinds("10.0.0.0/8"), vec![Tok::PrefixLit]);
     }
 
     #[test]

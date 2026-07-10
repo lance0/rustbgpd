@@ -558,9 +558,11 @@ fn parse_modifications(
         extended_communities_remove: remove.extended,
         large_communities_add: add.large,
         large_communities_remove: remove.large,
-        // Computed prepend operands (LAN-296) are an `.rpol`-only
-        // surface; the TOML frontend stays literal-only.
+        // Computed operands (LAN-296 prepend, LAN-299 set values) are
+        // an `.rpol`-only surface; the TOML frontend stays literal-only.
         as_path_prepend_computed: None,
+        set_local_pref_computed: None,
+        set_med_computed: None,
         as_path_prepend,
     })
 }

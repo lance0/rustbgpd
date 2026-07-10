@@ -1899,3 +1899,472 @@ test missing-local-as-fails-closed {
     assert_eq!(report.total, 6);
     assert!(report.all_passed(), "failures: {:?}", report.failures);
 }
+
+// ── LAN-299: typed arithmetic, value comparisons, eval-error rails ──
+
+/// `set med 25 + 25` must compile to *exactly* what `set med 50`
+/// compiles to (constant folding at lower time, checked ops), so the
+/// evaluator, memoization, diffing, and every downstream consumer see
+/// identical `RouteModifications`.
+#[test]
+fn constant_arithmetic_actions_fold_to_literals() {
+    let folded =
+        compile_ok("policy p { term t { set med 25 + 25; set local-pref 2 * 100; accept } }");
+    let literal = compile_ok("policy p { term t { set med 50; set local-pref 200; accept } }");
+    assert_eq!(
+        folded, literal,
+        "constant arithmetic folds to the literal form"
+    );
+    let mods = first_term_mods(&folded);
+    assert_eq!(mods.set_med, Some(50));
+    assert_eq!(mods.set_local_pref, Some(200));
+    assert!(mods.set_med_computed.is_none() && mods.set_local_pref_computed.is_none());
+
+    // Builtins fold too, including through parameter substitution.
+    let chain = compile_ok(
+        "policy q(n: u32) { term t { set med min(n * 2, 400); accept } }
+         policy p { term t { if apply(q(50)) { accept } } }",
+    );
+    // q(50) is instantiated inside apply as a predicate — instantiate
+    // it directly to observe the folded mods.
+    let mut store = SetStore::new();
+    let file =
+        super::RpolFile::parse("policy q(n: u32) { term t { set med min(n * 2, 400); accept } }")
+            .expect("clean");
+    let inst = file
+        .compile_policy("q", &[300], &mut store)
+        .expect("exists");
+    assert_eq!(
+        first_term_mods(&inst).set_med,
+        Some(400),
+        "min(600, 400) folds"
+    );
+    drop(chain);
+}
+
+/// Kebab-case maximal munch is permanent (ADR-0103 Decision 2.1):
+/// `route.med - 1` is subtraction, `route.med-1` is one identifier and
+/// therefore an unknown-field error suggesting `med`.
+#[test]
+fn subtraction_requires_whitespace_around_minus() {
+    let chain = reject_if("route.med - 1 >= 9");
+    let med10 = RouteContext {
+        med: Some(10),
+        ..absent_ctx()
+    };
+    assert_eq!(chain.evaluate(&med10).action, PolicyAction::Deny, "9 >= 9");
+    let med5 = RouteContext {
+        med: Some(5),
+        ..absent_ctx()
+    };
+    assert_eq!(chain.evaluate(&med5).action, PolicyAction::Permit, "4 < 9");
+
+    let (_, rendered) = diagnostics_of("policy p { term t { if route.med-1 >= 9 { reject } } }");
+    assert!(
+        rendered.contains("unknown field `route.med-1`"),
+        "maximal munch keeps `med-1` one identifier: {rendered}"
+    );
+    assert!(rendered.contains("did you mean `route.med`?"), "{rendered}");
+}
+
+/// The ADR guard example: arithmetic on both sides of a comparison,
+/// with fields as operands (`route.as-path.len * 10 >= route.med`).
+#[test]
+fn value_comparisons_evaluate_both_sides() {
+    let chain = reject_if("route.as-path.len * 10 >= route.med");
+    let mut ctx = absent_ctx();
+    ctx.as_path_len = 3;
+    ctx.med = Some(30);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny, "30 >= 30");
+    ctx.med = Some(31);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit, "30 < 31");
+
+    // Precedence: `*` binds tighter than `+`, both tighter than the
+    // comparison; parentheses group within value positions (a guard
+    // may not *start* with a value parenthesis — `(` at guard start
+    // opens a boolean group).
+    let chain = reject_if("route.med + 2 * 3 == 16");
+    let mut ctx = absent_ctx();
+    ctx.med = Some(10);
+    assert_eq!(
+        chain.evaluate(&ctx).action,
+        PolicyAction::Deny,
+        "10 + 6 == 16"
+    );
+    let chain = reject_if("route.med == (2 + 4) * 2");
+    ctx.med = Some(12);
+    assert_eq!(
+        chain.evaluate(&ctx).action,
+        PolicyAction::Deny,
+        "12 == 6 * 2"
+    );
+    let chain = reject_if("route.med * (route.med - 2) == 8");
+    ctx.med = Some(4);
+    assert_eq!(
+        chain.evaluate(&ctx).action,
+        PolicyAction::Deny,
+        "4 * 2 == 8"
+    );
+}
+
+/// Computed `set` values resolve per route at action execution; the
+/// evaluation result carries only the literal field (the LAN-296
+/// prepend discipline).
+#[test]
+fn computed_set_values_resolve_per_route() {
+    let chain = compile_ok(
+        "policy p { term t { set med route.med + 50; set local-pref min(route.local-pref * 2, 250); accept } }",
+    );
+    let mods = first_term_mods(&chain);
+    assert!(mods.set_med.is_none() && mods.set_med_computed.is_some());
+    let mut ctx = absent_ctx();
+    ctx.med = Some(7);
+    ctx.local_pref = Some(100);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(57));
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert!(
+        result.modifications.set_med_computed.is_none()
+            && result.modifications.set_local_pref_computed.is_none(),
+        "downstream consumers only ever see literal values"
+    );
+    // Absent med/local-pref use the documented implicit defaults
+    // (0 / 100), consistent with comparisons.
+    let result = chain.evaluate(&absent_ctx());
+    assert_eq!(result.modifications.set_med, Some(50));
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+}
+
+/// The eval-error rail end to end on the counting path: uniform Deny,
+/// staged modifications (an earlier Continue term's) discarded, the
+/// per-chain error counter incremented, hit counters untouched by the
+/// error itself.
+#[test]
+fn eval_error_denies_discards_mods_and_counts() {
+    use crate::eval::PolicyHitCounters;
+
+    let chain = compile_ok(
+        "policy p {
+            term tag { set local-pref 200 }
+            term guard { if route.med + 1 >= 1 { accept } }
+            term rest { accept }
+         }",
+    );
+    let counters = PolicyHitCounters::for_chain(&chain);
+
+    // Normal route: Continue mods merge under the eventual accept.
+    let mut ctx = absent_ctx();
+    ctx.med = Some(5);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert_eq!(counters.eval_errors(), 0);
+
+    // Overflowing route: `u32::MAX + 1` is an evaluation error →
+    // uniform Deny, staged Continue mods discarded, counter bumped.
+    ctx.med = Some(u32::MAX);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert!(result.modifications.is_empty(), "staged mods discarded");
+    assert_eq!(counters.eval_errors(), 1);
+    assert_eq!(counters.evals(), 2);
+
+    // The recording walk (dry runs) agrees on the verdict.
+    let mut hits = chain.zero_term_hits();
+    let recorded = chain.evaluate_recording_hits(&ctx, &mut hits);
+    assert_eq!(recorded.action, PolicyAction::Deny);
+    assert!(recorded.modifications.is_empty());
+    // Dry runs never move the live error counter.
+    assert_eq!(counters.eval_errors(), 1);
+}
+
+/// An absent operand without a documented default (origin-as on an
+/// AS_SET-only path, unknown peer.asn) is unresolvable → the same
+/// eval-error rail. Plain (arithmetic-free) comparisons keep their
+/// legacy never-match semantics — the two deliberately diverge.
+#[test]
+fn absent_operand_is_an_eval_error_not_a_non_match() {
+    // Arithmetic form: absent origin denies the route.
+    let arith = reject_if("route.origin-as * 1 == 64500");
+    assert_eq!(
+        arith.evaluate(&absent_ctx()).action,
+        PolicyAction::Deny,
+        "absent origin in arithmetic fails closed"
+    );
+    // Plain form: absent origin matches neither == nor != and the
+    // route falls through to the accepting term.
+    let plain = reject_if("route.origin-as == 64500");
+    assert_eq!(
+        plain.evaluate(&absent_ctx()).action,
+        PolicyAction::Permit,
+        "plain comparison keeps never-match-on-absent semantics"
+    );
+    // peer.asn as an operand behaves the same.
+    let peer = reject_if("peer.asn + 0 == 65010");
+    assert_eq!(peer.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+    let mut ctx = absent_ctx();
+    ctx.peer_asn = Some(65010);
+    assert_eq!(
+        peer.evaluate(&ctx).action,
+        PolicyAction::Deny,
+        "matches → reject term fires"
+    );
+}
+
+/// min/max/clamp evaluate per route with checked operand evaluation;
+/// a data-dependent inverted clamp is an eval error.
+#[test]
+fn builtin_edges_evaluate_and_inverted_clamp_fails_closed() {
+    let chain = compile_ok("policy p { term t { set med clamp(route.med, 10, 20); accept } }");
+    for (med, expected) in [(5u32, 10u32), (15, 15), (25, 20), (10, 10), (20, 20)] {
+        let mut ctx = absent_ctx();
+        ctx.med = Some(med);
+        assert_eq!(
+            chain.evaluate(&ctx).modifications.set_med,
+            Some(expected),
+            "clamp({med}, 10, 20)"
+        );
+    }
+    // Parameter-dependent inversion is invisible to the typechecker
+    // (it only folds literals) and fails per route, closed.
+    let mut store = SetStore::new();
+    let file = super::RpolFile::parse(
+        "policy q(lo: u32, hi: u32) { term t { set med clamp(route.med, lo, hi); accept } }",
+    )
+    .expect("clean");
+    let inverted = file
+        .compile_policy("q", &[20, 10], &mut store)
+        .expect("exists");
+    assert_eq!(inverted.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+}
+
+/// Statically invalid constant expressions are compile errors at the
+/// failing subexpression's span, not per-route runtime errors.
+#[test]
+fn constant_folding_diagnostics_carry_spans() {
+    let src = "policy p { term t { set med 4294967295 + 1; accept } }";
+    let (diags, rendered) = diagnostics_of(src);
+    assert!(
+        rendered.contains("this expression always fails: arithmetic overflow"),
+        "{rendered}"
+    );
+    let (span, _) = diags.0[0].labels[0];
+    assert_eq!(
+        &src[span.range()],
+        "4294967295 + 1",
+        "span pins the expression"
+    );
+
+    let (_, rendered) = diagnostics_of("policy p { term t { set med 1 / 0; accept } }");
+    assert!(rendered.contains("division by zero"), "{rendered}");
+
+    let (_, rendered) = diagnostics_of("policy p { term t { set med clamp(5, 10, 2); accept } }");
+    assert!(
+        rendered.contains("clamp bounds are inverted: lo (10) > hi (2)"),
+        "{rendered}"
+    );
+
+    // The error reports at the smallest failing subexpression, once.
+    let src = "policy p { term t { if route.med >= (4294967295 + 1) * 2 { reject } } }";
+    let (diags, rendered) = diagnostics_of(src);
+    assert_eq!(
+        diags.len(),
+        1,
+        "one diagnostic, at the inner overflow: {rendered}"
+    );
+    let (span, _) = diags.0[0].labels[0];
+    assert_eq!(&src[span.range()], "4294967295 + 1");
+}
+
+/// Builtin misuse diagnostics: unknown names get did-you-mean, wrong
+/// arity says what was expected, non-u32 fields are rejected as
+/// operands.
+#[test]
+fn value_expression_type_diagnostics() {
+    let (_, rendered) = diagnostics_of("policy p { term t { set med mim(1, 2); accept } }");
+    assert!(rendered.contains("unknown builtin `mim`"), "{rendered}");
+    assert!(rendered.contains("did you mean `min`?"), "{rendered}");
+
+    let (_, rendered) = diagnostics_of("policy p { term t { set med min(1); accept } }");
+    assert!(
+        rendered.contains("`min` takes 2 arguments but 1 was supplied"),
+        "{rendered}"
+    );
+
+    let (_, rendered) = diagnostics_of("policy p { term t { if route.rpki + 1 >= 2 { reject } } }");
+    assert!(
+        rendered.contains("`route.rpki` is not a u32 field"),
+        "{rendered}"
+    );
+
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { set med route.med + peer_lp; accept } }");
+    assert!(
+        rendered.contains("unknown parameter `peer_lp`"),
+        "{rendered}"
+    );
+}
+
+/// Arithmetic chains count toward the expression-depth budget like
+/// `&&`/`||` chains: a pathological operator run is a diagnostic, not
+/// a lowering/evaluation hazard.
+#[test]
+fn deep_arithmetic_chains_are_depth_diagnostics() {
+    let ones = " + 1".repeat(200);
+    let report = check_on_small_stack(format!(
+        "policy p {{ term t {{ set med 1{ones}; accept }} }}"
+    ));
+    let rendered = format!("{:?}", report.diagnostics);
+    assert!(
+        rendered.contains("expression nesting exceeds"),
+        "want the depth diagnostic, got: {rendered:.300}"
+    );
+}
+
+/// `peer.asn` as a value-expression operand reads peer identity and
+/// must disqualify update-group sharing; route-field arithmetic must
+/// not (grouping stays unaffected).
+#[test]
+fn peer_asn_operand_registers_peer_context() {
+    let peer_guard = reject_if("route.med + peer.asn >= 100");
+    assert!(peer_guard.requires_peer_context());
+
+    let route_only = reject_if("route.med * 2 >= route.as-path.len + 10");
+    assert!(!route_only.requires_peer_context());
+
+    let peer_action = compile_ok("policy p { term t { set med peer.asn + 1; accept } }");
+    assert!(
+        peer_action.requires_peer_context(),
+        "computed set value reading peer.asn"
+    );
+
+    let route_action = compile_ok("policy p { term t { set med route.med + 1; accept } }");
+    assert!(!route_action.requires_peer_context());
+}
+
+/// Guard evaluation errors render in explain traces in place of a
+/// verdict, in agreement with the live walk (ADR-0103 Decision 6.4).
+#[test]
+fn eval_error_explain_renders_and_agrees() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let compiled = compile_ok(
+        "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+    );
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+
+    let mut ctx = absent_ctx();
+    ctx.med = Some(u32::MAX);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    let step = &trace.steps[0];
+    assert_eq!(step.term_name.as_deref(), Some("big-med"));
+    assert!(
+        step.term_traces.iter().any(|line| line
+            .contains("route.med + 1 >= 1 => evaluation error: arithmetic overflow")
+            && line.contains("fail closed")),
+        "error renders in place of a verdict: {:?}",
+        step.term_traces
+    );
+    assert!(step.modifications.is_empty());
+
+    // Computed set values render in source form in the action lines.
+    let compiled = compile_ok("policy p { term t { set med route.med + 50; accept } }");
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(7);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    let step = &trace.steps[0];
+    assert!(
+        step.term_traces
+            .iter()
+            .any(|line| line.contains("set med route.med + 50")),
+        "{:?}",
+        step.term_traces
+    );
+    assert!(
+        step.modifications
+            .iter()
+            .any(|line| line.contains("med 7 -> route.med + 50 = 57")),
+        "{:?}",
+        step.modifications
+    );
+}
+
+/// In-language `test` fixtures exercise the boundary arithmetic and
+/// the deny-on-error contract end to end through `rbgp policy check`.
+#[test]
+fn in_language_tests_cover_arithmetic_boundaries() {
+    let source = r#"
+policy overflow-guard { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+policy div-zero { term t { if route.med / 0 >= 0 { accept } } term rest { reject } }
+policy mod-zero { term t { if route.med % route.med >= 0 { accept } } term rest { reject } }
+policy absent-origin { term t { if route.origin-as * 1 >= 0 { accept } } term rest { reject } }
+policy folded-parity(bump: u32) { term t { set med 25 + 25; set local-pref bump * 2; accept } }
+policy builtin-edges {
+    term t { set med max(min(route.med, 400), 100); accept }
+}
+
+test overflow-denies {
+    route { med 4294967295 }
+    expect overflow-guard == reject
+}
+
+test no-overflow-accepts {
+    route { med 5 }
+    expect overflow-guard == accept
+}
+
+test divide-by-zero-denies {
+    route { med 5 }
+    expect div-zero == reject
+}
+
+test modulo-zero-denies {
+    route { }
+    expect mod-zero == reject
+}
+
+test absent-origin-denies {
+    route { as-path "{64500 64501}" }
+    expect absent-origin == reject
+}
+
+test present-origin-accepts {
+    route { as-path "65010 64500" }
+    expect absent-origin == accept
+}
+
+test folded-constants-match-literals {
+    route { }
+    expect folded-parity(100) == accept with med 50, local-pref 200
+}
+
+test builtin-clamps-low {
+    route { med 5 }
+    expect builtin-edges == accept with med 100
+}
+
+test builtin-clamps-high {
+    route { med 900 }
+    expect builtin-edges == accept with med 400
+}
+
+test builtin-passes-middle {
+    route { med 250 }
+    expect builtin-edges == accept with med 250
+}
+"#;
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert_eq!(report.total, 10);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}

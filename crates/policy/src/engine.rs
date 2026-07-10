@@ -378,6 +378,22 @@ pub struct RouteModifications {
     /// downstream of them — [`apply_modifications`], the export memo,
     /// API explain surfaces — only ever see the literal field.**
     pub as_path_prepend_computed: Option<(PrependAs, u8)>,
+    /// Computed `LOCAL_PREF` value (LAN-299, `.rpol`
+    /// `set local-pref <expr>` where the expression reads route/peer
+    /// fields). Shares one logical "set local-pref" slot with
+    /// [`set_local_pref`](Self::set_local_pref) — at most one of the
+    /// pair is `Some` in frontend-produced modifications, and merges
+    /// treat them as one scalar. The evaluator resolves it into the
+    /// literal field at term execution (an evaluation error fails the
+    /// route closed, ADR-0103 Decision 4), so evaluation results and
+    /// everything downstream only ever see the literal field —
+    /// exactly the [`as_path_prepend_computed`](Self::as_path_prepend_computed)
+    /// discipline. `Arc`: modifications clone on the evaluation path
+    /// and the expression tree is immutable compile-time data.
+    pub set_local_pref_computed: Option<Arc<crate::ir::ValueExpr>>,
+    /// Computed `MED` value (LAN-299) — see
+    /// [`set_local_pref_computed`](Self::set_local_pref_computed).
+    pub set_med_computed: Option<Arc<crate::ir::ValueExpr>>,
 }
 
 impl RouteModifications {
@@ -386,6 +402,8 @@ impl RouteModifications {
     pub fn is_empty(&self) -> bool {
         self.set_local_pref.is_none()
             && self.set_med.is_none()
+            && self.set_local_pref_computed.is_none()
+            && self.set_med_computed.is_none()
             && self.set_next_hop.is_none()
             && self.as_path_prepend.is_none()
             && self.as_path_prepend_computed.is_none()
@@ -405,11 +423,16 @@ impl RouteModifications {
     /// on conflicts. A later remove cancels an earlier add of the same
     /// logical value, and a later add cancels an earlier remove.
     pub fn merge_from(&mut self, other: RouteModifications) {
-        if other.set_local_pref.is_some() {
+        // Literal and computed set-values share one logical slot each
+        // (LAN-299), like the prepend pair below: a later set of
+        // either form replaces an earlier one of either form.
+        if other.set_local_pref.is_some() || other.set_local_pref_computed.is_some() {
             self.set_local_pref = other.set_local_pref;
+            self.set_local_pref_computed = other.set_local_pref_computed;
         }
-        if other.set_med.is_some() {
+        if other.set_med.is_some() || other.set_med_computed.is_some() {
             self.set_med = other.set_med;
+            self.set_med_computed = other.set_med_computed;
         }
         if other.set_next_hop.is_some() {
             self.set_next_hop = other.set_next_hop;
@@ -1498,6 +1521,13 @@ pub fn apply_modifications(
     debug_assert!(
         mods.as_path_prepend_computed.is_none(),
         "computed prepend operand reached apply_modifications unresolved"
+    );
+    // Same contract for computed set-values (LAN-299): the evaluator
+    // folds them into the literal fields (or denies the route) before
+    // modifications reach an apply site.
+    debug_assert!(
+        mods.set_local_pref_computed.is_none() && mods.set_med_computed.is_none(),
+        "computed set-value reached apply_modifications unresolved"
     );
     if let Some((asn, count)) = mods.as_path_prepend {
         apply_as_path_prepend(attrs, asn, count);

@@ -1,0 +1,6 @@
+policy bad {
+    term overflow { set med 4294967295 + 1; accept }
+    term divzero { if route.med >= 1 / 0 { reject } }
+    term inverted { set med clamp(5, 10, 2) }
+    term kebab { if route.med-1 >= 0 { accept } }
+}

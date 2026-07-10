@@ -186,6 +186,60 @@ pub struct IfStmt {
     pub span: Span,
 }
 
+/// A `u32` value expression (LAN-299): checked arithmetic over
+/// literals, parameters, u32-typed context fields, and the bounded
+/// builtins (`min`/`max`/`clamp`). Appears in `set local-pref`/`set
+/// med` value positions and on either side of a comparison; the
+/// typechecker enforces u32 operand typing, the lowerer
+/// constant-folds (with checked ops) into [`crate::ir::ValueExpr`].
+#[derive(Debug, Clone)]
+pub enum ValueExprAst {
+    /// Integer literal.
+    Lit(u32, Span),
+    /// Parameter reference (bare identifier in a value position).
+    Ident(Spanned<String>),
+    /// A `route.`/`peer.` field read (u32-typed fields only, checked
+    /// by the typechecker).
+    Field(FieldPath),
+    /// A checked binary arithmetic operation.
+    Binary {
+        /// The operator.
+        op: crate::ir::ArithOp,
+        /// Left operand.
+        lhs: Box<ValueExprAst>,
+        /// Right operand.
+        rhs: Box<ValueExprAst>,
+        /// Whole-expression span.
+        span: Span,
+    },
+    /// A builtin call: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`.
+    /// The name is contextual (a parameter named `min` used bare keeps
+    /// its parameter meaning); the typechecker validates name and
+    /// arity.
+    Call {
+        /// The builtin name as written.
+        name: Spanned<String>,
+        /// Argument expressions.
+        args: Vec<ValueExprAst>,
+        /// Whole-call span.
+        span: Span,
+    },
+}
+
+impl ValueExprAst {
+    /// The expression's source span.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            ValueExprAst::Lit(_, span)
+            | ValueExprAst::Binary { span, .. }
+            | ValueExprAst::Call { span, .. } => *span,
+            ValueExprAst::Ident(name) => name.span,
+            ValueExprAst::Field(path) => path.span,
+        }
+    }
+}
+
 /// A `u32`-valued argument position: literal or parameter reference.
 #[derive(Debug, Clone)]
 pub enum U32Arg {
@@ -253,10 +307,11 @@ pub enum ActionStmt {
     Accept(Span),
     /// `reject` — terminal deny.
     Reject(Span),
-    /// `set local-pref <u32>`.
-    SetLocalPref(U32Arg, Span),
-    /// `set med <u32>`.
-    SetMed(U32Arg, Span),
+    /// `set local-pref <value-expr>` (a plain literal or parameter is
+    /// the degenerate expression).
+    SetLocalPref(ValueExprAst, Span),
+    /// `set med <value-expr>`.
+    SetMed(ValueExprAst, Span),
     /// `set next-hop <ip|self>`.
     SetNextHop(NextHopArg, Span),
     /// `add`/`remove` `community`/`large-community`/`ext-community`.
@@ -458,6 +513,22 @@ pub enum Expr {
         /// The ASN to look for (boundary-anchored).
         asn: U32Arg,
     },
+    /// A comparison containing arithmetic or a builtin on either side
+    /// (LAN-299): `route.med + 50 >= p`, `route.as-path.len * 10 >=
+    /// route.med`, `route.med == min(a, b)`. Plain comparisons keep
+    /// the [`Cmp`](Self::Cmp) shape (and its never-match absent
+    /// semantics); this shape evaluates checked, and an unresolvable
+    /// operand denies the route (ADR-0103 Decision 4).
+    ValueCmp {
+        /// Left value expression.
+        lhs: ValueExprAst,
+        /// The operator.
+        op: CmpOp,
+        /// Right value expression.
+        rhs: ValueExprAst,
+        /// Whole-comparison span.
+        span: Span,
+    },
     /// `apply(policy)` / `apply(policy(args))` — policy-as-predicate.
     Apply {
         /// The referenced policy.
@@ -475,7 +546,10 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Or(l, r) | Expr::And(l, r) => l.span().to(r.span()),
-            Expr::Not(_, span) | Expr::Cmp { span, .. } | Expr::Apply { span, .. } => *span,
+            Expr::Not(_, span)
+            | Expr::Cmp { span, .. }
+            | Expr::ValueCmp { span, .. }
+            | Expr::Apply { span, .. } => *span,
             Expr::In { field, set } => field.span.to(set.span),
             Expr::Has { field, lit } => field.span.to(lit.span),
             Expr::Matches { field, pattern } => field.span.to(pattern.span),

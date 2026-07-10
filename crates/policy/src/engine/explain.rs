@@ -341,6 +341,26 @@ fn render_modifications(
     if let Some(med) = mods.set_med {
         out.push(format!("med {} -> {med}", ctx.med.unwrap_or(IMPLICIT_MED)));
     }
+    // LAN-299: computed set values render with their source expression
+    // plus the value they resolve to for this route. The unresolvable
+    // case never reaches here — the trace walk denies at the failing
+    // term first — but renders honestly if it ever did.
+    if let Some(expr) = &mods.set_local_pref_computed {
+        let before = ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF);
+        match crate::eval::eval_value(expr, ctx) {
+            Ok(value) => out.push(format!("local_pref {before} -> {expr} = {value}")),
+            Err(kind) => out.push(format!(
+                "local_pref {before} -> {expr} (unresolvable: {kind})"
+            )),
+        }
+    }
+    if let Some(expr) = &mods.set_med_computed {
+        let before = ctx.med.unwrap_or(IMPLICIT_MED);
+        match crate::eval::eval_value(expr, ctx) {
+            Ok(value) => out.push(format!("med {before} -> {expr} = {value}")),
+            Err(kind) => out.push(format!("med {before} -> {expr} (unresolvable: {kind})")),
+        }
+    }
     if let Some(action) = mods.set_next_hop.as_ref() {
         let before = ctx
             .next_hop
@@ -413,13 +433,30 @@ fn trace_rpol_policy(
     let mut term_traces = Vec::new();
     let mut continued: Option<RouteModifications> = None;
     let mut decided: Option<(usize, &Term)> = None;
-    // LAN-296: set when a matched term's computed prepend operand
-    // cannot resolve — the live evaluator fails the route closed at
-    // that term, and the trace must agree (pinned by the agreement
-    // matrix in `statement_trace.rs`).
-    let mut prepend_failed = false;
+    // LAN-296/LAN-299: set when a term errors — an unresolvable
+    // computed operand or a failed guard value expression. The live
+    // evaluator fails the route closed at that term (the eval-error
+    // rail), and the trace must agree (pinned by the agreement matrix
+    // in `statement_trace.rs`).
+    let mut eval_failed = false;
     for (index, term) in policy.terms.iter().enumerate() {
-        let matched = tables.guard_matches(&term.guard, ctx);
+        let matched = match tables.guard_matches(&term.guard, ctx) {
+            Ok(matched) => matched,
+            // Guard evaluation error (LAN-299): render the error in
+            // place of a verdict (ADR-0103 Decision 6.4) and decide
+            // the route as a fail-closed reject, mirroring the live
+            // walk.
+            Err(kind) => {
+                term_traces.push(format!(
+                    "term {}: {} => evaluation error: {kind} — fail closed => reject",
+                    term.name.as_deref().unwrap_or("<unnamed>"),
+                    render_expr(&term.guard, tables),
+                ));
+                eval_failed = true;
+                decided = Some((index, term));
+                break;
+            }
+        };
         term_traces.push(format!(
             "term {}: {} => {} [{}]",
             term.name.as_deref().unwrap_or("<unnamed>"),
@@ -438,18 +475,13 @@ fn trace_rpol_policy(
             TermAction::Deny => None,
         };
         if let Some(mods) = action_mods
-            && tables.resolve_computed_prepend(mods, ctx).is_err()
+            && let Err(kind) = tables.resolve_computed(mods, ctx)
         {
-            let (operand, _) = mods
-                .as_path_prepend_computed
-                .expect("resolution only fails on a computed operand");
             term_traces.push(format!(
-                "term {}: prepend as {} unresolvable ({}) — fail closed => reject",
+                "term {}: evaluation error: {kind} — fail closed => reject",
                 term.name.as_deref().unwrap_or("<unnamed>"),
-                operand.as_str(),
-                missing_operand_reason(operand),
             ));
-            prepend_failed = true;
+            eval_failed = true;
             decided = Some((index, term));
             break;
         }
@@ -468,10 +500,9 @@ fn trace_rpol_policy(
     if let Some((index, term)) = decided {
         // Live-path parity: a deny discards accumulated Continue
         // modifications and contributes none of its own; a fail-closed
-        // computed-prepend failure denies regardless of the term's own
-        // action.
+        // evaluation error denies regardless of the term's own action.
         let (action, modifications) = match &term.action {
-            TermAction::Permit(mods) if !prepend_failed => {
+            TermAction::Permit(mods) if !eval_failed => {
                 let mut merged = continued.unwrap_or_default();
                 merged.merge_from(mods.clone());
                 (
@@ -526,17 +557,6 @@ fn render_term_action(action: &TermAction) -> String {
     parts.join("; ")
 }
 
-/// Why a computed prepend operand could not resolve for this route —
-/// the explain-side rendering of the fail-closed reasons in
-/// `PrependAs::resolve` (zero values count as unknown: RFC 7607).
-fn missing_operand_reason(operand: crate::engine::PrependAs) -> &'static str {
-    match operand {
-        crate::engine::PrependAs::LocalAs => "the chain carries no local ASN",
-        crate::engine::PrependAs::PeerAs => "the peer ASN is unknown",
-        crate::engine::PrependAs::OriginAs => "the route has no origin AS",
-    }
-}
-
 /// Modifications as `.rpol` action statements (static description of
 /// what the term *does* — contrast `render_modifications`, which
 /// renders the `before -> after` transition for a specific route).
@@ -547,6 +567,13 @@ fn render_action_stmts(mods: &RouteModifications) -> Vec<String> {
     }
     if let Some(med) = mods.set_med {
         out.push(format!("set med {med}"));
+    }
+    // LAN-299 computed set values render in their source form.
+    if let Some(expr) = &mods.set_local_pref_computed {
+        out.push(format!("set local-pref {expr}"));
+    }
+    if let Some(expr) = &mods.set_med_computed {
+        out.push(format!("set med {expr}"));
     }
     if let Some(action) = mods.set_next_hop.as_ref() {
         let target = match action {
@@ -687,6 +714,11 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         ),
         MatchExpr::LocalPref(cmp) => render_cmp("route.local-pref", *cmp),
         MatchExpr::Med(cmp) => render_cmp("route.med", *cmp),
+        // LAN-299: value expressions carry their own precedence-aware
+        // Display; the comparison itself binds like the other atoms.
+        MatchExpr::ValueCmp(node) => {
+            format!("{} {} {}", node.lhs, node.op.symbol(), node.rhs)
+        }
         MatchExpr::NextHopEq(addr) => format!("route.next-hop == {addr}"),
         MatchExpr::NextHopNe(addr) => format!("route.next-hop != {addr}"),
         MatchExpr::NextHopEqPeer => "route.next-hop == peer.address".to_string(),

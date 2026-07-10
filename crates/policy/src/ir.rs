@@ -18,6 +18,7 @@
 //! Spans and term names are optional carriers for the future `.rpol`
 //! frontend; the TOML compiler leaves term names empty.
 
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -46,6 +47,242 @@ pub enum Cmp {
     Ge(u32),
     /// Value must be `<=` the operand.
     Le(u32),
+}
+
+/// A checked `u32` arithmetic operator (LAN-299, ADR-0103 Decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    /// `+` — checked; overflow is an evaluation error.
+    Add,
+    /// `-` — checked; underflow is an evaluation error.
+    Sub,
+    /// `*` — checked; overflow is an evaluation error.
+    Mul,
+    /// `/` — checked; division by zero is an evaluation error.
+    Div,
+    /// `%` — checked; modulo by zero is an evaluation error.
+    Rem,
+}
+
+impl ArithOp {
+    /// The source spelling.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Rem => "%",
+        }
+    }
+}
+
+/// A `u32`-typed context field readable as a value-expression operand
+/// (LAN-299). Absent-value semantics per field, mirroring today's
+/// comparison defaults where a documented default exists:
+///
+/// - [`LocalPref`](Self::LocalPref) / [`Med`](Self::Med): the RFC 4271
+///   implicit defaults (100 / 0) when the attribute is absent — the
+///   same values plain comparisons already see.
+/// - [`AsPathLen`](Self::AsPathLen): always present (0 for an empty
+///   path).
+/// - [`OriginAs`](Self::OriginAs) / [`PeerAsn`](Self::PeerAsn): no
+///   default exists. An absent value makes the whole expression
+///   unresolvable — an **evaluation error** (uniform Deny, ADR-0103
+///   Decision 4), mirroring how computed prepend operands fail closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueField {
+    /// `route.local-pref` (absent → 100).
+    LocalPref,
+    /// `route.med` (absent → 0).
+    Med,
+    /// `route.as-path.len`.
+    AsPathLen,
+    /// `route.origin-as` (absent → evaluation error).
+    OriginAs,
+    /// `peer.asn` (absent → evaluation error). Reads peer identity, so
+    /// a chain whose value expressions contain it counts toward
+    /// [`CompiledChain::requires_peer_context`].
+    PeerAsn,
+}
+
+impl ValueField {
+    /// The `.rpol` source spelling (also the explain rendering).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ValueField::LocalPref => "route.local-pref",
+            ValueField::Med => "route.med",
+            ValueField::AsPathLen => "route.as-path.len",
+            ValueField::OriginAs => "route.origin-as",
+            ValueField::PeerAsn => "peer.asn",
+        }
+    }
+}
+
+/// A compiled `u32` value expression (LAN-299): checked arithmetic over
+/// constants, context fields, and the bounded builtins. Evaluated per
+/// route by `eval_value` (`crate::eval`); any checked-arithmetic
+/// failure or absent operand is an evaluation error that resolves the
+/// route as Deny (ADR-0103 Decision 4). Constant subtrees are folded at
+/// compile time (with checked ops); a constant expression that cannot
+/// fold safely is left in place and fails per route, closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueExpr {
+    /// A constant (literal, parameter, or folded subtree).
+    Const(u32),
+    /// A `u32` context field read.
+    Field(ValueField),
+    /// A checked binary arithmetic operation.
+    Binary {
+        /// The operator.
+        op: ArithOp,
+        /// Left operand.
+        lhs: Box<ValueExpr>,
+        /// Right operand.
+        rhs: Box<ValueExpr>,
+    },
+    /// `min(a, b)`.
+    Min(Box<ValueExpr>, Box<ValueExpr>),
+    /// `max(a, b)`.
+    Max(Box<ValueExpr>, Box<ValueExpr>),
+    /// `clamp(x, lo, hi)` — `lo > hi` is a compile error when statically
+    /// known, an evaluation error otherwise.
+    Clamp(Box<ValueExpr>, Box<ValueExpr>, Box<ValueExpr>),
+}
+
+impl ValueExpr {
+    /// Does any node satisfy `pred`? The value-expression sibling of
+    /// [`MatchExpr::any_node`], used by the `requires_*` analyses.
+    pub fn any_node(&self, pred: &impl Fn(&ValueExpr) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
+        match self {
+            ValueExpr::Const(_) | ValueExpr::Field(_) => false,
+            ValueExpr::Binary { lhs, rhs, .. }
+            | ValueExpr::Min(lhs, rhs)
+            | ValueExpr::Max(lhs, rhs) => lhs.any_node(pred) || rhs.any_node(pred),
+            ValueExpr::Clamp(x, lo, hi) => {
+                x.any_node(pred) || lo.any_node(pred) || hi.any_node(pred)
+            }
+        }
+    }
+
+    /// Whether evaluating this expression reads the evaluation peer's
+    /// identity (a [`ValueField::PeerAsn`] operand).
+    #[must_use]
+    pub fn reads_peer(&self) -> bool {
+        self.any_node(&|node| matches!(node, ValueExpr::Field(ValueField::PeerAsn)))
+    }
+}
+
+impl fmt::Display for ValueExpr {
+    /// Render in `.rpol` surface syntax with minimal parentheses
+    /// (`*`/`/`/`%` bind tighter than `+`/`-`), for explain traces and
+    /// eval-error logs.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn binding(expr: &ValueExpr) -> u8 {
+            match expr {
+                ValueExpr::Binary {
+                    op: ArithOp::Add | ArithOp::Sub,
+                    ..
+                } => 0,
+                ValueExpr::Binary { .. } => 1,
+                _ => 2,
+            }
+        }
+        fn render(expr: &ValueExpr, f: &mut fmt::Formatter<'_>, min_binding: u8) -> fmt::Result {
+            let paren = binding(expr) < min_binding;
+            if paren {
+                write!(f, "(")?;
+            }
+            match expr {
+                ValueExpr::Const(value) => write!(f, "{value}")?,
+                ValueExpr::Field(field) => write!(f, "{}", field.as_str())?,
+                ValueExpr::Binary { op, lhs, rhs } => {
+                    let this = binding(expr);
+                    render(lhs, f, this)?;
+                    write!(f, " {} ", op.symbol())?;
+                    // Right side binds one tighter so `a - (b - c)`
+                    // keeps its parentheses.
+                    render(rhs, f, this + 1)?;
+                }
+                ValueExpr::Min(a, b) => {
+                    write!(f, "min(")?;
+                    render(a, f, 0)?;
+                    write!(f, ", ")?;
+                    render(b, f, 0)?;
+                    write!(f, ")")?;
+                }
+                ValueExpr::Max(a, b) => {
+                    write!(f, "max(")?;
+                    render(a, f, 0)?;
+                    write!(f, ", ")?;
+                    render(b, f, 0)?;
+                    write!(f, ")")?;
+                }
+                ValueExpr::Clamp(x, lo, hi) => {
+                    write!(f, "clamp(")?;
+                    render(x, f, 0)?;
+                    write!(f, ", ")?;
+                    render(lo, f, 0)?;
+                    write!(f, ", ")?;
+                    render(hi, f, 0)?;
+                    write!(f, ")")?;
+                }
+            }
+            if paren {
+                write!(f, ")")?;
+            }
+            Ok(())
+        }
+        render(self, f, 0)
+    }
+}
+
+/// Comparison operator of a [`MatchExpr::ValueCmp`] guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueCmpOp {
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `>=`
+    Ge,
+    /// `<=`
+    Le,
+}
+
+impl ValueCmpOp {
+    /// The source spelling.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ValueCmpOp::Eq => "==",
+            ValueCmpOp::Ne => "!=",
+            ValueCmpOp::Ge => ">=",
+            ValueCmpOp::Le => "<=",
+        }
+    }
+}
+
+/// A comparison between two value expressions (LAN-299) — the compiled
+/// form of any `.rpol` comparison containing arithmetic or a builtin.
+/// Boxed behind [`MatchExpr::ValueCmp`] so plain guard nodes keep their
+/// size. Unlike the plain scalar nodes, an unresolvable operand here
+/// (absent origin/peer ASN, checked-arithmetic failure) is an
+/// **evaluation error**, not a non-match: the route is denied
+/// (ADR-0103 Decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueCmpNode {
+    /// The comparison operator.
+    pub op: ValueCmpOp,
+    /// Left value expression.
+    pub lhs: ValueExpr,
+    /// Right value expression.
+    pub rhs: ValueExpr,
 }
 
 /// A typed match expression — the guard side of a [`Term`].
@@ -174,6 +411,13 @@ pub enum MatchExpr {
     RpkiIs(RpkiValidation),
     /// ASPA path verification state equals this state.
     AspaIs(AspaValidation),
+    /// A comparison between two `u32` value expressions (LAN-299) —
+    /// any `.rpol` comparison containing arithmetic or a builtin. An
+    /// unresolvable operand or checked-arithmetic failure during
+    /// evaluation is an evaluation error: the route is denied
+    /// (ADR-0103 Decision 4), unlike the never-match semantics of the
+    /// plain scalar nodes above.
+    ValueCmp(Box<ValueCmpNode>),
     /// All children match (empty = true).
     And(Vec<MatchExpr>),
     /// Any child matches (empty = false).
@@ -208,7 +452,10 @@ impl MatchExpr {
             | MatchExpr::FamilyIs(_)
             | MatchExpr::FamilyNe(_)
             | MatchExpr::RpkiIs(_)
-            | MatchExpr::AspaIs(_) => 0,
+            | MatchExpr::AspaIs(_)
+            // Straight-line checked arithmetic over scalars — the
+            // cheap tier, like the comparisons it generalizes.
+            | MatchExpr::ValueCmp(_) => 0,
             MatchExpr::PrefixInSet(_)
             | MatchExpr::PrefixEq { .. }
             | MatchExpr::PrefixNe { .. }
@@ -409,26 +656,35 @@ impl CompiledChain {
     /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
     /// ASN, or peer-group matching — a strict-next-hop
     /// [`MatchExpr::NextHopEqPeer`] / [`MatchExpr::NextHopNePeer`]
-    /// node, a [`MatchExpr::PeerAsInSet`] membership probe, or a
-    /// peer-derived `prepend as peer` action, LAN-296 — the last is
+    /// node, a [`MatchExpr::PeerAsInSet`] membership probe, a
+    /// `peer.asn` operand inside a value expression — guard
+    /// [`MatchExpr::ValueCmp`] or a computed `set` value, LAN-299 — or
+    /// a peer-derived `prepend as peer` action, LAN-296 — the last is
     /// defense in depth: export attachment rejects it outright).
     /// Content-equal chains with
     /// such a guard can still yield peer-different verdicts, so
     /// update-group fingerprinting must not group peers that share one.
     /// `prepend as self` / `prepend as origin` are chain/route-context
-    /// only and deliberately do NOT count here. Import chains are
-    /// evaluated per-session and are unaffected by this flag.
+    /// only and deliberately do NOT count here; arithmetic over route
+    /// fields alone likewise never disqualifies grouping. Import
+    /// chains are evaluated per-session and are unaffected by this
+    /// flag.
     #[must_use]
     pub fn requires_peer_context(&self) -> bool {
-        self.any_guard_node(&|expr| {
-            matches!(
-                expr,
-                MatchExpr::NeighborIn(_)
-                    | MatchExpr::NextHopEqPeer
-                    | MatchExpr::NextHopNePeer
-                    | MatchExpr::PeerAsInSet(_)
-            )
+        self.any_guard_node(&|expr| match expr {
+            MatchExpr::NeighborIn(_)
+            | MatchExpr::NextHopEqPeer
+            | MatchExpr::NextHopNePeer
+            | MatchExpr::PeerAsInSet(_) => true,
+            MatchExpr::ValueCmp(node) => node.lhs.reads_peer() || node.rhs.reads_peer(),
+            _ => false,
         }) || self.peer_prepend_action().is_some()
+            || self.any_action_mods(&|mods| {
+                [&mods.set_local_pref_computed, &mods.set_med_computed]
+                    .into_iter()
+                    .flatten()
+                    .any(|expr| expr.reads_peer())
+            })
     }
 
     /// The first `prepend as peer` action in the chain, as the owning
@@ -464,5 +720,17 @@ impl CompiledChain {
             .iter()
             .flat_map(|policy| policy.terms.iter())
             .any(|term| term.guard.any_node(pred))
+    }
+
+    /// Do any term's action modifications (Permit or Continue) across
+    /// all policies satisfy `pred`?
+    fn any_action_mods(&self, pred: &impl Fn(&RouteModifications) -> bool) -> bool {
+        self.policies
+            .iter()
+            .flat_map(|policy| policy.terms.iter())
+            .any(|term| match &term.action {
+                TermAction::Permit(mods) | TermAction::Continue(mods) => pred(mods),
+                TermAction::Deny => false,
+            })
     }
 }

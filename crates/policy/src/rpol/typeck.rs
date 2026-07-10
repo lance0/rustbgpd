@@ -13,10 +13,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::engine::AsPathRegex;
+use crate::eval::checked_arith;
+use crate::ir::ValueField;
 
 use super::ast::{
     ActionStmt, CmpOp, CommunityKind, Expr, FieldPath, FieldRoot, PolicyDef, PrependAsArg, Rhs,
-    RouteField, SourceFile, Stmt, U32Arg,
+    RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, Span, Spanned, closest};
 
@@ -87,6 +89,20 @@ const MAX_APPLY_DEPTH: u32 = 8;
 /// human-written guard is under ten nodes.
 const MAX_APPLY_EXPANSION: u64 = 100_000;
 
+/// Maximum worst-case per-route evaluation steps for one policy
+/// (ADR-0103 Decision 3, `MAX_EVAL_COST`). Computed in the same
+/// Kahn-ordered DP as the apply bounds: every guard node — including
+/// each value-expression operator and builtin (LAN-299) — and every
+/// action's value operators count one step, apply targets contribute
+/// their inlined predicate cost. Straight-line programs whose bound
+/// fits need no runtime fuel (fuel starts at loop back-edges,
+/// LAN-303); a program whose bound exceeds this is rejected with a
+/// diagnostic naming the policy.
+const MAX_EVAL_COST: u64 = 1_000_000;
+
+/// The value-expression builtins (LAN-299) and their arities.
+const VALUE_BUILTINS: &[(&str, usize)] = &[("min", 2), ("max", 2), ("clamp", 3)];
+
 /// Enum members per enum-typed field, in language spelling.
 pub(super) const RPKI_MEMBERS: &[&str] = &["valid", "invalid", "not-found"];
 pub(super) const ASPA_MEMBERS: &[&str] = &["valid", "invalid", "unknown"];
@@ -139,6 +155,22 @@ pub(super) fn resolve_field(path: &FieldPath) -> Result<Field, Diagnostic> {
             )
             .with_note("the only sub-field is `route.as-path.len`"))
         }
+    }
+}
+
+/// The u32-typed [`ValueField`] a resolved field reads as a
+/// value-expression operand (LAN-299), or `None` for non-u32 fields.
+/// The single decision point shared by the typechecker and the
+/// lowerer, so the two passes cannot disagree about which fields are
+/// arithmetic operands.
+pub(super) fn value_field_of(field: Field) -> Option<ValueField> {
+    match field {
+        Field::LocalPref => Some(ValueField::LocalPref),
+        Field::Med => Some(ValueField::Med),
+        Field::AsPathLen => Some(ValueField::AsPathLen),
+        Field::OriginAs => Some(ValueField::OriginAs),
+        Field::PeerAsn => Some(ValueField::PeerAsn),
+        _ => None,
     }
 }
 
@@ -269,8 +301,8 @@ impl Checker<'_> {
     fn check_action(&mut self, action: &ActionStmt, params: &[&str]) {
         match action {
             ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::SetNextHop(..) => {}
-            ActionStmt::SetLocalPref(arg, _) | ActionStmt::SetMed(arg, _) => {
-                self.check_u32_arg(arg, params);
+            ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
+                self.check_value_expr(expr, params);
             }
             ActionStmt::Community { kind, lit, .. } => {
                 if lit.node.kind() != *kind {
@@ -324,6 +356,107 @@ impl Checker<'_> {
         }
     }
 
+    /// Typecheck a value expression (LAN-299): operands must be u32 —
+    /// literals, declared parameters, u32-typed fields — builtins must
+    /// be `min`/`max`/`clamp` with the right arity, and every
+    /// statically-evaluable subexpression must evaluate cleanly under
+    /// checked arithmetic (`4294967295 + 1` is a compile error at its
+    /// span, not a per-route runtime error).
+    fn check_value_expr(&mut self, expr: &ValueExprAst, params: &[&str]) {
+        match expr {
+            ValueExprAst::Lit(..) => {}
+            ValueExprAst::Ident(name) => {
+                self.check_u32_arg(&U32Arg::Param(name.clone()), params);
+            }
+            ValueExprAst::Field(path) => match resolve_field(path) {
+                Err(diag) => self.diags.push(diag),
+                Ok(resolved) => {
+                    if value_field_of(resolved).is_none() {
+                        self.diags.push(
+                            Diagnostic::new(
+                                path.span,
+                                format!("`{}` is not a u32 field", path.render()),
+                                "arithmetic operands are u32",
+                            )
+                            .with_note(
+                                "u32 fields: route.local-pref, route.med, route.as-path.len, \
+                                 route.origin-as, peer.asn",
+                            ),
+                        );
+                    }
+                }
+            },
+            ValueExprAst::Binary { op, lhs, rhs, span } => {
+                self.check_value_expr(lhs, params);
+                self.check_value_expr(rhs, params);
+                // Constant folding diagnostic, reported at the
+                // smallest failing subexpression: both children fold
+                // cleanly, this operator fails.
+                if let (Some(l), Some(r)) = (fold_const(lhs), fold_const(rhs))
+                    && let Err(kind) = checked_arith(*op, l, r)
+                {
+                    self.diags.push(Diagnostic::new(
+                        *span,
+                        format!("this expression always fails: {kind}"),
+                        "statically invalid arithmetic",
+                    ));
+                }
+            }
+            ValueExprAst::Call { name, args, span } => {
+                for arg in args {
+                    self.check_value_expr(arg, params);
+                }
+                let Some(&(_, arity)) = VALUE_BUILTINS
+                    .iter()
+                    .find(|(builtin, _)| *builtin == name.node)
+                else {
+                    let mut diag = Diagnostic::new(
+                        name.span,
+                        format!("unknown builtin `{}`", name.node),
+                        "not a value builtin",
+                    );
+                    if let Some(suggestion) =
+                        closest(&name.node, VALUE_BUILTINS.iter().map(|(b, _)| *b))
+                    {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    } else {
+                        diag = diag
+                            .with_note("value builtins: min(a, b), max(a, b), clamp(x, lo, hi)");
+                    }
+                    self.diags.push(diag);
+                    return;
+                };
+                if args.len() != arity {
+                    self.diags.push(Diagnostic::new(
+                        *span,
+                        format!(
+                            "`{}` takes {arity} argument{} but {} {} supplied",
+                            name.node,
+                            if arity == 1 { "" } else { "s" },
+                            args.len(),
+                            if args.len() == 1 { "was" } else { "were" },
+                        ),
+                        "wrong number of arguments",
+                    ));
+                    return;
+                }
+                // Statically inverted clamp bounds are a compile
+                // error (the data-dependent case fails per route on
+                // the eval-error rail).
+                if name.node == "clamp"
+                    && let (Some(lo), Some(hi)) = (fold_const(&args[1]), fold_const(&args[2]))
+                    && lo > hi
+                {
+                    self.diags.push(Diagnostic::new(
+                        *span,
+                        format!("clamp bounds are inverted: lo ({lo}) > hi ({hi})"),
+                        "this clamp always fails",
+                    ));
+                }
+            }
+        }
+    }
+
     fn check_u32_arg(&mut self, arg: &U32Arg, params: &[&str]) {
         if let U32Arg::Param(name) = arg
             && !params.contains(&name.node.as_str())
@@ -354,6 +487,13 @@ impl Checker<'_> {
             }
             Expr::Not(inner, _) => self.check_expr(inner, params),
             Expr::Cmp { field, op, rhs, .. } => self.check_cmp(field, *op, rhs, params),
+            // LAN-299: both sides of a value comparison are u32 value
+            // expressions; all four operators apply (the checked
+            // evaluation model has no unordered u32 fields).
+            Expr::ValueCmp { lhs, rhs, .. } => {
+                self.check_value_expr(lhs, params);
+                self.check_value_expr(rhs, params);
+            }
             Expr::In { field, set } => self.check_in(field, set),
             Expr::Has { field, lit } => match resolve_field(field) {
                 Err(diag) => self.diags.push(diag),
@@ -1007,6 +1147,19 @@ fn apply_edges(file: &SourceFile) -> HashMap<&str, Vec<(&str, Span)>> {
     edges
 }
 
+/// Record trivial costs for an over-limit (or dependent-of-over-limit)
+/// policy so one root cause yields one diagnostic, not a cascade.
+fn poison_policy<'a>(
+    name: &'a str,
+    depth: &mut HashMap<&'a str, u32>,
+    pred_cost: &mut HashMap<&'a str, u64>,
+    poisoned: &mut HashSet<&'a str>,
+) {
+    poisoned.insert(name);
+    depth.insert(name, 0);
+    pred_cost.insert(name, 1);
+}
+
 /// One policy's LAN-290 bound check (see
 /// [`Checker::check_apply_bounds`]): update the `depth` / `pred_cost`
 /// memo tables (its apply targets are already present — Kahn order)
@@ -1022,9 +1175,7 @@ fn bound_policy<'a>(
 ) -> Option<Diagnostic> {
     let name = def.name.node.as_str();
     if targets.iter().any(|(target, _)| poisoned.contains(target)) {
-        poisoned.insert(name);
-        depth.insert(name, 0);
-        pred_cost.insert(name, 1);
+        poison_policy(name, depth, pred_cost, poisoned);
         return None;
     }
     // Composition depth: one past the deepest apply target (unknown
@@ -1035,9 +1186,7 @@ fn bound_policy<'a>(
         .max_by_key(|&(d, _)| d);
     if let Some((d, span)) = deepest {
         if d > MAX_APPLY_DEPTH {
-            poisoned.insert(name);
-            depth.insert(name, 0);
-            pred_cost.insert(name, 1);
+            poison_policy(name, depth, pred_cost, poisoned);
             return Some(
                 Diagnostic::new(
                     span,
@@ -1056,8 +1205,10 @@ fn bound_policy<'a>(
     }
     // Expansion: per-arm guard costs in decision order (upper bound:
     // every `if` decides; an `else` adds a negated arm; a bare action
-    // run lowers to one `True`-guarded term).
+    // run lowers to one `True`-guarded term). Action value expressions
+    // (LAN-299) count toward the evaluation-cost budget alongside.
     let mut arms: Vec<u64> = Vec::new();
+    let mut action_cost: u64 = 0;
     for term in &def.terms {
         for stmt in &term.stmts {
             match stmt {
@@ -1067,16 +1218,45 @@ fn bound_policy<'a>(
                     if if_stmt.else_actions.is_some() {
                         arms.push(cost.saturating_add(1));
                     }
+                    for action in if_stmt
+                        .then_actions
+                        .iter()
+                        .chain(if_stmt.else_actions.iter().flatten())
+                    {
+                        action_cost = action_cost.saturating_add(action_value_cost(action));
+                    }
                 }
-                Stmt::Action(_) => arms.push(1),
+                Stmt::Action(action) => {
+                    arms.push(1);
+                    action_cost = action_cost.saturating_add(action_value_cost(action));
+                }
             }
         }
     }
     let lowered: u64 = arms.iter().fold(0u64, |acc, &g| acc.saturating_add(g));
+    // ADR-0103 Decision 3: the worst-case per-route step bound. With
+    // no loops, every lowered guard node and action value operator
+    // evaluates at most once per route, so the bound is the same DP
+    // sum the expansion budget uses plus the action value costs.
+    if lowered.saturating_add(action_cost) > MAX_EVAL_COST {
+        poison_policy(name, depth, pred_cost, poisoned);
+        return Some(
+            Diagnostic::new(
+                def.name.span,
+                format!(
+                    "policy `{name}` exceeds the worst-case evaluation budget \
+                     of {MAX_EVAL_COST} steps per route"
+                ),
+                "evaluation cost limit exceeded",
+            )
+            .with_note(
+                "every guard node, arithmetic operator, and builtin counts one step; \
+                 `apply` inlining multiplies — split or flatten the composition",
+            ),
+        );
+    }
     if lowered > MAX_APPLY_EXPANSION {
-        poisoned.insert(name);
-        depth.insert(name, 0);
-        pred_cost.insert(name, 1);
+        poison_policy(name, depth, pred_cost, poisoned);
         return Some(
             Diagnostic::new(
                 def.name.span,
@@ -1109,8 +1289,11 @@ fn bound_policy<'a>(
 /// Upper bound on the IR nodes `expr` lowers to, given the predicate
 /// costs of already-processed `apply` targets (a missing entry —
 /// unknown name or on a diagnosed cycle — counts as trivial; the file
-/// has errors and will never lower). Recursion depth is capped by the
-/// parser's `MAX_EXPR_DEPTH` (LAN-184).
+/// has errors and will never lower). Doubles as the worst-case
+/// per-route step count for the `MAX_EVAL_COST` budget: with no loops
+/// (LAN-303), every lowered node evaluates at most once per route.
+/// Recursion depth is capped by the parser's `MAX_EXPR_DEPTH`
+/// (LAN-184).
 fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
     match expr {
         Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => 1u64
@@ -1119,8 +1302,65 @@ fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
         Expr::Not(inner, _) => 1u64.saturating_add(guard_cost(inner, pred_cost)),
         // `==`/`!=` on u32 fields lower widest: `Not(And(Ge, Le))`.
         Expr::Cmp { .. } => 4,
+        // LAN-299: every operator/builtin in the value expressions
+        // counts one step in the DP.
+        Expr::ValueCmp { lhs, rhs, .. } => 1u64
+            .saturating_add(value_cost(lhs))
+            .saturating_add(value_cost(rhs)),
         Expr::Apply { policy, .. } => pred_cost.get(policy.node.as_str()).copied().unwrap_or(1),
         _ => 1,
+    }
+}
+
+/// The value-expression steps an action contributes to the
+/// evaluation-cost budget (LAN-299: only the computed `set` values
+/// carry expressions; everything else is constant-time).
+fn action_value_cost(action: &ActionStmt) -> u64 {
+    match action {
+        ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => value_cost(expr),
+        _ => 0,
+    }
+}
+
+/// Worst-case evaluation steps of a value expression (LAN-299): one
+/// per operand read and one per operator/builtin step (`clamp`
+/// charges two — it is a min/max pair).
+fn value_cost(expr: &ValueExprAst) -> u64 {
+    match expr {
+        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 1,
+        ValueExprAst::Binary { lhs, rhs, .. } => 1u64
+            .saturating_add(value_cost(lhs))
+            .saturating_add(value_cost(rhs)),
+        ValueExprAst::Call { name, args, .. } => {
+            let op_cost = if name.node == "clamp" { 2 } else { 1 };
+            args.iter()
+                .map(value_cost)
+                .fold(op_cost, u64::saturating_add)
+        }
+    }
+}
+
+/// A constant subtree's checked-folded value, or `None` when it
+/// contains a parameter/field or a folding step that itself fails
+/// (reported where it happens — see `check_value_expr`). Folding uses
+/// the same [`checked_arith`] as evaluation, so compile-time folding
+/// and per-route evaluation can never disagree about what overflows.
+fn fold_const(expr: &ValueExprAst) -> Option<u32> {
+    match expr {
+        ValueExprAst::Lit(value, _) => Some(*value),
+        ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+        ValueExprAst::Binary { op, lhs, rhs, .. } => {
+            checked_arith(*op, fold_const(lhs)?, fold_const(rhs)?).ok()
+        }
+        ValueExprAst::Call { name, args, .. } => match (name.node.as_str(), args.as_slice()) {
+            ("min", [a, b]) => Some(fold_const(a)?.min(fold_const(b)?)),
+            ("max", [a, b]) => Some(fold_const(a)?.max(fold_const(b)?)),
+            ("clamp", [x, lo, hi]) => {
+                let (x, lo, hi) = (fold_const(x)?, fold_const(lo)?, fold_const(hi)?);
+                (lo <= hi).then(|| x.clamp(lo, hi))
+            }
+            _ => None,
+        },
     }
 }
 

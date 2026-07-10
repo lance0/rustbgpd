@@ -169,6 +169,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-incumbent capture commands, prerequisites, limitations, and example
   equal / explained-difference reports.
 
+- **`.rpol` checked u32 value expressions** (LAN-299, the first
+  ADR-0103 slice). Arithmetic (`+ - * / %`) and the bounded builtins
+  `min`/`max`/`clamp` in value positions — `set med route.med + 50`,
+  `set local-pref min(route.local-pref * 2, 400)`, comparisons like
+  `route.as-path.len * 10 >= route.med` — over u32 literals,
+  parameters, and the u32 fields (`route.local-pref`, `route.med`,
+  `route.as-path.len`, `route.origin-as`, `peer.asn`). Every operation
+  is checked: overflow, underflow, division/modulo by zero, an
+  inverted clamp, or an absent operand (origin AS on an `AS_SET`-only
+  path, unknown peer ASN) is an evaluation error that denies the route
+  with staged modifications discarded, a per-chain error counter, a
+  rate-limited WARN naming the failing policy and term, and the error
+  rendered in explain traces in place of a verdict — the uniform
+  fail-closed rail later ADR-0103 slices reuse, and the computed
+  as-path prepend operands now ride it too. Constant subexpressions
+  fold at compile time with the same checked operators (`set med
+  25 + 25` compiles to exactly `set med 50`; `4294967295 + 1` is a
+  compile error at its span), operator costs land in the typecheck
+  cost DP under the ADR's `MAX_EVAL_COST` budget, and grammar
+  evolution is source-compatible: kebab-case maximal munch is
+  permanent, so `route.med - 1` subtracts while `route.med-1` stays an
+  unknown-field error. `peer.asn` operands register peer context for
+  update-group fingerprinting; route-field arithmetic never
+  disqualifies grouping.
+
 ### Changed
 
 - **Release publication is now fail-closed.** The binary-release and

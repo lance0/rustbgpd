@@ -55,16 +55,18 @@ use rustbgpd_wire::ExtendedCommunity;
 use crate::engine::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, PolicyAction, RouteModifications,
 };
+use crate::eval::checked_arith;
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
+    ValueCmpNode, ValueCmpOp, ValueExpr,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
     ActionStmt, CmpOp, CommunityLit, Expr, NextHopArg, PolicyDef, PrependAsArg, Rhs, SourceFile,
-    Stmt, U32Arg,
+    Stmt, U32Arg, ValueExprAst,
 };
-use super::typeck::{Field, resolve_field};
+use super::typeck::{Field, resolve_field, value_field_of};
 
 /// Encode a community literal's concrete wire value (for
 /// `add`/`remove` actions and test assertions). RT/RO literals pick
@@ -347,6 +349,21 @@ impl<'a> Lowerer<'a> {
             ]),
             Expr::Not(inner, _) => MatchExpr::Not(Box::new(self.lower_expr(inner, env, store))),
             Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env),
+            // LAN-299: value comparisons keep their shape (constant
+            // subtrees folded) — deliberately NOT rewritten to the
+            // legacy scalar nodes even when one side folds to a
+            // constant, because the two have different absent-operand
+            // semantics (never-match vs. fail-closed eval error).
+            Expr::ValueCmp { lhs, op, rhs, .. } => MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: match op {
+                    CmpOp::Eq => ValueCmpOp::Eq,
+                    CmpOp::Ne => ValueCmpOp::Ne,
+                    CmpOp::Ge => ValueCmpOp::Ge,
+                    CmpOp::Le => ValueCmpOp::Le,
+                },
+                lhs: lower_value(lhs, env),
+                rhs: lower_value(rhs, env),
+            })),
             Expr::In { field, set } => match resolve_field(field).expect("typechecked") {
                 Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
                 Field::OriginAs => MatchExpr::OriginAsInSet(self.asn_set_ids[&set.node]),
@@ -577,8 +594,19 @@ fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMa
         ActionStmt::Accept(_) | ActionStmt::Reject(_) => {
             unreachable!("verdicts handled by callers")
         }
-        ActionStmt::SetLocalPref(arg, _) => mods.set_local_pref = Some(resolve_u32(arg, env)),
-        ActionStmt::SetMed(arg, _) => mods.set_med = Some(resolve_u32(arg, env)),
+        // LAN-299: a computed set value that folds to a constant
+        // (literal, parameter, or constant arithmetic) lowers to the
+        // literal field — `set med 25 + 25` compiles to exactly what
+        // `set med 50` does. Only expressions that read route/peer
+        // fields stay computed (resolved per route by the evaluator).
+        ActionStmt::SetLocalPref(expr, _) => match lower_value(expr, env) {
+            ValueExpr::Const(value) => mods.set_local_pref = Some(value),
+            computed => mods.set_local_pref_computed = Some(std::sync::Arc::new(computed)),
+        },
+        ActionStmt::SetMed(expr, _) => match lower_value(expr, env) {
+            ValueExpr::Const(value) => mods.set_med = Some(value),
+            computed => mods.set_med_computed = Some(std::sync::Arc::new(computed)),
+        },
         ActionStmt::SetNextHop(arg, _) => {
             mods.set_next_hop = Some(match arg {
                 NextHopArg::Self_(_) => NextHopAction::Self_,
@@ -639,6 +667,77 @@ fn apply_action(mods: &mut RouteModifications, action: &ActionStmt, env: &HashMa
                     unreachable!("non-Value prepend args always denote an operand")
                 };
                 mods.as_path_prepend = Some((resolve_u32(arg, env), count));
+            }
+        }
+    }
+}
+
+/// Lower a value expression to IR with parameters substituted, folding
+/// constant subtrees bottom-up with checked arithmetic (LAN-299). A
+/// constant step that fails its check (e.g. `4294967295 + p` with
+/// `p = 1` at instantiation — invisible to the typechecker, which only
+/// sees literals) is left unfolded and fails per route on the
+/// eval-error rail: fail closed, never wrap.
+fn lower_value(expr: &ValueExprAst, env: &HashMap<&str, u32>) -> ValueExpr {
+    match expr {
+        ValueExprAst::Lit(value, _) => ValueExpr::Const(*value),
+        ValueExprAst::Ident(name) => ValueExpr::Const(
+            *env.get(name.node.as_str())
+                .expect("typechecked: parameter in scope"),
+        ),
+        ValueExprAst::Field(path) => {
+            let field = value_field_of(resolve_field(path).expect("typechecked"))
+                .expect("typechecked: u32 field operand");
+            ValueExpr::Field(field)
+        }
+        ValueExprAst::Binary { op, lhs, rhs, .. } => {
+            let lhs = lower_value(lhs, env);
+            let rhs = lower_value(rhs, env);
+            if let (ValueExpr::Const(l), ValueExpr::Const(r)) = (&lhs, &rhs)
+                && let Ok(folded) = checked_arith(*op, *l, *r)
+            {
+                return ValueExpr::Const(folded);
+            }
+            ValueExpr::Binary {
+                op: *op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }
+        }
+        ValueExprAst::Call { name, args, .. } => {
+            let mut args: Vec<ValueExpr> = args.iter().map(|arg| lower_value(arg, env)).collect();
+            let consts: Vec<Option<u32>> = args
+                .iter()
+                .map(|arg| match arg {
+                    ValueExpr::Const(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            match (name.node.as_str(), consts.as_slice()) {
+                ("min", [Some(a), Some(b)]) => ValueExpr::Const((*a).min(*b)),
+                ("max", [Some(a), Some(b)]) => ValueExpr::Const((*a).max(*b)),
+                ("clamp", [Some(x), Some(lo), Some(hi)]) if lo <= hi => {
+                    ValueExpr::Const((*x).clamp(*lo, *hi))
+                }
+                ("min", _) => {
+                    let b = Box::new(args.pop().expect("typechecked arity"));
+                    let a = Box::new(args.pop().expect("typechecked arity"));
+                    ValueExpr::Min(a, b)
+                }
+                ("max", _) => {
+                    let b = Box::new(args.pop().expect("typechecked arity"));
+                    let a = Box::new(args.pop().expect("typechecked arity"));
+                    ValueExpr::Max(a, b)
+                }
+                // Statically inverted constant clamps are typecheck
+                // errors; a parameter-dependent inversion stays a
+                // Clamp node and fails per route.
+                _ => {
+                    let hi = Box::new(args.pop().expect("typechecked arity"));
+                    let lo = Box::new(args.pop().expect("typechecked arity"));
+                    let x = Box::new(args.pop().expect("typechecked arity"));
+                    ValueExpr::Clamp(x, lo, hi)
+                }
             }
         }
     }
