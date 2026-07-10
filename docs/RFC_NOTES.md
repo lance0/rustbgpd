@@ -576,6 +576,24 @@ implemented per ADR-0040.
   record/byte budgets.
 - ASPA over RTR v2 uses 8210bis replacement semantics: announce replaces
   the customer's provider set; withdraw removes the customer ASN.
+- Strict acceptance limits (8210bis-26): per-PDU length is capped at
+  65,535 octets (§5 — an over-limit length field is corrupt framing,
+  Error Report code 0); End of Data timers are bounded to the §6 legal
+  ranges (zeros mean "not provided"; above-maximum values clamp down
+  with a warning; an expire below the 600 s minimum is honored as-is,
+  since expiring early is safe; a refresh/retry not below the expire is
+  lowered under it per the §6 relationship rule); ASPA PDUs must be
+  well-shaped per §5.12 (announce: at least one provider, strictly
+  increasing, no AS 0 among multiple; withdraw: no provider list, PDU
+  length exactly 12) — violations get Error Report code 9.
+- Deviation: Duplicate Announcement Received (Error Code 7) and
+  Withdrawal of Unknown Record (Error Code 6) are not detected. The RTR
+  client does not hold the per-cache active record set during a
+  transaction — the VRP manager applies updates by normalizing
+  announce/withdraw merges — so detecting either would require a
+  parallel active-record index in the client. Duplicate announcements
+  and withdrawals of unknown records are normalized silently instead of
+  failing the session.
 - Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
   and LOCAL_PREF).
 - `match_rpki_validation` in policy.
