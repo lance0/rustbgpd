@@ -135,6 +135,7 @@ rbgp gshut [--peer <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
 rbgp shutdown
 rbgp completions bash
+rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 ```
 
 Most data-oriented commands support `--json` for machine-parseable output.

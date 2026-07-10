@@ -120,7 +120,17 @@ Enable shell completions:
 
 ```bash
 rbgp completions bash > /etc/bash_completion.d/rbgp
-# Or use the generated files in examples/completions/.
+# Or use the generated files in examples/completions/, or the
+# share/completions/ files shipped in the release tarball.
+```
+
+Man pages ship in the release tarball (`share/man/man1/rbgp.1`,
+`share/man/man8/rustbgpd.8`), and the binaries regenerate them on
+demand:
+
+```bash
+rbgp man | man -l -
+rustbgpd --man | man -l -
 ```
 
 ## Remote gRPC access

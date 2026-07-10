@@ -290,6 +290,12 @@ enum Command {
         /// Shell to generate completions for
         shell: Shell,
     },
+
+    /// Print the rbgp man page (roff) to stdout
+    ///
+    /// Render it with `rbgp man | man -l -` or install it with
+    /// `rbgp man > /usr/local/share/man/man1/rbgp.1`.
+    Man,
 }
 
 #[derive(Subcommand)]
@@ -1433,6 +1439,76 @@ fn generate_completions(shell: Shell, binary_name: &'static str, output: &mut dy
     clap_complete::generate(shell, &mut cli_command(binary_name), binary_name, output);
 }
 
+/// Render the whole CLI as one comprehensive `rbgp.1`: the top-level
+/// page, a short SUBCOMMANDS index, then a SYNOPSIS/DESCRIPTION/OPTIONS
+/// block for every subcommand recursively ("RBGP NEIGHBOR DRAIN" style
+/// section headers). One page — not clap_mangen's one-file-per-command
+/// mode — keeps `rbgp man | man -l -` and
+/// `rbgp man > .../man1/rbgp.1` trivially usable, ripgrep-style.
+fn generate_man(binary_name: &'static str, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    let mut cmd = cli_command(binary_name);
+    cmd.build();
+
+    // The global connection/output flags propagate into every
+    // subcommand; documenting them once (in the top-level OPTIONS)
+    // instead of ~100 times keeps the page readable.
+    let global_args: Vec<clap::Id> = cmd
+        .get_arguments()
+        .filter(|a| a.is_global_set())
+        .map(|a| a.get_id().clone())
+        .collect();
+
+    let man = clap_mangen::Man::new(cmd.clone());
+    man.render_title(output)?;
+    man.render_name_section(output)?;
+    man.render_synopsis_section(output)?;
+    man.render_description_section(output)?;
+    man.render_options_section(output)?;
+
+    // Hand-rolled index instead of Man::render_subcommands_section:
+    // that section cross-references `rbgp-<sub>(1)` pages that do not
+    // exist in this single-page layout.
+    writeln!(output, ".SH SUBCOMMANDS")?;
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
+            continue;
+        }
+        writeln!(output, ".TP\n\\fB{} {}\\fR", binary_name, sub.get_name())?;
+        if let Some(about) = sub.get_about() {
+            writeln!(output, "{about}")?;
+        }
+    }
+
+    render_subcommand_sections(&cmd, binary_name, &global_args, output)?;
+    man.render_version_section(output)
+}
+
+fn render_subcommand_sections(
+    cmd: &clap::Command,
+    prefix: &str,
+    global_args: &[clap::Id],
+    output: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
+            continue;
+        }
+        let path = format!("{prefix} {}", sub.get_name());
+        let mut sub = sub.clone();
+        for id in global_args {
+            sub = sub.mut_arg(id.clone(), |a| a.hide(true));
+        }
+        sub = sub.mut_arg("help", |a| a.hide(true));
+        let man = clap_mangen::Man::new(sub.clone());
+        writeln!(output, ".SH \"{}\"", path.to_uppercase())?;
+        man.render_synopsis_section(output)?;
+        man.render_description_section(output)?;
+        man.render_options_section(output)?;
+        render_subcommand_sections(&sub, &path, global_args, output)?;
+    }
+    Ok(())
+}
+
 /// Terminate with the `config diff` / `config plan` detailed exit code:
 /// 0 when the candidate matches the runtime config, 2 when changes are
 /// present (errors take the generic exit-1 path in `main`).
@@ -1446,6 +1522,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
         generate_completions(shell, binary_name, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // Neither does the man page.
+    if let Command::Man = cli.command {
+        generate_man(binary_name, &mut std::io::stdout()).map_err(CliError::Io)?;
         return Ok(());
     }
 
@@ -2503,6 +2585,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         },
         Command::Completions { .. } => unreachable!("handled before connect"),
 
+        Command::Man => unreachable!("handled before connect"),
+
         Command::Diff { .. } => unreachable!("handled before connect"),
     }
 }
@@ -2567,6 +2651,31 @@ mod tests {
         assert!(completion.contains("_rbgp()"));
         assert!(completion.contains("cmd=\"rbgp\""));
         assert!(!completion.contains("rustbgpctl"));
+    }
+
+    #[test]
+    fn test_completions_generate_for_all_release_shells() {
+        // These three are what the release tarball ships.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut output = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut output);
+            assert!(!output.is_empty(), "{shell} completions are empty");
+        }
+    }
+
+    #[test]
+    fn test_man_page_is_roff_and_covers_nested_subcommands() {
+        let mut output = Vec::new();
+        generate_man(BINARY_NAME, &mut output).unwrap();
+        let man = String::from_utf8(output).unwrap();
+
+        assert!(man.contains(".TH rbgp 1"), "missing roff .TH header");
+        // Nested subcommands get their own flattened section.
+        assert!(
+            man.contains(".SH \"RBGP CONFIG DIFF\""),
+            "missing nested subcommand section"
+        );
+        assert!(!man.contains("rustbgpctl"));
     }
 
     #[test]

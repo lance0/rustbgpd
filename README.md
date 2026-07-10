@@ -131,6 +131,12 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 
 ## Install
 
+### Pre-built tarball
+
+Tagged releases publish per-arch tarballs (binaries, man pages, and
+bash/zsh/fish completions under `share/`) — see the
+[install walkthrough](docs/deployment.md#install).
+
 ### From source
 
 ```bash

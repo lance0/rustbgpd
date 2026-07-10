@@ -415,6 +415,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gate did not fire — dispatch is still not where evaluation cost
   lives; the receipt addendum is in the ADR. (LAN-301)
 
+- **Man pages and shell completions in release artifacts.** New
+  `rbgp man` subcommand renders the full CLI — every nested subcommand
+  gets its own SYNOPSIS/DESCRIPTION/OPTIONS section — as a single
+  `rbgp.1` roff page on stdout (clap_mangen), and `rustbgpd --man`
+  prints a `rustbgpd.8` page covering the daemon's flags, signals, and
+  files. Release tarballs now ship both pages plus bash/zsh/fish
+  completions under `share/` (`share/man/man1/`, `share/man/man8/`,
+  `share/completions/`), generated at package time by the built
+  binaries so they cannot drift; the container image installs the bash
+  completions at `/usr/share/bash-completion/completions/rbgp`.
+  (LAN-326)
+
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 - **Docs reorganized by task shape (Diátaxis).** `docs/README.md` now

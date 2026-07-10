@@ -36,8 +36,19 @@ note.
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
 `rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon) and `rbgp` (the CLI). The
-filename is the same on every release; `releases/latest/download/`
+ships `rustbgpd` (the daemon) and `rbgp` (the CLI), plus man pages
+and shell completions under `share/`:
+
+```
+rustbgpd, rbgp                          binaries
+LICENSE-MIT, LICENSE-APACHE             licenses
+rustbgpd.schema.json                    config JSON Schema
+share/man/man1/rbgp.1                   CLI man page
+share/man/man8/rustbgpd.8               daemon man page
+share/completions/rbgp.{bash,zsh,fish}  shell completions
+```
+
+The filename is the same on every release; `releases/latest/download/`
 always resolves to the current tag, so this snippet never needs a
 version bump.
 
@@ -50,7 +61,16 @@ curl -fL -o "$TARBALL" \
   "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 tar -xzf "$TARBALL"
 sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+sudo install -m 0644 share/man/man1/rbgp.1 /usr/local/share/man/man1/
+sudo install -m 0644 share/man/man8/rustbgpd.8 /usr/local/share/man/man8/
+sudo install -m 0644 share/completions/rbgp.bash \
+  /usr/share/bash-completion/completions/rbgp
 ```
+
+The man pages and completions are also generated on demand by the
+binaries themselves (`rbgp man`, `rustbgpd --man`,
+`rbgp completions bash|zsh|fish`), so an installed binary can always
+regenerate them.
 
 To pin to a specific tag for reproducibility, swap `latest` for the
 version, e.g. `releases/download/v0.45.0/${TARBALL}`. SHA-256

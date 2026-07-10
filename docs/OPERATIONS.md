@@ -6,6 +6,10 @@ see [CONFIGURATION.md](CONFIGURATION.md). For security posture, see
 walkthrough (systemd setup, Docker, containerlab quick-start, sample
 profiles), see [deployment.md](deployment.md).
 
+Man pages for both binaries ship in the release tarball under
+`share/man/` and can be regenerated any time with `rbgp man` and
+`rustbgpd --man` (roff on stdout; view with `rbgp man | man -l -`).
+
 ---
 
 ## Starting the daemon

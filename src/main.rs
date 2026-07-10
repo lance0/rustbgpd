@@ -804,6 +804,80 @@ fn bfd_diagnostic_to_str(diag: rustbgpd_bfd::Diagnostic) -> &'static str {
     }
 }
 
+/// The `rustbgpd(8)` man page, hand-maintained roff. The daemon's arg
+/// parser is hand-rolled (no clap), so this mirrors the `--help` text
+/// above — keep the two in sync when adding a flag.
+fn man_page() -> String {
+    format!(
+        r#".TH RUSTBGPD 8 "" "rustbgpd {version}" "System Administration"
+.SH NAME
+rustbgpd \- API\-first BGP daemon with gRPC control plane
+.SH SYNOPSIS
+.B rustbgpd
+[\fIOPTIONS\fR] [\fICONFIG_PATH\fR]
+.SH DESCRIPTION
+.B rustbgpd
+is a BGP daemon managed through its gRPC API. It loads a TOML
+configuration file at startup, speaks BGP on the configured listen
+port (179 by default), and exposes a gRPC control plane plus
+Prometheus metrics. Day\-to\-day inspection and runtime changes go
+through the
+.BR rbgp (1)
+CLI.
+.SH ARGUMENTS
+.TP
+\fICONFIG_PATH\fR
+Path to the TOML config file. Defaults to
+\fI/etc/rustbgpd/config.toml\fR.
+.SH OPTIONS
+.TP
+\fB\-\-check\fR
+Validate the config and exit without starting the daemon.
+.TP
+\fB\-\-diff\fR \fIPATH\fR
+Compare the config against \fIPATH\fR and show what SIGHUP would
+change.
+.TP
+\fB\-\-json\fR
+Output the diff as JSON (only with \fB\-\-diff\fR).
+.TP
+\fB\-\-init\-config\fR \fIPROFILE\fR
+Print a starter config to stdout and exit (requires
+\fB\-\-stdout\fR). Profiles: lab, edge.
+.TP
+\fB\-\-stdout\fR
+Write \fB\-\-init\-config\fR output to stdout (the only target for
+now).
+.TP
+\fB\-\-dump\-config\-schema\fR
+Print the config JSON Schema to stdout and exit.
+.TP
+\fB\-\-man\fR
+Print this man page (roff) to stdout and exit.
+.TP
+\fB\-\-version\fR, \fB\-V\fR
+Print version and exit.
+.TP
+\fB\-\-help\fR, \fB\-h\fR
+Print the help message.
+.SH SIGNALS
+.TP
+\fBSIGHUP\fR
+Reload the configuration file and hot\-apply the changes.
+.TP
+\fBSIGTERM\fR
+Shut down gracefully.
+.SH FILES
+.TP
+\fI/etc/rustbgpd/config.toml\fR
+Default configuration file.
+.SH SEE ALSO
+.BR rbgp (1)
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
 #[expect(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -811,6 +885,14 @@ fn main() {
     // Handle --version / -V before anything else.
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("rustbgpd {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    // Handle --man: print the roff man page (section 8) to stdout and
+    // exit. Render with `rustbgpd --man | man -l -` or install with
+    // `rustbgpd --man > /usr/local/share/man/man8/rustbgpd.8`.
+    if args.iter().any(|a| a == "--man") {
+        print!("{}", man_page());
         return;
     }
 
@@ -829,6 +911,7 @@ fn main() {
                                      Profiles: lab, edge\n  \
                --stdout              Write --init-config output to stdout (the only target for now)\n  \
                --dump-config-schema  Print the config JSON Schema to stdout and exit\n  \
+               --man                 Print the man page (roff) to stdout and exit\n  \
                --version             Print version and exit\n  \
                --help                Print this help message",
             env!("CARGO_PKG_VERSION")
@@ -3122,6 +3205,26 @@ mod tests {
         let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
         config
+    }
+
+    #[test]
+    fn man_page_is_roff_and_documents_the_flags() {
+        let man = man_page();
+        assert!(man.starts_with(".TH RUSTBGPD 8"), "missing roff .TH header");
+        for flag in [
+            r"\-\-check",
+            r"\-\-diff",
+            r"\-\-json",
+            r"\-\-init\-config",
+            r"\-\-stdout",
+            r"\-\-dump\-config\-schema",
+            r"\-\-man",
+            r"\-\-version",
+            r"\-\-help",
+        ] {
+            assert!(man.contains(flag), "man page missing {flag}");
+        }
+        assert!(man.contains("SIGHUP"));
     }
 
     fn tcp_ao_neighbor_toml(address: &str) -> String {
