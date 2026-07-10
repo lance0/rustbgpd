@@ -3,7 +3,7 @@
 //! Standalone HTTP server that serves the birdwatcher API contract
 //! consumed by Alice-LG and similar looking glass frontends, sourcing
 //! all data from a running rustbgpd over gRPC. This replaces the
-//! deprecated in-daemon `[global.telemetry.looking_glass]` server;
+//! removed in-daemon `[global.telemetry.looking_glass]` server;
 //! endpoint paths and response shapes are identical.
 //!
 //! **Supported endpoints** (single-table mode):
@@ -92,8 +92,8 @@ fn bad_gateway(context: &str, status: &tonic::Status) -> StatusCode {
 }
 
 // ---------------------------------------------------------------------------
-// Birdwatcher-compatible response pieces (shapes match the in-daemon
-// server in `src/looking_glass.rs`, which this adapter supersedes).
+// Birdwatcher-compatible response pieces (shapes match the removed
+// in-daemon looking glass server this adapter replaced).
 // ---------------------------------------------------------------------------
 
 /// Top-level `api` block included in every birdwatcher response.

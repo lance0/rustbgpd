@@ -298,23 +298,6 @@ pub fn neighbor_set_references(config: &Config, name: &str) -> Vec<String> {
         }
     }
 
-    if config
-        .policy
-        .import
-        .iter()
-        .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
-    {
-        refs.push("global import policy".to_string());
-    }
-    if config
-        .policy
-        .export
-        .iter()
-        .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
-    {
-        refs.push("global export policy".to_string());
-    }
-
     for neighbor in &config.neighbors {
         if neighbor
             .import_policy
@@ -547,11 +530,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         }
         ConfigEvent::SetGlobalImportChain { policy_names, .. } => {
             config.policy.import_chain.clone_from(policy_names);
-            config.policy.import.clear();
         }
         ConfigEvent::SetGlobalExportChain { policy_names, .. } => {
             config.policy.export_chain.clone_from(policy_names);
-            config.policy.export.clear();
         }
         ConfigEvent::ClearGlobalImportChain { .. } => {
             config.policy.import_chain.clear();

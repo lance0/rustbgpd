@@ -5,7 +5,7 @@ Standalone HTTP server that exposes rustbgpd through the
 [Alice-LG](https://github.com/alice-lg/alice-lg) and similar looking
 glass frontends. All data is sourced from a running rustbgpd over
 gRPC; endpoint paths and response shapes are identical to the
-deprecated in-daemon `[global.telemetry.looking_glass]` server this
+removed in-daemon `[global.telemetry.looking_glass]` server this
 adapter replaces.
 
 Rationale: the daemon's durable API identity is **gRPC + `rbgp`**.

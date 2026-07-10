@@ -152,7 +152,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
-| `GlobalService` | `GetGlobal` | `SetGlobal` |
+| `GlobalService` | `GetGlobal` | — |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
@@ -229,7 +229,6 @@ Daemon identity and configuration.
 | RPC | Description |
 |-----|-------------|
 | `GetGlobal` | Returns ASN, router ID, listen port, and host TCP-AO capability probe status |
-| `SetGlobal` | Reserved mutating RPC for future runtime global config changes; read-only listeners reject it with `PERMISSION_DENIED`, read-write listeners return `UNIMPLEMENTED` until the feature ships |
 
 ```bash
 # Get daemon identity

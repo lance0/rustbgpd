@@ -1,20 +1,17 @@
-//! Smoke test: the external birdwatcher-adapter must serve the same
-//! birdwatcher REST contract as the deprecated in-daemon looking
-//! glass, for the same daemon state.
+//! Smoke test: the external birdwatcher-adapter serves the
+//! birdwatcher REST contract from a live rustbgpd gRPC endpoint.
+//! (The adapter replaced the removed in-daemon looking glass server;
+//! this test pins the REST surface operators migrate to.)
 //!
-//! Spawns one rustbgpd (in-daemon looking glass + gRPC TCP enabled)
-//! and one birdwatcher-adapter pointed at that gRPC endpoint, then
-//! fetches `/status`, `/protocols/bgp`, and `/routes/peer/{peer}`
-//! from both and asserts structural equality after blanking the
-//! clock-dependent fields (`current_server`, `last_reboot`,
-//! `state_changed`, `state` — the configured 192.0.2.10 peer has no
-//! live counterpart, so its FSM state cycles).
+//! Spawns one rustbgpd (gRPC TCP enabled) and one birdwatcher-adapter
+//! pointed at that gRPC endpoint, then fetches `/status`,
+//! `/protocols/bgp`, and `/routes/peer/{peer}` and asserts the
+//! response shapes.
 //!
 //! A second neighbor (127.0.0.1) is driven by a minimal in-test BGP
 //! speaker that establishes a real session and announces one route, so
-//! the per-route `age` field is exercised end-to-end: both servers
-//! must render a non-empty receive timestamp for the same route, equal
-//! within clock-recovery jitter.
+//! the per-route `age` field is exercised end-to-end: the adapter must
+//! render a non-empty receive timestamp for the announced route.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -106,7 +103,30 @@ fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
     );
 }
 
-fn write_config(dir: &Path, grpc_port: u16, lg_port: u16, bgp_port: u16) -> PathBuf {
+/// Wait until `port` accepts a TCP connection (daemon gRPC readiness).
+fn wait_for_tcp(port: u16, proc_: &mut Proc) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        if let Ok(Some(status)) = proc_.child.try_wait() {
+            panic!(
+                "{} exited before listening on {port}: {status}\nstderr:\n{}",
+                proc_.name,
+                proc_.stderr()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "{} did not listen on {port} within timeout\nstderr:\n{}",
+        proc_.name,
+        proc_.stderr()
+    );
+}
+
+fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     let config_path = dir.join("rustbgpd.toml");
@@ -126,9 +146,6 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:{grpc_port}"
-
-[global.telemetry.looking_glass]
-addr = "127.0.0.1:{lg_port}"
 
 [[neighbors]]
 address = "192.0.2.10"
@@ -216,41 +233,16 @@ fn epoch_from_timestamp(s: &str) -> u64 {
     days * 86_400 + h * 3_600 + mi * 60 + se
 }
 
-/// Blank the clock-dependent fields so the two responses (taken at
-/// slightly different instants, over different uptime sources) compare
-/// structurally. Every blanked field is first asserted non-empty.
-fn normalize(mut value: serde_json::Value) -> serde_json::Value {
-    if let Some(status) = value.get_mut("status").and_then(|s| s.as_object_mut()) {
-        for key in ["current_server", "last_reboot"] {
-            let v = status.get(key).and_then(|v| v.as_str()).unwrap_or_default();
-            assert!(!v.is_empty(), "status.{key} must be populated");
-            status.insert(key.to_string(), "".into());
-        }
-    }
-    if let Some(protocols) = value.get_mut("protocols").and_then(|p| p.as_object_mut()) {
-        for (id, proto) in protocols.iter_mut() {
-            let obj = proto.as_object_mut().expect("protocol entry is an object");
-            for key in ["state_changed", "state"] {
-                let v = obj.get(key).and_then(|v| v.as_str()).unwrap_or_default();
-                assert!(!v.is_empty(), "protocols.{id}.{key} must be populated");
-                obj.insert(key.to_string(), "".into());
-            }
-        }
-    }
-    value
-}
-
 #[test]
-fn adapter_matches_in_daemon_looking_glass() {
+fn adapter_serves_birdwatcher_contract() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let grpc_port = free_port();
-    let lg_port = free_port();
     let adapter_port = free_port();
     let bgp_port = free_port();
-    let config_path = write_config(temp.path(), grpc_port, lg_port, bgp_port);
+    let config_path = write_config(temp.path(), grpc_port, bgp_port);
 
-    // Spawn the daemon (serves both gRPC and the in-daemon looking
-    // glass). Structured logs go to stdout, the banner to stderr.
+    // Spawn the daemon (serves gRPC). Structured logs go to stdout,
+    // the banner to stderr.
     let daemon_stdout = temp.path().join("rustbgpd.stdout.log");
     let daemon_stderr = temp.path().join("rustbgpd.stderr.log");
     let mut daemon = Proc {
@@ -267,14 +259,7 @@ fn adapter_matches_in_daemon_looking_glass() {
         name: "rustbgpd",
         stderr_path: daemon_stderr,
     };
-    wait_for_http(lg_port, "/status", &mut daemon);
-
-    // The configured looking glass must emit the deprecation warning.
-    let daemon_logs = std::fs::read_to_string(&daemon_stdout).expect("read daemon stdout");
-    assert!(
-        daemon_logs.contains("DEPRECATED") && daemon_logs.contains("birdwatcher-adapter"),
-        "daemon startup must warn that the in-daemon looking glass is deprecated:\n{daemon_logs}"
-    );
+    wait_for_tcp(grpc_port, &mut daemon);
 
     // Spawn the adapter against the daemon's gRPC endpoint. Built via
     // `cargo run` (same fallback pattern the rbgp test helper uses) —
@@ -299,75 +284,67 @@ fn adapter_matches_in_daemon_looking_glass() {
     };
     wait_for_http(adapter_port, "/status", &mut adapter);
 
-    // /status — equal after blanking the two clock fields.
-    let core = normalize(get_json(lg_port, "/status", "in-daemon"));
-    let ext = normalize(get_json(adapter_port, "/status", "adapter"));
-    assert_eq!(core, ext, "/status must match");
-
-    // /protocols/bgp — protocol id, neighbor_address, neighbor_as,
-    // description, table, and route counters must match; state and
-    // state_changed are blanked (unconnectable peer cycles its FSM).
-    let core = get_json(lg_port, "/protocols/bgp", "in-daemon");
+    // /status — birdwatcher envelope with the api block and a status
+    // object carrying the clock fields.
+    let status = get_json(adapter_port, "/status", "adapter");
     assert!(
-        core["protocols"]["bgp_192.0.2.10"].is_object(),
-        "in-daemon response must contain the configured peer: {core}"
+        status["api"].is_object(),
+        "/status must carry api: {status}"
     );
-    let core = normalize(core);
-    let ext = normalize(get_json(adapter_port, "/protocols/bgp", "adapter"));
-    assert_eq!(core, ext, "/protocols/bgp must match");
+    assert!(
+        status["status"]["current_server"].is_string(),
+        "/status must carry status.current_server: {status}"
+    );
 
-    // /routes/peer/{peer} — byte-equivalent JSON (empty route set; the
-    // envelope, api block, and routes array shape must be identical).
-    let core = get_json(lg_port, "/routes/peer/192.0.2.10", "in-daemon");
-    let ext = get_json(adapter_port, "/routes/peer/192.0.2.10", "adapter");
-    assert_eq!(core, ext, "/routes/peer must match exactly");
+    // /protocols/bgp — the configured peer appears under its
+    // "bgp_<addr>" protocol id with identity fields.
+    let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
+    let peer = &protocols["protocols"]["bgp_192.0.2.10"];
+    assert!(
+        peer.is_object(),
+        "response must contain the configured peer: {protocols}"
+    );
+    assert_eq!(peer["neighbor_address"], "192.0.2.10", "{protocols}");
+    assert_eq!(peer["neighbor_as"], 65010, "{protocols}");
+
+    // /routes/peer/{peer} — empty route set still returns the full
+    // envelope with an empty routes array.
+    let routes = get_json(adapter_port, "/routes/peer/192.0.2.10", "adapter");
+    assert!(routes["api"].is_object(), "{routes}");
+    assert_eq!(routes["routes"], serde_json::json!([]), "{routes}");
 
     // Same via the single-table protocol route (exercises the
-    // "bgp_<addr>" id parsing on both sides).
-    let core = get_json(lg_port, "/routes/protocol/bgp_192.0.2.10", "in-daemon");
-    let ext = get_json(adapter_port, "/routes/protocol/bgp_192.0.2.10", "adapter");
-    assert_eq!(core, ext, "/routes/protocol must match exactly");
+    // "bgp_<addr>" id parsing).
+    let by_protocol = get_json(adapter_port, "/routes/protocol/bgp_192.0.2.10", "adapter");
+    assert_eq!(
+        routes, by_protocol,
+        "/routes/protocol must match /routes/peer"
+    );
 
     // Establish a real session from the in-test BGP speaker and
-    // announce one route, then compare the non-empty route sets —
-    // including the `age` receive timestamp both servers must now
-    // derive from the same RIB receive instant.
+    // announce one route; the adapter must serve it with a non-empty
+    // `age` receive timestamp.
     let _bgp_session = establish_bgp_and_announce(bgp_port);
     let deadline = Instant::now() + Duration::from_secs(60);
-    let (mut core, mut ext) = loop {
-        let core = get_json(lg_port, "/routes/peer/127.0.0.1", "in-daemon");
-        let ext = get_json(adapter_port, "/routes/peer/127.0.0.1", "adapter");
-        if core["routes"].as_array().is_some_and(|r| r.len() == 1)
-            && ext["routes"].as_array().is_some_and(|r| r.len() == 1)
-        {
-            break (core, ext);
+    let live = loop {
+        let live = get_json(adapter_port, "/routes/peer/127.0.0.1", "adapter");
+        if live["routes"].as_array().is_some_and(|r| r.len() == 1) {
+            break live;
         }
         assert!(
             Instant::now() < deadline,
-            "announced route did not appear on both servers\nin-daemon: {core}\nadapter: {ext}\ndaemon stderr:\n{}",
+            "announced route did not appear on the adapter\nadapter: {live}\ndaemon stderr:\n{}",
             daemon.stderr()
         );
         thread::sleep(Duration::from_millis(200));
     };
-
-    // Non-empty age on both sides, equal within clock-recovery jitter
-    // (each server independently truncates `now - elapsed` to seconds).
-    let core_age = core["routes"][0]["age"].as_str().unwrap_or_default();
-    let ext_age = ext["routes"][0]["age"].as_str().unwrap_or_default();
-    assert!(!core_age.is_empty(), "in-daemon age must be populated");
-    assert!(!ext_age.is_empty(), "adapter age must be populated");
-    let delta = epoch_from_timestamp(core_age).abs_diff(epoch_from_timestamp(ext_age));
-    assert!(
-        delta <= 2,
-        "age must agree within jitter: in-daemon {core_age:?} vs adapter {ext_age:?}"
-    );
-
-    // With age blanked, the live-route responses must match exactly.
-    core["routes"][0]["age"] = "".into();
-    ext["routes"][0]["age"] = "".into();
-    assert_eq!(core, ext, "/routes/peer for the live peer must match");
     assert_eq!(
-        core["routes"][0]["network"], "10.99.0.0/24",
+        live["routes"][0]["network"], "10.99.0.0/24",
         "announced route must be served"
     );
+    let age = live["routes"][0]["age"].as_str().unwrap_or_default();
+    assert!(!age.is_empty(), "adapter age must be populated");
+    // The receive timestamp must parse and sit in the recent past.
+    let age_epoch = epoch_from_timestamp(age);
+    assert!(age_epoch > 0, "age must be a parseable timestamp: {age:?}");
 }

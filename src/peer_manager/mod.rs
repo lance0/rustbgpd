@@ -312,7 +312,6 @@ impl PeerManager {
                         log_format: "json".to_string(),
                         grpc_tcp: None,
                         grpc_uds: None,
-                        looking_glass: None,
                     },
                     dynamic_neighbor_limit: None,
                     worker_threads: None,

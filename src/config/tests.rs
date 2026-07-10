@@ -396,51 +396,6 @@ log_format = "json"
 }
 
 #[test]
-fn looking_glass_addr_parsed() {
-    let toml = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-log_format = "json"
-
-[global.telemetry.looking_glass]
-addr = "0.0.0.0:8080"
-"#;
-    let config = parse(toml).unwrap();
-    assert_eq!(
-        config.looking_glass_addr(),
-        Some("0.0.0.0:8080".parse::<SocketAddr>().unwrap())
-    );
-}
-
-#[test]
-fn looking_glass_optional() {
-    let config = parse(valid_toml()).unwrap();
-    assert_eq!(config.looking_glass_addr(), None);
-}
-
-#[test]
-fn looking_glass_invalid_addr_rejected() {
-    let toml = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-log_format = "json"
-
-[global.telemetry.looking_glass]
-addr = "not-a-socket-addr"
-"#;
-    let err = parse(toml).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
-}
-
-#[test]
 fn runtime_state_dir_defaults_to_var_lib() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(
@@ -1431,13 +1386,19 @@ log_format = "json"
 address = "10.0.0.2"
 remote_asn = 65002
 
-[[policy.import]]
+[policy]
+import_chain = ["import-filter"]
+export_chain = ["export-filter"]
+
+[policy.definitions.import-filter]
+[[policy.definitions.import-filter.statements]]
 action = "deny"
 prefix = "10.0.0.0/8"
 ge = 24
 le = 32
 
-[[policy.export]]
+[policy.definitions.export-filter]
+[[policy.definitions.export-filter.statements]]
 action = "permit"
 prefix = "192.168.0.0/16"
 "#;
@@ -1530,7 +1491,11 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.export]]
+[policy]
+export_chain = ["deny-tens"]
+
+[policy.definitions.deny-tens]
+[[policy.definitions.deny-tens.statements]]
 action = "deny"
 prefix = "10.0.0.0/8"
 
@@ -1616,7 +1581,11 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.export]]
+[policy]
+export_chain = ["deny-tens"]
+
+[policy.definitions.deny-tens]
+[[policy.definitions.deny-tens.statements]]
 action = "deny"
 prefix = "10.0.0.0/8"
 
@@ -1660,7 +1629,8 @@ log_format = "json"
 address = "10.0.0.2"
 remote_asn = 65002
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "allow"
 prefix = "10.0.0.0/8"
 "#;
@@ -1684,7 +1654,8 @@ log_format = "json"
 address = "10.0.0.2"
 remote_asn = 65002
 
-[[policy.export]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 prefix = "not-a-prefix"
 "#;
@@ -1704,7 +1675,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 prefix = "10.0.0.0/33"
 "#;
@@ -1724,7 +1696,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 prefix = "10.0.0.0/8"
 ge = 33
@@ -1745,7 +1718,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 prefix = "10.0.0.0/16"
 ge = 8
@@ -1766,7 +1740,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 prefix = "10.0.0.0/8"
 ge = 24
@@ -1788,7 +1763,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[[policy.import]]
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
 action = "deny"
 match_as_path_length_ge = 50
 match_as_path_length_le = 10
@@ -4610,10 +4586,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[[policy.import]]
-action = "permit"
-prefix = "10.0.0.0/8"
-
 [policy.definitions.unrelated]
 default_action = "permit"
 
@@ -4627,7 +4599,6 @@ remote_asn = 65002
     let diff = super::diff_config(&old, &new);
 
     assert!(diff.neighbor_tcp_ao_changed);
-    assert!(diff.policy.import_changed);
     assert_eq!(diff.policy.definitions_added, vec!["unrelated"]);
     assert!(diff.has_reload_applied_changes());
     assert!(diff.has_restart_required_changes());
@@ -5372,10 +5343,8 @@ fn diff_peer_group_changes_detects_field_diffs() {
     assert!(changes[0].render().contains("45"));
 }
 
-/// Policy-only edits are now reload-applied (per-named definitions
-/// flow through `apply_policy_change` on SIGHUP). Only the inline
-/// `policy.import` / `policy.export` statements remain
-/// restart-required.
+/// Policy-only edits are reload-applied (per-named definitions
+/// flow through `apply_policy_change` on SIGHUP).
 #[test]
 fn diff_config_named_policy_only_is_reload_applied() {
     let old = parse(valid_toml()).unwrap();
@@ -12607,7 +12576,7 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
     );
 }
 
-// ── Global inline policy deprecation (Item: surface reduction) ──────
+// ── Retired config keys (LAN-194 removal wave) ──────
 
 /// `MakeWriter` capturing tracing output into a shared buffer so the
 /// deprecation-warning tests can assert on emitted (or absent) warns.
@@ -12641,77 +12610,88 @@ fn capture_warnings(f: impl FnOnce()) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
-fn capture_deprecation_warning(config: &Config) -> String {
-    capture_warnings(|| config.warn_if_deprecated_global_inline_policy())
-}
-
 #[test]
-fn global_inline_policy_emits_deprecation_warning() {
+fn retired_global_inline_policy_fails_load_with_migration_error() {
     let toml_str = format!(
         "{}\n[[policy.import]]\nprefix = \"10.0.0.0/8\"\nge = 8\nle = 24\naction = \"permit\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
-    assert!(config.uses_deprecated_global_inline_policy());
-    let output = capture_deprecation_warning(&config);
+    let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        output.contains("WARN"),
-        "expected a warn-level log: {output}"
+        err.contains("has been removed"),
+        "must say the surface is removed: {err}"
     );
     assert!(
-        output.contains("DEPRECATED") && output.contains("[[policy.import]]"),
-        "warning must name the deprecated surface: {output}"
+        err.contains("[[policy.import]]") && err.contains("[[policy.export]]"),
+        "must name the retired keys: {err}"
     );
     assert!(
-        output.contains("import_chain") && output.contains("rpol"),
-        "warning must point at the migration targets: {output}"
+        err.contains("import_chain") && err.contains("rpol"),
+        "must point at the migration targets: {err}"
     );
 }
 
 #[test]
-fn config_without_global_inline_policy_does_not_warn() {
-    // Named definitions + chains and per-neighbor inline policy are
-    // NOT deprecated — only the global inline fallback warns.
+fn per_neighbor_inline_policy_still_loads() {
+    // Per-neighbor and per-group inline policy is NOT removed — only
+    // the global fallback is.
     let toml_str = format!(
-        "{}\nimport_policy = [{{ prefix = \"10.0.0.0/8\", ge = 8, le = 32, action = \"permit\" }}]\n\
-         [policy]\nimport_chain = [\"keep-all\"]\n\
-         [policy.definitions.keep-all]\nstatements = []\n",
-        valid_toml_no_grpc_security()
+        "{}\nimport_policy = [{{ prefix = \"10.0.0.0/8\", ge = 8, le = 32, action = \"permit\" }}]\n",
+        valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
-    assert!(!config.uses_deprecated_global_inline_policy());
-    let output = capture_deprecation_warning(&config);
-    assert!(output.is_empty(), "no warning expected: {output}");
+    let config = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap();
+    assert!(!config.neighbors[0].import_policy.is_empty());
 }
 
-// ── In-daemon looking glass deprecation (Item: surface reduction) ────
+// ── In-daemon looking glass removal (Item: surface reduction) ────────
 
 #[test]
-fn looking_glass_emits_deprecation_warning() {
+fn retired_looking_glass_fails_load_with_migration_error() {
     let toml_str = format!(
         "{}\n[global.telemetry.looking_glass]\naddr = \"127.0.0.1:8080\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
-    let output = capture_warnings(|| config.warn_if_deprecated_looking_glass());
+    let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        output.contains("WARN"),
-        "expected a warn-level log: {output}"
+        err.contains("has been removed"),
+        "must say the surface is removed: {err}"
     );
     assert!(
-        output.contains("DEPRECATED") && output.contains("[global.telemetry.looking_glass]"),
-        "warning must name the deprecated surface: {output}"
+        err.contains("[global.telemetry.looking_glass]"),
+        "must name the retired key: {err}"
     );
     assert!(
-        output.contains("birdwatcher-adapter"),
-        "warning must point at the external adapter: {output}"
+        err.contains("birdwatcher-adapter"),
+        "must point at the external adapter: {err}"
+    );
+}
+
+// ── Legacy gRPC enforcement sunset warning ───────────────────────────
+
+#[test]
+fn legacy_grpc_enforcement_warns_at_startup() {
+    // `parse()` injects `enforcement = "legacy"` for fixtures without
+    // an explicit [security.grpc] table.
+    let config = parse(valid_toml()).unwrap();
+    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
+    assert!(
+        output.contains("WARN") && output.contains("legacy"),
+        "expected a warn-level legacy-enforcement log: {output}"
+    );
+    assert!(
+        output.contains("mandatory in a future release"),
+        "warning must name the sunset: {output}"
     );
 }
 
 #[test]
-fn config_without_looking_glass_does_not_warn() {
-    let config = parse(valid_toml()).unwrap();
-    let output = capture_warnings(|| config.warn_if_deprecated_looking_glass());
+fn tier_grpc_enforcement_does_not_warn() {
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
+        valid_toml_no_grpc_security()
+    );
+    let config = parse(&toml_str).unwrap();
+    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
     assert!(output.is_empty(), "no warning expected: {output}");
 }
 

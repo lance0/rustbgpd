@@ -143,12 +143,6 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::SensitiveRead,
     ),
     method(
-        "rustbgpd.v1.GlobalService",
-        "SetGlobal",
-        "/rustbgpd.v1.GlobalService/SetGlobal",
-        AuthTier::OperatorOnly,
-    ),
-    method(
         "rustbgpd.v1.ConfigService",
         "DiffRuntimeConfig",
         "/rustbgpd.v1.ConfigService/DiffRuntimeConfig",
@@ -841,7 +835,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 98);
+        assert_eq!(METHODS.len(), 97);
     }
 
     #[test]
@@ -884,7 +878,7 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 56);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
     }
 
     #[test]

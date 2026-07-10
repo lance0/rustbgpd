@@ -85,7 +85,6 @@ Eleven separate gRPC services (Global, Config, Neighbor, Policy, PeerGroup, Rib,
 // Global daemon configuration and identity
 service GlobalService {
   rpc GetGlobal(GetGlobalRequest)     returns (GlobalState);
-  rpc SetGlobal(SetGlobalRequest)     returns (SetGlobalResponse);
 }
 
 // Neighbor lifecycle and state

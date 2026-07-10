@@ -406,8 +406,9 @@ IX peer C  ──┘
   with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
 - **BMP export** — stream to OpenBMP or pmacct for long-term archival
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
-- **Birdwatcher-compatible REST API** — optional HTTP server for Alice-LG and
-  similar looking glass frontends (`[global.telemetry.looking_glass]`)
+- **Birdwatcher-compatible REST API** — the external
+  [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) serves
+  Alice-LG and similar looking glass frontends from the gRPC API
 - **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 
@@ -426,10 +427,6 @@ log_format = "json"
 [global.telemetry.grpc_tcp]
 enabled = true
 address = "0.0.0.0:50051"
-
-# Birdwatcher-compatible looking glass for Alice-LG
-[global.telemetry.looking_glass]
-addr = "0.0.0.0:8080"
 
 # RPKI — annotate every route with validation state
 [rpki]
@@ -451,11 +448,15 @@ address = "10.0.0.100:5000"
 
 # Peers — import everything, export nothing
 [policy]
-[[policy.export]]
+export_chain = ["deny-all"]
+
+[policy.definitions.deny-all]
+[[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "0.0.0.0/0"
 le = 32
-[[policy.export]]
+
+[[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "::/0"
 le = 128

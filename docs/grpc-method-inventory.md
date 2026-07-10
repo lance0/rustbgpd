@@ -54,12 +54,11 @@ shape itself does not raise the tier.
 
 ## Per-service inventory
 
-### GlobalService (2 RPCs)
+### GlobalService (1 RPC)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
-| `SetGlobal` | `operator_only` | Reserved; currently `UNIMPLEMENTED`. Future implementation would touch global daemon state, so classify defensively now to avoid the "we'll tag it later" trap. |
 
 ### ConfigService (6 RPCs)
 
@@ -217,13 +216,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 56 | 57.1% |
-| `mutating` | 19 | 19.4% |
-| `operator_only` | 23 | 23.5% |
-| **Total** | **98** | **100%** |
+| `sensitive_read` | 56 | 57.7% |
+| `mutating` | 19 | 19.6% |
+| `operator_only` | 22 | 22.7% |
+| **Total** | **97** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 98
-total is 94 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 97
+total is 93 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -244,12 +243,12 @@ specific method if the model warrants it.
    (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 23
+2. **`operator_only` is small enough to gate by principal role.** 22
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   twenty-three `operator_only` methods live here. The simplest model is
+   twenty-two `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
@@ -279,12 +278,7 @@ specific method if the model warrants it.
    cut-over is not a breaking change for everyone on the same
    release. That opt-in path shipped as slice-5a, and the production
    default flipped to `tier` in v0.24.0 (legacy is now the opt-out).
-7. **`SetGlobal` is `UNIMPLEMENTED` today.** Classifying it
-   `operator_only` now sets the design constraint for whoever lands
-   the implementation — otherwise the natural temptation is to ship
-   it as `mutating` because "it's just a write." Catching this
-   pre-implementation is cheap; catching it post-CVE is not.
-8. **Audit logging.** The runtime now emits tier-decision logs and the
+7. **Audit logging.** The runtime now emits tier-decision logs and the
    low-cardinality `bgp_grpc_authz_decisions_total` metric for every RPC;
    listener `max_tier` denials use the bounded
    `result="listener_tier_denied"` label, and unauthenticated over-cap probes
@@ -303,7 +297,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 98-method classification
+`crates/api/src/authz.rs` contains the same 97-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

@@ -400,6 +400,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
 
+- **`security.grpc.enforcement = "legacy"` now logs a startup warning.**
+  Legacy mode keeps working, but the daemon warns at boot that
+  per-method tier authorization is not enforced and that tier
+  enforcement becomes mandatory in a future release — migrate to
+  `enforcement = "tier"` with `[security.grpc.roles]`. (LAN-194)
+
 - **Release publication is now fail-closed.** The binary-release and
   container-image workflows refuse to publish unless the pushed tag
   `vX.Y.Z` equals the workspace `[workspace.package]` version and
@@ -426,6 +432,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   removed in the next release; repoint dashboards and alerts at
   `bgp_aspa_records`. The shipped Grafana dashboard and the M84
   interop assertions already use the new name. (LAN-318)
+
+### Removed
+
+- **The in-daemon birdwatcher looking glass HTTP server.**
+  `[global.telemetry.looking_glass]` is gone; a config that still sets
+  it fails to load with a migration error. Run the external
+  `examples/birdwatcher-adapter` instead — it serves the identical
+  birdwatcher REST endpoints (`/status`, `/protocols/bgp`,
+  `/routes/protocol/{id}`, `/routes/peer/{peer}`) from the daemon's
+  gRPC API. (LAN-194)
+
+- **The legacy global inline policy fallback.** Top-level
+  `[[policy.import]]` / `[[policy.export]]` statements no longer load;
+  configs that still set them fail with a migration error. Move the
+  statements to named policies (`[policy.definitions.<name>]` or
+  `.rpol` files via `[policy] rpol_files`) referenced from `[policy]
+  import_chain` / `export_chain` — unlike the fallback, named chains
+  hot-apply on SIGHUP and are visible to config transactions.
+  Per-neighbor and per-group inline policy (`import_policy` /
+  `export_policy`) is unchanged. (LAN-194)
+
+- **The `GlobalService.SetGlobal` RPC.** It was reserved and always
+  returned `UNIMPLEMENTED`; runtime global mutation goes through
+  config transactions instead. The method, its request/response
+  messages, and its authz-matrix entry are removed (97 methods now
+  inventoried). (LAN-194)
 
 ### Fixed
 
