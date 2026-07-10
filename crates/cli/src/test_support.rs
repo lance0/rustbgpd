@@ -58,6 +58,9 @@ pub(crate) struct MockState {
     // Empty = every call returns an empty final page.
     pub(crate) list_route_pages: Mutex<Vec<server_proto::ListRoutesResponse>>,
     pub(crate) list_route_requests: Mutex<Vec<server_proto::ListRoutesRequest>>,
+    // Canned ListNeighbors response — drives `rbgp diff` peer-availability
+    // gating. Empty = no neighbors configured on the daemon.
+    pub(crate) list_neighbors_response: Mutex<Vec<server_proto::NeighborState>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
@@ -610,7 +613,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             .list_neighbors_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(server_proto::ListNeighborsResponse {
-            neighbors: vec![],
+            neighbors: self.state.list_neighbors_response.lock().await.clone(),
         }))
     }
 

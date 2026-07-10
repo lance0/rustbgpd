@@ -171,6 +171,21 @@ per_client_best = true
    rbgp rib --prefix <prefix> advertised <member> --explain
    ```
 
+   Then run the systematic per-member advertised-view diff: export the
+   incumbent's advertised routes to an `rbgp-ribsnap/1` NDJSON snapshot
+   (format and producer sketches in [`docs/ribdiff.md`](../ribdiff.md))
+   and compare it against the live Adj-RIB-Out:
+
+   ```bash
+   rbgp diff advertised --against incumbent.ndjson          # all snapshot members
+   rbgp diff advertised --peer <member> --against incumbent.ndjson
+   ```
+
+   Exit code 0 means complete inputs with no semantic differences, 1
+   means differences (listed in the report), and 2 means the comparison
+   was refused (incomplete, stale, or over-limit input is never treated
+   as equal). Gate each cutover batch on exit code 0 for its members.
+
 5. Confirm counters stay quiet after convergence:
 
    ```bash

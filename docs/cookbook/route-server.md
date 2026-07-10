@@ -196,6 +196,17 @@ hygiene and per-member export views without carrying member traffic yet.
    $ rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
    ```
 
+   For the systematic version — every member, every prefix, every
+   attribute — export the incumbent's advertised view to an NDJSON
+   snapshot and diff it against the live Adj-RIB-Out
+   ([`docs/ribdiff.md`](../ribdiff.md) has the snapshot format and
+   producer snippets):
+
+   ```console
+   $ rbgp diff advertised --against incumbent.ndjson
+   $ echo $?   # 0 in sync, 1 divergent, 2 comparison refused
+   ```
+
 4. For Add-Path members, verify multiple candidate paths are present. For
    non-Add-Path members, verify `Distribution Mode: per-client-best` and inspect
    the candidate ladder with `--explain`.
