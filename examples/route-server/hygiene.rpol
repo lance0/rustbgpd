@@ -49,3 +49,8 @@ test rpki-not-found-is-tagged-ov-not-found {
     route { prefix 203.0.113.0/24; as-path "64501" }
     expect ixp-hygiene == accept with ext-community OV_NOT_FOUND
 }
+
+test rpki-invalid-is-tagged-ov-invalid {
+    route { prefix 203.0.113.0/24; as-path "64501"; rpki invalid }
+    expect ixp-hygiene == accept with ext-community OV_INVALID
+}
