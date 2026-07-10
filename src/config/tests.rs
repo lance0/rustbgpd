@@ -4093,7 +4093,9 @@ fn diff_neighbors_detects_prefix_orf_receive_only_change() {
 
     let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
     assert!(
-        changes.iter().any(|c| c.contains("prefix_orf_receive")),
+        changes
+            .iter()
+            .any(|c| c.render().contains("prefix_orf_receive")),
         "describe_neighbor_changes must name prefix_orf_receive, got {changes:?}"
     );
 }
@@ -4114,7 +4116,9 @@ fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
 
     let changes = super::describe_neighbor_changes(&old[0], &diff.changed[0]);
     assert!(
-        changes.iter().any(|c| c.contains("disable_ipv4_unicast")),
+        changes
+            .iter()
+            .any(|c| c.render().contains("disable_ipv4_unicast")),
         "describe_neighbor_changes must name disable_ipv4_unicast, got {changes:?}"
     );
 }
@@ -4826,9 +4830,9 @@ fn describe_neighbor_changes_detects_field_diffs() {
 
     let changes = super::describe_neighbor_changes(&old, &new);
     assert_eq!(changes.len(), 3);
-    assert!(changes[0].contains("remote_asn"));
-    assert!(changes[1].contains("hold_time"));
-    assert!(changes[2].contains("families"));
+    assert!(changes[0].render().contains("remote_asn"));
+    assert!(changes[1].render().contains("hold_time"));
+    assert!(changes[2].render().contains("families"));
 }
 
 #[test]
@@ -4846,8 +4850,8 @@ fn describe_neighbor_changes_hides_md5_value() {
 
     let changes = super::describe_neighbor_changes(&old, &new);
     assert_eq!(changes.len(), 1);
-    assert!(changes[0].contains("<changed>"));
-    assert!(!changes[0].contains("secret"));
+    assert!(changes[0].render().contains("<changed>"));
+    assert!(!changes[0].render().contains("secret"));
 }
 
 #[test]
@@ -4864,10 +4868,133 @@ fn describe_neighbor_changes_hides_tcp_ao_key() {
     });
 
     let changes = super::describe_neighbor_changes(&old, &new);
-    assert_eq!(
-        changes,
-        vec!["tcp_ao: <changed restart-required>".to_string()]
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].render(), "tcp_ao: <changed>  [restart required]");
+    assert!(!changes[0].render().contains("secret"));
+    assert_eq!(changes[0].old, serde_json::Value::Null);
+    assert_eq!(changes[0].new, serde_json::Value::Null);
+}
+
+// ── LAN-321: operator-grade diff rendering + impact classification ───
+
+#[test]
+fn config_field_impact_surfaces_reload_matrix_classes() {
+    use super::ConfigFieldImpact::{HotApplied, RestartRequired, SessionReset};
+    let class = |field: &str| super::config_field_impact(field).map(|(class, _)| class);
+
+    // Session-affecting: a hold_time edit classifies as session reset.
+    assert_eq!(class("hold_time"), Some(SessionReset));
+    assert_eq!(class("families"), Some(SessionReset));
+    assert_eq!(class("md5_password"), Some(SessionReset));
+    // Hot-applied: a description edit never touches the session.
+    assert_eq!(class("description"), Some(HotApplied));
+    assert_eq!(class("log_level"), Some(HotApplied));
+    assert_eq!(class("max_prefixes"), Some(HotApplied));
+    // Restart-required, matching the reload matrix pins.
+    assert_eq!(class("tcp_ao"), Some(RestartRequired));
+    assert_eq!(class("bfd"), Some(RestartRequired));
+    // The existing classifiers disagree on these (reload matrix vs the
+    // reconcile / reshape executors), so the diff renders no annotation.
+    assert_eq!(class("remote_asn"), None);
+    assert_eq!(class("peer_group"), None);
+}
+
+#[test]
+fn config_diff_human_output_is_operator_grade() {
+    // Mixed diff: one added, one changed (hot + session-reset fields),
+    // one untouched neighbor.
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors = vec![
+        test_neighbor("10.0.0.2", 65002),
+        test_neighbor("10.0.0.9", 65009),
+    ];
+    old.neighbors[0].hold_time = Some(90);
+    let mut new = old.clone();
+    new.neighbors[0].hold_time = Some(30);
+    new.neighbors[0].description = Some("edge".to_string());
+    new.neighbors.push(test_neighbor("10.0.0.3", 65003));
+
+    let diff = super::diff_config(&old, &new);
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+
+    // The 0.50.0 defect: Rust Debug formatting leaked into operator output.
+    assert!(!text.contains("Some("), "{text}");
+    assert!(!text.contains("None"), "{text}");
+
+    assert!(text.contains("+ 10.0.0.3 (AS 65003)"), "{text}");
+    assert!(
+        text.contains("hold_time: 90 → 30  [session reset: OPEN renegotiation]"),
+        "{text}"
     );
+    assert!(
+        text.contains("description: (unset) → edge  [hot-applied]"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("10.0.0.9"),
+        "unchanged neighbors must not appear: {text}"
+    );
+    assert!(
+        text.ends_with("Plan: 1 to add, 1 to change · 1 session will reset\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn config_diff_json_changes_have_stable_field_shape() {
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
+    old.neighbors[0].hold_time = Some(90);
+    let mut new = old.clone();
+    new.neighbors[0].hold_time = Some(30);
+    new.neighbors[0].description = Some("edge".to_string());
+
+    let diff = super::diff_config(&old, &new);
+    let json = super::config_diff_json_value(&diff);
+
+    let changes = &json["reload_applied"]["neighbors"]["changed"][0]["changes"];
+    // describe order: description before hold_time.
+    assert_eq!(changes[0]["field"], "description");
+    assert_eq!(changes[0]["old"], serde_json::Value::Null);
+    assert_eq!(changes[0]["new"], "edge");
+    assert_eq!(changes[0]["impact"], "hot_applied");
+    assert_eq!(changes[1]["field"], "hold_time");
+    assert_eq!(changes[1]["old"], 90);
+    assert_eq!(changes[1]["new"], 30);
+    assert_eq!(changes[1]["impact"], "session_reset");
+
+    assert_eq!(json["summary"]["neighbors_added"], 0);
+    assert_eq!(json["summary"]["neighbors_changed"], 1);
+    assert_eq!(json["summary"]["neighbors_removed"], 0);
+    assert_eq!(json["summary"]["sessions_will_reset"], 1);
+    assert_eq!(json["summary"]["restart_required"], false);
+}
+
+#[test]
+fn config_diff_summary_line_covers_restart_and_no_reset_cases() {
+    // Hot-applied-only change: no session resets expected.
+    let mut old = parse(valid_toml()).unwrap();
+    old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
+    let mut new = old.clone();
+    new.neighbors[0].description = Some("edge".to_string());
+    let diff = super::diff_config(&old, &new);
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(
+        text.ends_with("Plan: 1 to change · no session resets expected\n"),
+        "{text}"
+    );
+
+    // Restart-required change ([policy.explain]): the summary names the
+    // restart and makes no "no resets" claim.
+    let mut new = old.clone();
+    new.policy.explain.cache_size = 512;
+    let diff = super::diff_config(&old, &new);
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(
+        text.ends_with("Plan: no neighbor changes · daemon restart required for some changes\n"),
+        "{text}"
+    );
+    assert!(!text.contains("no session resets expected"), "{text}");
 }
 
 #[test]
@@ -4985,7 +5112,7 @@ hold_time = 45
         diff.neighbors.changed[0]
             .changes
             .iter()
-            .any(|c| c.contains("hold_time"))
+            .any(|c| c.render().contains("hold_time"))
     );
 }
 
@@ -5073,11 +5200,14 @@ fn diff_config_role_change_is_reload_applied() {
             .changed
             .iter()
             .any(|summary| summary.address == "10.0.0.2"
-                && summary.changes.iter().any(|change| change.contains("role"))
                 && summary
                     .changes
                     .iter()
-                    .any(|change| change.contains("strict_role"))),
+                    .any(|change| change.render().contains("role"))
+                && summary
+                    .changes
+                    .iter()
+                    .any(|change| change.render().contains("strict_role"))),
         "neighbor details must explain role/strict_role drift: {:?}",
         diff.neighbors.changed
     );
@@ -5199,9 +5329,9 @@ fn diff_peer_group_changes_detects_field_diffs() {
     };
     let changes = super::describe_peer_group_changes(&old, &new);
     assert_eq!(changes.len(), 1);
-    assert!(changes[0].contains("hold_time"));
-    assert!(changes[0].contains("90"));
-    assert!(changes[0].contains("45"));
+    assert!(changes[0].render().contains("hold_time"));
+    assert!(changes[0].render().contains("90"));
+    assert!(changes[0].render().contains("45"));
 }
 
 /// Policy-only edits are now reload-applied (per-named definitions
@@ -12432,7 +12562,9 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
     assert_eq!(diff.changed.len(), 1);
     let changes = super::describe_neighbor_changes(&old, &new);
     assert!(
-        changes.iter().any(|c| c.contains("send_hold_time")),
+        changes
+            .iter()
+            .any(|c| c.render().contains("send_hold_time")),
         "{changes:?}"
     );
 }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
@@ -41,6 +41,11 @@ pub(crate) struct MockState {
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
+    pub(crate) config_diff_error: Mutex<Option<(Code, String)>>,
+    // Serve a "candidate matches runtime" diff / noop plan so the CLI
+    // detailed exit-code contract (0 = no changes) can be pinned.
+    pub(crate) config_diff_no_changes: AtomicBool,
+    pub(crate) config_plan_noop: AtomicBool,
     pub(crate) bfd_error: Mutex<Option<(Code, String)>>,
     pub(crate) bfd_sessions: Mutex<Vec<server_proto::BfdSession>>,
     pub(crate) last_bfd_request: Mutex<Option<server_proto::GetBfdSessionsRequest>>,
@@ -350,6 +355,20 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
     ) -> Result<Response<server_proto::DiffRuntimeConfigResponse>, Status> {
         self.state.config_diff_calls.fetch_add(1, Ordering::SeqCst);
         *self.state.last_config_diff.lock().await = Some(request.into_inner().candidate_toml);
+        if let Some((code, message)) = self.state.config_diff_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        if self.state.config_diff_no_changes.load(Ordering::SeqCst) {
+            return Ok(Response::new(server_proto::DiffRuntimeConfigResponse {
+                has_actionable_changes: false,
+                has_reload_applied_changes: false,
+                has_restart_required_changes: false,
+                has_informational_changes: false,
+                has_any_changes: false,
+                human_text: "No changes.\n".to_string(),
+                diff_json: "{\"has_any_changes\":false}".to_string(),
+            }));
+        }
         Ok(Response::new(server_proto::DiffRuntimeConfigResponse {
             has_actionable_changes: true,
             has_reload_applied_changes: false,
@@ -367,6 +386,17 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
     ) -> Result<Response<server_proto::ConfigTransactionPlanResponse>, Status> {
         self.state.config_plan_calls.fetch_add(1, Ordering::SeqCst);
         *self.state.last_config_plan.lock().await = Some(request.into_inner());
+        if self.state.config_plan_noop.load(Ordering::SeqCst) {
+            return Ok(Response::new(server_proto::ConfigTransactionPlanResponse {
+                status: server_proto::ConfigTransactionPlanStatus::Noop as i32,
+                runtime_snapshot_token: "kv1:planned:1".to_string(),
+                diff: None,
+                supported_sections: Vec::new(),
+                unsupported_sections: Vec::new(),
+                restart_required_sections: Vec::new(),
+                human_text: "Config transaction is a noop.\n".to_string(),
+            }));
+        }
         Ok(Response::new(server_proto::ConfigTransactionPlanResponse {
             status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
             runtime_snapshot_token: "kv1:planned:1".to_string(),

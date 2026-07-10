@@ -707,7 +707,7 @@ md5_password = "new-secret"
     assert!(diff.human_text.contains("md5_password: <changed>"));
     assert!(!diff.human_text.contains("old-secret"));
     assert!(!diff.human_text.contains("new-secret"));
-    assert!(diff.diff_json.contains("md5_password: <changed>"));
+    assert!(diff.diff_json.contains("\"field\": \"md5_password\""));
     assert!(!diff.diff_json.contains("old-secret"));
     assert!(!diff.diff_json.contains("new-secret"));
 }
