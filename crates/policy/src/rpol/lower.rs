@@ -57,28 +57,29 @@ use crate::engine::{
 };
 use crate::eval::checked_arith;
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
-    ValueCmpNode, ValueCmpOp, ValueExpr,
+    Cmp, CompiledChain, CompiledPolicy, ForEachNode, LoopSource, MatchExpr, PolicySource, RegexId,
+    SetId, Term, TermAction, ValueCmpNode, ValueCmpOp, ValueExpr,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityLit, Expr, NextHopArg, PolicyDef, PrependAsArg, Rhs, SourceFile,
-    Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, ForSource, NextHopArg, PolicyDef,
+    PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::typeck::{Field, resolve_field, value_field_of};
 
-/// Static slot allocation for `let` bindings (LAN-302): one register
-/// file per **source term** (bindings never cross terms), slots handed
-/// out in declaration order. Entering an `if`/`else` body saves a
-/// [`mark`](Self::mark) and leaving [`reset`](Self::reset)s to it, so
-/// sibling scopes reuse slots — they are never live simultaneously —
-/// and the frame stays within `2 × MAX_LOCALS` slots
-/// (`crate::eval::LOCAL_FRAME_SLOTS`) forever. Lookup scans innermost
-/// last (reverse), giving deterministic shadowing of outer bindings
-/// and parameters. Purely a function of the source, so identical
-/// source always compiles to identical slot assignments (ADR-0103
-/// Decision 5 determinism).
+/// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
+/// register file per **source term** (bindings never cross terms),
+/// slots handed out in declaration order. Entering an `if`/`else` or
+/// loop body saves a [`mark`](Self::mark) and leaving
+/// [`reset`](Self::reset)s to it, so sibling scopes reuse slots — they
+/// are never live simultaneously — and the typechecker's per-scope and
+/// whole-frame caps keep every allocation inside the
+/// `crate::eval::LOCAL_FRAME_SLOTS` register file. Lookup scans
+/// innermost last (reverse), giving deterministic shadowing of outer
+/// bindings and parameters. Purely a function of the source, so
+/// identical source always compiles to identical slot assignments
+/// (ADR-0103 Decision 5 determinism).
 #[derive(Default)]
 struct LetEnv {
     lets: Vec<(String, u8)>,
@@ -337,11 +338,32 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         store: &mut SetStore,
     ) -> Vec<(MatchExpr, TermAction)> {
-        let mut out: Vec<(MatchExpr, TermAction)> = Vec::new();
-        let mut pending = RouteModifications::default();
         // Slots reset per source term: bindings never cross terms.
         let mut lets = LetEnv::default();
-        for stmt in &term.stmts {
+        self.lower_stmts(&term.stmts, env, &mut lets, store)
+    }
+
+    /// Lower one statement sequence — a term body or (recursively) a
+    /// `for` body — to guarded IR actions (see module docs for the
+    /// fallthrough encoding). `break`/`continue` lower to their
+    /// loop-control terms (typechecked: they only occur in loop
+    /// bodies); a `for` lowers to a single [`TermAction::ForEach`]
+    /// term whose body re-enters this function in a nested `lets`
+    /// scope.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per statement kind; splitting would scatter the fallthrough encoding"
+    )]
+    fn lower_stmts(
+        &mut self,
+        stmts: &[Stmt],
+        env: &HashMap<&str, u32>,
+        lets: &mut LetEnv,
+        store: &mut SetStore,
+    ) -> Vec<(MatchExpr, TermAction)> {
+        let mut out: Vec<(MatchExpr, TermAction)> = Vec::new();
+        let mut pending = RouteModifications::default();
+        for stmt in stmts {
             match stmt {
                 Stmt::Action(ActionStmt::Accept(_)) => {
                     out.push((
@@ -354,11 +376,25 @@ impl<'a> Lowerer<'a> {
                     out.push((MatchExpr::True, TermAction::Deny));
                     return out;
                 }
-                // Term-body `let`: lower the initializer against the
-                // scope *before* declaring, so `let x = x + 1` reads
-                // the prior `x` (shadowing, not self-reference).
+                // Loop control (LAN-303): staged modifications so far
+                // still apply — `break`/`continue` are control, not
+                // verdicts — then the statement is terminal for this
+                // body (later statements are typecheck-unreachable).
+                Stmt::Action(ActionStmt::Break(_)) => {
+                    flush_pending(&mut out, &mut pending);
+                    out.push((MatchExpr::True, TermAction::Break));
+                    return out;
+                }
+                Stmt::Action(ActionStmt::Continue(_)) => {
+                    flush_pending(&mut out, &mut pending);
+                    out.push((MatchExpr::True, TermAction::ContinueLoop));
+                    return out;
+                }
+                // Body `let`: lower the initializer against the scope
+                // *before* declaring, so `let x = x + 1` reads the
+                // prior `x` (shadowing, not self-reference).
                 Stmt::Action(ActionStmt::Let { name, init, .. }) => {
-                    let expr = lower_value(init, env, &lets);
+                    let expr = lower_value(init, env, lets);
                     let slot = lets.declare(&name.node);
                     out.push((
                         MatchExpr::True,
@@ -369,49 +405,100 @@ impl<'a> Lowerer<'a> {
                         },
                     ));
                 }
-                Stmt::Action(action) => {
-                    apply_action(&mut pending, action, env, &lets);
-                }
-                Stmt::If(if_stmt) => {
-                    if !pending.is_empty() {
+                // LAN-303: a binding-valued community action resolves
+                // per execution, so it needs its own term (flushing
+                // staged modifications first preserves execution
+                // order). Parameter references are compile-time
+                // constants and stage as literals in `apply_action`.
+                Stmt::Action(
+                    action @ ActionStmt::Community {
+                        add,
+                        arg: CommunityArg::Var(name),
+                        ..
+                    },
+                ) => {
+                    if let Some(slot) = lets.lookup(&name.node) {
+                        flush_pending(&mut out, &mut pending);
                         out.push((
                             MatchExpr::True,
-                            TermAction::Continue(std::mem::take(&mut pending)),
+                            TermAction::CommunityVar {
+                                add: *add,
+                                slot,
+                                name: name.node.clone().into_boxed_str(),
+                            },
                         ));
+                    } else {
+                        apply_action(&mut pending, action, env, lets);
                     }
-                    let guard = self.lower_expr(&if_stmt.cond, env, &lets, store);
+                }
+                Stmt::Action(action) => {
+                    apply_action(&mut pending, action, env, lets);
+                }
+                Stmt::If(if_stmt) => {
+                    flush_pending(&mut out, &mut pending);
+                    let guard = self.lower_expr(&if_stmt.cond, env, lets, store);
                     let scope = lets.mark();
-                    let (then_binds, then_arm) = lower_body(&if_stmt.then_actions, env, &mut lets);
+                    let (then_binds, then_tail) = lower_body(&if_stmt.then_actions, env, lets);
                     lets.reset(scope);
                     let needs_else_guard = if_stmt.else_actions.is_some();
                     // Body `let`s become Bind terms guarded by the
                     // branch condition, ahead of the body's action
-                    // term (guards are pure, so re-evaluating the
+                    // terms (guards are pure, so re-evaluating the
                     // condition per term cannot diverge).
                     for bind in then_binds {
                         out.push((guard.clone(), bind));
                     }
-                    if let Some(action) = then_arm {
-                        out.push((guard.clone(), action));
-                    } else if needs_else_guard {
+                    if then_tail.is_empty() && needs_else_guard {
                         // An empty/no-op then-branch still gates the else.
                         out.push((
                             guard.clone(),
                             TermAction::Continue(RouteModifications::default()),
                         ));
                     }
+                    for action in then_tail {
+                        out.push((guard.clone(), action));
+                    }
                     if let Some(else_actions) = &if_stmt.else_actions {
                         let scope = lets.mark();
-                        let (else_binds, else_arm) = lower_body(else_actions, env, &mut lets);
+                        let (else_binds, else_tail) = lower_body(else_actions, env, lets);
                         lets.reset(scope);
                         let negated = MatchExpr::Not(Box::new(guard));
                         for bind in else_binds {
                             out.push((negated.clone(), bind));
                         }
-                        if let Some(action) = else_arm {
-                            out.push((negated, action));
+                        for action in else_tail {
+                            out.push((negated.clone(), action));
                         }
                     }
+                }
+                // LAN-303: the loop variable is a binding in a fresh
+                // body scope (fresh value per iteration at runtime);
+                // sibling scopes reuse its slots, keeping allocation a
+                // pure function of the source (Decision 5 determinism).
+                Stmt::For(for_stmt) => {
+                    flush_pending(&mut out, &mut pending);
+                    let source = self.lower_for_source(&for_stmt.source);
+                    let scope = lets.mark();
+                    let slot = lets.declare(&for_stmt.var.node);
+                    let body = self
+                        .lower_stmts(&for_stmt.body, env, lets, store)
+                        .into_iter()
+                        .map(|(guard, action)| Term {
+                            name: None,
+                            guard,
+                            action,
+                        })
+                        .collect();
+                    lets.reset(scope);
+                    out.push((
+                        MatchExpr::True,
+                        TermAction::ForEach(Box::new(ForEachNode {
+                            source,
+                            slot,
+                            var: for_stmt.var.node.clone().into_boxed_str(),
+                            body,
+                        })),
+                    ));
                 }
             }
         }
@@ -419,6 +506,19 @@ impl<'a> Lowerer<'a> {
             out.push((MatchExpr::True, TermAction::Continue(pending)));
         }
         out
+    }
+
+    /// Resolve a loop's iteration source (LAN-303; runs on typechecked
+    /// ASTs only).
+    fn lower_for_source(&self, source: &ForSource) -> LoopSource {
+        match source {
+            ForSource::Field(path) => match resolve_field(path).expect("typechecked") {
+                Field::Communities => LoopSource::Communities,
+                Field::AsPath => LoopSource::AsPath,
+                _ => unreachable!("typechecked: iterable fields are communities/as-path"),
+            },
+            ForSource::Set(name) => LoopSource::AsnSet(self.asn_set_ids[&name.node]),
+        }
     }
 
     fn lower_expr(
@@ -468,6 +568,42 @@ impl<'a> Lowerer<'a> {
                 Field::PeerAsn => MatchExpr::PeerAsInSet(self.asn_set_ids[&set.node]),
                 _ => MatchExpr::CommunityInSet(self.community_set_ids[&set.node]),
             },
+            // LAN-303: `<binding> in <set>` — a binding probes at
+            // runtime; a parameter is a compile-time constant and the
+            // probe folds to its truth value here (True / empty-Or =
+            // never matches).
+            Expr::IdentIn { ident, set } => {
+                if let Some(slot) = lets.lookup(&ident.node) {
+                    if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                        MatchExpr::LocalInAsnSet {
+                            slot,
+                            name: ident.node.clone().into_boxed_str(),
+                            set: id,
+                        }
+                    } else {
+                        MatchExpr::LocalInCommunitySet {
+                            slot,
+                            name: ident.node.clone().into_boxed_str(),
+                            set: self.community_set_ids[&set.node],
+                        }
+                    }
+                } else {
+                    let value = *env
+                        .get(ident.node.as_str())
+                        .expect("typechecked: parameter in scope");
+                    let matched = if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                        self.asn_sets[id.0 as usize].contains(value)
+                    } else {
+                        let id = self.community_set_ids[&set.node];
+                        self.community_sets[id.0 as usize].contains_standard(value)
+                    };
+                    if matched {
+                        MatchExpr::True
+                    } else {
+                        MatchExpr::Or(Vec::new())
+                    }
+                }
+            }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
@@ -694,24 +830,64 @@ fn lower_cmp(
     }
 }
 
+/// Flush staged modifications as an unconditional
+/// [`TermAction::Continue`] term, preserving execution order around
+/// terms that must stand alone (`if` blocks, loops, loop control,
+/// binding-valued community actions).
+fn flush_pending(out: &mut Vec<(MatchExpr, TermAction)>, pending: &mut RouteModifications) {
+    if !pending.is_empty() {
+        out.push((
+            MatchExpr::True,
+            TermAction::Continue(std::mem::take(pending)),
+        ));
+    }
+}
+
 /// Lower an `if` body (a flat action list) to its `let` bindings
 /// (LAN-302 — [`TermAction::Bind`]s the caller emits ahead of the
-/// action term, guarded by the branch condition) and its term action:
-/// `Some(Permit)` on `accept`, `Some(Deny)` on `reject`,
-/// `Some(Continue)` when it only modifies, `None` when it does nothing.
-/// The caller wraps this in a `lets` scope mark/reset — body bindings
-/// are not visible outside the body.
+/// action terms, guarded by the branch condition) and its ordered
+/// action tail: staged modifications as `Continue` terms interleaved
+/// (in execution order) with binding-valued community actions
+/// (LAN-303), ending with the body's terminal — `Permit` on `accept`,
+/// `Deny` on `reject`, `Break`/`ContinueLoop` on loop control — or
+/// nothing when the body only modifies/does nothing. The caller wraps
+/// this in a `lets` scope mark/reset — body bindings are not visible
+/// outside the body.
 fn lower_body(
     actions: &[ActionStmt],
     env: &HashMap<&str, u32>,
     lets: &mut LetEnv,
-) -> (Vec<TermAction>, Option<TermAction>) {
+) -> (Vec<TermAction>, Vec<TermAction>) {
     let mut binds = Vec::new();
+    let mut tail: Vec<TermAction> = Vec::new();
     let mut mods = RouteModifications::default();
+    let flush = |tail: &mut Vec<TermAction>, mods: &mut RouteModifications| {
+        if !mods.is_empty() {
+            tail.push(TermAction::Continue(std::mem::take(mods)));
+        }
+    };
     for action in actions {
         match action {
-            ActionStmt::Accept(_) => return (binds, Some(TermAction::Permit(mods))),
-            ActionStmt::Reject(_) => return (binds, Some(TermAction::Deny)),
+            ActionStmt::Accept(_) => {
+                tail.push(TermAction::Permit(mods));
+                return (binds, tail);
+            }
+            ActionStmt::Reject(_) => {
+                tail.push(TermAction::Deny);
+                return (binds, tail);
+            }
+            // Loop control (LAN-303): staged modifications still
+            // apply, then the branch is terminal.
+            ActionStmt::Break(_) => {
+                flush(&mut tail, &mut mods);
+                tail.push(TermAction::Break);
+                return (binds, tail);
+            }
+            ActionStmt::Continue(_) => {
+                flush(&mut tail, &mut mods);
+                tail.push(TermAction::ContinueLoop);
+                return (binds, tail);
+            }
             ActionStmt::Let { name, init, .. } => {
                 let expr = lower_value(init, env, lets);
                 let slot = lets.declare(&name.node);
@@ -721,15 +897,25 @@ fn lower_body(
                     expr,
                 });
             }
+            // LAN-303: binding-valued community action — its own term,
+            // in execution order relative to staged modifications.
+            ActionStmt::Community {
+                add,
+                arg: CommunityArg::Var(name),
+                ..
+            } if lets.lookup(&name.node).is_some() => {
+                flush(&mut tail, &mut mods);
+                tail.push(TermAction::CommunityVar {
+                    add: *add,
+                    slot: lets.lookup(&name.node).expect("checked above"),
+                    name: name.node.clone().into_boxed_str(),
+                });
+            }
             other => apply_action(&mut mods, other, env, lets),
         }
     }
-    let action = if mods.is_empty() {
-        None
-    } else {
-        Some(TermAction::Continue(mods))
-    };
-    (binds, action)
+    flush(&mut tail, &mut mods);
+    (binds, tail)
 }
 
 fn apply_action(
@@ -739,8 +925,12 @@ fn apply_action(
     lets: &LetEnv,
 ) {
     match action {
-        ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::Let { .. } => {
-            unreachable!("verdicts and `let` handled by callers")
+        ActionStmt::Accept(_)
+        | ActionStmt::Reject(_)
+        | ActionStmt::Let { .. }
+        | ActionStmt::Break(_)
+        | ActionStmt::Continue(_) => {
+            unreachable!("verdicts, `let`, and loop control handled by callers")
         }
         // LAN-299: a computed set value that folds to a constant
         // (literal, parameter, or constant arithmetic) lowers to the
@@ -761,7 +951,30 @@ fn apply_action(
                 NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
             });
         }
-        ActionStmt::Community { add, lit, .. } => match lit.node {
+        // LAN-303: a parameter-valued community reference is a
+        // compile-time constant — it stages as a literal, exactly like
+        // writing the value. (Binding-valued references are emitted as
+        // their own CommunityVar terms by the statement/body lowerers
+        // and never reach here.)
+        ActionStmt::Community {
+            add,
+            arg: CommunityArg::Var(name),
+            ..
+        } => {
+            let value = *env
+                .get(name.node.as_str())
+                .expect("typechecked: non-binding community var is a parameter");
+            if *add {
+                mods.communities_add.push(value);
+            } else {
+                mods.communities_remove.push(value);
+            }
+        }
+        ActionStmt::Community {
+            add,
+            arg: CommunityArg::Lit(lit),
+            ..
+        } => match lit.node {
             CommunityLit::Standard(value) => {
                 if *add {
                     mods.communities_add.push(value);
@@ -979,11 +1192,15 @@ fn accept_predicate(policy: &CompiledPolicy) -> MatchExpr {
     for term in &policy.terms {
         match term.action {
             TermAction::Continue(_) => {}
-            // LAN-302: the typechecker rejects `apply` of a policy
-            // that declares bindings, so an inlined predicate never
-            // contains Bind terms.
-            TermAction::Bind { .. } => {
-                unreachable!("typechecked: apply targets declare no `let` bindings")
+            // LAN-302/LAN-303: the typechecker rejects `apply` of a
+            // policy that declares bindings or contains loops, so an
+            // inlined predicate never contains these terms.
+            TermAction::Bind { .. }
+            | TermAction::ForEach(_)
+            | TermAction::Break
+            | TermAction::ContinueLoop
+            | TermAction::CommunityVar { .. } => {
+                unreachable!("typechecked: apply targets declare no bindings or loops")
             }
             TermAction::Permit(_) => {
                 let mut children = not_prior.clone();

@@ -44,6 +44,7 @@ fn route(prefix: Prefix, rpki: RpkiValidation) -> RouteContext<'static> {
         communities: &[],
         large_communities: &[],
         as_path_str: "",
+        as_path: None,
         as_path_len: 0,
         origin_asn: None,
         validation_state: rpki,

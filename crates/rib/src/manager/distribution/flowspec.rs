@@ -265,6 +265,7 @@ impl RibManager {
                     communities: best.communities(),
                     large_communities: best.large_communities(),
                     as_path_str: &aspath_str,
+                    as_path: best.as_path(),
                     as_path_len: aspath_len,
                     origin_asn,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,

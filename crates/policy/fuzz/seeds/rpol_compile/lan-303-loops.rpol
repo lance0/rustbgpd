@@ -1,0 +1,32 @@
+community-set scrub { 65000:100, 65000:200 }
+asn-set bogons { 64512, 64513, 65535 }
+
+policy strip-scrub {
+    term walk {
+        for c in route.communities {
+            if c in scrub { remove community c }
+            if c == 65001:1 { continue }
+        }
+        accept
+    }
+}
+
+policy bogon-path-guard {
+    term walk {
+        for asn in route.as-path {
+            if asn in bogons { reject }
+            if asn >= 4200000000 { break }
+        }
+        accept
+    }
+}
+
+test scrub-loop {
+    route { communities [65000:100, 65001:1] }
+    expect strip-scrub == accept
+}
+
+test bogon-loop {
+    route { as-path "65001 {64512 64513}" }
+    expect bogon-path-guard == reject
+}

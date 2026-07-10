@@ -495,6 +495,143 @@ peer ASN already denies — so it keeps its peers out of shared update
 groups, exactly like a `peer.asn` guard operand. Bindings over route
 fields alone never disqualify grouping.
 
+### Loops — `for`
+
+`for <var> in <source> { ... }` walks a finite collection, binding
+each element to an immutable `u32` loop variable — a fresh binding per
+iteration, scoped to the body (ADR-0103 Decision 3, LAN-303):
+
+```rpol
+community-set scrub { 65000:100, 65000:200 }
+asn-set bogon-asns { 64512, 65535 }
+
+policy route-server-in {
+    term scrub-communities {
+        for c in route.communities {
+            if c in scrub { remove community c }
+        }
+    }
+    term bogon-path-guard {
+        for asn in route.as-path {
+            if asn in bogon-asns { reject }
+        }
+        accept
+    }
+}
+```
+
+`for`, `break`, and `continue` are contextual identifiers like `let`
+(statement position admits no other bare identifier), so existing
+names keep working. There is **no `while`** — every loop's source is
+finite by construction, which is what keeps every bound provable or
+runtime-meterable.
+
+**Iteration sources — exactly three forms.**
+
+- `route.communities` — the route's **standard** (RFC 1997)
+  communities as raw `u32` values (`ASN << 16 | value`), in attribute
+  order. This is the community-iteration decision for this slice: a
+  standard community *is* a `u32`, so it rides the u32-only value
+  model without a new type. `route.large-communities` and
+  `route.ext-communities` do not iterate (their members are 96/64-bit
+  — probe them with `has`/`in`); community-sets do not iterate either
+  (mixed-kind members). A standard community literal doubles as a u32
+  in value positions, so `if c == 65000:100 { ... }` reads naturally.
+- `route.as-path` — every ASN in wire order: segments in order, ASNs
+  within each segment in stored order, **prepend duplicates included**.
+  `AS_SET` members are yielded individually in received order (note
+  the asymmetry with `route.as-path.len`, which counts a whole set as
+  1 per RFC 4271 §9.1.2.2). A route without an `AS_PATH` iterates zero
+  times.
+- A named `asn-set` — members in canonical order (sorted, deduplicated
+  — the interned representation), so iteration order is deterministic
+  across compiles and insertion orders. Sets larger than the 4,096
+  per-loop bound are rejected at compile time (probe those with `in`).
+
+**The loop variable in guards and actions.** It resolves like any
+`let` binding: value comparisons and arithmetic, `in` membership —
+against an `asn-set`, or against a `community-set`'s standard members
+(`c in scrub` above; large/ext members of the set never match a u32)
+— and the binding-valued community actions `add community <var>` /
+`remove community <var>` (standard kind only), which stage the
+element's value per execution: the scrub-loop idiom. Shadowing follows
+the `let` rules — the loop variable shadows outer bindings, a body
+`let` may shadow it.
+
+**`break`, `continue`, verdicts.** `break` exits the innermost loop
+(the walk continues after it); `continue` skips to the next iteration.
+Staged modifications before either still apply — they are control, not
+verdicts. `accept`/`reject` inside the body terminate the whole policy
+at that iteration, exactly as in an `if` body; staged modifications
+from earlier iterations merge under an `accept` and are discarded by a
+`reject`, the ordinary rules.
+
+**Iterated collections cannot change mid-loop.** Reads always see the
+route as it arrived — staged modifications are never read back
+(ADR-0103 Decision 2) — so `add community` inside a
+`for c in route.communities` body cannot extend its own iteration
+(pinned by test).
+
+**Bounds and fuel (ADR-0103 Decision 3).** Every budget provable at
+compile time is enforced at compile time, in the same cost DP that
+bounds `apply`:
+
+- **4,096 iterations per loop** (`MAX_LOOP_ITERATIONS`). Set sources
+  are checked at compile time. Route-attribute sources are checked at
+  runtime — a peer-supplied route with more elements than the cap
+  (possible with RFC 8654 extended messages) is an **evaluation
+  error** at the 4,097th element: uniform Deny, counter, rate-limited
+  log — cap-then-error, never silent truncation.
+- **Nesting ≤ 4 loops**, and the DP charges each loop at its static
+  bound × per-iteration body cost — multiplicatively for nests — so a
+  loop over one route attribute nested in a loop over another
+  (4,096 × 4,096 steps) is rejected at compile time against the
+  1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
+  route. Nest small set loops, or restructure with membership probes.
+- **Runtime fuel.** Every evaluation starts with `MAX_EVAL_COST` fuel,
+  decremented **only at loop iteration steps** — straight-line code is
+  pre-paid by the compile-time bound, so a chain with no loops pays
+  exactly zero (fuel is one register write, never read again).
+  Exhaustion — reachable only by compounding data-dependent iteration
+  across a chain — is an evaluation error on the same uniform-Deny
+  rail (`fuel-exhausted` in the error counters and explain traces).
+
+**Explain.** Traces render a bounded loop summary — iteration count
+plus the deciding iteration (`loop reject at iteration 3 of 3`), never
+per-iteration lines. Hit counters count the loop's term once per walk;
+body terms are inside the loop node and carry no counter rows.
+
+**`apply` restriction.** Like `let`, a policy containing `for` cannot
+be an `apply` target — `apply` inlines a pure predicate, which has no
+walk to run iterations in.
+
+**Update-group note.** Iterating `route.communities` / `route.as-path`
+/ a set reads no peer identity and never disqualifies update-group
+sharing; a `peer.*` read *inside* a loop body counts exactly as it
+would outside.
+
+Migration example — an FRR/BIRD-style AS-path bogon check without a
+regex:
+
+```rpol
+# Before: anchored regex over the rendered path string.
+policy bogon-guard-regex {
+    term walk { if route.as-path matches "_(64512|65535)_" { reject } accept }
+}
+
+# After: typed iteration + one hash probe per ASN; the set is
+# maintainable data, not pattern syntax.
+asn-set bogon-asns { 64512, 65535 }
+policy bogon-guard {
+    term walk {
+        for asn in route.as-path {
+            if asn in bogon-asns { reject }
+        }
+        accept
+    }
+}
+```
+
 ### `route.family` — one chain, many families
 
 `route.family` is the route's **typed** AFI/SAFI family, carried by the
@@ -676,25 +813,30 @@ asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
-stmt        := if-stmt | let-stmt | action [";"]
+stmt        := if-stmt | let-stmt | for-stmt | action [";"]
 let-stmt    := "let" IDENT "=" value [";"]        # contextual `let` (LAN-302)
+for-stmt    := "for" IDENT "in" for-source "{" stmt* "}"   # contextual `for` (LAN-303)
+for-source  := "route" "." ("communities" | "as-path") | IDENT   # IDENT: asn-set
 if-stmt     := "if" expr "{" body-stmt* "}" ["else" "{" body-stmt* "}"]
 body-stmt   := let-stmt | action [";"]
 action      := "accept" | "reject"
+             | "break" | "continue"               # loop bodies only (LAN-303)
              | "set" ("local-pref" | "med") value
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
+             | ("add" | "remove") "community" IDENT      # binding-valued (LAN-303)
              | "prepend" "as" (u32arg | "self" | "peer" | "origin") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
 unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] ")" | predicate
              | IDENT [arith-tail] ("=="|"!="|">="|"<=") value     # binding/parameter LHS
+             | IDENT "in" IDENT            # binding vs asn-set / community-set (LAN-303)
 predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" community
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
 value       := mul (("+"|"-") mul)*                            # checked u32
 mul         := atom (("*"|"/"|"%") atom)*
-atom        := INT | IDENT | field | "(" value ")"        # IDENT: parameter or `let` binding
+atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
              | ("min"|"max") "(" value "," value ")"
              | "clamp" "(" value "," value "," value ")"
 field       := ("route" | "peer") ("." IDENT)+
@@ -987,10 +1129,12 @@ hit counters — those come free after the rewrite.
 
 ## Deliberate V1 exclusions
 
-No loops, no user-defined types, no maps (safety is total by
-construction — ADR-0096 Decision 2; the ADR-0103 extension program
-adds bounded constructs slice by slice — checked arithmetic shipped
-as LAN-299). No `as-path-set`. No `else if` chains and no nested `if`
+No `while` and no unbounded iteration of any kind — `for` (LAN-303)
+iterates finite sources only, capped and fuel-metered. No
+user-defined types, no maps (safety is total by construction —
+ADR-0096 Decision 2; the ADR-0103 extension program adds bounded
+constructs slice by slice — checked arithmetic shipped as LAN-299,
+bindings as LAN-302, bounded loops as LAN-303). No `as-path-set`. No `else if` chains and no nested `if`
 (keep terms small; use `&&` or more terms). No mutable state of any
 kind — `let` bindings (LAN-302) are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and

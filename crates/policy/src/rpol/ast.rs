@@ -170,6 +170,51 @@ pub enum Stmt {
     If(IfStmt),
     /// A bare action executed unconditionally.
     Action(ActionStmt),
+    /// `for <var> in <source> { statements }` (LAN-303). Legal in term
+    /// bodies and (nested, depth-capped) in loop bodies; `if` bodies
+    /// stay flat action lists (the V1 rule).
+    For(ForStmt),
+}
+
+/// `for <var> in <source> { body }` — a bounded loop (LAN-303). `for`
+/// is a statement-initial contextual identifier (ADR-0103 Decision
+/// 2.2): statement position previously admitted no bare identifier but
+/// `let`, so consuming it is purely additive.
+#[derive(Debug)]
+pub struct ForStmt {
+    /// The loop variable: an immutable `u32` binding scoped to the
+    /// body, fresh per iteration.
+    pub var: Spanned<String>,
+    /// What to iterate.
+    pub source: ForSource,
+    /// Body statements — the term-body statement grammar plus
+    /// `break`/`continue` and nested `for`.
+    pub body: Vec<Stmt>,
+    /// Span of `for <var> in <source>`.
+    pub span: Span,
+}
+
+/// A loop's iteration source as parsed: a `route.`/`peer.` field path
+/// or a named set. The typechecker restricts these to the finite
+/// `u32`-valued sources (`route.communities`, `route.as-path`,
+/// `asn-set` names).
+#[derive(Debug)]
+pub enum ForSource {
+    /// `route.<field>` (or `peer.<field>`, rejected at typecheck).
+    Field(FieldPath),
+    /// A named set.
+    Set(Spanned<String>),
+}
+
+impl ForSource {
+    /// The source's span.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            ForSource::Field(path) => path.span,
+            ForSource::Set(name) => name.span,
+        }
+    }
 }
 
 /// `if <cond> { then } [else { otherwise }]`. Bodies are flat action
@@ -320,8 +365,9 @@ pub enum ActionStmt {
         add: bool,
         /// The kind keyword written (must match the literal's kind).
         kind: CommunityKind,
-        /// The community literal.
-        lit: Spanned<CommunityLit>,
+        /// The community literal or a `u32` binding reference
+        /// (LAN-303).
+        arg: CommunityArg,
         /// Whole-statement span.
         span: Span,
     },
@@ -335,6 +381,13 @@ pub enum ActionStmt {
         /// Whole-statement span.
         span: Span,
     },
+    /// `break` (LAN-303): exit the innermost enclosing loop. A
+    /// statement-position contextual identifier like `let`; the
+    /// typechecker rejects it outside a loop body.
+    Break(Span),
+    /// `continue` (LAN-303): skip to the enclosing loop's next
+    /// iteration. Same placement rules as `break`.
+    Continue(Span),
     /// `let <name> = <value-expr>` (LAN-302): an immutable, lexically
     /// scoped `u32` binding, legal in statement position — a term body
     /// or an `if`/`else` body. `let` is a contextual identifier
@@ -364,9 +417,24 @@ impl ActionStmt {
             | ActionStmt::SetNextHop(_, span)
             | ActionStmt::Community { span, .. }
             | ActionStmt::Prepend { span, .. }
+            | ActionStmt::Break(span)
+            | ActionStmt::Continue(span)
             | ActionStmt::Let { span, .. } => *span,
         }
     }
+}
+
+/// The operand of an `add`/`remove` community action: a literal, or a
+/// binding reference (LAN-303) whose `u32` value stages per execution
+/// — the scrub-loop form `remove community <loop-var>`. Bindings are
+/// standard-kind only (the u32 value model).
+#[derive(Debug)]
+pub enum CommunityArg {
+    /// A community literal of the action's kind.
+    Lit(Spanned<CommunityLit>),
+    /// A `let`/loop binding or policy parameter (standard communities
+    /// only; parameters resolve to literals at compile time).
+    Var(Spanned<String>),
 }
 
 /// `set next-hop` operand.
@@ -508,6 +576,17 @@ pub enum Expr {
         /// The referenced set.
         set: Spanned<String>,
     },
+    /// `<binding> in set-name` (LAN-303): a `u32` binding (loop
+    /// variable or `let`) probed against an `asn-set`, or — when the
+    /// binding carries a standard community — a `community-set`'s
+    /// standard members. Parameters are compile-time constants and
+    /// fold to a constant truth value at lowering.
+    IdentIn {
+        /// The binding or parameter name.
+        ident: Spanned<String>,
+        /// The referenced set.
+        set: Spanned<String>,
+    },
     /// `field has <community literal>`
     Has {
         /// Left-hand community-list field.
@@ -567,6 +646,7 @@ impl Expr {
             | Expr::ValueCmp { span, .. }
             | Expr::Apply { span, .. } => *span,
             Expr::In { field, set } => field.span.to(set.span),
+            Expr::IdentIn { ident, set } => ident.span.to(set.span),
             Expr::Has { field, lit } => field.span.to(lit.span),
             Expr::Matches { field, pattern } => field.span.to(pattern.span),
             Expr::Contains { field, asn } => field.span.to(asn.span()),

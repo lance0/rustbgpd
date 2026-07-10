@@ -13,12 +13,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::engine::AsPathRegex;
-use crate::eval::checked_arith;
+use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityKind, Expr, FieldPath, FieldRoot, PolicyDef, PrependAsArg, Rhs,
-    RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, CommunityKind, Expr, FieldPath, FieldRoot, ForSource, ForStmt,
+    PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, Span, Spanned, closest};
 
@@ -89,16 +89,19 @@ const MAX_APPLY_DEPTH: u32 = 8;
 /// human-written guard is under ten nodes.
 const MAX_APPLY_EXPANSION: u64 = 100_000;
 
-/// Maximum worst-case per-route evaluation steps for one policy
-/// (ADR-0103 Decision 3, `MAX_EVAL_COST`). Computed in the same
-/// Kahn-ordered DP as the apply bounds: every guard node — including
-/// each value-expression operator and builtin (LAN-299) — and every
-/// action's value operators count one step, apply targets contribute
-/// their inlined predicate cost. Straight-line programs whose bound
-/// fits need no runtime fuel (fuel starts at loop back-edges,
-/// LAN-303); a program whose bound exceeds this is rejected with a
-/// diagnostic naming the policy.
-const MAX_EVAL_COST: u64 = 1_000_000;
+// `MAX_EVAL_COST` (ADR-0103 Decision 3) lives in `crate::eval` so the
+// compile-time cost DP and the runtime fuel initializer can never
+// disagree; it is enforced here in the same Kahn-ordered DP as the
+// apply bounds. Every guard node, value operator/builtin (LAN-299),
+// and loop iteration × body step (LAN-303, multiplicative — nested
+// loops multiply) counts; a policy whose bound exceeds it is rejected
+// with a diagnostic naming the policy.
+
+/// Maximum `for`-loop nesting depth (LAN-303) — the apply-depth
+/// precedent: composition bounds are small because each level
+/// multiplies. Deeper nests are almost always a modeling error, and
+/// the cost DP would reject most of them anyway.
+const MAX_LOOP_DEPTH: u32 = 4;
 
 /// The value-expression builtins (LAN-299) and their arities.
 const VALUE_BUILTINS: &[(&str, usize)] = &[("min", 2), ("max", 2), ("clamp", 3)];
@@ -279,59 +282,189 @@ impl Checker<'_> {
             // Each term body is its own scope: bindings never cross
             // terms (LAN-302).
             scope.lets.clear();
-            let mut term_locals = 0usize;
-            let mut terminated: Option<Span> = None;
-            for stmt in &term.stmts {
-                if let Some(verdict_span) = terminated {
-                    let span = match stmt {
-                        Stmt::If(if_stmt) => if_stmt.span,
-                        Stmt::Action(action) => action.span(),
-                    };
-                    self.diags.push(
-                        Diagnostic::new(
-                            span,
-                            "unreachable statement",
-                            "this statement can never execute",
-                        )
-                        .with_label(verdict_span, "the term already decided here"),
-                    );
-                    break;
+            self.check_stmts(&term.stmts, &mut scope, 0);
+        }
+    }
+
+    /// One statement sequence — a term body or, recursively, a `for`
+    /// body (LAN-303) — as its own lexical scope. `loop_depth` counts
+    /// enclosing loops (0 in a term body); `break`/`continue` need it,
+    /// and nesting is capped against [`MAX_LOOP_DEPTH`].
+    fn check_stmts(&mut self, stmts: &[Stmt], scope: &mut Scope, loop_depth: u32) {
+        let mark = scope.lets.len();
+        let mut scope_locals = 0usize;
+        let mut terminated: Option<(Span, &'static str)> = None;
+        for stmt in stmts {
+            if let Some((terminal_span, label)) = terminated {
+                let span = match stmt {
+                    Stmt::If(if_stmt) => if_stmt.span,
+                    Stmt::Action(action) => action.span(),
+                    Stmt::For(for_stmt) => for_stmt.span,
+                };
+                self.diags.push(
+                    Diagnostic::new(
+                        span,
+                        "unreachable statement",
+                        "this statement can never execute",
+                    )
+                    .with_label(terminal_span, label),
+                );
+                break;
+            }
+            match stmt {
+                // A body `let`: check the initializer against the
+                // scope *before* declaring (so `let x = x + 1` reads
+                // the outer/prior `x`), then bring the name into scope
+                // for everything after it.
+                Stmt::Action(ActionStmt::Let { name, init, .. }) => {
+                    self.check_value_expr(init, scope);
+                    self.declare_binding(scope, name, &mut scope_locals);
                 }
-                match stmt {
-                    // A term-body `let`: check the initializer against
-                    // the scope *before* declaring (so `let x = x + 1`
-                    // reads the outer/prior `x`), then bring the name
-                    // into scope for everything after it.
-                    Stmt::Action(ActionStmt::Let { name, init, .. }) => {
-                        self.check_value_expr(init, &scope);
-                        if term_locals == MAX_LOCALS {
-                            self.locals_exceeded(name.span);
+                Stmt::Action(action) => {
+                    self.check_action(action, scope, loop_depth);
+                    match action {
+                        ActionStmt::Accept(_) | ActionStmt::Reject(_) => {
+                            terminated = Some((action.span(), "the term already decided here"));
                         }
-                        term_locals += 1;
-                        scope.lets.push(name.node.clone());
-                    }
-                    Stmt::Action(action) => {
-                        self.check_action(action, &scope);
-                        if matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)) {
-                            terminated = Some(action.span());
+                        ActionStmt::Break(_) | ActionStmt::Continue(_) => {
+                            terminated =
+                                Some((action.span(), "the walk already left this body here"));
                         }
-                    }
-                    Stmt::If(if_stmt) => {
-                        self.check_expr(&if_stmt.cond, &scope);
-                        self.check_action_list(&if_stmt.then_actions, &mut scope);
-                        if let Some(else_actions) = &if_stmt.else_actions {
-                            self.check_action_list(else_actions, &mut scope);
-                        }
+                        _ => {}
                     }
                 }
+                Stmt::If(if_stmt) => {
+                    self.check_expr(&if_stmt.cond, scope);
+                    self.check_action_list(&if_stmt.then_actions, scope, loop_depth);
+                    if let Some(else_actions) = &if_stmt.else_actions {
+                        self.check_action_list(else_actions, scope, loop_depth);
+                    }
+                }
+                Stmt::For(for_stmt) => self.check_for(for_stmt, scope, loop_depth),
+            }
+        }
+        scope.lets.truncate(mark);
+    }
+
+    /// One `for` loop (LAN-303): validate the source is one of the
+    /// finite u32-valued forms, cap nesting, then check the body in a
+    /// fresh scope holding the loop variable.
+    fn check_for(&mut self, for_stmt: &ForStmt, scope: &mut Scope, loop_depth: u32) {
+        if loop_depth == MAX_LOOP_DEPTH {
+            self.diags.push(
+                Diagnostic::new(
+                    for_stmt.span,
+                    format!("loops nest more than {MAX_LOOP_DEPTH} deep"),
+                    "loop nesting limit exceeded",
+                )
+                .with_note(
+                    "nested loop cost multiplies per level (ADR-0103); restructure with \
+                     set-membership probes instead",
+                ),
+            );
+        }
+        self.check_for_source(&for_stmt.source);
+        let mark = scope.lets.len();
+        let mut scope_locals = 0usize;
+        // The loop variable is an immutable binding in the body scope,
+        // fresh per iteration (LAN-302 slot model).
+        self.declare_binding(scope, &for_stmt.var, &mut scope_locals);
+        self.check_stmts(&for_stmt.body, scope, loop_depth + 1);
+        scope.lets.truncate(mark);
+    }
+
+    /// The three iterable source forms (LAN-303): `route.communities`
+    /// (standard, u32), `route.as-path` (ASNs), a named `asn-set`.
+    /// Everything else gets a spanned diagnostic naming why — the
+    /// finite-source grammar is what makes every loop bound provable
+    /// or runtime-meterable.
+    fn check_for_source(&mut self, source: &ForSource) {
+        match source {
+            ForSource::Field(path) => match resolve_field(path) {
+                Err(diag) => self.diags.push(diag),
+                Ok(Field::Communities | Field::AsPath) => {}
+                Ok(Field::LargeCommunities | Field::ExtCommunities) => self.diags.push(
+                    Diagnostic::new(
+                        path.span,
+                        format!("`{}` is not iterable", path.render()),
+                        "large/extended communities are not u32 values",
+                    )
+                    .with_note(
+                        "the loop variable is u32-typed (ADR-0103 Decision 2); only \
+                         route.communities (standard, RFC 1997) and route.as-path iterate \
+                         in this slice — probe large/ext communities with `has` or `in`",
+                    ),
+                ),
+                Ok(_) => self.diags.push(
+                    Diagnostic::new(
+                        path.span,
+                        format!("`{}` is not iterable", path.render()),
+                        "not a collection",
+                    )
+                    .with_note(
+                        "iterable sources: route.communities, route.as-path, or an asn-set name",
+                    ),
+                ),
+            },
+            ForSource::Set(name) => {
+                if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name.node) {
+                    // Set sizes are compile-time knowledge: enforce
+                    // the per-loop bound here instead of erroring per
+                    // route at runtime.
+                    if def.entries.len() > MAX_LOOP_ITERATIONS as usize {
+                        self.diags.push(
+                            Diagnostic::new(
+                                name.span,
+                                format!(
+                                    "asn-set `{}` has {} members — more than the \
+                                     {MAX_LOOP_ITERATIONS}-iteration loop bound",
+                                    name.node,
+                                    def.entries.len(),
+                                ),
+                                "set too large to iterate",
+                            )
+                            .with_note(
+                                "probe large sets with `in` (one hash lookup) instead of \
+                                 iterating them",
+                            ),
+                        );
+                    }
+                    return;
+                }
+                let mut diag = Diagnostic::new(
+                    name.span,
+                    format!("`{}` is not an iterable set", name.node),
+                    "loops iterate asn-sets",
+                );
+                diag = match self.set_kind_of(&name.node) {
+                    Some("community-set") => diag.with_note(
+                        "community-set members are mixed-kind (not u32); iterate \
+                         route.communities and probe with `in` instead",
+                    ),
+                    Some("prefix-set") => diag.with_note(
+                        "prefix-set members are not u32 values; probe with \
+                         `route.prefix in` instead",
+                    ),
+                    _ => {
+                        if let Some(suggestion) = closest(
+                            &name.node,
+                            self.file.asn_sets.iter().map(|s| s.name.node.as_str()),
+                        ) {
+                            diag.with_note(format!("did you mean `{suggestion}`?"))
+                        } else {
+                            diag
+                        }
+                    }
+                };
+                self.diags.push(diag);
             }
         }
     }
 
     /// One `if`/`else` body — its own lexical scope (LAN-302): `let`
     /// bindings declared here are visible to the rest of the body and
-    /// nowhere else.
-    fn check_action_list(&mut self, actions: &[ActionStmt], scope: &mut Scope) {
+    /// nowhere else. `loop_depth` scopes `break`/`continue` (LAN-303).
+    fn check_action_list(&mut self, actions: &[ActionStmt], scope: &mut Scope, loop_depth: u32) {
         let mark = scope.lets.len();
         let mut body_locals = 0usize;
         let mut terminated: Option<Span> = None;
@@ -349,19 +482,52 @@ impl Checker<'_> {
             }
             if let ActionStmt::Let { name, init, .. } = action {
                 self.check_value_expr(init, scope);
-                if body_locals == MAX_LOCALS {
-                    self.locals_exceeded(name.span);
-                }
-                body_locals += 1;
-                scope.lets.push(name.node.clone());
+                self.declare_binding(scope, name, &mut body_locals);
                 continue;
             }
-            self.check_action(action, scope);
-            if matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)) {
+            self.check_action(action, scope, loop_depth);
+            if matches!(
+                action,
+                ActionStmt::Accept(_)
+                    | ActionStmt::Reject(_)
+                    | ActionStmt::Break(_)
+                    | ActionStmt::Continue(_)
+            ) {
                 terminated = Some(action.span());
             }
         }
         scope.lets.truncate(mark);
+    }
+
+    /// Declare one binding: per-scope `MAX_LOCALS` cap (LAN-302) plus
+    /// the whole-frame slot cap (LAN-303 — nested loop scopes share
+    /// the 256-slot register file, `crate::eval::LOCAL_FRAME_SLOTS`).
+    /// Diagnostics fire once at the first binding past each limit; the
+    /// name still enters scope so resolution keeps reporting.
+    fn declare_binding(
+        &mut self,
+        scope: &mut Scope,
+        name: &Spanned<String>,
+        scope_locals: &mut usize,
+    ) {
+        if *scope_locals == MAX_LOCALS {
+            self.locals_exceeded(name.span);
+        }
+        *scope_locals += 1;
+        if scope.lets.len() == crate::eval::LOCAL_FRAME_SLOTS {
+            self.diags.push(
+                Diagnostic::new(
+                    name.span,
+                    format!(
+                        "more than {} bindings live at once across nested scopes",
+                        crate::eval::LOCAL_FRAME_SLOTS
+                    ),
+                    "binding frame exceeded",
+                )
+                .with_note("split the term or fold intermediate values"),
+            );
+        }
+        scope.lets.push(name.node.clone());
     }
 
     /// The 65th `let` of one scope (LAN-302, `MAX_LOCALS`): fires once,
@@ -380,14 +546,40 @@ impl Checker<'_> {
         );
     }
 
-    fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per action kind; splitting would scatter the per-action rules"
+    )]
+    fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>, loop_depth: u32) {
         match action {
             ActionStmt::Accept(_) | ActionStmt::Reject(_) | ActionStmt::SetNextHop(..) => {}
             ActionStmt::Let { .. } => unreachable!("`let` is scoped by the statement walkers"),
+            // Loop control outside a loop body (LAN-303).
+            ActionStmt::Break(span) | ActionStmt::Continue(span) => {
+                if loop_depth == 0 {
+                    let word = if matches!(action, ActionStmt::Break(_)) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    self.diags.push(
+                        Diagnostic::new(
+                            *span,
+                            format!("`{word}` outside a loop"),
+                            "no enclosing `for` loop",
+                        )
+                        .with_note("`break`/`continue` control the innermost `for` body"),
+                    );
+                }
+            }
             ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
                 self.check_value_expr(expr, scope);
             }
-            ActionStmt::Community { kind, lit, .. } => {
+            ActionStmt::Community {
+                kind,
+                arg: CommunityArg::Lit(lit),
+                ..
+            } => {
                 if lit.node.kind() != *kind {
                     let (kind_word, lit_word) =
                         (kind_keyword(*kind), kind_keyword(lit.node.kind()));
@@ -402,6 +594,49 @@ impl Checker<'_> {
                         )
                         .with_note(format!("use `add/remove {lit_word}` for this literal")),
                     );
+                }
+            }
+            // LAN-303: `add/remove community <binding>` — bindings are
+            // u32-valued, so the variable form is standard-kind only,
+            // and the name must resolve to a binding or parameter.
+            ActionStmt::Community {
+                kind,
+                arg: CommunityArg::Var(name),
+                ..
+            } => {
+                if *kind != CommunityKind::Standard {
+                    self.diags.push(
+                        Diagnostic::new(
+                            name.span,
+                            format!(
+                                "`{}` actions take a literal, not a binding",
+                                kind_keyword(*kind)
+                            ),
+                            "bindings are u32-valued",
+                        )
+                        .with_note(
+                            "only standard (RFC 1997) communities are u32-shaped; \
+                             large/extended community actions need a literal",
+                        ),
+                    );
+                }
+                if !scope.is_local(&name.node) && !scope.is_param(&name.node) {
+                    let mut diag = Diagnostic::new(
+                        name.span,
+                        format!("unknown parameter or binding `{}`", name.node),
+                        "not a parameter or `let`/loop binding in scope",
+                    );
+                    if let Some(suggestion) = closest(
+                        &name.node,
+                        scope
+                            .params
+                            .iter()
+                            .copied()
+                            .chain(scope.lets.iter().map(String::as_str)),
+                    ) {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.diags.push(diag);
                 }
             }
             ActionStmt::Prepend { asn, count, .. } => {
@@ -624,6 +859,50 @@ impl Checker<'_> {
                 self.check_value_expr(rhs, scope);
             }
             Expr::In { field, set } => self.check_in(field, set),
+            // LAN-303: `<binding> in <set>` — u32 value against an
+            // asn-set, or a community-set's standard members.
+            Expr::IdentIn { ident, set } => {
+                self.check_value_ident(ident, scope);
+                if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
+                    || self
+                        .file
+                        .community_sets
+                        .iter()
+                        .any(|s| s.name.node == set.node)
+                {
+                    // Community-set probes match standard members only
+                    // (the binding is a raw u32) — documented in the
+                    // language reference.
+                } else {
+                    let mut diag = Diagnostic::new(
+                        set.span,
+                        format!("unknown asn-set or community-set `{}`", set.node),
+                        "binding membership probes asn-sets and community-sets",
+                    );
+                    if self.set_kind_of(&set.node) == Some("prefix-set") {
+                        diag = diag.with_note(format!(
+                            "`{}` is a prefix-set; bindings are u32 values and cannot \
+                             probe prefixes",
+                            set.node
+                        ));
+                    } else if let Some(suggestion) = closest(
+                        &set.node,
+                        self.file
+                            .asn_sets
+                            .iter()
+                            .map(|s| s.name.node.as_str())
+                            .chain(
+                                self.file
+                                    .community_sets
+                                    .iter()
+                                    .map(|s| s.name.node.as_str()),
+                            ),
+                    ) {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.diags.push(diag);
+                }
+            }
             Expr::Has { field, lit } => match resolve_field(field) {
                 Err(diag) => self.diags.push(diag),
                 Ok(resolved) => {
@@ -738,6 +1017,26 @@ impl Checker<'_> {
                         .with_note(
                             "`apply` inlines the target as a pure predicate; factor the \
                              shared value into the applying policy instead",
+                        ),
+                    );
+                }
+                // LAN-303: loops execute per iteration; a pure inlined
+                // predicate has no walk to run them in — same rule as
+                // `let` above.
+                if let Some(loop_span) = first_loop(target) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            *span,
+                            format!(
+                                "cannot `apply` policy `{}`: it contains a `for` loop",
+                                policy.node
+                            ),
+                            "`apply` targets cannot use `for`",
+                        )
+                        .with_label(loop_span, "first `for` is here")
+                        .with_note(
+                            "`apply` inlines the target as a pure predicate; keep loops \
+                             in the applying policy instead",
                         ),
                     );
                 }
@@ -1149,6 +1448,7 @@ impl Checker<'_> {
             if let Some(diag) = bound_policy(
                 defs[name],
                 &edges[name],
+                file,
                 &mut depth,
                 &mut pred_cost,
                 &mut poisoned,
@@ -1303,15 +1603,22 @@ impl Checker<'_> {
 /// `apply` edges per policy: name → (target, span of the apply), in
 /// source order, duplicates kept.
 fn apply_edges(file: &SourceFile) -> HashMap<&str, Vec<(&str, Span)>> {
+    fn walk_stmts<'a>(stmts: &'a [Stmt], targets: &mut Vec<(&'a str, Span)>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::If(if_stmt) => collect_applies(&if_stmt.cond, targets),
+                Stmt::Action(_) => {}
+                // LAN-303: `if apply(p)` inside a loop body still
+                // participates in the DAG/bounds analyses.
+                Stmt::For(for_stmt) => walk_stmts(&for_stmt.body, targets),
+            }
+        }
+    }
     let mut edges: HashMap<&str, Vec<(&str, Span)>> = HashMap::new();
     for policy in &file.policies {
         let mut targets = Vec::new();
         for term in &policy.terms {
-            for stmt in &term.stmts {
-                if let Stmt::If(if_stmt) = stmt {
-                    collect_applies(&if_stmt.cond, &mut targets);
-                }
-            }
+            walk_stmts(&term.stmts, &mut targets);
         }
         edges.insert(&policy.name.node, targets);
     }
@@ -1337,9 +1644,14 @@ fn poison_policy<'a>(
 /// and return the diagnostic if the policy breaks a limit. An
 /// over-limit or poisoned policy records trivial costs so dependents
 /// don't repeat the diagnosis.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one DP pass over every statement kind; splitting would scatter the budget model"
+)]
 fn bound_policy<'a>(
     def: &'a PolicyDef,
     targets: &[(&'a str, Span)],
+    file: &SourceFile,
     depth: &mut HashMap<&'a str, u32>,
     pred_cost: &mut HashMap<&'a str, u64>,
     poisoned: &mut HashSet<&'a str>,
@@ -1380,6 +1692,9 @@ fn bound_policy<'a>(
     // (LAN-299) count toward the evaluation-cost budget alongside.
     let mut arms: Vec<u64> = Vec::new();
     let mut action_cost: u64 = 0;
+    // LAN-303: loop body IR nodes (counted once, toward compiled size)
+    // — the iteration-multiplied step cost lands in `action_cost`.
+    let mut loop_nodes: u64 = 0;
     for term in &def.terms {
         for stmt in &term.stmts {
             match stmt {
@@ -1408,10 +1723,25 @@ fn bound_policy<'a>(
                     arms.push(1);
                     action_cost = action_cost.saturating_add(action_value_cost(action));
                 }
+                // LAN-303: one IR term for the loop itself; the body
+                // charges the eval-cost budget at bound × per-iteration
+                // steps — multiplicative for nested loops, which is
+                // what rejects e.g. a communities loop nested inside an
+                // as-path loop (4096 × 4096 body steps) at compile time
+                // rather than metering it per route.
+                Stmt::For(for_stmt) => {
+                    arms.push(1);
+                    let (nodes, steps) = for_costs(for_stmt, pred_cost, file);
+                    loop_nodes = loop_nodes.saturating_add(nodes);
+                    action_cost = action_cost.saturating_add(steps);
+                }
             }
         }
     }
-    let lowered: u64 = arms.iter().fold(0u64, |acc, &g| acc.saturating_add(g));
+    let lowered: u64 = arms
+        .iter()
+        .fold(0u64, |acc, &g| acc.saturating_add(g))
+        .saturating_add(loop_nodes);
     // ADR-0103 Decision 3: the worst-case per-route step bound. With
     // no loops, every lowered guard node and action value operator
     // evaluates at most once per route, so the bound is the same DP
@@ -1490,6 +1820,67 @@ fn guard_cost(expr: &Expr, pred_cost: &HashMap<&str, u64>) -> u64 {
     }
 }
 
+/// Static iteration bound of one loop source (LAN-303): the actual
+/// member count for asn-set sources (compile-time knowledge; larger
+/// than the cap is rejected with its own diagnostic), the hard
+/// per-loop cap for route-attribute sources (their only static bound —
+/// the runtime cap guarantees it).
+fn loop_iteration_bound(source: &ForSource, file: &SourceFile) -> u64 {
+    match source {
+        ForSource::Set(name) => file
+            .asn_sets
+            .iter()
+            .find(|s| s.name.node == name.node)
+            .map_or(u64::from(MAX_LOOP_ITERATIONS), |s| s.entries.len() as u64),
+        ForSource::Field(_) => u64::from(MAX_LOOP_ITERATIONS),
+    }
+}
+
+/// One loop's `(body IR nodes, worst-case evaluation steps)` for the
+/// cost DP (LAN-303): nodes count once toward compiled size; steps are
+/// the static iteration bound × per-iteration body cost — nested loops
+/// multiply through the recursion, which is the ADR-0103 Decision 3
+/// compounding-composition defense.
+fn for_costs(for_stmt: &ForStmt, pred_cost: &HashMap<&str, u64>, file: &SourceFile) -> (u64, u64) {
+    let mut nodes: u64 = 1; // the ForEach term
+    let mut body_steps: u64 = 1; // the loop-var bind per iteration
+    for stmt in &for_stmt.body {
+        match stmt {
+            Stmt::If(if_stmt) => {
+                let guard = guard_cost(&if_stmt.cond, pred_cost);
+                // Upper bound per iteration: the guard (twice with an
+                // else — the negated arm) plus every body action.
+                let arms: u64 = if if_stmt.else_actions.is_some() { 2 } else { 1 };
+                nodes = nodes.saturating_add(guard.saturating_mul(arms));
+                body_steps = body_steps.saturating_add(guard.saturating_mul(arms));
+                for action in if_stmt
+                    .then_actions
+                    .iter()
+                    .chain(if_stmt.else_actions.iter().flatten())
+                {
+                    nodes = nodes.saturating_add(1);
+                    body_steps = body_steps
+                        .saturating_add(1)
+                        .saturating_add(action_value_cost(action));
+                }
+            }
+            Stmt::Action(action) => {
+                nodes = nodes.saturating_add(1);
+                body_steps = body_steps
+                    .saturating_add(1)
+                    .saturating_add(action_value_cost(action));
+            }
+            Stmt::For(inner) => {
+                let (inner_nodes, inner_steps) = for_costs(inner, pred_cost, file);
+                nodes = nodes.saturating_add(inner_nodes);
+                body_steps = body_steps.saturating_add(inner_steps);
+            }
+        }
+    }
+    let bound = loop_iteration_bound(&for_stmt.source, file);
+    (nodes, bound.saturating_mul(body_steps).saturating_add(1))
+}
+
 /// LAN-302: a `let` binding on the right of a u32-field comparison
 /// makes it a value comparison (that is what it lowers to), so all
 /// four operators apply and both sides are u32 — nothing further to
@@ -1515,8 +1906,8 @@ fn action_value_cost(action: &ActionStmt) -> u64 {
 }
 
 /// Span of the first `let` statement anywhere in a policy — term
-/// bodies and `if`/`else` bodies — or `None`. Backs the LAN-302
-/// `apply`-target rejection.
+/// bodies, `if`/`else` bodies, and loop bodies — or `None`. Backs the
+/// LAN-302 `apply`-target rejection.
 fn first_let(def: &PolicyDef) -> Option<Span> {
     fn in_actions(actions: &[ActionStmt]) -> Option<Span> {
         actions.iter().find_map(|action| match action {
@@ -1524,14 +1915,29 @@ fn first_let(def: &PolicyDef) -> Option<Span> {
             _ => None,
         })
     }
-    def.terms.iter().find_map(|term| {
-        term.stmts.iter().find_map(|stmt| match stmt {
+    fn in_stmts(stmts: &[Stmt]) -> Option<Span> {
+        stmts.iter().find_map(|stmt| match stmt {
             Stmt::Action(ActionStmt::Let { span, .. }) => Some(*span),
             Stmt::Action(_) => None,
             Stmt::If(if_stmt) => in_actions(&if_stmt.then_actions)
                 .or_else(|| if_stmt.else_actions.as_deref().and_then(in_actions)),
+            Stmt::For(for_stmt) => in_stmts(&for_stmt.body),
         })
-    })
+    }
+    def.terms.iter().find_map(|term| in_stmts(&term.stmts))
+}
+
+/// Span of the first `for` loop anywhere in a policy, or `None`.
+/// Backs the LAN-303 `apply`-target rejection (loops cannot inline as
+/// pure predicates).
+fn first_loop(def: &PolicyDef) -> Option<Span> {
+    fn in_stmts(stmts: &[Stmt]) -> Option<Span> {
+        stmts.iter().find_map(|stmt| match stmt {
+            Stmt::For(for_stmt) => Some(for_stmt.span),
+            _ => None,
+        })
+    }
+    def.terms.iter().find_map(|term| in_stmts(&term.stmts))
 }
 
 /// Worst-case evaluation steps of a value expression (LAN-299): one

@@ -14,6 +14,7 @@ fn evaluate_policy_with_validation_states(
         communities: &[],
         large_communities: &[],
         as_path_str: "",
+        as_path: None,
         as_path_len: 0,
         origin_asn: None,
         validation_state,

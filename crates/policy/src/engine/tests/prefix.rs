@@ -93,6 +93,7 @@ fn prefix_predicate_does_not_match_prefixless_context() {
         communities: &[],
         large_communities: &[],
         as_path_str: "",
+        as_path: None,
         as_path_len: 0,
         origin_asn: None,
         validation_state: RpkiValidation::NotFound,

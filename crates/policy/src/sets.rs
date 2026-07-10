@@ -334,6 +334,17 @@ impl CommunitySet {
             })
     }
 
+    /// Whether `value` is a **standard** (RFC 1997) member of this set
+    /// — one hash probe against the standard partition. Backs the
+    /// LAN-303 `<binding> in <community-set>` form, where the binding
+    /// carries a standard community's raw `u32`; large/extended
+    /// members are not `u32`-comparable and never match here.
+    #[must_use]
+    #[inline]
+    pub fn contains_standard(&self, value: u32) -> bool {
+        self.standard.contains(&value)
+    }
+
     /// The canonical (sorted, deduplicated) criteria list.
     #[must_use]
     pub fn criteria(&self) -> &[CommunityMatch] {
@@ -584,6 +595,7 @@ mod tests {
             communities: &[(65500 << 16) | 0x01],
             large_communities: &large,
             as_path_str: "",
+            as_path: None,
             as_path_len: 0,
             origin_asn: None,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,

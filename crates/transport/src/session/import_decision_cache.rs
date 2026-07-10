@@ -104,6 +104,10 @@ pub struct CachedPolicyContext {
     pub communities: Vec<u32>,
     pub large_communities: Vec<LargeCommunity>,
     pub as_path_str: String,
+    /// Typed `AS_PATH` (owned), so an explain re-derivation of a chain
+    /// with `for asn in route.as-path` loops (LAN-303) sees the same
+    /// iteration the live evaluation saw. Explain-enabled path only.
+    pub as_path: Option<rustbgpd_wire::AsPath>,
     pub as_path_len: usize,
     pub origin_asn: Option<u32>,
     pub local_pref: Option<u32>,

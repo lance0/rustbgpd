@@ -1,0 +1,20 @@
+asn-set transits { 174, 3356, 6939 }
+asn-set peers { 65010, 65020 }
+
+policy nested {
+    term t {
+        for a in transits {
+            for b in peers {
+                let sum = a + b;
+                if sum == 65194 { add community 65009:1 }
+                if b == 65020 { break }
+            }
+        }
+        accept
+    }
+}
+
+test nested-runs {
+    route { }
+    expect nested == accept
+}

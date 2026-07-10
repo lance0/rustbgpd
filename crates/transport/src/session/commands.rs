@@ -269,6 +269,7 @@ impl PeerSession {
             communities: &cached.communities,
             large_communities: &cached.large_communities,
             as_path_str: &cached.as_path_str,
+            as_path: cached.as_path.as_ref(),
             as_path_len: cached.as_path_len,
             origin_asn: cached.origin_asn,
             validation_state: decision.rpki,

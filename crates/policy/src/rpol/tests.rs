@@ -61,6 +61,7 @@ fn route_ctx(prefix: Prefix, communities: &[u32], rpki: RpkiValidation) -> Route
         communities: Box::leak(communities.to_vec().into_boxed_slice()),
         large_communities: &[],
         as_path_str: "",
+        as_path: None,
         as_path_len: 0,
         origin_asn: None,
         validation_state: rpki,
@@ -285,6 +286,7 @@ fn as_path_and_peer_predicates_lower_and_evaluate() {
     let base = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
     let long = RouteContext {
         as_path_str: "65005 65001 65002",
+        as_path: None,
         as_path_len: 3,
         origin_asn: None,
         ..base
@@ -292,6 +294,7 @@ fn as_path_and_peer_predicates_lower_and_evaluate() {
     assert_eq!(chain.evaluate(&long).action, PolicyAction::Deny);
     let leaf = RouteContext {
         as_path_str: "65010 65011",
+        as_path: None,
         as_path_len: 2,
         origin_asn: None,
         peer_group: Some("leaf"),
@@ -610,16 +613,98 @@ fn check_rpol_shapes() {
 
 // ── LAN-184: recursion-depth guard ──────────────────────────────────
 
+/// The deterministic stack bound the depth-guard tests enforce: the
+/// tokio worker-thread default (2 MiB) — the smallest stack the daemon
+/// compiles policies on (SIGHUP reload, gRPC policy check). Explicit
+/// `stack_size` so the bound never depends on `RUST_MIN_STACK` or
+/// scheduler/layout luck. The measured worst case (128-level
+/// expression nesting, debug build) is ~7.4 KiB per level across the
+/// `expr → and_expr → unary_expr` parse cycle ≈ 946 KiB — under half
+/// this budget; keep non-recursive parse branches hoisted out of that
+/// cycle (see `Parser::ident_condition`) so it stays there.
+const SMALL_STACK: usize = 2 * 1024 * 1024;
+
 /// Run `check_rpol` on `src` in a small-stack thread so an unguarded
-/// recursive front overflows fast and deterministically instead of
-/// depending on the host's default stack size.
+/// (or frame-bloated) recursive front overflows fast and
+/// deterministically instead of depending on the host's default stack
+/// size.
 fn check_on_small_stack(src: String) -> super::CheckReport {
     std::thread::Builder::new()
-        .stack_size(1024 * 1024)
+        .stack_size(SMALL_STACK)
         .spawn(move || check_rpol(&src))
         .expect("spawn")
         .join()
         .expect("policy compilation must never crash the thread")
+}
+
+/// LAN-303 regression guard for the boundary the depth-*error* tests
+/// above cannot reach: **legal** maximum-depth shapes must compile AND
+/// evaluate inside [`SMALL_STACK`] — every recursive pass runs (parse,
+/// typecheck, constant folding, lowering, evaluation, and the drop
+/// glue of both the AST and the compiled IR), where the diagnostic
+/// tests stop at the parser. A compile-legal configuration must never
+/// be able to overflow a daemon worker thread.
+#[test]
+fn legal_max_depth_shapes_compile_and_evaluate_on_small_stack() {
+    // Depth 120 of the 128 allowed, one source per recursion shape:
+    // `!` chains (deep unary AST), `&&` chains (deep binary AST),
+    // parenthesized nesting (deep parse recursion, flat AST), a deep
+    // arithmetic chain (value-expression recursion + folding), and a
+    // maximally nested loop (LAN-303) around all of it.
+    let bangs = format!(
+        "policy p {{ term t {{ if {}route.med == 0 {{ reject }} accept }} }}",
+        "!".repeat(120),
+    );
+    let ands = format!(
+        "policy p {{ term t {{ if route.med == 0{} {{ reject }} accept }} }}",
+        " && route.med == 0".repeat(120),
+    );
+    let parens = format!(
+        "policy p {{ term t {{ if {}route.med == 0{} {{ reject }} accept }} }}",
+        "(".repeat(120),
+        ")".repeat(120),
+    );
+    let arith = format!(
+        "policy p {{ term t {{ if route.med == 0{} {{ reject }} accept }} }}",
+        " + 1 - 1".repeat(60),
+    );
+    let loops = "
+        asn-set s { 1, 2 }
+        policy p { term t {
+            for a in s { for b in s { for c in s { for d in s {
+                if a + b + c + d >= 8 { add community 65009:9 }
+            } } } }
+            accept
+        } }"
+    .to_string();
+    for (name, src) in [
+        ("bangs", bangs),
+        ("ands", ands),
+        ("parens", parens),
+        ("arith", arith),
+        ("loops", loops),
+    ] {
+        let verdict = std::thread::Builder::new()
+            .stack_size(SMALL_STACK)
+            .spawn(move || {
+                let chain = compile_ok(&src);
+                let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+                let action = chain.evaluate(&ctx).action;
+                drop(chain); // deep IR drop glue, still on this stack
+                action
+            })
+            .expect("spawn")
+            .join()
+            .unwrap_or_else(|_| panic!("legal-depth `{name}` shape crashed the small stack"));
+        // med defaults to 0: `route.med == 0` matches, so every shape
+        // but the loop one rejects (bangs: 120 negations = even).
+        let expect = if name == "loops" {
+            PolicyAction::Permit
+        } else {
+            PolicyAction::Deny
+        };
+        assert_eq!(verdict, expect, "{name}");
+    }
 }
 
 #[test]
@@ -1007,6 +1092,7 @@ fn absent_ctx() -> RouteContext<'static> {
         communities: &[],
         large_communities: &[],
         as_path_str: "",
+        as_path: None,
         as_path_len: 0,
         origin_asn: None,
         validation_state: RpkiValidation::NotFound,
@@ -1616,7 +1702,7 @@ fn prepend_ctx(peer_asn: Option<u32>, origin_asn: Option<u32>) -> RouteContext<'
 fn first_term_mods(chain: &crate::ir::CompiledChain) -> &RouteModifications {
     match &chain.policies[0].terms[0].action {
         TermAction::Permit(mods) | TermAction::Continue(mods) => mods,
-        TermAction::Deny | TermAction::Bind { .. } => panic!("expected a modifying term"),
+        _ => panic!("expected a modifying term"),
     }
 }
 
@@ -2950,4 +3036,670 @@ test absent-origin-initializer-denies {
     let report = run_rpol_tests(source).expect("compiles cleanly");
     assert_eq!(report.total, 5);
     assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+// ── bounded loops (LAN-303) ────────────────────────────────────────
+
+/// A context with a typed `AS_PATH`: one `AS_SEQUENCE` plus an
+/// optional trailing `AS_SET`, leaked like the other test contexts.
+fn as_path_ctx(seq: &[u32], set: &[u32], communities: &[u32]) -> RouteContext<'static> {
+    use rustbgpd_wire::{AsPath, AsPathSegment};
+    let mut segments = Vec::new();
+    if !seq.is_empty() {
+        segments.push(AsPathSegment::AsSequence(seq.to_vec()));
+    }
+    if !set.is_empty() {
+        segments.push(AsPathSegment::AsSet(set.to_vec()));
+    }
+    let path: &'static AsPath = Box::leak(Box::new(AsPath { segments }));
+    RouteContext {
+        as_path: Some(path),
+        ..route_ctx(v4(10, 0, 0, 0, 24), communities, RpkiValidation::NotFound)
+    }
+}
+
+const STD_65000_100: u32 = (65000 << 16) | 0x64;
+const STD_65000_200: u32 = (65000 << 16) | 0xC8;
+const STD_65001_1: u32 = (65001 << 16) | 0x1;
+
+#[test]
+fn loop_over_communities_guards_membership() {
+    // Route-server shape: reject any route carrying a scrub-set
+    // community, via per-element membership.
+    let chain = compile_ok(
+        "community-set scrub { 65000:100, 65000:200 }
+         policy p { term t { for c in route.communities { if c in scrub { reject } } accept } }",
+    );
+    let tagged = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65001_1, STD_65000_200],
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(chain.evaluate(&tagged).action, PolicyAction::Deny);
+    let clean = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65001_1],
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(chain.evaluate(&clean).action, PolicyAction::Permit);
+}
+
+#[test]
+fn loop_scrub_removes_each_matching_community() {
+    // The scrub loop proper: `remove community <loop-var>` stages the
+    // matched value per iteration.
+    let chain = compile_ok(
+        "community-set scrub { 65000:100, 65000:200 }
+         policy p { term t { for c in route.communities { if c in scrub { remove community c } } accept } }",
+    );
+    let ctx = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65000_100, STD_65001_1, STD_65000_200],
+        RpkiValidation::NotFound,
+    );
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_remove,
+        vec![STD_65000_100, STD_65000_200],
+        "each matched community staged, in iteration order"
+    );
+}
+
+#[test]
+fn loop_var_compares_against_community_literal() {
+    // A standard community literal is a u32 in value position.
+    let chain = compile_ok(
+        "policy p { term t { for c in route.communities { if c == 65000:100 { reject } } accept } }",
+    );
+    let hit = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65000_100],
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(chain.evaluate(&hit).action, PolicyAction::Deny);
+    let miss = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65000_200],
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(chain.evaluate(&miss).action, PolicyAction::Permit);
+}
+
+#[test]
+fn as_path_iteration_wire_order_with_duplicates_and_sets() {
+    // Every ASN in wire order: prepend duplicates preserved, AS_SET
+    // members yielded individually. Observed via a per-iteration
+    // community add (list adds accumulate per execution).
+    let chain = compile_ok(
+        "policy p { term t { for asn in route.as-path { add community 65009:9 } accept } }",
+    );
+    let ctx = as_path_ctx(&[65001, 65001, 65002], &[64500, 64501], &[]);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        5,
+        "3 sequence ASNs (duplicate prepend kept) + 2 AS_SET members"
+    );
+    // An absent typed path iterates zero times.
+    let no_path = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    assert!(
+        chain
+            .evaluate(&no_path)
+            .modifications
+            .communities_add
+            .is_empty()
+    );
+}
+
+#[test]
+fn as_path_loop_asn_set_guard() {
+    let chain = compile_ok(
+        "asn-set bogons { 64512, 65535 }
+         policy p { term t { for asn in route.as-path { if asn in bogons { reject } } accept } }",
+    );
+    assert_eq!(
+        chain
+            .evaluate(&as_path_ctx(&[65001, 64512], &[], &[]))
+            .action,
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        chain
+            .evaluate(&as_path_ctx(&[65001, 65002], &[], &[]))
+            .action,
+        PolicyAction::Permit
+    );
+}
+
+#[test]
+fn set_iteration_is_canonical_order_and_deterministic() {
+    // Reversed insertion order interns to the same canonical set, so
+    // the compiled chains are equal and iteration order (observed via
+    // per-iteration adds) is the sorted member order.
+    let a = compile_ok(
+        "asn-set s { 65003, 65001, 65002 }
+         policy p { term t { for asn in s { add community 65009:9 } accept } }",
+    );
+    let b = compile_ok(
+        "asn-set s { 65002, 65001, 65003, 65001 }
+         policy p { term t { for asn in s { add community 65009:9 } accept } }",
+    );
+    assert_eq!(a, b, "reversed/duplicated insertion compiles identically");
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    assert_eq!(a.evaluate(&ctx).modifications.communities_add.len(), 3);
+    // Iteration order: prove via a value comparison that fires only on
+    // the *first* element being the smallest member.
+    let first_probe = compile_ok(
+        "asn-set s { 65003, 65001, 65002 }
+         policy p { term t { for asn in s { if asn == 65001 { reject } break } accept } }",
+    );
+    assert_eq!(
+        first_probe.evaluate(&ctx).action,
+        PolicyAction::Deny,
+        "canonical (sorted) order iterates 65001 first"
+    );
+}
+
+#[test]
+fn break_exits_innermost_loop_only() {
+    // Inner loop breaks on its first iteration; the outer loop still
+    // runs every iteration. 3 outer × (1 inner add) + 3 outer adds.
+    let chain = compile_ok(
+        "asn-set outer { 1, 2, 3 }
+         asn-set inner { 10, 20 }
+         policy p { term t {
+             for a in outer {
+                 for b in inner { add community 65009:1; break }
+                 add community 65009:2
+             }
+             accept
+         } }",
+    );
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        6,
+        "3 inner first-iteration adds + 3 outer adds — break is loop-local"
+    );
+}
+
+#[test]
+fn continue_skips_to_next_iteration() {
+    let chain = compile_ok(
+        "asn-set s { 1, 2, 3, 4 }
+         policy p { term t {
+             for a in s {
+                 if a <= 2 { continue }
+                 add community 65009:9
+             }
+             accept
+         } }",
+    );
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        2,
+        "elements 1 and 2 skipped by continue"
+    );
+}
+
+#[test]
+fn loop_var_scoping_and_shadowing() {
+    // The loop var shadows an outer `let`; a body `let` shadows the
+    // loop var; the outer binding is intact after the loop.
+    let chain = compile_ok(
+        "asn-set s { 7 }
+         policy p { term t {
+             let x = 100;
+             for x in s {
+                 let x = x + 1;
+                 if x == 8 { add community 65009:8 }
+             }
+             set med x;
+             accept
+         } }",
+    );
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        1,
+        "body let read the loop var (7) and shadowed it with 8"
+    );
+    assert_eq!(
+        result.modifications.set_med,
+        Some(100),
+        "outer binding unshadowed after the loop"
+    );
+}
+
+#[test]
+fn staged_add_never_extends_its_own_iteration() {
+    // Reads see the arrived route (staged mods are not read back), so
+    // a loop adding communities while iterating them runs exactly once
+    // per *arrived* community — pinned against self-extension.
+    let chain = compile_ok(
+        "policy p { term t { for c in route.communities { add community 65009:9 } accept } }",
+    );
+    let ctx = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[STD_65000_100, STD_65000_200],
+        RpkiValidation::NotFound,
+    );
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        2,
+        "exactly one add per arrived community — no self-extension"
+    );
+}
+
+#[test]
+fn verdict_mid_loop_terminates_policy_with_staged_mods() {
+    // `accept` inside the loop decides the policy at that iteration;
+    // earlier iterations' staged modifications merge under it, and
+    // later terms never run.
+    let chain = compile_ok(
+        "asn-set s { 1, 2, 3 }
+         policy p {
+             term t {
+                 for a in s {
+                     add community 65009:9;
+                     if a == 2 { set med 42; accept }
+                 }
+             }
+             term never { set local-pref 999; accept }
+         }",
+    );
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(42));
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        2,
+        "iterations 1 and 2 staged adds; iteration 3 never ran"
+    );
+    assert_eq!(
+        result.modifications.set_local_pref, None,
+        "later term never ran"
+    );
+}
+
+#[test]
+fn fuel_accounting_is_exact() {
+    // Consumed fuel == loop iterations, nothing else: straight-line
+    // code pays zero; nested loops pay per entered iteration.
+    let flat = compile_ok(
+        "asn-set s { 1, 2, 3, 4, 5 }
+         policy p { term t { for a in s { if a == 0 { break } } accept } }",
+    );
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let (result, consumed) = flat.evaluate_measuring_fuel(&ctx);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(consumed, 5, "one fuel step per iteration, exactly");
+
+    let nested = compile_ok(
+        "asn-set outer { 1, 2, 3 }
+         asn-set inner { 10, 20 }
+         policy p { term t { for a in outer { for b in inner { if b == 0 { break } } } accept } }",
+    );
+    let (_, consumed) = nested.evaluate_measuring_fuel(&ctx);
+    assert_eq!(
+        consumed,
+        3 + 3 * 2,
+        "outer iterations + entered inner iterations"
+    );
+
+    let loop_free = compile_ok("policy p { term t { if route.med <= 100 { set med 5 } accept } }");
+    let (_, consumed) = loop_free.evaluate_measuring_fuel(&ctx);
+    assert_eq!(consumed, 0, "loop-free walks never touch fuel");
+}
+
+#[test]
+fn oversized_community_list_caps_then_errors_closed() {
+    use crate::eval::PolicyHitCounters;
+    // A peer-supplied route with more communities than the per-loop
+    // cap (possible with RFC 8654 extended messages): the 4097th
+    // element is an evaluation error — uniform Deny + counter, never
+    // silent truncation.
+    let chain = compile_ok(
+        "policy p { term t { for c in route.communities { if c == 1:1 { reject } } accept } }",
+    );
+    let many: Vec<u32> = (0..5000u32).collect();
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &many, RpkiValidation::NotFound);
+    let counters = PolicyHitCounters::for_chain(&chain);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "cap-then-error fails closed"
+    );
+    assert_eq!(counters.eval_errors(), 1);
+
+    // Exactly at the cap: completes cleanly (no elements remain).
+    let exact: Vec<u32> = (0..4096u32).collect();
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &exact, RpkiValidation::NotFound);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+}
+
+#[test]
+fn oversized_as_path_caps_then_errors_closed() {
+    let chain = compile_ok(
+        "policy p { term t { for asn in route.as-path { if asn == 0 { reject } } accept } }",
+    );
+    let long: Vec<u32> = (1..=5000u32).collect();
+    let ctx = as_path_ctx(&long, &[], &[]);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    let realistic: Vec<u32> = (1..=500u32).collect();
+    assert_eq!(
+        chain.evaluate(&as_path_ctx(&realistic, &[], &[])).action,
+        PolicyAction::Permit
+    );
+}
+
+#[test]
+fn fuel_exhausts_across_a_chain_of_loops() {
+    use crate::eval::PolicyHitCounters;
+    // Each policy's loop fits its own compile-time budget, but the
+    // chain compounds at runtime: 300 policies × 4096 iterations >
+    // MAX_EVAL_COST — the fuel rail denies with a counter.
+    use std::fmt::Write as _;
+    let mut source = String::new();
+    for i in 0..300 {
+        let _ = writeln!(
+            source,
+            "policy p{i} {{ term t {{ for c in route.communities {{ if c == 1:1 {{ reject }} }} accept }} }}"
+        );
+    }
+    let chain = compile_ok(&source);
+    let exact: Vec<u32> = (0..4096u32).collect();
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &exact, RpkiValidation::NotFound);
+    let counters = PolicyHitCounters::for_chain(&chain);
+    let result = chain.evaluate_counting(&ctx, &counters);
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "fuel exhaustion fails closed"
+    );
+    assert_eq!(counters.eval_errors(), 1);
+    let (_, consumed) = chain.evaluate_measuring_fuel(&ctx);
+    assert_eq!(
+        consumed,
+        crate::eval::MAX_EVAL_COST,
+        "every fuel step spent"
+    );
+}
+
+#[test]
+fn nested_loops_at_the_cap_compile_and_run_deeper_is_rejected() {
+    let four = "
+        asn-set s { 1, 2 }
+        policy p { term t {
+            for a in s { for b in s { for c in s { for d in s {
+                add community 65009:9
+            } } } }
+            accept
+        } }";
+    let chain = compile_ok(four);
+    let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let result = chain.evaluate(&ctx);
+    assert_eq!(
+        result.modifications.communities_add.len(),
+        16,
+        "2^4 innermost executions at the nesting cap"
+    );
+
+    let five = "
+        asn-set s { 1, 2 }
+        policy p { term t {
+            for a in s { for b in s { for c in s { for d in s { for e in s {
+                add community 65009:9
+            } } } } }
+            accept
+        } }";
+    let (_, rendered) = diagnostics_of(five);
+    assert!(
+        rendered.contains("loops nest more than 4 deep"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn nested_attribute_loops_exceed_the_evaluation_budget() {
+    // 4096 × 4096 body steps: rejected at compile time by the cost DP,
+    // not metered per route.
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t {
+            for a in route.as-path { for c in route.communities { if c == 1:1 { reject } } }
+            accept
+        } }",
+    );
+    assert!(
+        rendered.contains("exceeds the worst-case evaluation budget"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn only_finite_u32_sources_iterate() {
+    for (source, expect) in [
+        ("route.large-communities", "not iterable"),
+        ("route.ext-communities", "not iterable"),
+        ("route.local-pref", "not iterable"),
+        ("peer.asn", "not iterable"),
+        ("route.as-path.len", "not iterable"),
+    ] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p {{ term t {{ for x in {source} {{ if x == 1 {{ reject }} }} accept }} }}"
+        ));
+        assert!(rendered.contains(expect), "{source}: {rendered}");
+    }
+    // Set kinds that are not u32-valued.
+    let (_, rendered) = diagnostics_of(
+        "prefix-set nets { 10.0.0.0/8 }
+         policy p { term t { for x in nets { if x == 1 { reject } } accept } }",
+    );
+    assert!(rendered.contains("not an iterable set"), "{rendered}");
+    let (_, rendered) = diagnostics_of(
+        "community-set cs { 65000:100 }
+         policy p { term t { for x in cs { if x == 1 { reject } } accept } }",
+    );
+    assert!(rendered.contains("iterate route.communities"), "{rendered}");
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { for x in no-such-set { if x == 1 { reject } } accept } }",
+    );
+    assert!(rendered.contains("not an iterable set"), "{rendered}");
+}
+
+#[test]
+fn oversized_asn_set_source_is_rejected_at_compile_time() {
+    let members: Vec<String> = (1..=4097u32).map(|n| n.to_string()).collect();
+    let source = format!(
+        "asn-set big {{ {} }}
+         policy p {{ term t {{ for a in big {{ if a == 1 {{ reject }} }} accept }} }}",
+        members.join(", ")
+    );
+    let (_, rendered) = diagnostics_of(&source);
+    assert!(rendered.contains("set too large to iterate"), "{rendered}");
+}
+
+#[test]
+fn break_and_continue_outside_a_loop_are_rejected() {
+    let (_, rendered) = diagnostics_of("policy p { term t { break; accept } }");
+    assert!(rendered.contains("`break` outside a loop"), "{rendered}");
+    let (_, rendered) =
+        diagnostics_of("policy p { term t { if route.med <= 5 { continue } accept } }");
+    assert!(rendered.contains("`continue` outside a loop"), "{rendered}");
+}
+
+#[test]
+fn apply_target_with_loop_is_rejected() {
+    let (_, rendered) = diagnostics_of(
+        "policy looper { term t { for c in route.communities { if c == 1:1 { reject } } } }
+         policy p { term t { if apply(looper) { reject } accept } }",
+    );
+    assert!(
+        rendered.contains("cannot `apply` policy `looper`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("`apply` targets cannot use `for`"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn parameter_membership_folds_at_compile_time() {
+    // `p in <asn-set>` with a parameter folds to a constant truth
+    // value at instantiation.
+    let source = "
+        asn-set bogons { 64512 }
+        policy guard(asn: u32) { term t { if asn in bogons { reject } accept } }
+        test bogon-param { route { } expect guard(64512) == reject }
+        test clean-param { route { } expect guard(65001) == accept }";
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+#[test]
+fn in_language_tests_exercise_loops() {
+    let source = r#"
+community-set scrub { 65000:100 }
+asn-set bogons { 64512 }
+
+policy strip-scrub {
+    term walk {
+        for c in route.communities {
+            if c in scrub { remove community c }
+        }
+        accept
+    }
+}
+
+policy bogon-path-guard {
+    term walk {
+        for asn in route.as-path {
+            if asn in bogons { reject }
+        }
+        accept
+    }
+}
+
+test scrub-removes-tagged {
+    route { communities [65000:100, 65001:1] }
+    expect strip-scrub == accept
+}
+
+test bogon-as-anywhere-rejects {
+    route { as-path "65001 64512 65002" }
+    expect bogon-path-guard == reject
+}
+
+test bogon-in-as-set-rejects {
+    route { as-path "65001 {64512 64513}" }
+    expect bogon-path-guard == reject
+}
+
+test clean-path-accepts {
+    route { as-path "65001 65002" }
+    expect bogon-path-guard == accept
+}
+"#;
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert_eq!(report.total, 4);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+#[test]
+fn explain_renders_loop_summary_not_iterations() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+    use std::sync::Arc;
+
+    let chain_ir = compile_ok(
+        "asn-set bogons { 64512 }
+         policy p { term guard { for asn in route.as-path { if asn in bogons { reject } } accept } }",
+    );
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(chain_ir),
+    )]);
+    let ctx = as_path_ctx(&[65001, 65002, 64512], &[], &[]);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(
+        trace.action,
+        PolicyAction::Deny,
+        "trace agrees with the live verdict"
+    );
+    let step = &trace.steps[0];
+    let loop_line = step
+        .term_traces
+        .iter()
+        .find(|line| line.contains("loop"))
+        .expect("loop summary line present");
+    assert!(
+        loop_line.contains("reject at iteration 3 of 3"),
+        "summary names the deciding iteration: {loop_line}"
+    );
+    assert!(
+        step.term_traces.len() <= 3,
+        "bounded output — a summary, not per-iteration lines: {:?}",
+        step.term_traces
+    );
+
+    // No verdict: the loop completes and the trace says so.
+    let clean = as_path_ctx(&[65001, 65002], &[], &[]);
+    let trace = explain_chain_statements(Some(&chain), &clean);
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let loop_line = trace.steps[0]
+        .term_traces
+        .iter()
+        .find(|line| line.contains("loop"))
+        .expect("loop summary line present");
+    assert!(
+        loop_line.contains("completed after 2 iteration(s), no verdict"),
+        "{loop_line}"
+    );
+}
+
+#[test]
+fn loop_requires_flags_reach_through_bodies() {
+    // as-path iteration sets requires_as_path_asns; a peer read inside
+    // a loop body still disqualifies update-group sharing.
+    let chain = compile_ok(
+        "policy p { term t { for asn in route.as-path { if asn == 1 { reject } } accept } }",
+    );
+    assert!(chain.requires_as_path_asns());
+    assert!(!chain.requires_peer_context());
+    let peer_in_body = compile_ok(
+        "asn-set s { 1 }
+         policy p { term t { for a in s { if peer.asn == 64512 { reject } } accept } }",
+    );
+    assert!(peer_in_body.requires_peer_context());
+    assert!(!peer_in_body.requires_as_path_asns());
+    let loop_free = compile_ok("policy p { term t { if route.med <= 5 { reject } accept } }");
+    assert!(!loop_free.requires_as_path_asns());
+}
+
+#[test]
+fn dry_run_recording_hits_agrees_with_live_loop_walk() {
+    let chain = compile_ok(
+        "community-set scrub { 65000:100 }
+         policy p { term walk { for c in route.communities { if c in scrub { reject } } accept } }",
+    );
+    for communities in [vec![STD_65000_100], vec![STD_65001_1], vec![]] {
+        let ctx = route_ctx(v4(10, 0, 0, 0, 24), &communities, RpkiValidation::NotFound);
+        let mut hits = chain.zero_term_hits();
+        let recorded = chain.evaluate_recording_hits(&ctx, &mut hits);
+        let live = chain.evaluate(&ctx);
+        assert_eq!(recorded, live, "communities {communities:?}");
+    }
 }
