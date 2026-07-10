@@ -1307,9 +1307,13 @@ expect      := "expect" IDENT ["(" INT,* ")"] "==" ("accept"|"reject") ["with" a
 
 Every error carries labeled source spans (ariadne rendering), and the
 compiler recovers to report multiple independent errors per file.
-Unknown names (sets, policies, fields, enum members, parameters, test
-fixture fields) get did-you-mean suggestions by edit distance;
-kind/type mismatches say what to write instead.
+Unknown names (sets, datasets, policies, functions, fields, enum
+members, parameters, test fixture fields) get did-you-mean suggestions
+by edit distance, with a label at the suggested symbol's definition
+site; an exact name match of a different kind is named as such
+(`` `bogons` is an asn-set; `route.prefix in` needs a prefix-set ``)
+instead of a spelling suggestion. Kind/type mismatches say what to
+write instead.
 
 ```text
 Error: unknown prefix-set `custmers`

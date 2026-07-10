@@ -350,6 +350,19 @@ impl<'a> Checker<'a> {
         self.file.datasets.iter().find(|d| d.name.node == name)
     }
 
+    /// The names of every declared dataset of `kind`, for did-you-mean
+    /// candidate lists (LAN-328).
+    fn dataset_names(
+        &self,
+        kind: DatasetKind,
+    ) -> impl Iterator<Item = &'a Spanned<String>> + use<'a> {
+        self.file
+            .datasets
+            .iter()
+            .filter(move |d| d.kind == kind)
+            .map(|d| &d.name)
+    }
+
     /// The kind and definition span of a source-defined set by name.
     fn set_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
         if let Some(def) = self.file.prefix_sets.iter().find(|s| s.name.node == name) {
@@ -366,6 +379,23 @@ impl<'a> Checker<'a> {
         } else {
             None
         }
+    }
+
+    /// The kind and definition span of any user-defined symbol by name
+    /// (LAN-328): sets, datasets, functions, policies. Used by the
+    /// unknown-reference diagnostics to say what an exact name match in
+    /// a different kind actually is, instead of suggesting a typo fix.
+    fn symbol_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
+        self.set_def_of(name)
+            .or_else(|| self.dataset_of(name).map(|d| ("dataset", d.name.span)))
+            .or_else(|| {
+                self.file
+                    .fns
+                    .iter()
+                    .find(|f| f.name.node == name)
+                    .map(|f| ("function", f.name.span))
+            })
+            .or_else(|| self.policy(name).map(|p| ("policy", p.name.span)))
     }
 
     // ── functions (LAN-304) ─────────────────────────────────────────
@@ -774,13 +804,22 @@ impl<'a> Checker<'a> {
                          `route.prefix in` instead",
                     ),
                     _ => {
-                        if let Some(suggestion) = closest(
-                            &name.node,
-                            self.file.asn_sets.iter().map(|s| s.name.node.as_str()),
-                        ) {
-                            diag.with_note(format!("did you mean `{suggestion}`?"))
+                        if let Some((kind, span)) = self.symbol_def_of(&name.node) {
+                            diag.with_note(format!(
+                                "`{}` is {} {kind}, not an iterable asn-set",
+                                name.node,
+                                article(kind)
+                            ))
+                            .with_label(span, format!("`{}` is defined here", name.node))
                         } else {
-                            diag
+                            with_suggestion(
+                                diag,
+                                &name.node,
+                                self.file
+                                    .asn_sets
+                                    .iter()
+                                    .map(|s| (s.name.node.as_str(), Some(s.name.span))),
+                            )
                         }
                     }
                 };
@@ -1111,23 +1150,39 @@ impl<'a> Checker<'a> {
                         format!("unknown function or builtin `{}`", name.node),
                         "not a function or value builtin",
                     );
-                    if self.policy(&name.node).is_some() {
-                        diag = diag.with_note(format!(
-                            "`{}` is a policy — policies are predicates, composed with \
-                             `apply({}(...))`, not called for a value",
-                            name.node, name.node
-                        ));
-                    } else if let Some(suggestion) = closest(
-                        &name.node,
-                        VALUE_BUILTINS
-                            .iter()
-                            .map(|(b, _)| *b)
-                            .chain(self.file.fns.iter().map(|f| f.name.node.as_str())),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
-                    } else {
+                    if let Some((kind, span)) = self.symbol_def_of(&name.node) {
+                        let note = if kind == "policy" {
+                            format!(
+                                "`{}` is a policy — policies are predicates, composed with \
+                                 `apply({}(...))`, not called for a value",
+                                name.node, name.node
+                            )
+                        } else {
+                            format!(
+                                "`{}` is {} {kind}, not a function",
+                                name.node,
+                                article(kind)
+                            )
+                        };
                         diag = diag
-                            .with_note("value builtins: min(a, b), max(a, b), clamp(x, lo, hi)");
+                            .with_note(note)
+                            .with_label(span, format!("`{}` is defined here", name.node));
+                    } else {
+                        diag = with_suggestion(
+                            diag,
+                            &name.node,
+                            VALUE_BUILTINS.iter().map(|(b, _)| (*b, None)).chain(
+                                self.file
+                                    .fns
+                                    .iter()
+                                    .map(|f| (f.name.node.as_str(), Some(f.name.span))),
+                            ),
+                        );
+                        if diag.notes.is_empty() {
+                            diag = diag.with_note(
+                                "value builtins: min(a, b), max(a, b), clamp(x, lo, hi)",
+                            );
+                        }
                     }
                     self.diags.push(diag);
                     return;
@@ -1278,26 +1333,36 @@ impl<'a> Checker<'a> {
                         format!("unknown asn-set or community-set `{}`", set.node),
                         "binding membership probes asn-sets and community-sets",
                     );
-                    if self.set_kind_of(&set.node) == Some("prefix-set") {
-                        diag = diag.with_note(format!(
-                            "`{}` is a prefix-set; bindings are u32 values and cannot \
-                             probe prefixes",
-                            set.node
-                        ));
-                    } else if let Some(suggestion) = closest(
-                        &set.node,
-                        self.file
-                            .asn_sets
-                            .iter()
-                            .map(|s| s.name.node.as_str())
-                            .chain(
-                                self.file
-                                    .community_sets
-                                    .iter()
-                                    .map(|s| s.name.node.as_str()),
-                            ),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    if let Some((kind, span)) = self.symbol_def_of(&set.node) {
+                        let note = if kind == "prefix-set" {
+                            format!(
+                                "`{}` is a prefix-set; bindings are u32 values and cannot \
+                                 probe prefixes",
+                                set.node
+                            )
+                        } else {
+                            format!(
+                                "`{}` is {} {kind}, not an asn-set or community-set",
+                                set.node,
+                                article(kind)
+                            )
+                        };
+                        diag = diag
+                            .with_note(note)
+                            .with_label(span, format!("`{}` is defined here", set.node));
+                    } else {
+                        diag = with_suggestion(
+                            diag,
+                            &set.node,
+                            self.file
+                                .asn_sets
+                                .iter()
+                                .map(|s| &s.name)
+                                .chain(self.file.community_sets.iter().map(|s| &s.name))
+                                .chain(self.dataset_names(DatasetKind::Asn))
+                                .chain(self.dataset_names(DatasetKind::Community))
+                                .map(|n| (n.node.as_str(), Some(n.span))),
+                        );
                     }
                     self.diags.push(diag);
                 }
@@ -1367,14 +1432,23 @@ impl<'a> Checker<'a> {
                         format!("unknown policy `{}`", policy.node),
                         "no policy with this name",
                     );
-                    let names: Vec<&str> = self
-                        .file
-                        .policies
-                        .iter()
-                        .map(|p| p.name.node.as_str())
-                        .collect();
-                    if let Some(suggestion) = closest(&policy.node, names) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    if let Some((kind, span)) = self.symbol_def_of(&policy.node) {
+                        diag = diag
+                            .with_note(format!(
+                                "`{}` is {} {kind}, not a policy — `apply` composes policies",
+                                policy.node,
+                                article(kind)
+                            ))
+                            .with_label(span, format!("`{}` is defined here", policy.node));
+                    } else {
+                        diag = with_suggestion(
+                            diag,
+                            &policy.node,
+                            self.file
+                                .policies
+                                .iter()
+                                .map(|p| (p.name.node.as_str(), Some(p.name.span))),
+                        );
                     }
                     self.diags.push(diag);
                     return;
@@ -1713,8 +1787,9 @@ impl<'a> Checker<'a> {
         need: &str,
         names: impl Iterator<Item = &'n Spanned<String>>,
     ) {
-        let mut candidates = names.map(|n| n.node.as_str());
-        if candidates.any(|name| name == set.node) {
+        let candidates: Vec<(&str, Option<Span>)> =
+            names.map(|n| (n.node.as_str(), Some(n.span))).collect();
+        if candidates.iter().any(|&(name, _)| name == set.node) {
             return;
         }
         let mut diag = Diagnostic::new(
@@ -1722,32 +1797,18 @@ impl<'a> Checker<'a> {
             format!("unknown {kind} `{}`", set.node),
             format!("no {kind} with this name"),
         );
-        if let Some(actual) = self.set_kind_of(&set.node) {
-            diag = diag.with_note(format!("`{}` is a {actual}; {need}", set.node));
-        } else if let Some(suggestion) = closest(
-            &set.node,
-            match kind {
-                "prefix-set" => self
-                    .file
-                    .prefix_sets
-                    .iter()
-                    .map(|s| s.name.node.as_str())
-                    .collect::<Vec<_>>(),
-                "community-set" => self
-                    .file
-                    .community_sets
-                    .iter()
-                    .map(|s| s.name.node.as_str())
-                    .collect(),
-                _ => self
-                    .file
-                    .asn_sets
-                    .iter()
-                    .map(|s| s.name.node.as_str())
-                    .collect(),
-            },
-        ) {
-            diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+        // An exact name match of a different kind beats a typo
+        // suggestion (LAN-328): the reference is wrong, not misspelled.
+        if let Some((actual, span)) = self.symbol_def_of(&set.node) {
+            diag = diag
+                .with_note(format!(
+                    "`{}` is {} {actual}; {need}",
+                    set.node,
+                    article(actual)
+                ))
+                .with_label(span, format!("`{}` is defined here", set.node));
+        } else {
+            diag = with_suggestion(diag, &set.node, candidates);
         }
         self.diags.push(diag);
     }
@@ -1788,24 +1849,38 @@ impl<'a> Checker<'a> {
             return;
         }
         match resolved {
+            // Right-kind datasets are valid `in` targets (LAN-305), so
+            // they are suggestion candidates alongside the sets.
             Field::Prefix => self.check_set_reference(
                 set,
                 "prefix-set",
                 "`route.prefix in` needs a prefix-set",
-                self.file.prefix_sets.iter().map(|s| &s.name),
+                self.file
+                    .prefix_sets
+                    .iter()
+                    .map(|s| &s.name)
+                    .chain(self.dataset_names(DatasetKind::Prefix)),
             ),
             Field::Communities | Field::LargeCommunities | Field::ExtCommunities => self
                 .check_set_reference(
                     set,
                     "community-set",
                     "community membership needs a community-set",
-                    self.file.community_sets.iter().map(|s| &s.name),
+                    self.file
+                        .community_sets
+                        .iter()
+                        .map(|s| &s.name)
+                        .chain(self.dataset_names(DatasetKind::Community)),
                 ),
             Field::OriginAs | Field::PeerAsn => self.check_set_reference(
                 set,
                 "asn-set",
                 "ASN membership needs an asn-set",
-                self.file.asn_sets.iter().map(|s| &s.name),
+                self.file
+                    .asn_sets
+                    .iter()
+                    .map(|s| &s.name)
+                    .chain(self.dataset_names(DatasetKind::Asn)),
             ),
             _ => self.diags.push(
                 Diagnostic::new(
@@ -1994,11 +2069,24 @@ impl<'a> Checker<'a> {
                         format!("unknown dataset `{}`", def.name.node),
                         "no dataset declared with this name",
                     );
-                    if let Some(suggestion) = closest(
-                        &def.name.node,
-                        self.file.datasets.iter().map(|d| d.name.node.as_str()),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    if let Some((kind, span)) = self.symbol_def_of(&def.name.node) {
+                        diag = diag
+                            .with_note(format!(
+                                "`{}` is {} {kind}, not a dataset — overrides fill declared \
+                                 datasets",
+                                def.name.node,
+                                article(kind)
+                            ))
+                            .with_label(span, format!("`{}` is defined here", def.name.node));
+                    } else {
+                        diag = with_suggestion(
+                            diag,
+                            &def.name.node,
+                            self.file
+                                .datasets
+                                .iter()
+                                .map(|d| (d.name.node.as_str(), Some(d.name.span))),
+                        );
                     }
                     self.diags.push(diag);
                     continue;
@@ -2032,11 +2120,23 @@ impl<'a> Checker<'a> {
                         format!("unknown policy `{}`", expect.policy.node),
                         "no policy with this name",
                     );
-                    if let Some(suggestion) = closest(
-                        &expect.policy.node,
-                        self.file.policies.iter().map(|p| p.name.node.as_str()),
-                    ) {
-                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    if let Some((kind, span)) = self.symbol_def_of(&expect.policy.node) {
+                        diag = diag
+                            .with_note(format!(
+                                "`{}` is {} {kind}, not a policy — `expect` runs policies",
+                                expect.policy.node,
+                                article(kind)
+                            ))
+                            .with_label(span, format!("`{}` is defined here", expect.policy.node));
+                    } else {
+                        diag = with_suggestion(
+                            diag,
+                            &expect.policy.node,
+                            self.file
+                                .policies
+                                .iter()
+                                .map(|p| (p.name.node.as_str(), Some(p.name.span))),
+                        );
                     }
                     self.diags.push(diag);
                     continue;
@@ -2723,6 +2823,42 @@ fn find_cycle<'a>(
     path.pop();
     done.insert(node);
     None
+}
+
+/// "a" / "an" for a symbol-kind noun in a diagnostic note
+/// ("an asn-set", "a prefix-set").
+fn article(kind: &str) -> &'static str {
+    if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// Attach the shared "did you mean" note for the closest candidate
+/// (LAN-328), plus a definition-site label when the candidate is a
+/// user-defined symbol — ariadne renders the label with the defining
+/// file and line. Candidates without a span (builtins) get the note
+/// only; no candidate within the [`closest`] budget leaves `diag`
+/// untouched.
+fn with_suggestion<'n>(
+    diag: Diagnostic,
+    name: &str,
+    candidates: impl IntoIterator<Item = (&'n str, Option<Span>)>,
+) -> Diagnostic {
+    let candidates: Vec<(&str, Option<Span>)> = candidates.into_iter().collect();
+    let Some(suggestion) = closest(name, candidates.iter().map(|&(candidate, _)| candidate)) else {
+        return diag;
+    };
+    let diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+    let defined = candidates
+        .iter()
+        .find(|&&(candidate, _)| candidate == suggestion)
+        .and_then(|&(_, span)| span);
+    match defined {
+        Some(span) => diag.with_label(span, format!("`{suggestion}` is defined here")),
+        None => diag,
+    }
 }
 
 fn type_mismatch(field: &FieldPath, expected: &str, found: &Rhs) -> Diagnostic {
