@@ -1,11 +1,14 @@
 name: "Install containerlab (hardened)"
 description: >-
-  Download and install a pinned containerlab release with retry + archive
-  validation (issue #208). The bare `curl … -o /tmp/clab.deb && dpkg -i` has
-  failed when the download is truncated or returns an HTML error body
-  ("dpkg-deb: '/tmp/clab.deb' is not a Debian format archive"). This retries
-  with backoff and validates the file with `dpkg-deb --info` — the exact tool
-  that errored — before invoking `dpkg -i`, and fails with a clear diagnostic.
+  Install a pinned containerlab release from the Actions cache, downloading
+  only on a cache miss with retry + archive validation (issue #208). The bare
+  `curl … -o /tmp/clab.deb && dpkg -i` has failed when the download is
+  truncated or returns an HTML error body ("dpkg-deb: '/tmp/clab.deb' is not
+  a Debian format archive"). The cache (LAN-252) removes the download — the
+  interop workflows' flakiest external fetch — from warm runs entirely; a
+  cold run retries with backoff and validates the file with
+  `dpkg-deb --info` — the exact tool that errored — before it is installed
+  and saved to the cache.
 inputs:
   version:
     description: "containerlab release version (without leading v)."
@@ -14,14 +17,25 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install containerlab ${{ inputs.version }} (retry + validate)
+    # The key includes the pinned version, so bumping the version input
+    # naturally invalidates the cache and re-downloads.
+    - name: Restore containerlab ${{ inputs.version }} .deb from cache
+      id: clab-deb
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/containerlab/containerlab_${{ inputs.version }}_linux_amd64.deb
+        key: containerlab-deb-${{ inputs.version }}
+
+    - name: Download containerlab ${{ inputs.version }} (retry + validate)
+      if: steps.clab-deb.outputs.cache-hit != 'true'
       shell: bash
       env:
         CLAB_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
         url="https://github.com/srl-labs/containerlab/releases/download/v${CLAB_VERSION}/containerlab_${CLAB_VERSION}_linux_amd64.deb"
-        deb=/tmp/clab.deb
+        deb="$HOME/.cache/containerlab/containerlab_${CLAB_VERSION}_linux_amd64.deb"
+        mkdir -p "$(dirname "$deb")"
         # Single retry mechanism: the outer loop owns retry + backoff, because
         # the load-bearing failure (#208) is a 200-OK truncated/HTML body that
         # `curl --retry` treats as success — only the `dpkg-deb --info` check
@@ -41,6 +55,21 @@ runs:
         done
         if [ "$ok" != 1 ]; then
           echo "::error::containerlab .deb download/validation failed after ${attempts} attempts (issue #208)"
+          exit 1
+        fi
+
+    - name: Install containerlab ${{ inputs.version }}
+      shell: bash
+      env:
+        CLAB_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        deb="$HOME/.cache/containerlab/containerlab_${CLAB_VERSION}_linux_amd64.deb"
+        # Validate on both paths (fresh download and cache restore) with the
+        # exact tool that errored in #208, so a bad artifact fails loudly
+        # here rather than as an opaque dpkg error.
+        if ! dpkg-deb --info "$deb" >/dev/null 2>&1; then
+          echo "::error::containerlab .deb failed validation; evict cache key containerlab-deb-${CLAB_VERSION} and re-run"
           exit 1
         fi
         sudo dpkg -i "$deb"

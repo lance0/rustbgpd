@@ -1055,6 +1055,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Prometheus endpoint, refreshed at scrape time:
   `jemalloc_allocated_bytes`, `jemalloc_active_bytes`,
   `jemalloc_resident_bytes`, and `jemalloc_mapped_bytes`. (LAN-331)
+- **Interop CI no longer re-downloads its flakiest setup artifacts every
+  run.** The containerlab `.deb` is cached via `actions/cache` keyed on the
+  pinned version (warm runs skip the download entirely; cold runs keep the
+  #208 retry + `dpkg-deb` validation), and the M43 BIRD 3.2.1 TCP-AO image
+  build now uses the buildx GHA layer cache, so the bird.nic.cz tarball
+  fetch and source compile are skipped on warm runs. (LAN-252)
 
 ## [0.50.0] — 2026-07-05
 

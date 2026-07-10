@@ -334,9 +334,23 @@ jobs:
             echo "::warning::M43 skipped: $(uname -r) does not advertise CONFIG_TCP_AO=y"
           fi
 
+      # Buildx GHA layer cache (LAN-252): the bird.nic.cz tarball fetch and
+      # the full BIRD source build live in layers keyed on the Dockerfile
+      # content (which pins BIRD_VERSION and the configure flags), so warm
+      # runs skip both the flaky download and the compile; a version bump
+      # edits the Dockerfile and naturally invalidates. Buildx itself is set
+      # up by setup-dataplane-host above. The dedicated scope keeps this
+      # image's cache separate from rustbgpd:dev's.
       - name: Build BIRD 3.2.1 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
-        run: docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird3
+          load: true
+          tags: bird:3.2.1-tcpao
+          cache-from: type=gha,scope=bird3-tcpao
+          cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true
 
       - name: Run M43 (deploy + test + destroy with retry)
         if: steps.tcp_ao.outputs.supported == 'true'
