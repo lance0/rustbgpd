@@ -1053,6 +1053,9 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         // tagged route (otherwise local_pref=0 is ambiguous between
         // "policy set it" and "no LOCAL_PREF on EBGP wire").
         local_pref_attr: route.local_pref_attr(),
+        // Distinguishes "explicit MED attribute" from "no attribute" —
+        // the bare `med` field encodes absent as 0 (LAN-313).
+        med_attr: route.med_attr(),
         // Receive wall time recovered from the monotonic receive
         // instant, the same recovery the BMP Loc-RIB dump uses for its
         // RFC 9069 per-peer header timestamp. Approximation: `now()` and
@@ -4212,6 +4215,58 @@ mod tests {
             resp.next_page_token,
             encode_route_page_token(&route_query_key(&route))
         );
+    }
+
+    #[tokio::test]
+    async fn list_routes_distinguishes_med_absent_from_med_zero() {
+        // LAN-313: `med_attr` is the honest absence marker — a route
+        // whose MED attribute is explicitly 0 and a route with no MED
+        // attribute both encode bare `med = 0`, but must differ in
+        // `med_attr` through the service and a wire round trip.
+        use prost::Message;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let med_zero = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![PathAttribute::Med(0)],
+        );
+        let med_absent = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24)),
+            vec![],
+        );
+        let page = vec![med_zero, med_absent];
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                if let RibUpdate::QueryRoutesPage { reply, .. } = update {
+                    let _ = reply.send(RoutePage {
+                        routes: page.clone(),
+                        total: 2,
+                        has_more: false,
+                    });
+                }
+            }
+        });
+
+        let svc = RibService::new(tx);
+        let resp = svc
+            .list_received_routes(Request::new(list_routes_request()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.routes.len(), 2);
+        let zero = &resp.routes[0];
+        let absent = &resp.routes[1];
+        assert_eq!(zero.med, 0);
+        assert_eq!(absent.med, 0, "bare med conflates absent with 0");
+        assert_eq!(zero.med_attr, Some(0));
+        assert_eq!(absent.med_attr, None);
+
+        // The distinction must survive protobuf encode/decode.
+        let decoded = proto::Route::decode(zero.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.med_attr, Some(0));
+        let decoded = proto::Route::decode(absent.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.med_attr, None);
     }
 
     #[tokio::test]

@@ -58,9 +58,6 @@ const IGNORABLE_ATTRIBUTES: &[&str] = &[
 /// human and JSON output so a reader knows exactly what the comparison
 /// could and could not see.
 const LIVE_SOURCE_NOTES: &[&str] = &[
-    "med: the daemon proto carries MED as a bare integer, so MED-absent and MED 0 are \
-     indistinguishable over gRPC; live med=0 is compared as absent (snapshot producers \
-     should omit `med` when it is zero or absent)",
     "as_path: the daemon proto exposes a flattened ASN list, so AS_PATH is compared as a \
      single AS_SEQUENCE on both sides; AS_SET structure is not compared",
     "unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, \
@@ -70,6 +67,25 @@ const LIVE_SOURCE_NOTES: &[&str] = &[
      drift is detected via per-page total_count instead, and the snapshot header's \
      generation is adopted for the live side",
 ];
+
+/// MED-conflation caveat, emitted only when the daemon never populated
+/// `med_attr` in the run (an older daemon whose bare `med` field cannot
+/// distinguish absent from 0). Daemons that populate `med_attr` are
+/// compared exactly (absent = absent, 0 = 0) and need no caveat.
+const MED_CONFLATION_NOTE: &str = "med: this daemon carries MED as a bare integer only \
+     (no med_attr), so MED-absent and MED 0 are indistinguishable over gRPC; live med=0 \
+     is compared as absent (snapshot producers should omit `med` when it is zero or absent)";
+
+/// The live-source notes for one run: the MED-conflation caveat is
+/// version-conditional, the rest are structural.
+fn live_source_notes(med_attr_seen: bool) -> Vec<&'static str> {
+    let mut notes = Vec::with_capacity(LIVE_SOURCE_NOTES.len() + 1);
+    if !med_attr_seen {
+        notes.push(MED_CONFLATION_NOTE);
+    }
+    notes.extend_from_slice(LIVE_SOURCE_NOTES);
+    notes
+}
 
 /// Requested page size — matches the server's per-page cap.
 const ROUTE_PAGE_SIZE: u32 = 1000;
@@ -171,6 +187,9 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
 
     let mut rib_client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    // True once any live route carries `med_attr` — the daemon is
+    // MED-absence-aware and the MED-conflation caveat does not apply.
+    let mut med_attr_seen = false;
 
     let mut report = DiffReport {
         schema: ribdiff::SCHEMA_VERSION,
@@ -254,7 +273,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             },
             limits,
         );
-        fetch_advertised_into(
+        med_attr_seen |= fetch_advertised_into(
             &mut rib_client,
             &peer_id,
             &mut live,
@@ -288,10 +307,11 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
         Verdict::Divergent => EXIT_DIVERGENT,
         Verdict::Incomparable => EXIT_INCOMPARABLE,
     };
+    let notes = live_source_notes(med_attr_seen);
     let rendered = if opts.json {
-        render_json(&report, &ignored)?
+        render_json(&report, &ignored, &notes)?
     } else {
-        render_human(&report, &ignored, opts.detail)
+        render_human(&report, &ignored, &notes, opts.detail)
     };
     Ok((rendered, code))
 }
@@ -755,6 +775,10 @@ fn as_path_segment(asns: &[u32]) -> Vec<AsPathSegment> {
 /// - the fetched route count must equal the server's `total_count`;
 /// - `--max-routes` is enforced before each page is buffered into the set;
 /// - the shared deadline is checked before every RPC.
+///
+/// Returns whether any fetched route carried `med_attr` (a
+/// MED-absence-aware daemon); the MED-conflation caveat is dropped
+/// from the report notes for such runs.
 async fn fetch_advertised_into(
     client: &mut RibClient,
     peer: &PeerId,
@@ -763,7 +787,7 @@ async fn fetch_advertised_into(
     ignored: &[String],
     max_routes: usize,
     deadline: Instant,
-) -> Result<(), CliError> {
+) -> Result<bool, CliError> {
     let peer_addr = peer.address;
     let mut req = ListRoutesRequest {
         neighbor_address: peer_addr.to_string(),
@@ -780,6 +804,7 @@ async fn fetch_advertised_into(
     let mut seen_tokens: HashSet<String> = HashSet::new();
     let mut fetched: u64 = 0;
     let mut expected_total: Option<u64> = None;
+    let mut med_attr_seen = false;
     loop {
         if Instant::now() >= deadline {
             return Err(op(format!(
@@ -811,6 +836,7 @@ async fn fetch_advertised_into(
         }
         for route in &resp.routes {
             fetched += 1;
+            med_attr_seen |= route.med_attr.is_some();
             let (family, nlri, path) = convert_live_route(route)
                 .map_err(|msg| op(format!("daemon returned an unusable route: {msg}")))?;
             if !family_retained(family, family_filter) {
@@ -840,7 +866,7 @@ async fn fetch_advertised_into(
              routes but the server reported total_count {total}; refusing to compare"
         )));
     }
-    Ok(())
+    Ok(med_attr_seen)
 }
 
 fn convert_live_route(route: &Route) -> Result<(FamilyId, Nlri, RoutePath), String> {
@@ -866,9 +892,11 @@ fn convert_live_route(route: &Route) -> Result<(FamilyId, Nlri, RoutePath), Stri
         origin: Some(origin),
         as_path: as_path_segment(&route.as_path),
         next_hop,
-        // The proto carries MED as a bare u32: absent and 0 are
-        // indistinguishable, so 0 maps to absent (see LIVE_SOURCE_NOTES).
-        med: (route.med != 0).then_some(route.med),
+        // `med_attr` is the honest optional field (absent = absent,
+        // 0 = 0). Older daemons only carry the bare u32 where absent
+        // and 0 are indistinguishable, so 0 maps to absent (see
+        // MED_CONFLATION_NOTE).
+        med: route.med_attr.or((route.med != 0).then_some(route.med)),
         // local_pref_attr is the honest optional field; the bare
         // `local_pref` is the effective (defaulted) value.
         local_pref: route.local_pref_attr,
@@ -906,20 +934,21 @@ fn ignored_display(ignored: &[String]) -> String {
     }
 }
 
-fn render_json(report: &DiffReport, ignored: &[String]) -> Result<String, CliError> {
+fn render_json(
+    report: &DiffReport,
+    ignored: &[String],
+    notes: &[&str],
+) -> Result<String, CliError> {
     let mut value = serde_json::to_value(report)?;
     let object = value
         .as_object_mut()
         .expect("DiffReport serializes to an object");
     object.insert("ignored_attributes".to_string(), serde_json::json!(ignored));
-    object.insert(
-        "live_source_notes".to_string(),
-        serde_json::json!(LIVE_SOURCE_NOTES),
-    );
+    object.insert("live_source_notes".to_string(), serde_json::json!(notes));
     Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
 }
 
-fn render_human(report: &DiffReport, ignored: &[String], detail: usize) -> String {
+fn render_human(report: &DiffReport, ignored: &[String], notes: &[&str], detail: usize) -> String {
     use std::fmt::Write;
 
     let mut out = String::new();
@@ -936,7 +965,7 @@ fn render_human(report: &DiffReport, ignored: &[String], detail: usize) -> Strin
         ignored_display(ignored)
     );
     out.push_str("live-source notes:\n");
-    for note in LIVE_SOURCE_NOTES {
+    for note in notes {
         let _ = writeln!(out, "  - {note}");
     }
     let verdict = match report.verdict {
@@ -1087,6 +1116,17 @@ mod tests {
             med,
             communities: vec![(64501 << 16) | 100],
             ..Default::default()
+        }
+    }
+
+    fn live_route_with_med_attr(
+        prefix: &str,
+        med: u32,
+        med_attr: Option<u32>,
+    ) -> server_proto::Route {
+        server_proto::Route {
+            med_attr,
+            ..live_route(prefix, med)
         }
     }
 
@@ -1470,6 +1510,67 @@ mod tests {
         let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
         let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
         assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+    }
+
+    #[tokio::test]
+    async fn med_attr_compares_exactly_and_drops_conflation_caveat() {
+        // A MED-absence-aware daemon (med_attr populated): explicit
+        // MED 0 stays 0 and absent stays absent, so a snapshot carrying
+        // explicit med:0 diffs clean against a live med=0 — and the
+        // MED-conflation caveat disappears from the report notes.
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", Some(0)),
+            route_line("10.0.1.0/24", None),
+            trailer_line(2),
+        ]);
+        let server = server_with_pages(vec![page(
+            vec![
+                live_route_with_med_attr("10.0.0.0", 0, Some(0)),
+                live_route_with_med_attr("10.0.1.0", 0, None),
+            ],
+            "",
+            2,
+        )])
+        .await;
+        let mut json_opts = opts(file.path());
+        json_opts.json = true;
+        let (rendered, code) = run_against(&server, &json_opts).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let notes = value["live_source_notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !n.as_str().unwrap().starts_with("med:")),
+            "MED caveat should be dropped when med_attr is present: {notes:?}"
+        );
+        assert!(!notes.is_empty(), "structural notes remain");
+    }
+
+    #[tokio::test]
+    async fn med_attr_missing_keeps_fallback_mapping_and_caveat() {
+        // Older daemon (med_attr populated nowhere): live med=0 still
+        // maps to absent and the MED-conflation caveat stays in the
+        // report notes.
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let mut json_opts = opts(file.path());
+        json_opts.json = true;
+        let (rendered, code) = run_against(&server, &json_opts).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let notes = value["live_source_notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str().unwrap().starts_with("med:")),
+            "MED caveat should be kept for daemons without med_attr: {notes:?}"
+        );
     }
 
     #[tokio::test]

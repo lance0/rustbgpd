@@ -485,6 +485,18 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
     }
 }
 
+/// Render one MED table cell. `med_attr` is the honest absence marker
+/// (LAN-313): when the daemon supports it (populated anywhere in the
+/// response), an absent MED renders as "-"; against an older daemon the
+/// bare 0-defaulted `med` field is shown as-is.
+fn format_med(med: u32, med_attr: Option<u32>, med_attr_supported: bool) -> String {
+    match med_attr {
+        Some(m) => m.to_string(),
+        None if med_attr_supported => "-".to_string(),
+        None => med.to_string(),
+    }
+}
+
 /// Print route table with dynamic column widths and colored best marker.
 pub fn print_route_table(routes: &[proto::Route]) {
     struct Row {
@@ -499,6 +511,10 @@ pub fn print_route_table(routes: &[proto::Route]) {
         path_id: String,
     }
 
+    // A daemon that populates `med_attr` anywhere in the response is
+    // MED-absence-aware: render an absent MED as "-". Older daemons
+    // never set it, so fall back to the bare (0-defaulted) `med` field.
+    let med_attr_supported = routes.iter().any(|r| r.med_attr.is_some());
     let rows: Vec<Row> = routes
         .iter()
         .map(|r| {
@@ -514,7 +530,7 @@ pub fn print_route_table(routes: &[proto::Route]) {
                 next_hop: r.next_hop.clone(),
                 as_path: format_as_path(&r.as_path),
                 lp: r.local_pref.to_string(),
-                med: r.med.to_string(),
+                med: format_med(r.med, r.med_attr, med_attr_supported),
                 origin: format_origin(r.origin).to_string(),
                 path_id,
             }
@@ -655,6 +671,19 @@ mod tests {
         // >= 7 days
         assert_eq!(format_duration(604800), "7d 0h");
         assert_eq!(format_duration(615600), "7d 3h");
+    }
+
+    #[test]
+    fn test_format_med() {
+        // MED-absence-aware daemon: explicit values (including 0) render
+        // as numbers, an absent MED renders as "-".
+        assert_eq!(format_med(0, Some(0), true), "0");
+        assert_eq!(format_med(50, Some(50), true), "50");
+        assert_eq!(format_med(0, None, true), "-");
+        // Older daemon (med_attr populated nowhere): the bare
+        // 0-defaulted field passes through unchanged.
+        assert_eq!(format_med(0, None, false), "0");
+        assert_eq!(format_med(50, None, false), "50");
     }
 
     #[test]

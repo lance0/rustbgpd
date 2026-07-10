@@ -284,6 +284,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Peers whose chain content did change get exactly the previous
   behavior: session installs, RIB replacement, regroup, counter reset,
   and Route Refresh. (LAN-311)
+- **The gRPC `Route` message now marks MED absence honestly.** A new
+  optional `med_attr` field (mirroring `local_pref_attr`) distinguishes
+  "no MED attribute" from "MED 0", which the bare 0-defaulted `med`
+  field conflates. `rbgp` route tables render an absent MED as `-` and
+  route JSON as `null` when the daemon populates the field (older
+  daemons keep the bare-field rendering), and `rbgp diff` compares MED
+  exactly against such daemons — an explicit MED 0 in a snapshot now
+  diffs clean against a live MED 0 — dropping the MED-conflation caveat
+  from `live_source_notes`; the caveat and the med=0-as-absent mapping
+  remain only for daemons without the field. (LAN-313)
 
 - **Fatal RTR errors now flush the affected cache's data and emit Error
   Reports per draft-ietf-sidrops-8210bis-26, instead of retaining until

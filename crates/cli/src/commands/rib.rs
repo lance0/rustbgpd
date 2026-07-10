@@ -578,9 +578,13 @@ impl Serialize for JsonRoutes<'_> {
     where
         S: Serializer,
     {
+        let med_attr_supported = self.0.iter().any(|r| r.med_attr.is_some());
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
         for route in self.0 {
-            seq.serialize_element(&JsonRouteRef(route))?;
+            seq.serialize_element(&JsonRouteRef {
+                route,
+                med_attr_supported,
+            })?;
         }
         seq.end()
     }
@@ -675,14 +679,21 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-struct JsonRouteRef<'a>(&'a Route);
+struct JsonRouteRef<'a> {
+    route: &'a Route,
+    /// Whether any route in the enclosing response carried `med_attr`
+    /// — i.e. the daemon distinguishes MED-absent from MED 0. When
+    /// true, an absent MED serializes as `null`; when false (older
+    /// daemon), the bare 0-defaulted `med` field is emitted as-is.
+    med_attr_supported: bool,
+}
 
 impl Serialize for JsonRouteRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let route = self.0;
+        let route = self.route;
         let mut len = 10;
         if route.path_id != 0 {
             len += 1;
@@ -696,7 +707,11 @@ impl Serialize for JsonRouteRef<'_> {
         map.serialize_entry("next_hop", &route.next_hop)?;
         map.serialize_entry("as_path", &route.as_path)?;
         map.serialize_entry("local_pref", &route.local_pref)?;
-        map.serialize_entry("med", &route.med)?;
+        match route.med_attr {
+            Some(med) => map.serialize_entry("med", &med)?,
+            None if self.med_attr_supported => map.serialize_entry("med", &None::<u32>)?,
+            None => map.serialize_entry("med", &route.med)?,
+        }
         map.serialize_entry("origin", output::format_origin(route.origin))?;
         map.serialize_entry("best", &route.best)?;
         map.serialize_entry("peer_address", &route.peer_address)?;
@@ -1268,6 +1283,11 @@ impl Serialize for JsonExplainBestPathRef<'_> {
     {
         let resp = self.0;
         let peer_scoped = !resp.peer_address.is_empty();
+        let med_attr_supported = resp
+            .best_route
+            .iter()
+            .chain(resp.candidates.iter().filter_map(|c| c.route.as_ref()))
+            .any(|r| r.med_attr.is_some());
         let mut len = 5;
         if peer_scoped {
             len += 2;
@@ -1281,7 +1301,10 @@ impl Serialize for JsonExplainBestPathRef<'_> {
         }
         map.serialize_entry(
             "best_route",
-            &JsonOptionalRouteRef(resp.best_route.as_ref()),
+            &JsonOptionalRouteRef {
+                route: resp.best_route.as_ref(),
+                med_attr_supported,
+            },
         )?;
         map.serialize_entry("best_reason", &resp.best_reason)?;
         map.serialize_entry("best_reason_detail", &resp.best_reason_detail)?;
@@ -1290,6 +1313,7 @@ impl Serialize for JsonExplainBestPathRef<'_> {
             &JsonExplainCandidatesRef {
                 candidates: &resp.candidates,
                 peer_scoped,
+                med_attr_supported,
             },
         )?;
         map.end()
@@ -1307,15 +1331,22 @@ impl Serialize for JsonExplainPrefix<'_> {
     }
 }
 
-struct JsonOptionalRouteRef<'a>(Option<&'a Route>);
+struct JsonOptionalRouteRef<'a> {
+    route: Option<&'a Route>,
+    med_attr_supported: bool,
+}
 
 impl Serialize for JsonOptionalRouteRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        match self.0 {
-            Some(route) => JsonRouteRef(route).serialize(serializer),
+        match self.route {
+            Some(route) => JsonRouteRef {
+                route,
+                med_attr_supported: self.med_attr_supported,
+            }
+            .serialize(serializer),
             None => serializer.serialize_none(),
         }
     }
@@ -1324,6 +1355,7 @@ impl Serialize for JsonOptionalRouteRef<'_> {
 struct JsonExplainCandidatesRef<'a> {
     candidates: &'a [crate::proto::BestPathCandidate],
     peer_scoped: bool,
+    med_attr_supported: bool,
 }
 
 impl Serialize for JsonExplainCandidatesRef<'_> {
@@ -1336,6 +1368,7 @@ impl Serialize for JsonExplainCandidatesRef<'_> {
             seq.serialize_element(&JsonExplainCandidateRef {
                 candidate,
                 peer_scoped: self.peer_scoped,
+                med_attr_supported: self.med_attr_supported,
             })?;
         }
         seq.end()
@@ -1345,6 +1378,7 @@ impl Serialize for JsonExplainCandidatesRef<'_> {
 struct JsonExplainCandidateRef<'a> {
     candidate: &'a crate::proto::BestPathCandidate,
     peer_scoped: bool,
+    med_attr_supported: bool,
 }
 
 impl Serialize for JsonExplainCandidateRef<'_> {
@@ -1359,7 +1393,13 @@ impl Serialize for JsonExplainCandidateRef<'_> {
         }
 
         let mut map = serializer.serialize_map(Some(len))?;
-        map.serialize_entry("route", &JsonOptionalRouteRef(candidate.route.as_ref()))?;
+        map.serialize_entry(
+            "route",
+            &JsonOptionalRouteRef {
+                route: candidate.route.as_ref(),
+                med_attr_supported: self.med_attr_supported,
+            },
+        )?;
         map.serialize_entry("vs_best_reason", &candidate.vs_best_reason)?;
         map.serialize_entry("vs_best_detail", &candidate.vs_best_detail)?;
         map.serialize_entry("vs_best_ordering", &candidate.vs_best_ordering)?;
@@ -2423,6 +2463,32 @@ mod tests {
         let legacy = serde_json::to_string_pretty(&legacy).unwrap();
 
         assert_eq!(direct, legacy);
+    }
+
+    #[test]
+    fn route_list_json_honors_med_absence_marker() {
+        // MED-absence-aware daemon: `med_attr` present somewhere in
+        // the response, so an explicit MED 0 stays 0 and an absent MED
+        // serializes as null.
+        let mut zero = route_for_json(0, "");
+        zero.med = 0;
+        zero.med_attr = Some(0);
+        let mut absent = route_for_json(0, "");
+        absent.med = 0;
+        absent.med_attr = None;
+        let value: serde_json::Value = serde_json::to_value(JsonRoutes(&[zero, absent])).unwrap();
+        assert_eq!(value[0]["med"], 0);
+        assert_eq!(value[1]["med"], serde_json::Value::Null);
+
+        // Older daemon: `med_attr` populated nowhere — the bare
+        // 0-defaulted field passes through unchanged.
+        let with_med = route_for_json(0, ""); // med: 50, med_attr: None
+        let mut zero_med = route_for_json(0, "");
+        zero_med.med = 0;
+        let value: serde_json::Value =
+            serde_json::to_value(JsonRoutes(&[with_med, zero_med])).unwrap();
+        assert_eq!(value[0]["med"], 50);
+        assert_eq!(value[1]["med"], 0);
     }
 
     #[test]
