@@ -1,8 +1,13 @@
 use std::fmt;
 
 pub enum CliError {
-    Connect(#[expect(dead_code)] tonic::transport::Error),
-    ConnectTimeout,
+    /// Failed to reach the daemon at connect time. `addr` is the endpoint the
+    /// CLI actually dialed; `detail` is a short human failure class derived
+    /// from the transport error chain (never raw transport debris).
+    Connect {
+        addr: String,
+        detail: String,
+    },
     Rpc(String),
     Argument(String),
     Io(std::io::Error),
@@ -12,8 +17,11 @@ pub enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CliError::Connect(_) => write!(f, "daemon is not running or unreachable"),
-            CliError::ConnectTimeout => write!(f, "daemon is not running or unreachable"),
+            CliError::Connect { addr, detail } => write!(
+                f,
+                "cannot reach rustbgpd at {addr} ({detail})\n  \
+                 hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR"
+            ),
             CliError::Rpc(msg) => write!(f, "{msg}"),
             CliError::Argument(msg) => write!(f, "{msg}"),
             CliError::Io(e) => write!(f, "{e}"),
@@ -28,21 +36,36 @@ impl fmt::Debug for CliError {
     }
 }
 
-impl From<tonic::transport::Error> for CliError {
-    fn from(e: tonic::transport::Error) -> Self {
-        CliError::Connect(e)
-    }
-}
-
 impl From<tonic::Status> for CliError {
     fn from(s: tonic::Status) -> Self {
-        match s.code() {
+        // tonic's `Code` Display strings are full sentences ("The system is
+        // not in a state required for the operation's execution: ..."), so
+        // every code maps to a short lowercase prefix and the daemon-side
+        // message reads as the sentence.
+        let prefix = match s.code() {
+            // Connect-time unreachability is handled by `CliError::Connect`
+            // (with address + failure class); an UNAVAILABLE that surfaces
+            // mid-RPC means the daemon went away, and the raw transport
+            // detail is intentionally suppressed.
             tonic::Code::Unavailable => {
-                CliError::Rpc("daemon is not running or unreachable".into())
+                return CliError::Rpc("daemon is not running or unreachable".into());
             }
-            tonic::Code::NotFound => CliError::Rpc(format!("not found: {}", s.message())),
-            _ => CliError::Rpc(format!("{}: {}", s.code(), s.message())),
-        }
+            tonic::Code::NotFound => "not found",
+            tonic::Code::InvalidArgument => "invalid argument",
+            tonic::Code::FailedPrecondition => "precondition failed",
+            tonic::Code::PermissionDenied => "permission denied",
+            tonic::Code::Unauthenticated => "unauthenticated",
+            tonic::Code::AlreadyExists => "already exists",
+            tonic::Code::ResourceExhausted => "resource exhausted",
+            tonic::Code::Unimplemented => "not supported by this daemon",
+            tonic::Code::DeadlineExceeded => "deadline exceeded",
+            tonic::Code::Aborted => "aborted",
+            tonic::Code::OutOfRange => "out of range",
+            tonic::Code::Cancelled => "cancelled",
+            tonic::Code::DataLoss => "data loss",
+            tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::Ok => "daemon error",
+        };
+        CliError::Rpc(format!("{prefix}: {}", s.message()))
     }
 }
 
@@ -65,9 +88,22 @@ mod tests {
 
     // Every gRPC command routes its `Status` errors through
     // `From<Status>` via `?`, so this mapping is the CLI's single
-    // operator-facing error contract. These pin the three distinct arms
+    // operator-facing error contract. These pin the distinct arms
     // so a regression (reordering the match, dropping a special case, or
     // changing a prefix) is caught centrally rather than per command.
+
+    #[test]
+    fn connect_error_renders_address_class_and_hint() {
+        let err = CliError::Connect {
+            addr: "unix:///var/lib/rustbgpd/grpc.sock".into(),
+            detail: "socket does not exist".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "cannot reach rustbgpd at unix:///var/lib/rustbgpd/grpc.sock (socket does not exist)\n  \
+             hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR"
+        );
+    }
 
     #[test]
     fn unavailable_is_reported_as_generic_unreachable() {
@@ -87,27 +123,53 @@ mod tests {
     }
 
     #[test]
-    fn invalid_argument_falls_through_with_code_and_message() {
-        // INVALID_ARGUMENT is not special-cased: it must surface via the
-        // generic "{code}: {message}" arm so operators see both.
+    fn invalid_argument_gets_short_prefix_not_tonic_sentence() {
         let err = CliError::from(Status::invalid_argument("prefix length 33 exceeds 32"));
         assert!(matches!(err, CliError::Rpc(_)));
         assert_eq!(
             err.to_string(),
-            "Client specified an invalid argument: prefix length 33 exceeds 32"
+            "invalid argument: prefix length 33 exceeds 32"
         );
     }
 
     #[test]
-    fn already_exists_falls_through_with_code_and_message() {
+    fn failed_precondition_gets_short_prefix_not_tonic_sentence() {
+        // The live 0.50.0 capture: tonic rendered this code as "The system
+        // is not in a state required for the operation's execution: ...".
+        let err = CliError::from(Status::failed_precondition(
+            "config persistence failed: failed to write /var/lib/rustbgpd/config.toml: No such file or directory (os error 2)",
+        ));
+        assert!(matches!(err, CliError::Rpc(_)));
+        assert_eq!(
+            err.to_string(),
+            "precondition failed: config persistence failed: failed to write /var/lib/rustbgpd/config.toml: No such file or directory (os error 2)"
+        );
+    }
+
+    #[test]
+    fn permission_denied_gets_short_prefix() {
+        let err = CliError::from(Status::permission_denied("token lacks write scope"));
+        assert_eq!(
+            err.to_string(),
+            "permission denied: token lacks write scope"
+        );
+    }
+
+    #[test]
+    fn already_exists_gets_short_prefix_not_tonic_sentence() {
         let err = CliError::from(Status::already_exists(
             "neighbor 10.0.0.2 already configured",
         ));
         assert!(matches!(err, CliError::Rpc(_)));
         assert_eq!(
             err.to_string(),
-            "Some entity that we attempted to create already exists: \
-             neighbor 10.0.0.2 already configured"
+            "already exists: neighbor 10.0.0.2 already configured"
         );
+    }
+
+    #[test]
+    fn internal_falls_back_to_daemon_error_prefix() {
+        let err = CliError::from(Status::internal("route processor panicked"));
+        assert_eq!(err.to_string(), "daemon error: route processor panicked");
     }
 }

@@ -67,10 +67,43 @@ enum EndpointTarget {
 pub(crate) async fn connect(addr: &str, token_file: Option<&str>) -> Result<Connection, CliError> {
     let token = load_bearer_token(token_file)?;
     let channel = match parse_endpoint_target(addr)? {
-        EndpointTarget::Tcp(uri) => connect_tcp(&uri).await?,
-        EndpointTarget::Uds(path) => connect_uds(&path).await?,
+        EndpointTarget::Tcp(uri) => connect_tcp(&uri, addr).await?,
+        EndpointTarget::Uds(path) => connect_uds(&path, addr).await?,
     };
     Ok(Connection::new(channel, token))
+}
+
+/// Map a connect-time transport error to a short human failure class,
+/// suppressing tonic/hyper wrapper debris ("transport error").
+///
+/// The useful cause is the `io::Error` buried in the source chain (ENOENT
+/// for a missing unix socket, ECONNREFUSED, ETIMEDOUT, EACCES, ...). When no
+/// io error is present (TLS handshake, HTTP/2 setup, internal timeout), the
+/// deepest source's own message is the honest fallback class.
+fn connect_failure_class(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut deepest = error;
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::NotFound => "socket does not exist".into(),
+                std::io::ErrorKind::ConnectionRefused => "connection refused".into(),
+                std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+                std::io::ErrorKind::TimedOut => "connection timed out".into(),
+                _ => io.to_string(),
+            };
+        }
+        deepest = err;
+        current = err.source();
+    }
+    deepest.to_string()
+}
+
+fn connect_error(addr: &str, error: &tonic::transport::Error) -> CliError {
+    CliError::Connect {
+        addr: addr.to_string(),
+        detail: connect_failure_class(error),
+    }
 }
 
 fn parse_endpoint_target(addr: &str) -> Result<EndpointTarget, CliError> {
@@ -125,14 +158,17 @@ fn load_bearer_token(token_file: Option<&str>) -> Result<Option<AsciiMetadataVal
     Ok(Some(value))
 }
 
-async fn connect_tcp(uri: &str) -> Result<Channel, CliError> {
+async fn connect_tcp(uri: &str, display_addr: &str) -> Result<Channel, CliError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|e| CliError::Argument(format!("invalid address: {e}")))?
         .connect_timeout(CONNECT_TIMEOUT);
-    endpoint.connect().await.map_err(Into::into)
+    endpoint
+        .connect()
+        .await
+        .map_err(|e| connect_error(display_addr, &e))
 }
 
-async fn connect_uds(path: &Path) -> Result<Channel, CliError> {
+async fn connect_uds(path: &Path, display_addr: &str) -> Result<Channel, CliError> {
     let endpoint = Endpoint::try_from("http://[::]:50051")
         .map_err(|e| CliError::Argument(format!("invalid UDS endpoint: {e}")))?
         .connect_timeout(CONNECT_TIMEOUT);
@@ -146,7 +182,11 @@ async fn connect_uds(path: &Path) -> Result<Channel, CliError> {
     }));
     let channel = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
-        .map_err(|_| CliError::ConnectTimeout)??;
+        .map_err(|_| CliError::Connect {
+            addr: display_addr.to_string(),
+            detail: format!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+        })?
+        .map_err(|e| connect_error(display_addr, &e))?;
     Ok(channel)
 }
 
@@ -247,12 +287,12 @@ mod tests {
     }
 
     // Connecting to a socket nothing is listening on must surface the
-    // friendly "daemon is not running or unreachable" message rather than
-    // leak a raw transport/io error. A nonexistent UDS path fails
+    // target address and a human failure class — never raw transport/io
+    // debris ("transport error: ..."). A nonexistent UDS path fails
     // immediately (ENOENT) so this stays fast and deterministic — no
     // dependence on the 5s connect timeout.
     #[tokio::test]
-    async fn connect_to_absent_socket_reports_daemon_unreachable() {
+    async fn connect_to_absent_socket_reports_address_and_class() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("not-listening.sock");
         let addr = format!("unix://{}", absent.display());
@@ -263,6 +303,37 @@ mod tests {
             Err(err) => err,
         };
 
-        assert_eq!(err.to_string(), "daemon is not running or unreachable");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "cannot reach rustbgpd at {addr} (socket does not exist)\n  \
+                 hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR"
+            )
+        );
+    }
+
+    // A socket file that exists but has no listener behind it (daemon
+    // crashed, stale socket) must be classified as "connection refused",
+    // not "does not exist".
+    #[tokio::test]
+    async fn connect_to_dead_socket_reports_connection_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stale.sock");
+        // Bind then drop the listener: the socket file remains, ECONNREFUSED.
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let addr = format!("unix://{}", stale.display());
+
+        let err = match connect(&addr, None).await {
+            Ok(_) => panic!("connecting to a dead socket must fail"),
+            Err(err) => err,
+        };
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&format!(
+                "cannot reach rustbgpd at {addr} (connection refused)"
+            )),
+            "{rendered}"
+        );
     }
 }

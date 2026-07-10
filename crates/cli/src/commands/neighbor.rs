@@ -282,7 +282,14 @@ pub async fn add(
         "add_neighbor",
         address,
         &format!("Neighbor {address} added"),
-    )
+    )?;
+    output::print_next_step(
+        json,
+        &format!(
+            "watch the session establish: rbgp watch {address} (or check: rbgp neighbor {address})"
+        ),
+    );
+    Ok(())
 }
 
 pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
@@ -342,7 +349,12 @@ pub async fn disable(
         "disable_neighbor",
         address,
         &format!("Neighbor {address} disabled"),
-    )
+    )?;
+    output::print_next_step(
+        json,
+        &format!("re-enable when ready: rbgp neighbor {address} enable"),
+    );
+    Ok(())
 }
 
 pub async fn softreset(
@@ -396,7 +408,13 @@ pub async fn set_graceful_shutdown(
         "set_graceful_shutdown",
         scope,
         &format!("GRACEFUL_SHUTDOWN advertise {verb} for {scope}"),
-    )
+    )?;
+    let status_cmd = match peer.as_deref() {
+        Some(peer) => format!("rbgp neighbor {peer}"),
+        None => "rbgp neighbor".to_string(),
+    };
+    output::print_next_step(json, &format!("check session status: {status_cmd}"));
+    Ok(())
 }
 
 #[cfg(test)]

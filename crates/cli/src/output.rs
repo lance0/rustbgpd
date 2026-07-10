@@ -601,6 +601,21 @@ pub fn print_result(json: bool, action: &str, target: &str, message: &str) -> Re
     Ok(())
 }
 
+/// Compose the one-line "what next" footer for a lifecycle command, or
+/// `None` under `--json` — machine output must stay pure JSON, so every
+/// footer routes through this suppression gate.
+pub fn next_step(json: bool, text: &str) -> Option<String> {
+    (!json).then(|| format!("next: {text}"))
+}
+
+/// Print the "what next" footer to stderr, so it never mixes into
+/// pipeable stdout. No-op under `--json`.
+pub fn print_next_step(json: bool, text: &str) {
+    if let Some(line) = next_step(json, text) {
+        eprintln!("{line}");
+    }
+}
+
 /// Print a pretty JSON value, returning a CLI error instead of panicking if
 /// serialization fails.
 pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {
@@ -655,6 +670,21 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn next_step_footer_golden_and_suppressed_under_json() {
+        // Golden shape for the human footer...
+        assert_eq!(
+            next_step(
+                false,
+                "confirm within the window: rbgp config confirm deploy-1"
+            ),
+            Some("next: confirm within the window: rbgp config confirm deploy-1".to_string())
+        );
+        // ...and proof `-j` output carries NO footer: every lifecycle footer
+        // routes through this gate.
+        assert_eq!(next_step(true, "anything"), None);
+    }
 
     #[test]
     fn test_format_duration() {

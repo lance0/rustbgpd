@@ -324,6 +324,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp` errors are now actionable.** Connect failures name the
+  endpoint the CLI actually dialed and the failure class (`cannot
+  reach rustbgpd at unix:///var/lib/rustbgpd/grpc.sock (socket does
+  not exist)`, connection refused, permission denied, timed out) plus
+  a hint pointing at `-s`/`RUSTBGPD_ADDR`, instead of the flat "daemon
+  is not running or unreachable". gRPC status codes map to short
+  lowercase prefixes (`precondition failed:`, `invalid argument:`,
+  `permission denied:`, ...) instead of tonic's sentence-length code
+  descriptions. Daemon-side config persistence failures name the file
+  being written (`failed to write /var/lib/rustbgpd/config.toml: ...`)
+  rather than a bare os error. Lifecycle commands (`config
+  apply`/`confirm`/`abort` with a confirmed-commit window, `neighbor
+  add`/`disable`, `gshut`) print a one-line `next:` footer on stderr
+  with the natural follow-up command; footers are suppressed under
+  `--json` so machine output stays pure JSON. (LAN-317)
+
 - **Policy reinstallation is scoped to peers whose resolved chain
   content actually moved.** SIGHUP reloads, rpol overlay swaps, catalog
   edits, and live-impact transactions re-resolve every affected peer's
