@@ -419,6 +419,9 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         updates_sent: info.updates_sent,
         notifications_received: info.notifications_received,
         notifications_sent: info.notifications_sent,
+        messages_received: info.messages_received,
+        messages_sent: info.messages_sent,
+        route_reflector_client: info.route_reflector_client,
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
         is_dynamic: info.is_dynamic,
@@ -1845,6 +1848,20 @@ mod tests {
         assert_eq!(state.import_policy_routes_denied, 12);
         assert_eq!(state.export_policy_routes_permitted, 13);
         assert_eq!(state.export_policy_routes_denied, 14);
+    }
+
+    /// LAN-322: total message counters and the RR-client flag cross the
+    /// `PeerInfo` → proto boundary intact.
+    #[test]
+    fn peer_info_to_proto_carries_message_totals_and_rr_client() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.messages_received = 4321;
+        info.messages_sent = 1234;
+        info.route_reflector_client = true;
+        let state = peer_info_to_proto(&info);
+        assert_eq!(state.messages_received, 4321);
+        assert_eq!(state.messages_sent, 1234);
+        assert!(state.route_reflector_client);
     }
 
     #[tokio::test]

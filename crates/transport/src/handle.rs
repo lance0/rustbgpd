@@ -420,6 +420,13 @@ pub struct PeerSessionState {
     pub notifications_received: u64,
     /// Total NOTIFICATION messages sent.
     pub notifications_sent: u64,
+    /// Total BGP messages received, all types. Read from the per-peer
+    /// telemetry counters, so the value is daemon-lifetime (persists
+    /// across session flaps) and includes KEEPALIVEs.
+    pub messages_received: u64,
+    /// Total BGP messages sent, all types (daemon-lifetime; includes
+    /// writer-task cadence KEEPALIVEs).
+    pub messages_sent: u64,
     /// Number of times the session went from Established to non-Established.
     pub flap_count: u64,
     /// Seconds since last transition to Established (0 if never established).

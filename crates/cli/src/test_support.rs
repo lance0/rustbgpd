@@ -697,6 +697,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             export_policy_routes_permitted: 0,
             export_policy_routes_denied: 0,
             update_group: "group:0".to_string(),
+            messages_received: 9,
+            messages_sent: 8,
+            route_reflector_client: false,
         }))
     }
 

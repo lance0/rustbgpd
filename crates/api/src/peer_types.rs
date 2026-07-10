@@ -1772,6 +1772,13 @@ pub struct PeerInfo {
     pub notifications_received: u64,
     /// Total NOTIFICATION messages sent.
     pub notifications_sent: u64,
+    /// Total BGP messages received, all types (daemon-lifetime;
+    /// persists across session flaps and includes KEEPALIVEs).
+    pub messages_received: u64,
+    /// Total BGP messages sent, all types (daemon-lifetime).
+    pub messages_sent: u64,
+    /// Whether this iBGP peer is configured as a route-reflector client.
+    pub route_reflector_client: bool,
     /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
     pub otc_routes_blocked: u64,
     /// Import policy evaluations that permitted a route.

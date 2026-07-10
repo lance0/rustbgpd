@@ -48,6 +48,9 @@ fn build_peer_info(
         updates_sent: session_state.map_or(0, |s| s.updates_sent),
         notifications_received: session_state.map_or(0, |s| s.notifications_received),
         notifications_sent: session_state.map_or(0, |s| s.notifications_sent),
+        messages_received: session_state.map_or(0, |s| s.messages_received),
+        messages_sent: session_state.map_or(0, |s| s.messages_sent),
+        route_reflector_client: managed.transport_config.route_reflector_client,
         otc_routes_blocked: session_state.map_or(0, |s| s.otc_routes_blocked),
         import_policy_routes_permitted: session_state
             .map_or(0, |s| s.import_policy_routes_permitted),
