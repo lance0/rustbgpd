@@ -1,0 +1,56 @@
+# M85 — rustbgpd as iBGP route reflector for two BIRD 2 clients and one
+# rustbgpd client, IPv4+IPv6 unicast over v4 transport.
+#
+# GR helper shape:
+#   - bird1 (`graceful restart on` in BIRD) gets graceful_restart = true
+#     with a short gr_stale_routes_time so the post-re-establish EoR
+#     sweep is bounded for the lab.
+#   - bird2 keeps BIRD's default `graceful restart aware` mode: BIRD
+#     sends the GR capability with restart time 0 and NO address
+#     families. graceful_restart = true here too — the point of the
+#     receipt is that rustbgpd must still NOT stale-preserve bird2's
+#     routes, because the peer listed no AF as preserved.
+
+[global]
+asn = 65001
+router_id = "10.85.0.1"
+listen_port = 179
+cluster_id = "10.85.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.85.1.2"
+remote_asn = 65001
+description = "bird1-gr-on"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+graceful_restart = true
+gr_stale_routes_time = 30
+
+[[neighbors]]
+address = "10.85.2.2"
+remote_asn = 65001
+description = "bird2-gr-aware"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+graceful_restart = true
+gr_stale_routes_time = 30
+
+[[neighbors]]
+address = "10.85.3.2"
+remote_asn = 65001
+description = "rustbgpd-client"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[security.grpc]
+enforcement = "legacy"

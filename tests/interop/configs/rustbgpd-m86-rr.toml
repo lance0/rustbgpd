@@ -1,0 +1,52 @@
+# M86 — rustbgpd as iBGP route reflector for two OpenBGPD 9.1 clients
+# and one rustbgpd client, IPv4+IPv6 unicast over v4 transport.
+#
+# graceful_restart = true on both OpenBGPD neighbors: rustbgpd offers
+# the GR capability, but OpenBGPD is a helper-only implementation — it
+# advertises the GR capability without any AF carrying the
+# Forwarding-state bit, so a bgpd kill must NOT leave stale-preserved
+# routes on the RR (the M86 driver asserts the withdraws propagate).
+
+[global]
+asn = 65001
+router_id = "10.86.0.1"
+listen_port = 179
+cluster_id = "10.86.0.1"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.86.1.2"
+remote_asn = 65001
+description = "obgp1"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+graceful_restart = true
+gr_stale_routes_time = 30
+
+[[neighbors]]
+address = "10.86.2.2"
+remote_asn = 65001
+description = "obgp2"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+graceful_restart = true
+gr_stale_routes_time = 30
+
+[[neighbors]]
+address = "10.86.3.2"
+remote_asn = 65001
+description = "rustbgpd-client"
+hold_time = 90
+route_reflector_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[security.grpc]
+enforcement = "legacy"
