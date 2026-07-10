@@ -19,6 +19,11 @@ test as-set-is-rejected {
     expect ixp-hygiene == reject
 }
 
+test aspa-invalid-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501"; aspa invalid }
+    expect ixp-hygiene == reject
+}
+
 test clean-route-falls-through {
     route { prefix 203.0.113.0/24; as-path "64501 64510" }
     expect ixp-hygiene == accept

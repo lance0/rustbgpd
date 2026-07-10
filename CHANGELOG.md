@@ -497,6 +497,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typo'd `in` probes. Message/notes enrichment only — error codes and
   exit contracts are unchanged. (LAN-328)
 
+- **rpol coverage-gap fixtures.** In-language tests for the two terms
+  `rbgp policy check --coverage` found evaluated-but-never-matched:
+  an `aspa invalid` reject fixture in
+  `tests/interop/configs/m83-hygiene.rpol` and an `rpki invalid`
+  OV_INVALID-tagging fixture in `examples/route-server/hygiene.rpol`;
+  both corpora now report full term coverage. (LAN-342)
+
 ### Changed
 - **CLI consistency sweep (LAN-329).** One noun, one file-arg style, one
   empty-state shape across `rbgp`; every old spelling keeps working as
