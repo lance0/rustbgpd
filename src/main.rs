@@ -851,6 +851,7 @@ fn main() {
                --init-config PROFILE Print a starter config to stdout and exit (needs --stdout).\n                        \
                                      Profiles: lab, edge\n  \
                --stdout              Write --init-config output to stdout (the only target for now)\n  \
+               --dump-config-schema  Print the config JSON Schema to stdout and exit\n  \
                --version             Print version and exit\n  \
                --help                Print this help message",
             env!("CARGO_PKG_VERSION")
@@ -864,6 +865,7 @@ fn main() {
     let mut json_output = false;
     let mut init_profile: Option<String> = None;
     let mut to_stdout = false;
+    let mut dump_schema = false;
     let mut config_path = "/etc/rustbgpd/config.toml".to_string();
     let mut expect_diff_path = false;
     let mut expect_init_profile = false;
@@ -884,12 +886,14 @@ fn main() {
             expect_init_profile = true;
         } else if arg == "--stdout" {
             to_stdout = true;
+        } else if arg == "--dump-config-schema" {
+            dump_schema = true;
         } else if !arg.starts_with('-') {
             config_path.clone_from(arg);
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--version] [CONFIG_PATH]"
+                "usage: rustbgpd [--check] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [--version] [CONFIG_PATH]"
             );
             process::exit(1);
         }
@@ -922,6 +926,16 @@ fn main() {
     if init_profile.is_some() && (check_only || diff_path.is_some()) {
         eprintln!("error: --init-config cannot be combined with --check or --diff");
         process::exit(2);
+    }
+    // `--dump-config-schema` is a standalone mode, like `--init-config`:
+    // reject combining it rather than silently letting one mode win.
+    if dump_schema {
+        if check_only || diff_path.is_some() || init_profile.is_some() || to_stdout {
+            eprintln!("error: --dump-config-schema cannot be combined with other modes");
+            process::exit(2);
+        }
+        print!("{}", config::config_json_schema());
+        return;
     }
 
     // `--init-config PROFILE --stdout` prints a curated starter config and

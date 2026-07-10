@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **JSON Schema for the TOML config.** Every config struct/enum in the
+  deserialization graph now derives `schemars::JsonSchema`, with field
+  doc comments carried through as descriptions, serde defaults as
+  schema defaults, and `deny_unknown_fields` as
+  `additionalProperties: false`. `rustbgpd --dump-config-schema`
+  prints the schema to stdout; a generated copy is committed at
+  `docs/rustbgpd.schema.json` (freshness-checked by a config test —
+  regenerate with `BLESS=1` or by re-running the dump), shipped in the
+  release tarballs, and published as a standalone release asset. TOML
+  language servers (taplo / Even Better TOML) get as-you-type
+  completion, inline validation, and hover docs; see the new "Editor
+  integration" section in `docs/CONFIGURATION.md`. (LAN-319)
+
 - **rpol pure user-defined functions (`fn`).** The fourth ADR-0103
   Phase B slice: `fn penalty(len: u32, weight: u32) -> u32 { let base
   = len * weight  min(base, 1000) }` names a pure `u32` computation

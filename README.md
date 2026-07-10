@@ -284,7 +284,7 @@ evolving API.**
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Crate graph, runtime model, ownership, data flow |
 | [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |
 | [docs/API.md](docs/API.md) | gRPC API reference with examples for every RPC |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples, plus editor integration via the shipped JSON Schema (`docs/rustbgpd.schema.json`) |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Bare-metal first run: starter config, validate, run, verify, operate |
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | Current product boundaries and known non-goals |
 | [docs/deployment.md](docs/deployment.md) | End-to-end install + lifecycle walkthrough: systemd, Docker, containerlab quick-start, upgrade, sample profiles |

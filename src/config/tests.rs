@@ -12676,3 +12676,21 @@ fn config_without_looking_glass_does_not_warn() {
     let output = capture_warnings(|| config.warn_if_deprecated_looking_glass());
     assert!(output.is_empty(), "no warning expected: {output}");
 }
+
+/// The committed JSON Schema must stay in sync with the config structs.
+/// `BLESS=1` rewrites the committed file (review the diff), mirroring the
+/// diff-golden convention.
+#[test]
+fn config_json_schema_committed_copy_is_fresh() {
+    let generated = config_json_schema();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/rustbgpd.schema.json");
+    if std::env::var_os("BLESS").is_some() {
+        fs::write(path, &generated).unwrap();
+    }
+    let committed = fs::read_to_string(path).unwrap();
+    assert_eq!(
+        generated, committed,
+        "docs/rustbgpd.schema.json is stale — regenerate with `cargo run --bin rustbgpd -- \
+         --dump-config-schema > docs/rustbgpd.schema.json` (or rerun this test with BLESS=1)"
+    );
+}

@@ -96,8 +96,15 @@ jobs:
           cp target/${{ matrix.target }}/release/rustbgpd staging/
           cp target/${{ matrix.target }}/release/rbgp staging/
           cp LICENSE-MIT LICENSE-APACHE staging/
+          cp docs/rustbgpd.schema.json staging/
           tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz \
-            rustbgpd rbgp LICENSE-MIT LICENSE-APACHE
+            rustbgpd rbgp LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json
+          # Also publish the config JSON Schema as a standalone asset so
+          # editors can reference the stable
+          # `releases/latest/download/rustbgpd.schema.json` URL. Both
+          # matrix legs upload an identical copy; the merged artifact
+          # download deduplicates them.
+          cp docs/rustbgpd.schema.json dist/
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 

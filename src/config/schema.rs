@@ -3,6 +3,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use rustbgpd_wire::BgpRole;
@@ -14,27 +15,36 @@ pub(super) const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
 pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Daemon-wide BGP settings (ASN, router ID, listeners, telemetry).
     pub global: Global,
     /// Security policy and authorization configuration. Empty by
     /// default so existing deployments keep legacy listener-level
     /// authorization until operators opt into later ADR-0064 slices.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Statically configured BGP neighbors.
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
+    /// Named peer groups providing inherited defaults for neighbors.
     #[serde(default)]
     pub peer_groups: HashMap<String, PeerGroupConfig>,
+    /// Routing policy: inline statements, named definitions, chains,
+    /// and `.rpol` files.
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Prefix-based dynamic neighbor ranges.
     #[serde(default)]
     pub dynamic_neighbors: Vec<DynamicNeighborConfig>,
+    /// RPKI route-origin validation via RTR cache servers.
     #[serde(default)]
     pub rpki: Option<RpkiConfig>,
+    /// BGP Monitoring Protocol (RFC 7854) export.
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
+    /// Periodic MRT RIB dumps.
     #[serde(default)]
     pub mrt: Option<MrtConfig>,
     /// Local EVPN instances on this VTEP. Empty by default — only set
@@ -107,7 +117,7 @@ pub struct Config {
 /// All fields are restart-required — toggling the outbox or its
 /// bounds requires a daemon restart. The reload matrix documents the
 /// classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EventHistoryConfig {
     /// Enable the durable outbox. **Default `false` (opt-in as of
@@ -205,23 +215,26 @@ fn default_event_history_batch_interval_ms() -> u64 {
     50
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
+    /// gRPC authorization policy (ADR-0064).
     #[serde(default)]
     pub grpc: GrpcSecurityConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcSecurityConfig {
+    /// Role-enforcement mode: `"legacy"` or `"tier"`.
     #[serde(default)]
     pub enforcement: GrpcEnforcementConfig,
+    /// Per-principal role assignments (principal name -> role).
     #[serde(default)]
     pub roles: HashMap<String, GrpcRoleConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcEnforcementConfig {
     /// Preserve pre-v0.24.0 role authorization behavior. Listener
@@ -242,7 +255,7 @@ pub enum GrpcEnforcementConfig {
     Tier,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcRoleConfig {
     Observer,
@@ -253,7 +266,7 @@ pub enum GrpcRoleConfig {
 /// Prefix-based dynamic neighbor range. Inbound connections from IPs
 /// within `prefix` are automatically accepted and inherit configuration
 /// from the referenced `peer_group`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicNeighborConfig {
     /// IP prefix range (e.g., `10.0.0.0/24` or `2001:db8::/32`).
@@ -268,40 +281,50 @@ pub struct DynamicNeighborConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RpkiConfig {
+    /// RTR cache servers to connect to.
     #[serde(default)]
     pub cache_servers: Vec<CacheServer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CacheServer {
+    /// RTR cache endpoint as `host:port`.
     pub address: String,
+    /// RTR refresh interval in seconds. Default 3600.
     #[serde(default = "default_rpki_refresh")]
     pub refresh_interval: u64,
+    /// RTR retry interval in seconds. Default 600.
     #[serde(default = "default_rpki_retry")]
     pub retry_interval: u64,
+    /// RTR expire interval in seconds. Default 7200.
     #[serde(default = "default_rpki_expire")]
     pub expire_interval: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BmpConfig {
+    /// `sysName` information TLV sent in the BMP INITIATION message.
     #[serde(default = "default_bmp_sys_name")]
     pub sys_name: String,
+    /// `sysDescr` information TLV sent in the BMP INITIATION message.
     #[serde(default)]
     pub sys_descr: String,
+    /// BMP collectors to stream route-monitoring data to.
     #[serde(default)]
     pub collectors: Vec<BmpCollector>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BmpCollector {
+    /// Collector endpoint as `host:port`.
     pub address: String,
+    /// Seconds between reconnect attempts. Default 30.
     #[serde(default = "default_bmp_reconnect")]
     pub reconnect_interval: u64,
     /// Which route-monitoring streams this collector receives.
@@ -316,7 +339,7 @@ pub struct BmpCollector {
 }
 
 /// A BMP route-monitoring stream selection (per collector).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BmpMonitorView {
     /// Pre-policy Adj-RIB-In route monitoring (RFC 7854).
@@ -328,14 +351,18 @@ pub enum BmpMonitorView {
     LocRib,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MrtConfig {
+    /// Directory MRT dump files are written to.
     pub output_dir: String,
+    /// Seconds between RIB dumps. Default 7200.
     #[serde(default = "default_mrt_dump_interval")]
     pub dump_interval: u64,
+    /// Gzip-compress dump files.
     #[serde(default)]
     pub compress: bool,
+    /// Dump filename prefix. Default `"rib"`.
     #[serde(default = "default_mrt_file_prefix")]
     pub file_prefix: String,
 }
@@ -374,12 +401,15 @@ fn default_rpki_expire() -> u64 {
     7200
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[allow(clippy::struct_excessive_bools)]
 #[serde(deny_unknown_fields)]
 pub struct Global {
+    /// Local autonomous system number.
     pub asn: u32,
+    /// BGP router ID in IPv4 dotted-quad form (e.g. `"192.0.2.1"`).
     pub router_id: String,
+    /// TCP listen port for inbound BGP sessions (conventionally 179).
     pub listen_port: u16,
     /// Cluster ID for route reflection (RFC 4456). Defaults to `router_id`
     /// when any neighbor is configured as a route reflector client.
@@ -457,6 +487,8 @@ pub struct Global {
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,
+    /// Telemetry and control-plane listeners (Prometheus, gRPC,
+    /// looking glass) plus logging format.
     pub telemetry: TelemetryConfig,
 }
 
@@ -464,7 +496,7 @@ fn default_runtime_state_dir() -> String {
     "/var/lib/rustbgpd".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     /// Prometheus metrics HTTP listener address (e.g., "0.0.0.0:9179").
@@ -472,9 +504,12 @@ pub struct TelemetryConfig {
     /// collected for gRPC health and internal counters.
     #[serde(default)]
     pub prometheus_addr: Option<String>,
+    /// Log output format (`"json"`).
     pub log_format: String,
+    /// gRPC TCP listener.
     #[serde(default)]
     pub grpc_tcp: Option<GrpcTcpListenerConfig>,
+    /// gRPC Unix-domain-socket listener.
     #[serde(default)]
     pub grpc_uds: Option<GrpcUdsListenerConfig>,
     /// Optional birdwatcher-compatible looking glass HTTP server.
@@ -482,24 +517,28 @@ pub struct TelemetryConfig {
     pub looking_glass: Option<LookingGlassConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LookingGlassConfig {
     /// Listen address for the looking glass HTTP server (e.g., "0.0.0.0:8080").
     pub addr: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcTcpListenerConfig {
+    /// Enable this listener. Default `true`.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Listen address (e.g. `"127.0.0.1:50051"`).
     pub address: Option<String>,
+    /// Listener access mode: `"read_only"` or `"read_write"`.
     pub access_mode: Option<GrpcAccessModeConfig>,
     /// ADR-0064 per-method listener ceiling. When omitted, the
     /// listener preserves the compatibility cap implied by
     /// `access_mode`.
     pub max_tier: Option<GrpcMaxTierConfig>,
+    /// Path to a bearer-token file for client authentication.
     pub token_file: Option<String>,
     /// Stable audit principal label for non-mTLS bearer-token
     /// listeners. Native mTLS listeners derive the audit principal
@@ -517,19 +556,24 @@ pub struct GrpcTcpListenerConfig {
     pub tls_client_ca_file: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcUdsListenerConfig {
+    /// Enable this listener. Default `true`.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Unix socket path.
     pub path: Option<String>,
+    /// Socket file mode bits. Default `0o600`.
     #[serde(default = "default_grpc_uds_mode")]
     pub mode: u32,
+    /// Listener access mode: `"read_only"` or `"read_write"`.
     pub access_mode: Option<GrpcAccessModeConfig>,
     /// ADR-0064 per-method listener ceiling. When omitted, the
     /// listener preserves the compatibility cap implied by
     /// `access_mode`.
     pub max_tier: Option<GrpcMaxTierConfig>,
+    /// Path to a bearer-token file for client authentication.
     pub token_file: Option<String>,
     /// Stable audit principal label for this Unix-domain-socket
     /// listener. Filesystem permissions authenticate the socket, but
@@ -537,14 +581,14 @@ pub struct GrpcUdsListenerConfig {
     pub principal: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcAccessModeConfig {
     ReadOnly,
     ReadWrite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GrpcMaxTierConfig {
     Read,
@@ -553,7 +597,7 @@ pub enum GrpcMaxTierConfig {
     OperatorOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EvpnDuplicateMacActionConfig {
     /// Count/report threshold crossings but do not suppress local
@@ -566,7 +610,7 @@ pub enum EvpnDuplicateMacActionConfig {
 }
 
 /// Per-`[[evpn_instances]]` RFC 7432 §15.1 duplicate-MAC detector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvpnDuplicateMacDetectionConfig {
     /// Action to take when `threshold` moves occur within
@@ -617,16 +661,20 @@ fn default_grpc_uds_mode() -> u32 {
     0o600
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Neighbor {
+    /// Peer IP address (IPv4 or IPv6).
     pub address: String,
     /// Interface name required for IPv6 link-local / BGP unnumbered peers.
     pub interface: Option<String>,
+    /// Peer autonomous system number. Equal to `global.asn` for iBGP.
     pub remote_asn: u32,
+    /// Free-form operator description.
     pub description: Option<String>,
     /// Optional peer-group reference for inherited transport/policy defaults.
     pub peer_group: Option<String>,
+    /// Hold time in seconds: 0 disables, otherwise >= 3. Default 90.
     pub hold_time: Option<u16>,
     /// Send hold time in seconds (RFC 9687): tear the session down when
     /// the peer stops draining its TCP socket for this long. 0 disables.
@@ -634,7 +682,10 @@ pub struct Neighbor {
     /// (RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×
     /// the effective `hold_time` (RFC 9687 §6).
     pub send_hold_time: Option<u32>,
+    /// Maximum prefixes accepted from this peer before the session is
+    /// torn down. Unset = unlimited.
     pub max_prefixes: Option<u32>,
+    /// TCP MD5 signature password (RFC 2385).
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
     /// startup active-open sockets and the passive listener when configured.
@@ -642,6 +693,8 @@ pub struct Neighbor {
     /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
     /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
     pub bfd: Option<BfdConfig>,
+    /// GTSM TTL security (RFC 5082): require TTL 255 from a directly
+    /// connected peer.
     pub ttl_security: Option<bool>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
@@ -714,8 +767,10 @@ pub struct Neighbor {
     /// Override log level for this peer: `"error"`, `"warn"`, `"info"`,
     /// `"debug"`, or `"trace"`.
     pub log_level: Option<String>,
+    /// Inline import policy statements for this neighbor.
     #[serde(default)]
     pub import_policy: Vec<PolicyStatementConfig>,
+    /// Inline export policy statements for this neighbor.
     #[serde(default)]
     pub export_policy: Vec<PolicyStatementConfig>,
     /// Named policy chain for import (mutually exclusive with `import_policy`).
@@ -726,7 +781,7 @@ pub struct Neighbor {
     pub export_policy_chain: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TcpAoConfig {
     /// TCP-AO Master Key Tuple secret. 1..=80 bytes.
@@ -760,15 +815,22 @@ impl fmt::Debug for TcpAoConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PeerGroupConfig {
+    /// Hold time inherited by neighbors in this group. See the
+    /// neighbor-level `hold_time`.
     pub hold_time: Option<u16>,
     /// Send hold time in seconds (RFC 9687) inherited by neighbors in
     /// this group. See the neighbor-level `send_hold_time`.
     pub send_hold_time: Option<u32>,
+    /// Prefix limit inherited by neighbors in this group. See the
+    /// neighbor-level `max_prefixes`.
     pub max_prefixes: Option<u32>,
+    /// TCP MD5 signature password (RFC 2385) inherited by neighbors in
+    /// this group.
     pub md5_password: Option<String>,
+    /// GTSM TTL security (RFC 5082) inherited by neighbors in this group.
     pub ttl_security: Option<bool>,
     /// Single-hop BFD attachment inherited by neighbors in this group (unless
     /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
@@ -776,20 +838,33 @@ pub struct PeerGroupConfig {
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     #[serde(default)]
     pub families: Vec<String>,
+    /// Enable Graceful Restart (RFC 4724). See the neighbor-level
+    /// `graceful_restart`.
     pub graceful_restart: Option<bool>,
+    /// GR restart time (seconds). See the neighbor-level `gr_restart_time`.
     pub gr_restart_time: Option<u16>,
+    /// GR stale-routes time (seconds). See the neighbor-level
+    /// `gr_stale_routes_time`.
     pub gr_stale_routes_time: Option<u64>,
+    /// LLGR stale time (RFC 9494, seconds). See the neighbor-level
+    /// `llgr_stale_time`.
     pub llgr_stale_time: Option<u32>,
+    /// Explicit IPv6 next-hop. See the neighbor-level `local_ipv6_nexthop`.
     pub local_ipv6_nexthop: Option<String>,
+    /// Mark neighbors in this group as route reflector clients (RFC 4456).
     pub route_reflector_client: Option<bool>,
     /// Optimal Route Reflection vantage point (RFC 9107) inherited by
     /// neighbors in this group. See the neighbor-level `orr_vantage`.
     pub orr_vantage: Option<IpAddr>,
+    /// Mark neighbors in this group as transparent route-server clients.
+    /// See the neighbor-level `route_server_client`.
     pub route_server_client: Option<bool>,
     /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
     /// this group. See the neighbor-level `per_client_best`.
     pub per_client_best: Option<bool>,
+    /// Local BGP Role (RFC 9234) inherited by neighbors in this group.
     pub role: Option<BgpRoleConfig>,
+    /// Require a compatible BGP Role capability from peers in this group.
     pub strict_role: Option<bool>,
     /// Advertise willingness to receive Address-Prefix ORF entries (RFC
     /// 5291/5292) from peers in this group.
@@ -798,21 +873,29 @@ pub struct PeerGroupConfig {
     /// (true IPv6-only peering). See the neighbor-level
     /// `disable_ipv4_unicast` for semantics.
     pub disable_ipv4_unicast: Option<bool>,
+    /// Remove private ASNs before eBGP advertisement (`"remove"`,
+    /// `"all"`, or `"replace"`). See the neighbor-level `remove_private_as`.
     pub remove_private_as: Option<String>,
+    /// Add-Path (RFC 7911) configuration inherited by neighbors in this
+    /// group.
     pub add_path: Option<AddPathConfig>,
     /// Override log level for peers in this group.
     pub log_level: Option<String>,
+    /// Inline import policy statements for peers in this group.
     #[serde(default)]
     pub import_policy: Vec<PolicyStatementConfig>,
+    /// Inline export policy statements for peers in this group.
     #[serde(default)]
     pub export_policy: Vec<PolicyStatementConfig>,
+    /// Named policy chain for import (mutually exclusive with `import_policy`).
     #[serde(default)]
     pub import_policy_chain: Vec<String>,
+    /// Named policy chain for export (mutually exclusive with `export_policy`).
     #[serde(default)]
     pub export_policy_chain: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BgpRoleConfig {
     Provider,
@@ -836,7 +919,7 @@ impl BgpRoleConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddPathConfig {
     /// Accept multiple paths per prefix from this peer (RFC 7911).
@@ -854,7 +937,7 @@ pub struct AddPathConfig {
 /// The presence of this block enables single-hop asynchronous BFD for the
 /// neighbor; it references a `[[bfd_profiles]]` entry for the timers. Static
 /// neighbors only — dynamic-neighbor BFD is deferred (see ADR-0067).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BfdConfig {
     /// Name of the `[[bfd_profiles]]` entry providing the timers.
@@ -880,7 +963,7 @@ fn default_bfd_enabled() -> bool {
 
 /// A named BFD timing profile referenced by `[neighbors.bfd]` /
 /// `[peer_groups.<name>.bfd]`. Intervals are in **milliseconds**.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BfdProfileConfig {
     /// Unique profile name (referenced by `bfd.profile`).
@@ -905,11 +988,13 @@ fn default_bfd_multiplier() -> u32 {
     3
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
+    /// Global import policy statements applied to all peers.
     #[serde(default)]
     pub import: Vec<PolicyStatementConfig>,
+    /// Global export policy statements applied to all peers.
     #[serde(default)]
     pub export: Vec<PolicyStatementConfig>,
     /// Named policy definitions, reusable across neighbors and directions.
@@ -964,7 +1049,7 @@ pub struct PolicyConfig {
 /// This is **diagnostic retention**, not policy evaluation behaviour:
 /// shrinking or disabling the cache changes only what the explain
 /// surface can answer, never which routes the import chain admits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyExplainConfig {
     /// Whether the per-session import-decision cache is populated.
@@ -1005,24 +1090,28 @@ impl Default for PolicyExplainConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NeighborSetConfig {
+    /// Neighbor IP addresses in this set.
     #[serde(default)]
     pub addresses: Vec<String>,
+    /// Remote ASNs in this set.
     #[serde(default)]
     pub remote_asns: Vec<u32>,
+    /// Peer-group names in this set.
     #[serde(default)]
     pub peer_groups: Vec<String>,
 }
 
 /// A named policy definition with configurable default action.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NamedPolicyConfig {
     /// Default action when no statement matches: `"permit"` (default) or `"deny"`.
     #[serde(default = "default_policy_action_str")]
     pub default_action: String,
+    /// Policy statements evaluated in order; first match wins.
     #[serde(default)]
     pub statements: Vec<PolicyStatementConfig>,
 }
@@ -1031,13 +1120,16 @@ fn default_policy_action_str() -> String {
     "permit".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyStatementConfig {
+    /// Action when the statement matches: `"permit"` or `"deny"`.
     pub action: String,
     /// CIDR prefix to match. Optional when any other match criterion is set.
     pub prefix: Option<String>,
+    /// Minimum prefix length (inclusive) for the `prefix` match.
     pub ge: Option<u8>,
+    /// Maximum prefix length (inclusive) for the `prefix` match.
     pub le: Option<u8>,
     /// Community match criteria, e.g. `["65001:100"]`, `["RT:65001:100"]`,
     /// or `["NO_EXPORT"]`.
@@ -1088,10 +1180,12 @@ pub struct PolicyStatementConfig {
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AsPathPrependConfig {
+    /// ASN to prepend.
     pub asn: u32,
+    /// Number of times to prepend it.
     pub count: u8,
 }
 
@@ -1131,7 +1225,7 @@ pub struct AsPathPrependConfig {
 ///   community. **Not** a static FDB: rustbgpd does not synthesize
 ///   Type 2s for these MACs; the flag only marks them on origination.
 ///   Empty by default. See ADR-0056.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvpnInstanceConfig {
     /// Local VNI for this instance (`1..=16_777_215`).
@@ -1248,7 +1342,7 @@ pub struct EvpnInstanceConfig {
 /// - `table_id` — VRF route table id. The follow-on Linux readiness
 ///   probe will cross-check it against `vrf_device`'s
 ///   `IFLA_VRF_TABLE`. Observe-only.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvpnIpVrfConfig {
     /// Operator-facing tenant handle.
@@ -1312,7 +1406,7 @@ pub struct EvpnIpVrfConfig {
 /// The `owner_token` is required when at least one row is configured and is
 /// used only to derive durable `IFLA_ALT_IFNAME` ownership stamps:
 /// `rustbgpd:<class>:<owner_token>:<link_name>`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedNetdevsConfig {
     /// Stable deployment-local owner token. Empty only when no rows are
@@ -1345,7 +1439,7 @@ pub struct ManagedNetdevsConfig {
 }
 
 /// One managed Linux bridge row (ADR-0091 bridge-first tranche).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedBridgeNetdevConfig {
     /// Linux bridge interface name.
@@ -1355,7 +1449,7 @@ pub struct ManagedBridgeNetdevConfig {
 }
 
 /// One managed fixed-VNI VXLAN row (ADR-0091 VXLAN tranche).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedVxlanNetdevConfig {
     /// Linux VXLAN interface name.
@@ -1379,7 +1473,7 @@ pub struct ManagedVxlanNetdevConfig {
 }
 
 /// One managed collect-metadata / Single VXLAN Device row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedSvdVxlanNetdevConfig {
     /// Linux VXLAN interface name.
@@ -1403,7 +1497,7 @@ pub struct ManagedSvdVxlanNetdevConfig {
 }
 
 /// One managed Linux VRF row (ADR-0091 VRF/L3VXLAN substrate tranche).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedVrfNetdevConfig {
     /// Linux VRF interface name.
@@ -1413,7 +1507,7 @@ pub struct ManagedVrfNetdevConfig {
 }
 
 /// One managed L3 VXLAN row (ADR-0091 VRF/L3VXLAN substrate tranche).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedL3VxlanNetdevConfig {
     /// Linux L3 VXLAN interface name.
@@ -1438,7 +1532,7 @@ pub struct ManagedL3VxlanNetdevConfig {
 }
 
 /// One managed Linux VLAN upper row (ADR-0091 VLAN-upper tranche).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedVlanUpperNetdevConfig {
     /// Linux VLAN upper interface name.
@@ -1454,7 +1548,7 @@ const fn default_vxlan_dstport() -> u16 {
 }
 
 /// Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayIndexModeConfig {
     /// RFC 9136 §4.4.2 Interface-less — the default, byte-for-byte the
@@ -1473,7 +1567,7 @@ pub enum OverlayIndexModeConfig {
 /// RFC 7999 BLACKHOLE discard. The operator must name every Linux
 /// route table rustbgpd may write to; the daemon never silently takes
 /// over `main`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FibTableConfig {
     /// Operator-facing handle for status output and CLI/API filters.
@@ -1585,7 +1679,7 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   flapping circuit stays drained until it holds carrier for the
 ///   full window. Only meaningful — and only accepted — together
 ///   with `interface`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EthernetSegmentConfig {
     /// 10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`).
@@ -1630,6 +1724,17 @@ fn default_df_algorithm() -> String {
 
 fn default_redundancy_mode() -> String {
     "all-active".to_string()
+}
+
+/// JSON Schema for the TOML config file, pretty-printed with a trailing
+/// newline. Emitted by `rustbgpd --dump-config-schema` and committed at
+/// `docs/rustbgpd.schema.json` (freshness-checked in `config::tests`).
+pub fn config_json_schema() -> String {
+    let schema = schemars::schema_for!(Config);
+    let mut json = serde_json::to_string_pretty(&schema)
+        .expect("config JSON Schema serialization cannot fail");
+    json.push('\n');
+    json
 }
 
 #[derive(Debug, thiserror::Error)]

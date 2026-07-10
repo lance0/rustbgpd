@@ -24,6 +24,67 @@ all peers are managed via gRPC.
 
 ---
 
+## Editor integration (JSON Schema)
+
+A JSON Schema for the full config surface ships as
+[`docs/rustbgpd.schema.json`](rustbgpd.schema.json) (also emitted by
+`rustbgpd --dump-config-schema`, included in the release tarballs, and
+published as a standalone release asset). Any TOML language server that
+supports JSON Schema — [taplo] / the VS Code **Even Better TOML**
+extension — will give as-you-type completion, inline validation, and
+hover docs for every field on this page.
+
+Point your editor at the schema with a directive at the top of the
+config file:
+
+```toml
+#:schema https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd.schema.json
+[global]
+# ...
+```
+
+or associate it by path in `.taplo.toml`:
+
+```toml
+[[rule]]
+include = ["**/rustbgpd*.toml", "/etc/rustbgpd/*.toml"]
+url = "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd.schema.json"
+```
+
+(Use a local `file://` URL or the tarball copy for air-gapped hosts.)
+
+To validate a config from the command line without the daemon:
+
+```
+taplo check --schema file://$PWD/docs/rustbgpd.schema.json /etc/rustbgpd/config.toml
+```
+
+Note that the schema checks structure, types, and enum values; semantic
+rules (ASN/hold-time ranges, cross-field requirements, name references)
+are still enforced by `rustbgpd --check`. Run both for full coverage.
+
+### SchemaStore submission (not yet submitted)
+
+Once submitted to [SchemaStore](https://github.com/SchemaStore/schemastore),
+editors pick the schema up automatically with no `#:schema` directive.
+The catalog entry to add to `src/api/json/catalog.json` in a PR there:
+
+```json
+{
+  "name": "rustbgpd",
+  "description": "rustbgpd BGP daemon configuration",
+  "fileMatch": ["rustbgpd.toml", "**/rustbgpd/config.toml", "**/rustbgpd/*.toml"],
+  "url": "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd.schema.json"
+}
+```
+
+(SchemaStore requires the entry sorted alphabetically by `name`, and a
+positive + negative test fixture under `src/test/rustbgpd/`.)
+
+[taplo]: https://taplo.tamasfe.dev/
+
+---
+
 ## `[global]`
 
 Required. Defines the local BGP speaker identity.

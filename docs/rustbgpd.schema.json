@@ -1,0 +1,2509 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "apply_bum_enforcement": {
+      "description": "Apply Gate 8b BUM-suppression filters to the kernel\n(per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge\nports). **Default `true` since v0.23.0** — kernel enforcement\nis the production posture after the Gate 8b MAC-churn 24h soak\n(2026-05-16, postmortem `docs/soak-gate8b-mac-churn-24h.md`)\nand the M37 local-origination 24h soak (2026-05-19,\npostmortem `docs/soak-m37-local-origination-churn-24h.md`)\nboth passed clean. Operators who need the prior observe-only\nbehavior can still opt out explicitly with\n`apply_bum_enforcement = false`; the deserializer honors\nexplicit values unchanged. The resolved enforcement plan is\nalways reported via `DataplaneReport.bum_enforcement`\nregardless of this flag, so observability does not depend on\nthe flip.",
+      "type": "boolean",
+      "default": true
+    },
+    "bfd_profiles": {
+      "description": "Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by\n`[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/BfdProfileConfig"
+      }
+    },
+    "bmp": {
+      "description": "BGP Monitoring Protocol (RFC 7854) export.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BmpConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "dynamic_neighbors": {
+      "description": "Prefix-based dynamic neighbor ranges.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DynamicNeighborConfig"
+      }
+    },
+    "ethernet_segments": {
+      "description": "Local Ethernet Segments this PE participates in (Gate 8\nmultihoming foundation). Empty by default — single-homed\nVTEPs and route reflectors leave it empty. See ADR-0057 for\nthe observable-without-enforcement scope decision.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EthernetSegmentConfig"
+      }
+    },
+    "event_history": {
+      "description": "Durable event-history outbox (ADR-0072). **Opt-in (default off)\nas of v0.32.0**; set `[event_history].enabled = true` for\nrestart-safe event replay. All fields are restart-required.",
+      "$ref": "#/$defs/EventHistoryConfig",
+      "default": {
+        "batch_interval_ms": 50,
+        "batch_size": 1024,
+        "enabled": false,
+        "max_bytes": 256000000,
+        "max_events": 100000,
+        "overflow": "drop",
+        "path": "",
+        "queue_capacity": 4096,
+        "required": false,
+        "synchronous": "full"
+      }
+    },
+    "evpn_instances": {
+      "description": "Local EVPN instances on this VTEP. Empty by default — only set\nwhen this daemon is acting as a leaf VTEP (Phase 2). Route\nreflector deployments leave this list empty; reflection has no\ndependency on local EVI state.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EvpnInstanceConfig"
+      }
+    },
+    "evpn_ip_vrfs": {
+      "description": "Local IP-VRFs / L3VNIs this VTEP serves (Gate 9 symmetric\nInterface-less IRB, RFC 9136 §4.4.2). Empty by default —\nL2-only VTEPs and route reflectors leave it empty. See\nADR-0058 for the IP-VRF lifecycle + Router MAC + observe-only\ndevice contract.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EvpnIpVrfConfig"
+      }
+    },
+    "fib_tables": {
+      "description": "General-purpose Linux unicast FIB export tables (ADR-0061).\nEmpty by default — route-server / route-reflector deployments\nleave this empty and never spawn the ordinary unicast kernel\nFIB actor. Each entry is an explicit operator opt-in for one\nLinux route table; when at least one table is present the\ndefault-off FIB reconciler starts and programs unicast best\nroutes into the configured non-reserved tables. Restart-required.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FibTableConfig"
+      }
+    },
+    "global": {
+      "description": "Daemon-wide BGP settings (ASN, router ID, listeners, telemetry).",
+      "$ref": "#/$defs/Global"
+    },
+    "managed_netdevs": {
+      "description": "Optional rustbgpd-managed EVPN Linux netdev lifecycle\n(ADR-0091). Empty by default — existing deployments keep the\noperator-provisioned / observe-only contract. Configured rows opt\ninto class-scoped bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper,\nVRF, and L3VXLAN create/adopt/reap.",
+      "$ref": "#/$defs/ManagedNetdevsConfig",
+      "default": {
+        "bridges": [],
+        "l3vxlans": [],
+        "owner_token": "",
+        "svd_vxlans": [],
+        "vlan_uppers": [],
+        "vrfs": [],
+        "vxlans": []
+      }
+    },
+    "mrt": {
+      "description": "Periodic MRT RIB dumps.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MrtConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "neighbors": {
+      "description": "Statically configured BGP neighbors.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Neighbor"
+      }
+    },
+    "peer_groups": {
+      "description": "Named peer groups providing inherited defaults for neighbors.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PeerGroupConfig"
+      },
+      "default": {}
+    },
+    "policy": {
+      "description": "Routing policy: inline statements, named definitions, chains,\nand `.rpol` files.",
+      "$ref": "#/$defs/PolicyConfig",
+      "default": {
+        "definitions": {},
+        "explain": {
+          "cache_size": 4096,
+          "enabled": true
+        },
+        "export": [],
+        "export_chain": [],
+        "import": [],
+        "import_chain": [],
+        "neighbor_sets": {},
+        "rpol_files": [],
+        "rpol_roots": []
+      }
+    },
+    "rpki": {
+      "description": "RPKI route-origin validation via RTR cache servers.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RpkiConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "security": {
+      "description": "Security policy and authorization configuration. Empty by\ndefault so existing deployments keep legacy listener-level\nauthorization until operators opt into later ADR-0064 slices.",
+      "$ref": "#/$defs/SecurityConfig",
+      "default": {
+        "grpc": {
+          "enforcement": "tier",
+          "roles": {}
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "global"
+  ],
+  "$defs": {
+    "AddPathConfig": {
+      "type": "object",
+      "properties": {
+        "receive": {
+          "description": "Accept multiple paths per prefix from this peer (RFC 7911).",
+          "type": "boolean",
+          "default": false
+        },
+        "send": {
+          "description": "Advertise multiple paths per prefix to this peer (RFC 7911).",
+          "type": "boolean",
+          "default": false
+        },
+        "send_max": {
+          "description": "Maximum number of paths to advertise per prefix (0 or absent = unlimited).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "AsPathPrependConfig": {
+      "type": "object",
+      "properties": {
+        "asn": {
+          "description": "ASN to prepend.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "count": {
+          "description": "Number of times to prepend it.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asn",
+        "count"
+      ]
+    },
+    "BfdConfig": {
+      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881, ADR-0067).\n\nThe presence of this block enables single-hop asynchronous BFD for the\nneighbor; it references a `[[bfd_profiles]]` entry for the timers. Static\nneighbors only — dynamic-neighbor BFD is deferred (see ADR-0067).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether BFD is enabled. Defaults to `true`; the field exists so a\nneighbor can override an inherited peer-group `bfd` block to *disable*\nBFD (`bfd = { profile = \"...\", enabled = false }`). A disabled block runs\nno session — the actor skips it — so the effective session set is fully\nexpressible inline, which the restart-required reload pin relies on.",
+          "type": "boolean",
+          "default": true
+        },
+        "profile": {
+          "description": "Name of the `[[bfd_profiles]]` entry providing the timers.",
+          "type": "string"
+        },
+        "strict": {
+          "description": "RFC 5882 strict mode: when true, the BGP session is not allowed to reach\nEstablished until the BFD session is Up. Default false — BGP may\nestablish first, and a later BFD-down tears it down faster than the hold\ntimer.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "profile"
+      ]
+    },
+    "BfdProfileConfig": {
+      "description": "A named BFD timing profile referenced by `[neighbors.bfd]` /\n`[peer_groups.<name>.bfd]`. Intervals are in **milliseconds**.",
+      "type": "object",
+      "properties": {
+        "min_rx_interval": {
+          "description": "Required minimum receive interval (ms). Default 300; validated ≥ 100.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 300,
+          "minimum": 0
+        },
+        "min_tx_interval": {
+          "description": "Desired minimum transmit interval (ms). Default 300; validated ≥ 100.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 300,
+          "minimum": 0
+        },
+        "multiplier": {
+          "description": "Detection multiplier — detection time is `multiplier × negotiated\ninterval`. Default 3; validated ≥ 2.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "name": {
+          "description": "Unique profile name (referenced by `bfd.profile`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "BgpRoleConfig": {
+      "type": "string",
+      "enum": [
+        "provider",
+        "route_server",
+        "route_server_client",
+        "customer",
+        "peer"
+      ]
+    },
+    "BmpCollector": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "Collector endpoint as `host:port`.",
+          "type": "string"
+        },
+        "monitor": {
+          "description": "Which route-monitoring streams this collector receives.\nDefault preserves pre-RFC 8671 behavior: pre-policy Adj-RIB-In only.",
+          "type": "array",
+          "default": [
+            "rib_in_pre"
+          ],
+          "items": {
+            "$ref": "#/$defs/BmpMonitorView"
+          }
+        },
+        "reconnect_interval": {
+          "description": "Seconds between reconnect attempts. Default 30.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "version": {
+          "description": "BMP wire version framed for this collector: 3 (RFC 7854,\ndefault) or 4 (TLV framing per draft-ietf-grow-bmp-tlv-20 —\npre-IANA; code points may renumber at RFC publication).",
+          "type": "integer",
+          "format": "uint8",
+          "default": 3,
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address"
+      ]
+    },
+    "BmpConfig": {
+      "type": "object",
+      "properties": {
+        "collectors": {
+          "description": "BMP collectors to stream route-monitoring data to.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BmpCollector"
+          }
+        },
+        "sys_descr": {
+          "description": "`sysDescr` information TLV sent in the BMP INITIATION message.",
+          "type": "string",
+          "default": ""
+        },
+        "sys_name": {
+          "description": "`sysName` information TLV sent in the BMP INITIATION message.",
+          "type": "string",
+          "default": "rustbgpd"
+        }
+      },
+      "additionalProperties": false
+    },
+    "BmpMonitorView": {
+      "description": "A BMP route-monitoring stream selection (per collector).",
+      "oneOf": [
+        {
+          "description": "Pre-policy Adj-RIB-In route monitoring (RFC 7854).",
+          "type": "string",
+          "const": "rib_in_pre"
+        },
+        {
+          "description": "Post-policy Adj-RIB-Out route monitoring (RFC 8671).",
+          "type": "string",
+          "const": "rib_out_post"
+        },
+        {
+          "description": "Loc-RIB instance monitoring with collector-connect table sync\n(RFC 9069).",
+          "type": "string",
+          "const": "loc_rib"
+        }
+      ]
+    },
+    "CacheServer": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "RTR cache endpoint as `host:port`.",
+          "type": "string"
+        },
+        "expire_interval": {
+          "description": "RTR expire interval in seconds. Default 7200.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 7200,
+          "minimum": 0
+        },
+        "refresh_interval": {
+          "description": "RTR refresh interval in seconds. Default 3600.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "retry_interval": {
+          "description": "RTR retry interval in seconds. Default 600.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address"
+      ]
+    },
+    "DynamicNeighborConfig": {
+      "description": "Prefix-based dynamic neighbor range. Inbound connections from IPs\nwithin `prefix` are automatically accepted and inherit configuration\nfrom the referenced `peer_group`.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Description applied to dynamic peers from this range.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "peer_group": {
+          "description": "Peer group whose config the dynamic peer inherits.",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "IP prefix range (e.g., `10.0.0.0/24` or `2001:db8::/32`).",
+          "type": "string"
+        },
+        "remote_asn": {
+          "description": "Expected remote ASN. 0 = accept any ASN from OPEN message.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prefix",
+        "peer_group"
+      ]
+    },
+    "EthernetSegmentConfig": {
+      "description": "One Ethernet Segment this PE participates in (Gate 8).\n\nEach entry produces:\n\n- One Type 4 ES route announcing this PE as a candidate for the\n  ESI's per-`(ESI, VNI)` DF election.\n- One Type 1 EAD-per-ES route signalling ES liveness.\n- One Type 1 EAD-per-EVI route per `member_vni` carrying the\n  role-aware ESI Label flag.\n\n**Operator prerequisite**: every member VNI must already be\ndeclared in `[[evpn_instances]]`. Members referencing unknown\nVNIs are rejected at config-load time.\n\n## Fields\n\n- `esi` — 10-byte Ethernet Segment Identifier in canonical\n  `XX:XX:XX:XX:XX:XX:XX:XX:XX:XX` form. Must be exactly 10\n  colon-separated hex bytes. Type 0 (all zero) is rejected\n  because Type 0 means \"single-homed\" and thus shouldn't appear\n  in a multihoming config.\n- `member_vnis` — non-empty set of VNIs that participate in\n  this ES. Each member contributes a slot to the per-(ESI, VNI)\n  DF election.\n- `df_preference` — RFC 9785 Designated Forwarder preference\n  value (`0..=65535`, default 32768). Used only by\n  `\"highest-preference\"` / `\"lowest-preference\"`; default-modulo\n  and HRW require the default because they ignore preference.\n- `df_algorithm` — DF election algorithm string. Gate 8 accepts\n  `\"default-modulo\"` (RFC 7432 §8.5) and\n  `\"highest-random-weight\"` (RFC 8584 §3.2), plus RFC 9785\n  `\"highest-preference\"` / `\"lowest-preference\"` (revertive;\n  local Don't-Preempt/non-revertive behavior is deferred).\n  Default `\"default-modulo\"`.\n- `redundancy_mode` — `\"all-active\"` (default) or\n  `\"single-active\"`; single-active sets the ESI Label extcomm flag\n  and prevents receiver-side all-active aliasing ECMP for remote\n  single-active ES reachability.\n- `originator_ip` — IP this PE uses as the Type 4 ES route's\n  originator address. Typically equals `evpn_instances[].local_vtep_ip`.\n- `interface` — optional attachment-circuit link binding\n  (ADR-0085 decision 1). When set, the ES's drain state follows\n  that link's carrier (`IFF_LOWER_UP`): carrier loss drains the\n  ES immediately; a link absent from the kernel counts as down\n  (fail-closed). Unbound segments behave as before — drain only\n  via the ADR-0084 RPC.\n- `recovery_delay_secs` — hold-off after carrier returns before\n  the link drain is released (ADR-0085 decision 3). Default 30,\n  range `0..=3600`; the timer re-arms on every up edge, so a\n  flapping circuit stays drained until it holds carrier for the\n  full window. Only meaningful — and only accepted — together\n  with `interface`.",
+      "type": "object",
+      "properties": {
+        "df_algorithm": {
+          "description": "DF algorithm string. Default `\"default-modulo\"`.",
+          "type": "string",
+          "default": "default-modulo"
+        },
+        "df_dont_preempt": {
+          "description": "RFC 9785 Don't-Preempt (non-revertive DF). Default `false`. Only\nvalid with `highest-preference` / `lowest-preference`.",
+          "type": "boolean",
+          "default": false
+        },
+        "df_preference": {
+          "description": "RFC 9785 DF preference. Default 32768.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 32768,
+          "minimum": 0
+        },
+        "esi": {
+          "description": "10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`).",
+          "type": "string"
+        },
+        "interface": {
+          "description": "ADR-0085 decision 1: name of the local attachment-circuit\nlink whose carrier drives this ES's link drain. Optional —\nunbound segments are drained only via the ADR-0084 RPC.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "member_vnis": {
+          "description": "VNIs participating in this ES. Each must already be declared\nin `[[evpn_instances]]`.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "originator_ip": {
+          "description": "Originator IP carried on the Type 4 ES route.",
+          "type": "string"
+        },
+        "recovery_delay_secs": {
+          "description": "ADR-0085 decision 3: seconds to hold the link drain after\ncarrier returns (default 30, range `0..=3600`). Rejected\nwithout `interface` — it has no meaning unbound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "redundancy_mode": {
+          "description": "Redundancy mode string. Default `\"all-active\"`.",
+          "type": "string",
+          "default": "all-active"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "esi",
+        "member_vnis",
+        "originator_ip"
+      ]
+    },
+    "EventHistoryConfig": {
+      "description": "Durable event-history outbox configuration (ADR-0072).\n\nAll fields are restart-required — toggling the outbox or its\nbounds requires a daemon restart. The reload matrix documents the\nclassification.",
+      "type": "object",
+      "properties": {
+        "batch_interval_ms": {
+          "description": "Batch-commit time threshold (milliseconds).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 50,
+          "minimum": 0
+        },
+        "batch_size": {
+          "description": "Batch-commit size threshold.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1024,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Enable the durable outbox. **Default `false` (opt-in as of\nv0.32.0).** When `false`, EHM runs in pass-through mode (live\nbroadcasts only, no persistence) and `SubscribeFromEvent`\nreturns `FAILED_PRECONDITION`. Set `true` for restart-safe event\nreplay — it costs memory / CPU / disk (see `docs/BENCHMARKS.md`).",
+          "type": "boolean",
+          "default": false
+        },
+        "max_bytes": {
+          "description": "Byte retention trigger on `events.db` + WAL combined. `SQLite`\nmay reuse freed pages rather than shrink the main DB immediately.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 256000000,
+          "minimum": 0
+        },
+        "max_events": {
+          "description": "Hard count cap on retained events.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 100000,
+          "minimum": 0
+        },
+        "overflow": {
+          "description": "Behavior on full producer queue. v1 only supports `drop`;\n`block` is reserved for a future ADR. ADR-0072 documents the\nrationale for uniform best-effort drop.",
+          "type": "string",
+          "default": "drop"
+        },
+        "path": {
+          "description": "Path of `events.db` relative to `runtime_state_dir`.\nEmpty string ⇒ `<runtime_state_dir>/events.db`.",
+          "type": "string",
+          "default": ""
+        },
+        "queue_capacity": {
+          "description": "Per-producer mpsc capacity.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "required": {
+          "description": "Fail to start if the events DB cannot be opened or recovered.\nDefault `false` — degrade to pass-through with the\n`bgp_event_outbox_degraded` flag set.",
+          "type": "boolean",
+          "default": false
+        },
+        "synchronous": {
+          "description": "`SQLite` `PRAGMA synchronous` mode. `full` (default) fsyncs\nper commit; `normal` checkpoints periodically and trades a\nsmall crash window for throughput.",
+          "type": "string",
+          "default": "full"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvpnDuplicateMacActionConfig": {
+      "oneOf": [
+        {
+          "description": "Count/report threshold crossings but do not suppress local\noriginations. This preserves pre-quarantine behavior.",
+          "type": "string",
+          "const": "detect"
+        },
+        {
+          "description": "Withdraw and suppress locally-originated Type 2 routes for the\nquarantined `(VNI, MAC)` until `recovery_seconds` elapses.",
+          "type": "string",
+          "const": "suppress_local"
+        }
+      ]
+    },
+    "EvpnDuplicateMacDetectionConfig": {
+      "description": "Per-`[[evpn_instances]]` RFC 7432 §15.1 duplicate-MAC detector.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Action to take when `threshold` moves occur within\n`window_seconds`. Defaults to detect-only.",
+          "$ref": "#/$defs/EvpnDuplicateMacActionConfig",
+          "default": "detect"
+        },
+        "recovery_seconds": {
+          "description": "Suppression hold time in seconds for `suppress_local`. Default\n540 (three M windows). Must still be non-zero in detect-only mode\nso reloads can flip the action without introducing invalid state.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 540,
+          "minimum": 0
+        },
+        "threshold": {
+          "description": "RFC 7432 N move threshold. Default 5.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "window_seconds": {
+          "description": "RFC 7432 M window in seconds. Default 180.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 180,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvpnInstanceConfig": {
+      "description": "One local EVPN instance entry in TOML.\n\nThis is the *operator-facing* shape; resolution into the runtime\n[`rustbgpd_evpn::EvpnInstance`] domain type happens in\n[`Config::resolve_evpn_instances`]. Phase-2 fields (e.g. inbound\nMAC-mobility knobs, IRB router-mac) will be added here without\nreshaping the existing surface.\n\nField semantics:\n\n- `vni` — 24-bit VXLAN VNI (RFC 8365 §5). Required, must be 1..=`16_777_215`.\n- `rd` — Route Distinguisher (RFC 4364 §4.2). Required, parsed via\n  the wire crate's [`rustbgpd_wire::RouteDistinguisher`] textual\n  forms (`asn:val`, `ipv4:val`, 4-octet AS).\n- `route_targets` — bidirectional Route Target list (RFC 4360 / RFC 5668).\n  Required and non-empty unless `auto_derive_route_target = true`; each\n  entry parses through [`rustbgpd_evpn::RouteTarget`].\n- `auto_derive_route_target` — derive the RFC 8365 §5.1.2.1 VXLAN RT from\n  `[global].asn` and `vni`. Off by default; requires a 2-octet AS.\n- `local_vtep_ip` — VXLAN tunnel source IP for this EVI. Required,\n  must be a unicast address (rejects unspecified / multicast /\n  loopback).\n- `bridge` — optional Linux bridge name this EVI is bound to.\n  Kernel reconciliation reports `NotReady` until the named bridge exists.\n- `bridge_vlan` — optional local Linux bridge VLAN selector\n  (`1..=4094`). Valid only with `bridge`; ADR-0089 v1 keeps EVPN\n  Ethernet Tag ID `0`, so this is not a wire-protocol tag.\n- `advertise_svi_mac` — toggle for Type 2 origination of the SVI's\n  own MAC address (RFC 9135 §6.1). Off by default. Origination is\n  gated on dataplane readiness for the instance.\n- `sticky_macs` — list of MAC addresses (`aa:bb:cc:dd:ee:ff` form)\n  that, when learned by the local kernel, are originated with the\n  RFC 7432 §15.4 \"sticky\" bit set in the MAC Mobility extended\n  community. **Not** a static FDB: rustbgpd does not synthesize\n  Type 2s for these MACs; the flag only marks them on origination.\n  Empty by default. See ADR-0056.",
+      "type": "object",
+      "properties": {
+        "advertise_svi_mac": {
+          "description": "Originate Type 2 routes for the SVI's own MAC address (RFC 9135 §6.1).\nOff by default.",
+          "type": "boolean",
+          "default": false
+        },
+        "apply_aliasing_ecmp": {
+          "description": "Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes\n(aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Default `true`.\nOperators flip to `false` to roll a single L2VNI back to the\nsingle-dst FDB path (primary VTEP only, no kernel-side ECMP).\nSingle-homed entries are unaffected — they always take the\nsingle-dst path regardless of this flag.\n\n**Runtime-drivable via `EvpnService.ApplyEvpnRuntime` L2VNI redefine;\nSIGHUP remains restart-required.** A config-file reload still reverts\nedits to the instance table, but a runtime L2VNI redefine that flips\nthis knob converges cleanly through the dataplane diff's standard\n`FdbNhg → SingleDst` transition (#210). When toggled across a daemon\nrestart instead, stale tagged FDB rows from a prior run stay in place\nuntil the next periodic drift cycle (≤ 60 s, slice 3.5 PR 2).",
+          "type": "boolean",
+          "default": true
+        },
+        "auto_derive_route_target": {
+          "description": "Derive the RFC 8365 §5.1.2.1 VXLAN Route Target from `[global].asn` and `vni`.",
+          "type": "boolean",
+          "default": false
+        },
+        "bridge": {
+          "description": "Optional Linux bridge name this EVI is bound to for kernel\ndataplane probing, readiness reporting, and local origination\nthat depends on observed bridge state.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "bridge_vlan": {
+          "description": "Optional local Linux bridge VLAN selector for ADR-0089\nVLAN-aware bridge attribution. This is not an EVPN Ethernet Tag.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "duplicate_mac_detection": {
+          "description": "RFC 7432 §15.1 duplicate-MAC detection and optional local\nquarantine policy. Default is detect-only with the RFC M/N\nwindow (5 moves in 180s). `action = \"suppress_local\"` is\nopt-in and withdraws/suppresses locally-originated Type 2 routes\nfor the offending `(VNI, MAC)` until `recovery_seconds` elapses.",
+          "$ref": "#/$defs/EvpnDuplicateMacDetectionConfig",
+          "default": {
+            "action": "detect",
+            "recovery_seconds": 540,
+            "threshold": 5,
+            "window_seconds": 180
+          }
+        },
+        "ip_vrf": {
+          "description": "Optional name of an `[[evpn_ip_vrfs]]` entry that binds this\nL2VNI into Gate 9 symmetric Interface-less IRB. When set, the\ndaemon validates the referenced IP-VRF, originates local Type 5\nroutes from that VRF's kernel table, and imports remote Type 5\nroutes into the corresponding L3 FIB. Empty / unset means this\nL2VNI remains bridging-only. See ADR-0058.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "local_vtep_ip": {
+          "description": "VXLAN tunnel source IP for this EVI.",
+          "type": "string"
+        },
+        "rd": {
+          "description": "Route Distinguisher (RFC 4364 §4.2). Textual form: `asn:val` or `ipv4:val`.",
+          "type": "string"
+        },
+        "route_targets": {
+          "description": "Bidirectional Route Targets — each entry applies to both import and export.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sticky_macs": {
+          "description": "MACs to be originated with the RFC 7432 §15.4 sticky bit when\nthe local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`\n(lowercase hex, six octets). Empty by default. See ADR-0056.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "vni": {
+          "description": "Local VNI for this instance (`1..=16_777_215`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "vni",
+        "rd",
+        "local_vtep_ip"
+      ]
+    },
+    "EvpnIpVrfConfig": {
+      "description": "One IP-VRF / L3VNI tenant served by this VTEP (Gate 9 symmetric\nInterface-less IRB, RFC 9136 §4.4.2).\n\nEach entry binds:\n\n- A configured **L3VNI** for the VXLAN encapsulation.\n- A Linux **VRF device** (`vrf_device`) whose route table the\n  daemon watches for local-route → Type 5 origination.\n- A Linux **L3 VXLAN device** (`l3vxlan_device`) the daemon\n  programs FIB entries through.\n- A **Router MAC** advertised on every outbound Type 5 via the\n  RFC 9135 §4.2 / RFC 9136 Router MAC extended community. The\n  value is operator-supplied (not auto-derived) — see ADR-0058\n  §4 for why.\n\n**Operator prerequisite**: the VRF device and L3 VXLAN device must\nexist and satisfy the readiness predicates in ADR-0058 §3 before\nrustbgpd originates or installs anything. By default those links are\noperator-provisioned; deployments that want rustbgpd to own their\nlifecycle can opt in with matching ADR-0091 `[[managed_netdevs.vrfs]]`\nand `[[managed_netdevs.l3vxlans]]` rows.\n\n## Fields\n\n- `name` — operator-facing handle, used by\n  `[[evpn_instances]].ip_vrf` to bind L2VNIs to this IP-VRF.\n  `^[a-zA-Z][a-zA-Z0-9_-]*$`, unique across `[[evpn_ip_vrfs]]`.\n- `vni` — L3VNI in `1..=16_777_215`. Unique across both\n  `[[evpn_instances]]` and `[[evpn_ip_vrfs]]` — an L2VNI and an\n  L3VNI cannot share a number.\n- `rd` — Route Distinguisher (`asn:value` or `ipv4:value`).\n- `route_targets` — bidirectional RTs applied to both import\n  and export. Tenant identity on the wire. Required and non-empty unless\n  `auto_derive_route_target = true`.\n- `auto_derive_route_target` — derive the L3VNI / IP-VRF RT as plain\n  `AS:VNI` from `[global].asn` and the L3VNI (matching FRR's default\n  tenant-VRF auto-RT — the RFC 8365 opaque form is MAC-VRF-only and\n  would not import against FRR for L3VNIs). Off by default; requires a\n  2-octet AS.\n- `local_vtep_ip` — VXLAN source IP for outbound Type 5\n  `NEXT_HOP`. Typically equals the per-`[[evpn_instances]]`\n  `local_vtep_ip`; explicitly carried so an operator with split\n  VTEP IPs per VRF can express that.\n- `router_mac` — Router MAC value advertised on every outbound\n  Type 5 and asserted against the kernel-side L3 VXLAN device's\n  MAC. `aa:bb:cc:dd:ee:ff` form.\n- `vrf_device` — Linux VRF device name. Observe-only.\n- `l3vxlan_device` — Linux L3 VXLAN device name. Observe-only.\n- `table_id` — VRF route table id. The follow-on Linux readiness\n  probe will cross-check it against `vrf_device`'s\n  `IFLA_VRF_TABLE`. Observe-only.",
+      "type": "object",
+      "properties": {
+        "auto_derive_route_target": {
+          "description": "Derive the L3VNI / IP-VRF Route Target as `AS:VNI` from `[global].asn`\nand L3VNI (FRR-compatible tenant-VRF auto-RT, not the RFC 8365 form).",
+          "type": "boolean",
+          "default": false
+        },
+        "l3vxlan_device": {
+          "description": "Linux L3 VXLAN device name (operator-managed, observe-only).",
+          "type": "string"
+        },
+        "local_vtep_ip": {
+          "description": "VXLAN tunnel source IP for outbound Type 5 `NEXT_HOP`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Operator-facing tenant handle.",
+          "type": "string"
+        },
+        "overlay_index_esi": {
+          "description": "Non-zero ESI used when `overlay_index_mode = \"esi\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "overlay_index_l2vni": {
+          "description": "Optional L2VNI disambiguator for ESI mode when this IP-VRF links\nmore than one L2VNI.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "overlay_index_mac": {
+          "description": "Router's MAC extended community used when\n`overlay_index_mode = \"esi\"`. This names the virtual appliance /\ntransit-switch MAC, not the PE/NVE router MAC.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "overlay_index_mode": {
+          "description": "Outbound Type 5 overlay-index mode (ADR-0087). `\"interface_less\"`\n(default) keeps the RFC 9136 §4.4.2 shape — Gateway Address zero,\nRouter's MAC extended community. `\"gateway_ip\"` opts into RFC 9136\n§4.1/§4.2 GW-IP overlay index: a kernel route whose via lands on a\nconnected subnet of this VRF originates with that via in the\nGateway Address and no Router's MAC extcomm; routes without an\neligible via fall back to the interface-less shape. `\"esi\"` opts\ninto RFC 9136 §4.3 ESI overlay index and requires\n`overlay_index_esi` + `overlay_index_mac`. `\"gateway_ip\"` and\n`\"esi\"` both require at least one `[[evpn_instances]].ip_vrf`-linked L2VNI\n(the receive side needs it to scope recursive resolution).",
+          "$ref": "#/$defs/OverlayIndexModeConfig",
+          "default": "interface_less"
+        },
+        "rd": {
+          "description": "Route Distinguisher (`asn:value` or `ipv4:value`).",
+          "type": "string"
+        },
+        "route_targets": {
+          "description": "Bidirectional Route Targets — applied to both import and export.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "router_mac": {
+          "description": "Router MAC value (RFC 9135 §4.2 / RFC 9136 Router MAC ext-community).\n`aa:bb:cc:dd:ee:ff` form, hex (case-insensitive).",
+          "type": "string"
+        },
+        "table_id": {
+          "description": "VRF route table id, cross-checked against `vrf_device`'s\n`IFLA_VRF_TABLE`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "vni": {
+          "description": "L3VNI (`1..=16_777_215`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "vrf_device": {
+          "description": "Linux VRF device name (operator-managed, observe-only).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vni",
+        "rd",
+        "local_vtep_ip",
+        "router_mac",
+        "vrf_device",
+        "l3vxlan_device",
+        "table_id"
+      ]
+    },
+    "FibTableConfig": {
+      "description": "Explicit opt-in for ordinary unicast kernel FIB export.\n\nADR-0061 keeps the general FIB path separate from EVPN L3VNI and\nRFC 7999 BLACKHOLE discard. The operator must name every Linux\nroute table rustbgpd may write to; the daemon never silently takes\nover `main`.",
+      "type": "object",
+      "properties": {
+        "allowed_neighbors": {
+          "description": "Optional neighbor address allow-list. When non-empty, routes learned\nfrom peers outside this list are rejected before kernel apply.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_peer_groups": {
+          "description": "Optional peer-group allow-list. When non-empty, routes learned from\npeers outside these groups are rejected before kernel apply.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "families": {
+          "description": "Address families eligible for install. Defaults to both IPv4\nand IPv6 unicast when the `[[fib_tables]]` block itself is\npresent.",
+          "type": "array",
+          "default": [
+            "ipv4_unicast",
+            "ipv6_unicast"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_routes": {
+          "description": "Optional hard cap for the table. If the eligible route count exceeds\nthis value, rustbgpd freezes table growth and replacement while still\nallowing already-owned rows to be repaired or withdrawn.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maximum_paths": {
+          "description": "Optional maximum number of equal-cost next-hops to install per prefix\n(unicast multipath / ECMP, ADR-0066). Unset or `1` programs a single\nnext-hop — exactly today's behavior. Higher values install up to this\nmany equal-cost paths as a kernel `RTA_MULTIPATH` route. Applies to any\nhomogeneous eBGP or iBGP equal-cost group that does not have a per-class\noverride below. Distinct from `max_routes`, which caps the number of\nprefixes (rows), not the next-hops per row. Validated `>= 1`, capped at\n256.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "maximum_paths_ebgp": {
+          "description": "Per-class ECMP cap for **eBGP** equal-cost groups (FRR's\n`maximum-paths`). Overrides `maximum_paths` for eBGP best routes; when\nunset, eBGP groups fall back to `maximum_paths` (then `1`). Validated\n`>= 1`, capped at 256.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "maximum_paths_ibgp": {
+          "description": "Per-class ECMP cap for **iBGP** equal-cost groups (FRR's\n`maximum-paths ibgp`). Overrides `maximum_paths` for iBGP best routes;\nwhen unset, iBGP groups fall back to `maximum_paths` (then `1`).\nValidated `>= 1`, capped at 256.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "metric": {
+          "description": "Kernel route metric / priority to use for daemon-owned rows.\nRequired so coexistence with static routes and other routing\ndaemons is a conscious operator choice rather than an implicit\ndefault.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "Operator-facing handle for status output and CLI/API filters.\nUnique across `[[fib_tables]]`.",
+          "type": "string"
+        },
+        "table_id": {
+          "description": "Linux route table id. Reserved tables are rejected at config\nvalidation time; use an explicit non-reserved table for the\nfirst general-FIB tranche.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "table_id",
+        "metric"
+      ]
+    },
+    "Global": {
+      "type": "object",
+      "properties": {
+        "allow_blackhole_broad_prefixes": {
+          "description": "Permit non-host BLACKHOLE routes to install kernel discard rows.\nDefaults to false so IPv4 `/32` and IPv6 `/128` are the only\ninstallable prefixes. This knob has no effect unless\n`install_blackhole_discard = true`.",
+          "type": "boolean",
+          "default": false
+        },
+        "asn": {
+          "description": "Local autonomous system number.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "cluster_id": {
+          "description": "Cluster ID for route reflection (RFC 4456). Defaults to `router_id`\nwhen any neighbor is configured as a route reflector client.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dynamic_neighbor_limit": {
+          "description": "Maximum number of dynamic (prefix-based) neighbors. Default 100.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "honor_blackhole": {
+          "description": "Honor RFC 7999 `BLACKHOLE` community on inbound EBGP routes by\nappending an implicit chain-tail rule that preserves the `BLACKHOLE`\nmarker and adds `NO_ADVERTISE` to keep the request local. Off by\ndefault; RFC 7999 §4 says receivers should not discard traffic without\nan explicit operator directive. This knob scopes the control-plane\nroute; kernel discard/null-route installation requires the separate\n`install_blackhole_discard` opt-in.\n\nSIGHUP hot-applies through the peer manager, matching\n`honor_graceful_shutdown`.",
+          "type": "boolean",
+          "default": false
+        },
+        "honor_graceful_shutdown": {
+          "description": "Honor RFC 8326 `GRACEFUL_SHUTDOWN` community on inbound EBGP routes\nby appending an implicit chain-tail rule that sets `local_pref = 0`\non tagged routes. Off by default. Per RFC 8326 §4 receivers\nSHOULD apply this on EBGP sessions; iBGP is unaffected because\n`LOCAL_PREF` is preserved within an AS and re-clobbering it here\nwould overwrite values set legitimately upstream.\n\nSIGHUP hot-applies through the peer manager, recomputing EBGP\nruntime policies for already-managed peers.",
+          "type": "boolean",
+          "default": false
+        },
+        "install_blackhole_discard": {
+          "description": "Install local kernel blackhole routes for accepted EBGP best\nroutes carrying RFC 7999 `BLACKHOLE`. Off by default and only\neffective when `honor_blackhole = true`. The first FIB slice is\nintentionally conservative: host routes only unless\n`allow_blackhole_broad_prefixes = true`, no overwrite of existing\nkernel routes, and daemon-owned cleanup on withdraw / shutdown.",
+          "type": "boolean",
+          "default": false
+        },
+        "link_bandwidth_weighted": {
+          "description": "ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,\nunicast ECMP next-hops are weighted by their Link Bandwidth Extended\nCommunity (draft-ietf-idr-link-bandwidth) when the whole equal-cost group\ncarries one; otherwise they stay equal-cost. Off by default. Like\n`multipath_relax` it is a best-path-wide knob and is inert unless a table\nsets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above\n1.",
+          "type": "boolean",
+          "default": false
+        },
+        "listen_port": {
+          "description": "TCP listen port for inbound BGP sessions (conventionally 179).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "multipath_relax": {
+          "description": "ADR-0066 multipath-relax (FRR's `bgp bestpath as-path multipath-relax`).\nWhen `true`, unicast ECMP groups equal-cost candidates by `AS_PATH`\n*length* instead of an exact `AS_PATH` match, so equal-length paths through\ndifferent ASes co-install as multipath. Off by default (exact match). It\nis a best-path-wide knob, so it lives here rather than per\n`[[fib_tables]]`; it is inert unless a table sets `maximum_paths`,\n`maximum_paths_ebgp`, or `maximum_paths_ibgp` above 1.",
+          "type": "boolean",
+          "default": false
+        },
+        "router_id": {
+          "description": "BGP router ID in IPv4 dotted-quad form (e.g. `\"192.0.2.1\"`).",
+          "type": "string"
+        },
+        "runtime_state_dir": {
+          "description": "Directory for daemon-owned runtime state files.",
+          "type": "string",
+          "default": "/var/lib/rustbgpd"
+        },
+        "telemetry": {
+          "description": "Telemetry and control-plane listeners (Prometheus, gRPC,\nlooking glass) plus logging format.",
+          "$ref": "#/$defs/TelemetryConfig"
+        },
+        "worker_threads": {
+          "description": "Number of tokio runtime worker threads. Unset (the default) caps to\n`min(available CPU parallelism, 8)`: spawning one worker per core on a\nhigh-core-count host over-provisions the async runtime (each worker\nreserves a stack and a scheduler slot) for what is an I/O-bound daemon,\nnot a CPU-bound one. Capping reduces virtual-address reservation and\nscheduler footprint — same-host benchmarks showed it to be RSS-neutral,\nso this is runtime right-sizing, not a memory optimization. A value of `0` is\ntreated as unset. The `RUSTBGPD_WORKER_THREADS` environment variable\noverrides this field. **Restart-required:** the runtime is built once at\nstartup, so a change only takes effect on the next restart, not on SIGHUP.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "asn",
+        "router_id",
+        "listen_port",
+        "telemetry"
+      ]
+    },
+    "GrpcAccessModeConfig": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "read_write"
+      ]
+    },
+    "GrpcEnforcementConfig": {
+      "oneOf": [
+        {
+          "description": "Preserve pre-v0.24.0 role authorization behavior. Listener\n`max_tier` caps still apply in this mode, but per-principal\nrole ceilings are not enforced. Operators who need this\nbehavior after v0.24.0 must set `enforcement = \"legacy\"`\nexplicitly.",
+          "type": "string",
+          "const": "legacy"
+        },
+        {
+          "description": "Enforce per-principal role ceilings in addition to listener\n`max_tier` caps. **Default since v0.24.0** after the\nmigration window documented in `docs/CONFIGURATION.md`.\nExisting deployments that do not configure\n`[security.grpc.roles]` will fail validation at startup with\na message pointing at the migration checklist; operators who\nhave not staged their config can opt back into `legacy`\nexplicitly.",
+          "type": "string",
+          "const": "tier"
+        }
+      ]
+    },
+    "GrpcMaxTierConfig": {
+      "type": "string",
+      "enum": [
+        "read",
+        "sensitive_read",
+        "mutating",
+        "operator_only"
+      ]
+    },
+    "GrpcRoleConfig": {
+      "type": "string",
+      "enum": [
+        "observer",
+        "automation",
+        "operator"
+      ]
+    },
+    "GrpcSecurityConfig": {
+      "type": "object",
+      "properties": {
+        "enforcement": {
+          "description": "Role-enforcement mode: `\"legacy\"` or `\"tier\"`.",
+          "$ref": "#/$defs/GrpcEnforcementConfig",
+          "default": "tier"
+        },
+        "roles": {
+          "description": "Per-principal role assignments (principal name -> role).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/GrpcRoleConfig"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "GrpcTcpListenerConfig": {
+      "type": "object",
+      "properties": {
+        "access_mode": {
+          "description": "Listener access mode: `\"read_only\"` or `\"read_write\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcAccessModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "description": "Listen address (e.g. `\"127.0.0.1:50051\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Enable this listener. Default `true`.",
+          "type": "boolean",
+          "default": true
+        },
+        "max_tier": {
+          "description": "ADR-0064 per-method listener ceiling. When omitted, the\nlistener preserves the compatibility cap implied by\n`access_mode`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcMaxTierConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "principal": {
+          "description": "Stable audit principal label for non-mTLS bearer-token\nlisteners. Native mTLS listeners derive the audit principal\nfrom the client certificate instead.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_cert_file": {
+          "description": "Server certificate (PEM file path). Required to enable mTLS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_client_ca_file": {
+          "description": "CA certificate(s) (PEM file path) used to verify client\ncertificates. Required when `tls_cert_file` is set — rustbgpd\nalways enforces client-cert auth when TLS is on (no\n\"TLS-without-mTLS\" half-mode).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_key_file": {
+          "description": "Server private key (PEM file path). Required when `tls_cert_file`\nis set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_file": {
+          "description": "Path to a bearer-token file for client authentication.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "GrpcUdsListenerConfig": {
+      "type": "object",
+      "properties": {
+        "access_mode": {
+          "description": "Listener access mode: `\"read_only\"` or `\"read_write\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcAccessModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "description": "Enable this listener. Default `true`.",
+          "type": "boolean",
+          "default": true
+        },
+        "max_tier": {
+          "description": "ADR-0064 per-method listener ceiling. When omitted, the\nlistener preserves the compatibility cap implied by\n`access_mode`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcMaxTierConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "description": "Socket file mode bits. Default `0o600`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 384,
+          "minimum": 0
+        },
+        "path": {
+          "description": "Unix socket path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "description": "Stable audit principal label for this Unix-domain-socket\nlistener. Filesystem permissions authenticate the socket, but\nthis gives audit logs an operator-controlled identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_file": {
+          "description": "Path to a bearer-token file for client authentication.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LookingGlassConfig": {
+      "type": "object",
+      "properties": {
+        "addr": {
+          "description": "Listen address for the looking glass HTTP server (e.g., \"0.0.0.0:8080\").",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "addr"
+      ]
+    },
+    "ManagedBridgeNetdevConfig": {
+      "description": "One managed Linux bridge row (ADR-0091 bridge-first tranche).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Linux bridge interface name.",
+          "type": "string"
+        },
+        "vlan_filtering": {
+          "description": "Desired protected bridge `vlan_filtering` value.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vlan_filtering"
+      ]
+    },
+    "ManagedL3VxlanNetdevConfig": {
+      "description": "One managed L3 VXLAN row (ADR-0091 VRF/L3VXLAN substrate tranche).",
+      "type": "object",
+      "properties": {
+        "dstport": {
+          "description": "UDP destination port. Defaults to the IANA VXLAN port.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 4789,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "learning": {
+          "description": "Linux VXLAN learning mode. ADR-0091 L3VXLAN lifecycle requires\n`false` (`nolearning`); the field exists so typos or intentional\ndeviations fail validation explicitly instead of silently using the\ndefault.",
+          "type": "boolean",
+          "default": false
+        },
+        "local": {
+          "description": "Local source IP for VXLAN encapsulation.",
+          "type": "string",
+          "format": "ip"
+        },
+        "name": {
+          "description": "Linux L3 VXLAN interface name.",
+          "type": "string"
+        },
+        "router_mac": {
+          "description": "Router MAC this L3 VXLAN must carry.",
+          "type": "string"
+        },
+        "vni": {
+          "description": "Fixed VXLAN VNI (`1..=16_777_215`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "vrf": {
+          "description": "VRF device this L3 VXLAN must be enslaved to.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vni",
+        "local",
+        "vrf",
+        "router_mac"
+      ]
+    },
+    "ManagedNetdevsConfig": {
+      "description": "ADR-0091 opt-in block for rustbgpd-managed EVPN Linux netdevs.\n\nv1 accepts `[[managed_netdevs.bridges]]`, fixed-VNI\n`[[managed_netdevs.vxlans]]`, collect-metadata\n`[[managed_netdevs.svd_vxlans]]`, `[[managed_netdevs.vrfs]]`,\n`[[managed_netdevs.l3vxlans]]`, and `[[managed_netdevs.vlan_uppers]]` rows.\nThe `owner_token` is required when at least one row is configured and is\nused only to derive durable `IFLA_ALT_IFNAME` ownership stamps:\n`rustbgpd:<class>:<owner_token>:<link_name>`.",
+      "type": "object",
+      "properties": {
+        "bridges": {
+          "description": "Managed bridge rows.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedBridgeNetdevConfig"
+          }
+        },
+        "l3vxlans": {
+          "description": "Managed L3 VXLAN rows.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedL3VxlanNetdevConfig"
+          }
+        },
+        "owner_token": {
+          "description": "Stable deployment-local owner token. Empty only when no rows are\nconfigured.",
+          "type": "string",
+          "default": ""
+        },
+        "svd_vxlans": {
+          "description": "Managed collect-metadata / Single VXLAN Device rows. Each row is shared\nby the configured `[[evpn_instances]]` on its bridge that carry\n`bridge_vlan`; rustbgpd derives the bridge VLAN -> VNI mappings from\nthose instances.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedSvdVxlanNetdevConfig"
+          }
+        },
+        "vlan_uppers": {
+          "description": "Managed VLAN upper rows. These are helper links for the existing\nVLAN-upper `AF_INET` / `AF_INET6` MAC+IP attribution path and must match\na configured `[[evpn_instances]]` `bridge` + `bridge_vlan` binding.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedVlanUpperNetdevConfig"
+          }
+        },
+        "vrfs": {
+          "description": "Managed VRF rows.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedVrfNetdevConfig"
+          }
+        },
+        "vxlans": {
+          "description": "Managed fixed-VNI VXLAN rows.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManagedVxlanNetdevConfig"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ManagedSvdVxlanNetdevConfig": {
+      "description": "One managed collect-metadata / Single VXLAN Device row.",
+      "type": "object",
+      "properties": {
+        "bridge": {
+          "description": "VLAN-aware bridge this SVD VXLAN device must be enslaved to. Matching\n`[[evpn_instances]]` rows on this bridge with `bridge_vlan` provide the\nmanaged VLAN -> VNI mappings.",
+          "type": "string"
+        },
+        "dstport": {
+          "description": "UDP destination port. Defaults to the IANA VXLAN port.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 4789,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "learning": {
+          "description": "Linux VXLAN learning mode. ADR-0091 SVD lifecycle requires `false`\n(`nolearning`); the field exists so typos or intentional deviations fail\nvalidation explicitly instead of silently using the default.",
+          "type": "boolean",
+          "default": false
+        },
+        "local": {
+          "description": "Optional local source IP for VXLAN encapsulation. If omitted, rustbgpd\ncreates the common SVD shape without a pinned local address.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ip",
+          "default": null
+        },
+        "name": {
+          "description": "Linux VXLAN interface name.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "bridge"
+      ]
+    },
+    "ManagedVlanUpperNetdevConfig": {
+      "description": "One managed Linux VLAN upper row (ADR-0091 VLAN-upper tranche).",
+      "type": "object",
+      "properties": {
+        "bridge": {
+          "description": "Parent Linux bridge name.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Linux VLAN upper interface name.",
+          "type": "string"
+        },
+        "vlan": {
+          "description": "Linux VLAN id (`1..=4094`).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "bridge",
+        "vlan"
+      ]
+    },
+    "ManagedVrfNetdevConfig": {
+      "description": "One managed Linux VRF row (ADR-0091 VRF/L3VXLAN substrate tranche).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Linux VRF interface name.",
+          "type": "string"
+        },
+        "table_id": {
+          "description": "Desired VRF table id (`IFLA_VRF_TABLE`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "table_id"
+      ]
+    },
+    "ManagedVxlanNetdevConfig": {
+      "description": "One managed fixed-VNI VXLAN row (ADR-0091 VXLAN tranche).",
+      "type": "object",
+      "properties": {
+        "bridge": {
+          "description": "Bridge this VXLAN device must be enslaved to before it can satisfy\nEVPN readiness.",
+          "type": "string"
+        },
+        "dstport": {
+          "description": "UDP destination port. Defaults to the IANA VXLAN port.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 4789,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "learning": {
+          "description": "Linux VXLAN learning mode. ADR-0091 fixed-VNI lifecycle requires\n`false` (`nolearning`); the field exists so typos or intentional\ndeviations fail validation explicitly instead of silently using the\ndefault.",
+          "type": "boolean",
+          "default": false
+        },
+        "local": {
+          "description": "Local source IP for VXLAN encapsulation.",
+          "type": "string",
+          "format": "ip"
+        },
+        "name": {
+          "description": "Linux VXLAN interface name.",
+          "type": "string"
+        },
+        "vni": {
+          "description": "Fixed VXLAN VNI (`1..=16_777_215`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vni",
+        "local",
+        "bridge"
+      ]
+    },
+    "MrtConfig": {
+      "type": "object",
+      "properties": {
+        "compress": {
+          "description": "Gzip-compress dump files.",
+          "type": "boolean",
+          "default": false
+        },
+        "dump_interval": {
+          "description": "Seconds between RIB dumps. Default 7200.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 7200,
+          "minimum": 0
+        },
+        "file_prefix": {
+          "description": "Dump filename prefix. Default `\"rib\"`.",
+          "type": "string",
+          "default": "rib"
+        },
+        "output_dir": {
+          "description": "Directory MRT dump files are written to.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "output_dir"
+      ]
+    },
+    "NamedPolicyConfig": {
+      "description": "A named policy definition with configurable default action.",
+      "type": "object",
+      "properties": {
+        "default_action": {
+          "description": "Default action when no statement matches: `\"permit\"` (default) or `\"deny\"`.",
+          "type": "string",
+          "default": "permit"
+        },
+        "statements": {
+          "description": "Policy statements evaluated in order; first match wins.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Neighbor": {
+      "type": "object",
+      "properties": {
+        "add_path": {
+          "description": "Add-Path (RFC 7911) configuration for this neighbor.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AddPathConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "description": "Peer IP address (IPv4 or IPv6).",
+          "type": "string"
+        },
+        "bfd": {
+          "description": "Single-hop BFD (RFC 5880/5881) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BfdConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "description": "Free-form operator description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disable_ipv4_unicast": {
+          "description": "Never treat IPv4 unicast as available on this session (true\nIPv6-only peering). When `true`, IPv4 unicast is excluded from our\nadvertised `MultiProtocol` capability and the RFC 4760 §8\nimplicit-IPv4 fallback is suppressed; a session whose family\nintersection ends up empty is rejected with OPEN error /\nUnsupported Capability. Default: `false` (RFC-default implicit\nIPv4). Rejected at config load when the neighbor's effective\n`families` resolve to IPv4 unicast only.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "export_policy": {
+          "description": "Inline export policy statements for this neighbor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "export_policy_chain": {
+          "description": "Named policy chain for export (mutually exclusive with `export_policy`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "families": {
+          "description": "Address families to negotiate (e.g., `[\"ipv4_unicast\", \"ipv6_unicast\"]`).\nDefault: `[\"ipv4_unicast\"]`. If the neighbor address is IPv6, `\"ipv6_unicast\"`\nis also included by default.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "gr_restart_time": {
+          "description": "Restart time advertised in GR capability (seconds, max 4095). Default: 120.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "gr_stale_routes_time": {
+          "description": "Time to retain stale routes after peer restart (seconds). Default: 360.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "graceful_restart": {
+          "description": "Enable Graceful Restart (RFC 4724). Default: true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "hold_time": {
+          "description": "Hold time in seconds: 0 disables, otherwise >= 3. Default 90.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "import_policy": {
+          "description": "Inline import policy statements for this neighbor.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "import_policy_chain": {
+          "description": "Named policy chain for import (mutually exclusive with `import_policy`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "interface": {
+          "description": "Interface name required for IPv6 link-local / BGP unnumbered peers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "llgr_stale_time": {
+          "description": "Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).\nWhen > 0, LLGR capability is advertised and routes enter a long-lived\nstale phase instead of being purged when the GR timer expires.\nMax: `16_777_215` (24-bit, ≈ 194 days).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "local_ipv6_nexthop": {
+          "description": "Explicit IPv6 next-hop for eBGP advertisements when the TCP session\nis IPv4. If not set, the local IPv6 socket address is used (if\navailable); otherwise IPv6 routes are suppressed for this peer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_level": {
+          "description": "Override log level for this peer: `\"error\"`, `\"warn\"`, `\"info\"`,\n`\"debug\"`, or `\"trace\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_prefixes": {
+          "description": "Maximum prefixes accepted from this peer before the session is\ntorn down. Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "md5_password": {
+          "description": "TCP MD5 signature password (RFC 2385).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orr_vantage": {
+          "description": "Optimal Route Reflection vantage point (RFC 9107): an IP address\nidentifying this client's IGP location as a BGP-LS topology node\n(a link interface/neighbor address, or an address covered by a\nPrefix NLRI). Requires `route_reflector_client = true` (iBGP).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ip"
+        },
+        "peer_group": {
+          "description": "Optional peer-group reference for inherited transport/policy defaults.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "per_client_best": {
+          "description": "RFC 7947 §2.3.2 per-client best-path for this route-server\nclient: when the Loc-RIB best is denied by this peer's export\npolicy, advertise the best export-policy-permitted candidate\ninstead of hiding the prefix (path-hiding mitigation for clients\nwithout Add-Path). Requires `route_server_client = true`.\nFamilies where the session negotiates Add-Path send use Add-Path\ninstead — the negotiated capability outranks this fallback.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prefix_orf_receive": {
+          "description": "Advertise willingness to receive Address-Prefix ORF entries from this\npeer (RFC 5291/5292) and apply them to its outbound advertisements.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "remote_asn": {
+          "description": "Peer autonomous system number. Equal to `global.asn` for iBGP.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "remove_private_as": {
+          "description": "Remove private ASNs from `AS_PATH` before eBGP advertisement.\n\n- `\"remove\"` — only if the entire path consists of private ASNs\n- `\"all\"` — unconditionally remove all private ASNs\n- `\"replace\"` — replace each private ASN with the local ASN\n\nOnly valid for eBGP neighbors.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Local BGP Role for RFC 9234 route-leak prevention. eBGP only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BgpRoleConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "route_reflector_client": {
+          "description": "Mark this neighbor as a route reflector client (RFC 4456).\nOnly valid for iBGP neighbors (`remote_asn` == `global.asn`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "route_server_client": {
+          "description": "Mark this eBGP neighbor as a transparent route-server client.\n\nWhen enabled, outbound unicast advertisements preserve the original\nnext hop and suppress automatic local-AS prepend. Explicit export\npolicy next-hop rewrites still apply.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "send_hold_time": {
+          "description": "Send hold time in seconds (RFC 9687): tear the session down when\nthe peer stops draining its TCP socket for this long. 0 disables.\nNon-zero values must be greater than the effective `hold_time`\n(RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×\nthe effective `hold_time` (RFC 9687 §6).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "strict_role": {
+          "description": "Require the peer to advertise a compatible BGP Role capability.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tcp_ao": {
+          "description": "Static-neighbor TCP-AO (RFC 5925) configuration. Installed on\nstartup active-open sockets and the passive listener when configured.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TcpAoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ttl_security": {
+          "description": "GTSM TTL security (RFC 5082): require TTL 255 from a directly\nconnected peer.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "remote_asn"
+      ]
+    },
+    "NeighborSetConfig": {
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "description": "Neighbor IP addresses in this set.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "peer_groups": {
+          "description": "Peer-group names in this set.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "remote_asns": {
+          "description": "Remote ASNs in this set.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "OverlayIndexModeConfig": {
+      "description": "Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).",
+      "oneOf": [
+        {
+          "description": "RFC 9136 §4.4.2 Interface-less — the default, byte-for-byte the\npre-ADR-0087 behavior.",
+          "type": "string",
+          "const": "interface_less"
+        },
+        {
+          "description": "RFC 9136 §4.1/§4.2 GW-IP overlay index.",
+          "type": "string",
+          "const": "gateway_ip"
+        },
+        {
+          "description": "RFC 9136 §4.3 ESI overlay index.",
+          "type": "string",
+          "const": "esi"
+        }
+      ]
+    },
+    "PeerGroupConfig": {
+      "type": "object",
+      "properties": {
+        "add_path": {
+          "description": "Add-Path (RFC 7911) configuration inherited by neighbors in this\ngroup.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AddPathConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bfd": {
+          "description": "Single-hop BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BfdConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disable_ipv4_unicast": {
+          "description": "Never treat IPv4 unicast as available for peers in this group\n(true IPv6-only peering). See the neighbor-level\n`disable_ipv4_unicast` for semantics.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "export_policy": {
+          "description": "Inline export policy statements for peers in this group.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "export_policy_chain": {
+          "description": "Named policy chain for export (mutually exclusive with `export_policy`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "families": {
+          "description": "Address families to negotiate (e.g., `[\"ipv4_unicast\", \"ipv6_unicast\"]`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "gr_restart_time": {
+          "description": "GR restart time (seconds). See the neighbor-level `gr_restart_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "gr_stale_routes_time": {
+          "description": "GR stale-routes time (seconds). See the neighbor-level\n`gr_stale_routes_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "graceful_restart": {
+          "description": "Enable Graceful Restart (RFC 4724). See the neighbor-level\n`graceful_restart`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "hold_time": {
+          "description": "Hold time inherited by neighbors in this group. See the\nneighbor-level `hold_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "import_policy": {
+          "description": "Inline import policy statements for peers in this group.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "import_policy_chain": {
+          "description": "Named policy chain for import (mutually exclusive with `import_policy`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "llgr_stale_time": {
+          "description": "LLGR stale time (RFC 9494, seconds). See the neighbor-level\n`llgr_stale_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "local_ipv6_nexthop": {
+          "description": "Explicit IPv6 next-hop. See the neighbor-level `local_ipv6_nexthop`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_level": {
+          "description": "Override log level for peers in this group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_prefixes": {
+          "description": "Prefix limit inherited by neighbors in this group. See the\nneighbor-level `max_prefixes`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "md5_password": {
+          "description": "TCP MD5 signature password (RFC 2385) inherited by neighbors in\nthis group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orr_vantage": {
+          "description": "Optimal Route Reflection vantage point (RFC 9107) inherited by\nneighbors in this group. See the neighbor-level `orr_vantage`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "ip"
+        },
+        "per_client_best": {
+          "description": "RFC 7947 §2.3.2 per-client best-path inherited by neighbors in\nthis group. See the neighbor-level `per_client_best`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prefix_orf_receive": {
+          "description": "Advertise willingness to receive Address-Prefix ORF entries (RFC\n5291/5292) from peers in this group.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "remove_private_as": {
+          "description": "Remove private ASNs before eBGP advertisement (`\"remove\"`,\n`\"all\"`, or `\"replace\"`). See the neighbor-level `remove_private_as`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Local BGP Role (RFC 9234) inherited by neighbors in this group.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BgpRoleConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "route_reflector_client": {
+          "description": "Mark neighbors in this group as route reflector clients (RFC 4456).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "route_server_client": {
+          "description": "Mark neighbors in this group as transparent route-server clients.\nSee the neighbor-level `route_server_client`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "send_hold_time": {
+          "description": "Send hold time in seconds (RFC 9687) inherited by neighbors in\nthis group. See the neighbor-level `send_hold_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "strict_role": {
+          "description": "Require a compatible BGP Role capability from peers in this group.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ttl_security": {
+          "description": "GTSM TTL security (RFC 5082) inherited by neighbors in this group.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyConfig": {
+      "type": "object",
+      "properties": {
+        "definitions": {
+          "description": "Named policy definitions, reusable across neighbors and directions.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NamedPolicyConfig"
+          },
+          "default": {}
+        },
+        "explain": {
+          "description": "Import-decision explain cache tuning (ADR-0073). Diagnostic\nretention only — does not affect which routes are accepted.",
+          "$ref": "#/$defs/PolicyExplainConfig",
+          "default": {
+            "cache_size": 4096,
+            "enabled": true
+          }
+        },
+        "export": {
+          "description": "Global export policy statements applied to all peers.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "export_chain": {
+          "description": "Global export policy chain (references named definitions).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "import": {
+          "description": "Global import policy statements applied to all peers.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyStatementConfig"
+          }
+        },
+        "import_chain": {
+          "description": "Global import policy chain (references named definitions).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "neighbor_sets": {
+          "description": "Named neighbor-set definitions for policy matching.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NeighborSetConfig"
+          },
+          "default": {}
+        },
+        "rpol_files": {
+          "description": "`.rpol` policy-language files (ADR-0096) compiled at config\nload. Relative paths resolve against the config file's\ndirectory and are rewritten to absolute paths after load (so\nruntime config snapshots and transaction candidates stay\nloadable regardless of the daemon's working directory).\nCompile diagnostics are config load errors. The policies they\ndefine share one namespace with `[policy.definitions]`; chains\nreference them by name, parameterized policies by call-form\n(`\"customer-in(200)\"`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rpol_roots": {
+          "description": "Additional policy roots for `.rpol` `import` resolution\n(LAN-300). Imports resolve against the importing file's\ndirectory first, then these directories in order, and the\nresolved file must stay inside the main file's directory or one\nof these roots. Relative entries resolve against the config\nfile's directory and are rewritten absolute at load, like\n`rpol_files`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyExplainConfig": {
+      "description": "Tuning for the per-session import-decision cache that backs\n`rbgp policy explain` / `PolicyService.ExplainImportPolicy`\n(ADR-0073).\n\nThis is **diagnostic retention**, not policy evaluation behaviour:\nshrinking or disabling the cache changes only what the explain\nsurface can answer, never which routes the import chain admits.",
+      "type": "object",
+      "properties": {
+        "cache_size": {
+          "description": "Per-peer cache capacity (entries). Each entry is one\n`(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —\na fabric / partial-table starter size (hundreds–low-thousands\nof prefixes fully observable). It is **not** sized for internet\nfull-table retention: a 100k-prefix peer keeps the cache\nsaturated, so explain becomes a coin-flip versus an evicted\nanswer. Operators who want reliable full-table explain raise\nthis toward their expected retained-prefix count for the peer\nand own the memory cost.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Whether the per-session import-decision cache is populated.\nDefault `true`. This is the performance control: when `false`\nthe inbound UPDATE path skips building and storing any decision\nsnapshot — a single boolean check, no per-NLRI attribute /\nmodification clone. Turn it off on hot full-table peers where\nthe explain surface isn't worth the write-path cost.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyStatementConfig": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Action when the statement matches: `\"permit\"` or `\"deny\"`.",
+          "type": "string"
+        },
+        "ge": {
+          "description": "Minimum prefix length (inclusive) for the `prefix` match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "le": {
+          "description": "Maximum prefix length (inclusive) for the `prefix` match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "match_as_path": {
+          "description": "`AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_as_path_length_ge": {
+          "description": "Minimum `AS_PATH` length (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_as_path_length_le": {
+          "description": "Maximum `AS_PATH` length (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_aspa_validation": {
+          "description": "ASPA validation state to match: `\"valid\"`, `\"invalid\"`, or `\"unknown\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_community": {
+          "description": "Community match criteria, e.g. `[\"65001:100\"]`, `[\"RT:65001:100\"]`,\nor `[\"NO_EXPORT\"]`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "match_evpn_route_type": {
+          "description": "EVPN route type to match (RFC 7432 §7 / RFC 9136). Numeric: 1\n(EAD per-ES/per-EVI), 2 (MAC/IP), 3 (IMET), 4 (Ethernet Segment),\n5 (IP Prefix). `None` means no constraint; non-EVPN routes never\nmatch a set value.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "match_local_pref_ge": {
+          "description": "Minimum `LOCAL_PREF` (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_local_pref_le": {
+          "description": "Maximum `LOCAL_PREF` (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_med_ge": {
+          "description": "Minimum MED (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_med_le": {
+          "description": "Maximum MED (inclusive) to match.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "match_neighbor_set": {
+          "description": "Named neighbor-set to match against the evaluation peer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_next_hop": {
+          "description": "Exact next-hop address to match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_route_type": {
+          "description": "Route source type to match: `\"local\"`, `\"internal\"`, or `\"external\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "match_rpki_validation": {
+          "description": "RPKI validation state to match: `\"valid\"`, `\"invalid\"`, or `\"not_found\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefix": {
+          "description": "CIDR prefix to match. Optional when any other match criterion is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "set_as_path_prepend": {
+          "description": "Prepend `AS_PATH` on matching routes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AsPathPrependConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "set_community_add": {
+          "description": "Add communities to matching routes.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "set_community_remove": {
+          "description": "Remove communities from matching routes.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "set_local_pref": {
+          "description": "Set `LOCAL_PREF` on matching routes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "set_med": {
+          "description": "Set MED on matching routes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "set_next_hop": {
+          "description": "Rewrite next-hop: `\"self\"` or an IP address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ]
+    },
+    "RpkiConfig": {
+      "type": "object",
+      "properties": {
+        "cache_servers": {
+          "description": "RTR cache servers to connect to.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CacheServer"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SecurityConfig": {
+      "type": "object",
+      "properties": {
+        "grpc": {
+          "description": "gRPC authorization policy (ADR-0064).",
+          "$ref": "#/$defs/GrpcSecurityConfig",
+          "default": {
+            "enforcement": "tier",
+            "roles": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TcpAoConfig": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "description": "Linux TCP-AO MAC/KDF algorithm name, e.g. `\"hmac(sha256)\"`.",
+          "type": "string"
+        },
+        "deprecated": {
+          "description": "Mark this key as deprecated for future rollover behavior. Startup socket\ninstallation carries the flag through; runtime rollover remains deferred.",
+          "type": "boolean",
+          "default": false
+        },
+        "key": {
+          "description": "TCP-AO Master Key Tuple secret. 1..=80 bytes.",
+          "type": "string"
+        },
+        "preferred": {
+          "description": "Mark this key as the preferred current send key for startup socket\ninstallation. Runtime key rotation remains deferred.",
+          "type": "boolean",
+          "default": false
+        },
+        "recv_id": {
+          "description": "Receiver `KeyID` (`rcvid` in Linux's TCP-AO UAPI).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "send_id": {
+          "description": "Sender `KeyID` (`sndid` in Linux's TCP-AO UAPI).",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "send_id",
+        "recv_id",
+        "algorithm"
+      ]
+    },
+    "TelemetryConfig": {
+      "type": "object",
+      "properties": {
+        "grpc_tcp": {
+          "description": "gRPC TCP listener.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcTcpListenerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "grpc_uds": {
+          "description": "gRPC Unix-domain-socket listener.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcUdsListenerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "log_format": {
+          "description": "Log output format (`\"json\"`).",
+          "type": "string"
+        },
+        "looking_glass": {
+          "description": "Optional birdwatcher-compatible looking glass HTTP server.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LookingGlassConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "prometheus_addr": {
+          "description": "Prometheus metrics HTTP listener address (e.g., \"0.0.0.0:9179\").\nIf absent, no metrics HTTP server is started. Metrics are still\ncollected for gRPC health and internal counters.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "log_format"
+      ]
+    }
+  }
+}
