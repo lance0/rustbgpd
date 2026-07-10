@@ -1135,6 +1135,12 @@ pub struct PolicyEvaluation {
     pub action: PolicyAction,
     /// Configured name of the terminal-decision policy, if it has one.
     pub matched_policy: Option<String>,
+    /// Set when the Deny is the fail-closed disposition of an
+    /// evaluation error (ADR-0103 Decision 4) rather than a clean
+    /// policy verdict — the kind plus the failing policy/term. Always
+    /// `None` on a Permit; built on the error path only, so the hot
+    /// path never allocates for it.
+    pub eval_error: Option<crate::eval::EvalError>,
 }
 
 /// An ordered sequence of policies evaluated in chain.
@@ -1409,6 +1415,7 @@ impl PolicyChain {
                         PolicyEvaluation {
                             action: PolicyAction::Deny,
                             matched_policy: named.name.clone(),
+                            eval_error: None,
                         },
                     );
                 }
@@ -1427,6 +1434,7 @@ impl PolicyChain {
             PolicyEvaluation {
                 action: PolicyAction::Permit,
                 matched_policy,
+                eval_error: None,
             },
         )
     }
@@ -1472,6 +1480,7 @@ pub fn evaluate_chain_with_attribution(
             PolicyEvaluation {
                 action: PolicyAction::Permit,
                 matched_policy: None,
+                eval_error: None,
             },
         ),
     }

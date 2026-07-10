@@ -613,6 +613,78 @@ fn bench_loop_eval(c: &mut Criterion) {
     group.finish();
 }
 
+/// LAN-304 pure functions: the fn-heavy representative workload for
+/// the ADR-0103 bytecode re-entry gate (LAN-301). `fn_calls` routes a
+/// damping formula through a user `fn` from both a guard and two `set`
+/// value positions (three call sites, each fully inlined at compile
+/// time into caller-frame binds); `hand_inlined` writes the identical
+/// arithmetic out by hand. Functions are a compile-time construct —
+/// the delta between the two arms is the honest runtime cost of using
+/// `fn`, and the contract says it is the cost of the equivalent `let`
+/// bindings, not of any call machinery (there are no runtime frames).
+fn bench_fn_eval(c: &mut Criterion) {
+    let mut store = SetStore::new();
+    let fn_calls = rustbgpd_policy::rpol::compile_rpol(
+        "fn penalty(len: u32, weight: u32) -> u32 {
+             let base = len * weight
+             min(base, 1000)
+         }
+         policy p {
+             term dampen { if penalty(route.as-path.len, 10) >= route.med { reject } }
+             term pad {
+                 set med penalty(route.as-path.len, 20);
+                 set local-pref penalty(route.as-path.len, 30);
+                 accept
+             }
+         }",
+        &mut store,
+    )
+    .expect("compiles");
+    let hand_inlined = rustbgpd_policy::rpol::compile_rpol(
+        "policy p {
+             term dampen {
+                 let base = route.as-path.len * 10
+                 if min(base, 1000) >= route.med { reject }
+             }
+             term pad {
+                 let pad-med = route.as-path.len * 20
+                 let pad-lp = route.as-path.len * 30
+                 set med min(pad-med, 1000);
+                 set local-pref min(pad-lp, 1000);
+                 accept
+             }
+         }",
+        &mut store,
+    )
+    .expect("compiles");
+
+    // A route that walks both terms (guard non-match, then the pads).
+    let communities: Vec<u32> = Vec::new();
+    let as_path_str = "65001 65100 65200".to_string();
+    let mut ctx = predicate_ctx(
+        matching_prefix(),
+        &communities,
+        &as_path_str,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    ctx.med = Some(100); // penalty(3, 10) = 30 < 100 → dampen misses
+
+    let mut group = c.benchmark_group("fn_eval");
+    group.bench_function("fn_calls", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&fn_calls).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.bench_function("hand_inlined", |b| {
+        b.iter(|| {
+            let r = std::hint::black_box(&hand_inlined).evaluate(&ctx);
+            std::hint::black_box(r);
+        });
+    });
+    group.finish();
+}
+
 /// LAN-305 dataset parity: a dataset probe runs the SAME indexed
 /// structure as its in-language set sibling (`AsnSet` here), so the
 /// pair pins the per-walk pin overhead (one wait-free handle load +
@@ -696,6 +768,7 @@ criterion_group!(
     bench_set_heavy,
     bench_value_expr,
     bench_loop_eval,
+    bench_fn_eval,
     bench_dataset_parity
 );
 criterion_main!(benches);

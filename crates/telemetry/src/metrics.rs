@@ -171,6 +171,7 @@ pub struct BgpMetrics {
 
     // ── Policy dataset refresh failures (LAN-305) ─────────────
     policy_dataset_refresh_errors: IntCounterVec,
+    policy_eval_errors: IntCounterVec,
 
     // ── Enhanced Route Refresh ────────────────────────────────
     route_refresh_in_progress: IntGaugeVec,
@@ -871,6 +872,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let policy_eval_errors = IntCounterVec::new(
+            Opts::new(
+                "bgp_policy_eval_errors_total",
+                "Routes denied by a policy evaluation error (ADR-0103 Decision 4 \
+                 fail-closed rail) by direction (import, export) and error kind \
+                 (the closed EvalErrorKind label set: overflow, divide-by-zero, \
+                 absent-operand, fuel-exhausted, ...). Per-chain counts and the \
+                 failing policy/term are on `rbgp policy stats`, not labels.",
+            ),
+            &["direction", "kind"],
+        )
+        .expect("valid metric definition");
+
         let route_refresh_in_progress = IntGaugeVec::new(
             Opts::new(
                 "bgp_route_refresh_in_progress",
@@ -1518,6 +1532,9 @@ impl BgpMetrics {
             .register(Box::new(policy_dataset_refresh_errors.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(policy_eval_errors.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_refresh_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -1753,6 +1770,7 @@ impl BgpMetrics {
             aspa_records,
             validation_import_refreshes,
             policy_dataset_refresh_errors,
+            policy_eval_errors,
             route_refresh_in_progress,
             route_refresh_stale_entries,
             evpn_local_originations,
@@ -2589,6 +2607,19 @@ impl BgpMetrics {
     pub fn record_policy_dataset_refresh_error(&self, dataset: &str) {
         self.policy_dataset_refresh_errors
             .with_label_values(&[dataset])
+            .inc();
+    }
+
+    /// Count one route denied by a policy evaluation error (LAN-301,
+    /// ADR-0103 Decision 4). Labels are bounded and closed:
+    /// - `direction`: `"import"` or `"export"`.
+    /// - `kind`: an `EvalErrorKind` stable label (`"overflow"`,
+    ///   `"divide-by-zero"`, `"fuel-exhausted"`, ...).
+    ///
+    /// Error path only — the evaluator's hot path never reaches this.
+    pub fn record_policy_eval_error(&self, direction: &str, kind: &str) {
+        self.policy_eval_errors
+            .with_label_values(&[direction, kind])
             .inc();
     }
 
@@ -3541,6 +3572,32 @@ mod tests {
         assert!(text.contains(r#"policy="ingress-filter""#));
         assert!(text.contains(r#"direction="import""#));
         assert!(text.contains(r#"action="deny""#));
+    }
+
+    /// LAN-301: the eval-error counter aggregates by direction and
+    /// closed error kind — no peer label, so no reap discipline needed.
+    #[test]
+    fn policy_eval_errors_counter_uses_direction_and_kind() {
+        let m = BgpMetrics::new();
+        m.record_policy_eval_error("import", "overflow");
+        m.record_policy_eval_error("import", "overflow");
+        m.record_policy_eval_error("export", "fuel-exhausted");
+
+        assert_eq!(
+            m.policy_eval_errors
+                .with_label_values(&["import", "overflow"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.policy_eval_errors
+                .with_label_values(&["export", "fuel-exhausted"])
+                .get(),
+            1
+        );
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_policy_eval_errors_total"));
+        assert!(text.contains(r#"kind="overflow""#));
     }
 
     /// Reaping a peer must invalidate the thread-local memoized counter

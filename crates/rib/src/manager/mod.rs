@@ -2451,6 +2451,11 @@ impl RibManager {
             crate::update::ExportPolicyTermHits {
                 peer: owner,
                 evals: chain.hit_counters().evals(),
+                eval_errors: chain.hit_counters().eval_errors(),
+                last_error: chain
+                    .hit_counters()
+                    .last_error()
+                    .map(|error| error.to_string()),
                 terms: chain.term_hit_rows(),
             }
         };

@@ -1105,6 +1105,16 @@ message PolicyChainStats {
   // do not track an install generation yet and always report 0
   // (LAN-311).
   uint64 policy_generation = 5;
+  // Routes denied by an evaluation error since chain install
+  // (ADR-0103 Decision 4 fail-closed rail: checked-arithmetic
+  // failure, absent operand, fuel/loop-cap exhaustion, ...). A
+  // nonzero value means some policy is erroring; last_error names
+  // where and why.
+  uint64 eval_errors = 6;
+  // Most recent evaluation error, rendered as
+  // "KIND in policy NAME term NAME". Empty when no evaluation has
+  // errored since chain install.
+  string last_error = 7;
 }
 
 message GetPolicyStatsResponse {

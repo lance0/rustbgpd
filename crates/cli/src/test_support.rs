@@ -1774,6 +1774,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             direction: "export".to_string(),
             routes_evaluated: 7,
             policy_generation: 0,
+            eval_errors: 2,
+            last_error: "overflow in policy customer-in(200) term customer-routes".to_string(),
             terms: vec![
                 server_proto::PolicyTermStat {
                     policy_index: 0,
@@ -1796,6 +1798,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             direction: "import".to_string(),
             routes_evaluated: 11,
             policy_generation: 3,
+            eval_errors: 0,
+            last_error: String::new(),
             terms: vec![server_proto::PolicyTermStat {
                 policy_index: 0,
                 policy: "customer-in(200)".to_string(),

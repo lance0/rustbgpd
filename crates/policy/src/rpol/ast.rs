@@ -800,19 +800,37 @@ pub enum PeerField {
     Group(Spanned<String>),
 }
 
-/// `expect policy(args) == accept|reject [with assertions]`.
+/// `expect policy(args) == accept|reject|error [KIND] [with assertions]`.
 #[derive(Debug)]
 pub struct ExpectDef {
     /// The policy under test.
     pub policy: Spanned<String>,
     /// Instantiation arguments (literals only in `expect`).
     pub args: Vec<Spanned<u32>>,
-    /// True for `accept`, false for `reject`.
-    pub accept: bool,
-    /// `with` attribute assertions.
+    /// The expected verdict.
+    pub verdict: ExpectVerdict,
+    /// `with` attribute assertions (accept/reject verdicts only —
+    /// an error discards modifications, so the parser rejects `with`
+    /// after `error`).
     pub with: Vec<WithAssertion>,
     /// Whole-expect span.
     pub span: Span,
+}
+
+/// The right-hand side of an `expect ... ==` (LAN-301, ADR-0103
+/// Decision 4): `accept` and `reject` assert clean verdicts — an
+/// evaluation error FAILS either one, with the error rendered — and
+/// `error [KIND]` pins the fail-closed rail itself, optionally down
+/// to the [`EvalErrorKind`](crate::eval::EvalErrorKind) label
+/// (`error divide-by-zero`).
+#[derive(Debug)]
+pub enum ExpectVerdict {
+    /// `== accept` — clean permit.
+    Accept,
+    /// `== reject` — clean deny (NOT an evaluation error).
+    Reject,
+    /// `== error [KIND]` — evaluation error, any kind when `None`.
+    Error(Option<Spanned<String>>),
 }
 
 /// One `with` assertion — checked against the evaluation result's

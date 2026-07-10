@@ -366,6 +366,12 @@ pub struct ImportPolicyTermHits {
     pub generation: u64,
     /// Routes evaluated through the chain since install.
     pub evals: u64,
+    /// Routes denied by an evaluation error since install (ADR-0103
+    /// Decision 4 fail-closed rail).
+    pub eval_errors: u64,
+    /// Most recent evaluation error, rendered (`None` = no evaluation
+    /// has errored since install).
+    pub last_error: Option<String>,
     /// Per-term labeled hit counts, in chain walk order.
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }

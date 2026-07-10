@@ -127,6 +127,34 @@ pub enum EvalErrorKind {
     DatasetUnpinned,
 }
 
+/// One evaluation error with its blame context (LAN-301): the kind
+/// plus the failing policy/term names, as the live walk resolved them.
+/// Carried on [`PolicyEvaluation`](crate::engine::PolicyEvaluation)
+/// (error path only — the hot path never builds one) and retained per
+/// chain as [`PolicyHitCounters::last_error`] for the stats surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalError {
+    /// Why the evaluation failed.
+    pub kind: EvalErrorKind,
+    /// Name of the failing policy (`None` = inline / anonymous).
+    pub policy: Option<String>,
+    /// Name of the failing term (`Bind` terms carry the qualified
+    /// `term (let binding)` form); `None` for unnamed TOML statements.
+    pub term: Option<String>,
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} in policy {} term {}",
+            self.kind.label(),
+            self.policy.as_deref().unwrap_or("<inline>"),
+            self.term.as_deref().unwrap_or("<unnamed>"),
+        )
+    }
+}
+
 impl EvalErrorKind {
     /// Stable short label (counter/log-friendly).
     #[must_use]
@@ -146,6 +174,25 @@ impl EvalErrorKind {
             EvalErrorKind::DatasetUnpinned => "dataset-unpinned",
         }
     }
+
+    /// Every stable label, for surfaces that validate operator-written
+    /// kind names (the in-language `expect ... == error KIND` form).
+    /// The kind set is closed by construction — extending the enum
+    /// extends this list (the exhaustive `label` match enforces it).
+    pub const LABELS: &'static [&'static str] = &[
+        "overflow",
+        "underflow",
+        "divide-by-zero",
+        "remainder-by-zero",
+        "clamp-inverted",
+        "absent-operand",
+        "absent-prepend-operand",
+        "unbound-local",
+        "fuel-exhausted",
+        "loop-limit-exceeded",
+        "stray-loop-control",
+        "dataset-unpinned",
+    ];
 }
 
 impl fmt::Display for EvalErrorKind {
@@ -328,6 +375,11 @@ pub struct PolicyHitCounters {
     policies: Vec<Vec<AtomicU64>>,
     evals: AtomicU64,
     eval_errors: AtomicU64,
+    /// Most recent evaluation error (LAN-301) — the "why" behind a
+    /// nonzero `eval_errors`, surfaced by `rbgp policy stats`. Behind
+    /// a `Mutex` because it carries names; written on the (cold,
+    /// rate-bounded) error path only, never on the hot path.
+    last_error: std::sync::Mutex<Option<EvalError>>,
 }
 
 impl PolicyHitCounters {
@@ -342,6 +394,7 @@ impl PolicyHitCounters {
                 .collect(),
             evals: AtomicU64::new(0),
             eval_errors: AtomicU64::new(0),
+            last_error: std::sync::Mutex::new(None),
         }
     }
 
@@ -360,6 +413,23 @@ impl PolicyHitCounters {
     #[must_use]
     pub fn eval_errors(&self) -> u64 {
         self.eval_errors.load(Ordering::Relaxed)
+    }
+
+    /// The most recent evaluation error, if any route has errored
+    /// since chain install (LAN-301) — kind plus the failing
+    /// policy/term, for the stats surface.
+    #[must_use]
+    pub fn last_error(&self) -> Option<EvalError> {
+        self.last_error.lock().map_or(None, |guard| guard.clone())
+    }
+
+    /// Record one evaluation error: bump the counter and retain the
+    /// error as [`last_error`](Self::last_error). Error path only.
+    fn record_eval_error(&self, error: &EvalError) {
+        self.eval_errors.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut guard) = self.last_error.lock() {
+            *guard = Some(error.clone());
+        }
     }
 
     /// Snapshot of the per-term hit grid (`snapshot()[p][t]`).
@@ -601,6 +671,7 @@ impl CompiledChain {
                         PolicyEvaluation {
                             action: PolicyAction::Deny,
                             matched_policy: if ATTR { policy.name.clone() } else { None },
+                            eval_error: None,
                         },
                     );
                 }
@@ -609,9 +680,6 @@ impl CompiledChain {
                 // accumulator drops here), operator-visible counter +
                 // rate-limited WARN naming the failing policy/term.
                 PolicyDecision::Error { kind, term_index } => {
-                    if COUNT && let Some(hits) = hits {
-                        hits.eval_errors.fetch_add(1, Ordering::Relaxed);
-                    }
                     // A failing Bind names its binding — for
                     // call-inlined binds (LAN-304) the qualified
                     // `fn.binding` name, so the WARN names both the
@@ -626,11 +694,20 @@ impl CompiledChain {
                         }
                     });
                     warn_eval_error(policy.name.as_deref(), term_label.as_deref(), kind);
+                    let error = EvalError {
+                        kind,
+                        policy: policy.name.clone(),
+                        term: term_label,
+                    };
+                    if COUNT && let Some(hits) = hits {
+                        hits.record_eval_error(&error);
+                    }
                     return (
                         PolicyResult::deny(),
                         PolicyEvaluation {
                             action: PolicyAction::Deny,
                             matched_policy: if ATTR { policy.name.clone() } else { None },
+                            eval_error: Some(error),
                         },
                     );
                 }
@@ -661,6 +738,7 @@ impl CompiledChain {
             PolicyEvaluation {
                 action: PolicyAction::Permit,
                 matched_policy,
+                eval_error: None,
             },
         )
     }
