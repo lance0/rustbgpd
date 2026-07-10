@@ -22,7 +22,7 @@ evpn-linux     ──► evpn
 rib            ──► wire, policy, telemetry, rpki, bmp
 transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
 api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history
-cli            ──► wire, policy    (dev tests also use api, evpn)
+cli            ──► wire, policy    (dev tests also use api, evpn, bmp)
 ```
 
 The daemon binary (`src/`) depends on every crate above; it wires them
