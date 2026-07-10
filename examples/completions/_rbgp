@@ -68,7 +68,7 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (diff)
 _arguments "${_arguments_options[@]}" : \
-'--from-file=[Candidate TOML file to validate and compare]:PATH:_default' \
+'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -77,11 +77,12 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+'::candidate -- Candidate TOML file to validate and compare:_default' \
 && ret=0
 ;;
 (plan)
 _arguments "${_arguments_options[@]}" : \
-'--from-file=[Candidate TOML file to validate and classify]:PATH:_default' \
+'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '--expected-runtime-snapshot-token=[Optional runtime snapshot token to check while planning]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -91,11 +92,12 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+'::candidate -- Candidate TOML file to validate and classify:_default' \
 && ret=0
 ;;
 (apply)
 _arguments "${_arguments_options[@]}" : \
-'--from-file=[Candidate TOML file to validate and commit]:PATH:_default' \
+'()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '--expected-runtime-snapshot-token=[Runtime snapshot token returned by config plan]:TOKEN:_default' \
 '--client-request-id=[Optional audit/correlation identifier]:ID:_default' \
 '--comment=[Optional human change note; not logged verbatim by the daemon]:TEXT:_default' \
@@ -109,6 +111,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+'::candidate -- Candidate TOML file to validate and commit:_default' \
 && ret=0
 ;;
 (confirm)
@@ -138,6 +141,18 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (status)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(effective)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -185,6 +200,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(effective)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -202,6 +221,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'()--wide[Append the classic summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), and State/PfxRcd (prefix count when Established). Display-only; -j already carries every field]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -220,9 +240,11 @@ _arguments "${_arguments_options[@]}" : \
         case $line[2] in
             (add)
 _arguments "${_arguments_options[@]}" : \
-'--asn=[Remote AS number]:ASN:_default' \
+'--remote-asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
+'--asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
 '--description=[Description]:DESCRIPTION:_default' \
 '--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
+'--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
@@ -231,6 +253,150 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client]' \
+'--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
+'--add-path-receive[Enable Add-Path receive]' \
+'--add-path-send[Enable Add-Path send]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+'--reason=[Disable reason]:REASON:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(softreset)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family to refresh]:FAMILY:_default' \
+'--family=[Address family to refresh]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__neighbor__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-neighbor-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(softreset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'()--wide[Append the classic summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), and State/PfxRcd (prefix count when Established). Display-only; -j already carries every field]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::address -- Neighbor address (omit to list all):_default' \
+":: :_rbgp__subcmd__neighbor_commands" \
+"*::: :->neighbor" \
+&& ret=0
+
+    case $state in
+    (neighbor)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-neighbor-command-$line[2]:"
+        case $line[2] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'--remote-asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
+'--asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
+'--description=[Description]:DESCRIPTION:_default' \
+'--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
+'--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
+'--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
+'*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
+'--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client]' \
 '--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
 '--add-path-receive[Enable Add-Path receive]' \
 '--add-path-send[Enable Add-Path send]' \
@@ -460,10 +626,43 @@ _arguments "${_arguments_options[@]}" : \
 ':address -- Neighbor address:_default' \
 && ret=0
 ;;
+(recv)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
 (advertised)
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
+'--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--explain[Explain whether this exact prefix would be advertised to the peer]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(sent)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -494,9 +693,90 @@ _arguments "${_arguments_options[@]}" : \
 '--state=[FIB route state filter\: installed, rejected, failed]:STATE:_default' \
 '--reason=[Exact reason-code filter, e.g. owned or route_limit_exceeded]:REASON:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
-'--peer=[Source peer-address filter]:PEER:_default' \
+'--neighbor=[Source neighbor-address filter]:NEIGHBOR:_default' \
+'--peer=[Source neighbor-address filter]:NEIGHBOR:_default' \
 '--page-size=[Maximum FIB status rows to return; omitted returns the full snapshot]:PAGE_SIZE:_default' \
 '--page-token=[Page token returned by a previous paginated FIB status query]:PAGE_TOKEN:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(bgpls)
+_arguments "${_arguments_options[@]}" : \
+'-a+[BGP-LS family filter\: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)]:FAMILY:_default' \
+'--family=[BGP-LS family filter\: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)]:FAMILY:_default' \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--nlri-type=[NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)]:NLRI_TYPE:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(bgp-ls)
+_arguments "${_arguments_options[@]}" : \
+'-a+[BGP-LS family filter\: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)]:FAMILY:_default' \
+'--family=[BGP-LS family filter\: linkstate (aliases bgpls, bgp-ls) or linkstate_vpn (aliases bgpls-vpn, bgp-ls-vpn)]:FAMILY:_default' \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--nlri-type=[NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)]:NLRI_TYPE:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(vpn)
+_arguments "${_arguments_options[@]}" : \
+'-a+[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:FAMILY:_default' \
+'--family=[VPN family filter\: l3vpn_ipv4_unicast (alias vpnv4) or l3vpn_ipv6_unicast (alias vpnv6)]:FAMILY:_default' \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(labeled)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:FAMILY:_default' \
+'--family=[Labeled family filter\: ipv4_labeled_unicast (alias labeled-v4) or ipv6_labeled_unicast (alias labeled-v6)]:FAMILY:_default' \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(rtc)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -570,6 +850,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(bgpls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(vpn)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(labeled)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rtc)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (add)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -577,6 +873,274 @@ _arguments "${_arguments_options[@]}" : \
 (delete)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(topology)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__topology_commands" \
+"*::: :->topology" \
+&& ret=0
+
+    case $state in
+    (topology)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-topology-command-$line[1]:"
+        case $line[1] in
+            (nodes)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(links)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__topology__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-topology-help-command-$line[1]:"
+        case $line[1] in
+            (nodes)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(links)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(orr)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(diff)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__diff_commands" \
+"*::: :->diff" \
+&& ret=0
+
+    case $state in
+    (diff)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-diff-command-$line[1]:"
+        case $line[1] in
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+'*--neighbor=[Neighbor address to compare; may be repeated. Omit to compare every peer present in the snapshot]:NEIGHBOR:_default' \
+'*--peer=[Neighbor address to compare; may be repeated. Omit to compare every peer present in the snapshot]:NEIGHBOR:_default' \
+'--against=[Path to the incumbent \`rbgp-ribsnap/1\` NDJSON snapshot]:PATH:_default' \
+'*-a+[Address family filter (ipv4_unicast, ipv6_unicast); may be repeated]:FAMILY:_default' \
+'*--family=[Address family filter (ipv4_unicast, ipv6_unicast); may be repeated]:FAMILY:_default' \
+'--max-routes=[Maximum retained routes per side; exceeding it refuses the comparison (exit 2)]:MAX_ROUTES:_default' \
+'--max-input-bytes=[Maximum snapshot bytes read; exceeding it refuses the comparison (exit 2)]:MAX_INPUT_BYTES:_default' \
+'*--ignore-attribute=[Attribute to exclude from comparison on both sides (origin, as_path, next_hop, med, local_pref, communities, extended_communities, large_communities, unknown); may be repeated]:IGNORE_ATTRIBUTE:_default' \
+'--detail=[Maximum detailed difference rows in human output (--json is always complete)]:DETAIL:_default' \
+'--deadline=[Overall wall-clock budget in seconds; expiry refuses the comparison (exit 2)]:DEADLINE:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rbgp__subcmd__diff__subcmd__snapshot_commands" \
+"*::: :->snapshot" \
+&& ret=0
+
+    case $state in
+    (snapshot)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-diff-snapshot-command-$line[1]:"
+        case $line[1] in
+            (from-mrt)
+_arguments "${_arguments_options[@]}" : \
+'--view=[Attestation of what the dump is\: adj-rib-out-capture (a per-client post-policy capture; accepted), loc-rib, or adj-rib-in (both refused as non-comparable)]:VIEW:_default' \
+'--peer=[Peer address the captured routes were advertised to]:PEER:_default' \
+'--peer-asn=[ASN of that peer]:PEER_ASN:_default' \
+'--source=[Free-form provenance label appended to the header \`source\`]:SOURCE:_default' \
+'--generation=[Capture-round generation stamped into the header]:GENERATION:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':file -- Path to the MRT TABLE_DUMP_V2 file:_files' \
+&& ret=0
+;;
+(from-bmp)
+_arguments "${_arguments_options[@]}" : \
+'*--peer=[Peer address to emit; may be repeated. Omit to emit every complete global-instance peer (all of which must then be complete)]:PEER:_default' \
+'--source=[Free-form provenance label appended to the header \`source\`]:SOURCE:_default' \
+'--generation=[Capture-round generation stamped into the header]:GENERATION:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':file -- Path to the captured BMP byte stream:_files' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-diff-snapshot-help-command-$line[1]:"
+        case $line[1] in
+            (from-mrt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(from-bmp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__diff__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-diff-help-command-$line[1]:"
+        case $line[1] in
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot_commands" \
+"*::: :->snapshot" \
+&& ret=0
+
+    case $state in
+    (snapshot)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-diff-help-snapshot-command-$line[1]:"
+        case $line[1] in
+            (from-mrt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(from-bmp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
@@ -678,7 +1242,8 @@ esac
 (evpn)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Route type filter (1..=5) — applies when no subcommand is given]:ROUTE_TYPE:_default' \
-'--peer=[Peer IP address filter (list mode only)]:PEER:_default' \
+'--neighbor=[Neighbor IP address filter (list mode only)]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter (list mode only)]:NEIGHBOR:_default' \
 '--rd=[Route Distinguisher filter (list mode only), e.g. "65000\:100"]:RD:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -701,7 +1266,8 @@ _arguments "${_arguments_options[@]}" : \
             (list)
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[]:ROUTE_TYPE:_default' \
-'--peer=[]:PEER:_default' \
+'--neighbor=[Neighbor IP address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor IP address filter]:NEIGHBOR:_default' \
 '--rd=[]:RD:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1272,6 +1838,20 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--output=[Output tarball path. Defaults to \`rustbgpd-doctor-<unix-seconds>.tar.gz\`]:FILE:_files' \
+'--log-file=[Daemon log file to tail (last 1000 lines) into the bundle. Without it the manifest records that the daemon logs to stdout/journald]:FILE:_files' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (metrics)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1311,7 +1891,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (gshut)
 _arguments "${_arguments_options[@]}" : \
-'--peer=[Peer address; omit to toggle for all peers]:PEER:_default' \
+'--neighbor=[Neighbor address; omit to toggle for all peers]:NEIGHBOR:_default' \
+'--peer=[Neighbor address; omit to toggle for all peers]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1367,6 +1948,58 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+'*--root=[Additional policy root for \`import\` resolution (repeatable; the main file'\''s directory is always a root) — mirror of the daemon'\''s \`\[policy\] rpol_roots\`]:ROOTS:_default' \
+'--coverage-min=[Minimum acceptable exercised-term percentage (implies --coverage)\: exit 3 when coverage falls below PCT (CI gate). Diagnostics (1) and test failures (2) take precedence]:PCT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--list-deps[Print the resolved import graph — each module'\''s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)]' \
+'--coverage[Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':file -- Path to the main `.rpol` file:_default' \
+&& ret=0
+;;
+(fmt)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--check[Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::files -- `.rpol` files to format; `-` reads stdin and writes the formatted source to stdout (editor integration):_default' \
+&& ret=0
+;;
+(test)
+_arguments "${_arguments_options[@]}" : \
+'--policy=[Policy to evaluate\: a name, or a call-form with u32 arguments for parameterized policies, e.g. "customer-in(200)"]:POLICY:_default' \
+'--direction=[Evaluation direction\: import (Adj-RIB-In) or export (Loc-RIB best routes)]:DIRECTION:_default' \
+'--neighbor=[Neighbor address\: restricts the import snapshot to one peer'\''s Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
+'--peer=[Neighbor address\: restricts the import snapshot to one peer'\''s Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
+'-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'--limit=[Maximum routes to evaluate (0 = all)]:LIMIT:_default' \
+'--show-changes=[Maximum before/after attribute diffs to show]:SHOW_CHANGES:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':file -- Path to the `.rpol` file:_default' \
 && ret=0
 ;;
 (get)
@@ -1432,6 +2065,7 @@ _arguments "${_arguments_options[@]}" : \
             (show)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor address (omit for the global chains)]:NEIGHBOR:_default' \
+'--peer=[Neighbor address (omit for the global chains)]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1445,6 +2079,7 @@ _arguments "${_arguments_options[@]}" : \
 (set-import)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor address (omit for global)]:NEIGHBOR:_default' \
+'--peer=[Neighbor address (omit for global)]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1459,6 +2094,7 @@ _arguments "${_arguments_options[@]}" : \
 (set-export)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[]:NEIGHBOR:_default' \
+'--peer=[]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1473,6 +2109,7 @@ _arguments "${_arguments_options[@]}" : \
 (clear-import)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[]:NEIGHBOR:_default' \
+'--peer=[]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1486,6 +2123,7 @@ _arguments "${_arguments_options[@]}" : \
 (clear-export)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[]:NEIGHBOR:_default' \
+'--peer=[]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1540,9 +2178,40 @@ esac
     ;;
 esac
 ;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'--direction=[Direction\: export (default), import, or both]:DIRECTION:(import export both)' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(counters)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
+'--direction=[Direction\: export (default), import, or both]:DIRECTION:(import export both)' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (explain)
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor (peer) address whose import-decision cache to read]:NEIGHBOR:_default' \
+'--peer=[Neighbor (peer) address whose import-decision cache to read]:NEIGHBOR:_default' \
 '--prefix=[Prefix in CIDR form, e.g. \`192.0.2.0/24\` or \`2001\:db8\:\:/32\`]:PREFIX:_default' \
 '--path-id=[Add-Path identifier; omit to show every matching path]:PATH_ID:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1568,6 +2237,18 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rbgp-policy-help-command-$line[1]:"
         case $line[1] in
             (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(fmt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(test)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1618,6 +2299,10 @@ _arguments "${_arguments_options[@]}" : \
         esac
     ;;
 esac
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
 ;;
 (explain)
 _arguments "${_arguments_options[@]}" : \
@@ -1929,6 +2614,7 @@ _arguments "${_arguments_options[@]}" : \
 (add)
 _arguments "${_arguments_options[@]}" : \
 '--peer-group=[Peer group the dynamic peers inherit]:PEER_GROUP:_default' \
+'--remote-asn=[Expected remote ASN (0 = accept any ASN from OPEN)]:ASN:_default' \
 '--asn=[Expected remote ASN (0 = accept any ASN from OPEN)]:ASN:_default' \
 '--description=[Optional description]:DESCRIPTION:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2107,6 +2793,18 @@ _arguments "${_arguments_options[@]}" : \
 ':shell -- Shell to generate completions for:(bash elvish fish powershell zsh)' \
 && ret=0
 ;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__help_commands" \
@@ -2156,6 +2854,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(effective)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2251,6 +2953,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(bgpls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(vpn)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(labeled)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rtc)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (add)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2258,6 +2976,78 @@ _arguments "${_arguments_options[@]}" : \
 (delete)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(topology)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__topology_commands" \
+"*::: :->topology" \
+&& ret=0
+
+    case $state in
+    (topology)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-topology-command-$line[1]:"
+        case $line[1] in
+            (nodes)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(links)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(orr)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(diff)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__diff_commands" \
+"*::: :->diff" \
+&& ret=0
+
+    case $state in
+    (diff)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-diff-command-$line[1]:"
+        case $line[1] in
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+":: :_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot_commands" \
+"*::: :->snapshot" \
+&& ret=0
+
+    case $state in
+    (snapshot)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rbgp-help-diff-snapshot-command-$line[1]:"
+        case $line[1] in
+            (from-mrt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(from-bmp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
         esac
     ;;
@@ -2427,6 +3217,10 @@ esac
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (metrics)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2460,6 +3254,18 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:rbgp-help-policy-command-$line[1]:"
         case $line[1] in
             (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(fmt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(test)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2510,6 +3316,10 @@ _arguments "${_arguments_options[@]}" : \
         esac
     ;;
 esac
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
 ;;
 (explain)
 _arguments "${_arguments_options[@]}" : \
@@ -2651,6 +3461,10 @@ esac
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2670,24 +3484,30 @@ _rbgp_commands() {
 'global:Show daemon global configuration' \
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
+'summary:Manage BGP neighbors' \
 'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
 'rib:Query and manage the RIB' \
+'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \
+'orr:Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)' \
+'diff:Compare live RIB views against an external snapshot (read-only)' \
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
 'events:Show recent route update events' \
 'health:Check daemon health' \
+'doctor:Run red/green triage checks and write a redacted support bundle' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
 'mrt-dump:Trigger an on-demand MRT dump' \
-'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates for one peer (\`--peer X\`) or every currently-managed peer (omit \`--peer\`). Receivers that honor RFC 8326 will set local_pref = 0 on tagged paths, draining traffic ahead of planned maintenance' \
+'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates' \
 'top:Live TUI dashboard' \
-'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
-'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
-'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
-'dynamic-neighbor:Manage \`\[\[dynamic_neighbors\]\]\` prefix ranges that auto-accept inbound peers into a peer group. Backed by NeighborService' \
-'fib-table:Manage \`\[\[fib_tables\]\]\` (ADR-0061 general unicast FIB export) at runtime. Hot-applies through the FIB reconciler and persists to the config' \
+'policy:Manage policy definitions and import/export chains' \
+'neighbor-set:Manage named neighbor sets used by policy' \
+'peer-group:Manage peer groups and neighbor membership' \
+'dynamic-neighbor:Manage dynamic-neighbor prefix ranges' \
+'fib-table:Manage general unicast FIB export tables at runtime' \
 'completions:Generate shell completions' \
+'man:Print the rbgp man page (roff) to stdout' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp commands' commands "$@"
@@ -2749,6 +3569,7 @@ _rbgp__subcmd__config_commands() {
 'confirm:Confirm a pending confirmed config transaction' \
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
+'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp config commands' commands "$@"
@@ -2773,6 +3594,11 @@ _rbgp__subcmd__config__subcmd__diff_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp config diff commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__config__subcmd__effective_commands] )) ||
+_rbgp__subcmd__config__subcmd__effective_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp config effective commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__config__subcmd__help_commands] )) ||
 _rbgp__subcmd__config__subcmd__help_commands() {
     local commands; commands=(
@@ -2782,6 +3608,7 @@ _rbgp__subcmd__config__subcmd__help_commands() {
 'confirm:Confirm a pending confirmed config transaction' \
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
+'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp config help commands' commands "$@"
@@ -2805,6 +3632,11 @@ _rbgp__subcmd__config__subcmd__help__subcmd__confirm_commands() {
 _rbgp__subcmd__config__subcmd__help__subcmd__diff_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp config help diff commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__config__subcmd__help__subcmd__effective_commands] )) ||
+_rbgp__subcmd__config__subcmd__help__subcmd__effective_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp config help effective commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__config__subcmd__help__subcmd__help_commands] )) ||
 _rbgp__subcmd__config__subcmd__help__subcmd__help_commands() {
@@ -2830,6 +3662,105 @@ _rbgp__subcmd__config__subcmd__plan_commands() {
 _rbgp__subcmd__config__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp config status commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff_commands] )) ||
+_rbgp__subcmd__diff_commands() {
+    local commands; commands=(
+'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp diff commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__diff__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help_commands() {
+    local commands; commands=(
+'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp diff help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot_commands() {
+    local commands; commands=(
+'from-mrt:Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot' \
+'from-bmp:Convert a captured RFC 7854/8671 BMP byte stream into a snapshot' \
+    )
+    _describe -t commands 'rbgp diff help snapshot commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-bmp_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-bmp_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff help snapshot from-bmp commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-mrt_commands] )) ||
+_rbgp__subcmd__diff__subcmd__help__subcmd__snapshot__subcmd__from-mrt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff help snapshot from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot_commands() {
+    local commands; commands=(
+'from-mrt:Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot' \
+'from-bmp:Convert a captured RFC 7854/8671 BMP byte stream into a snapshot' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp diff snapshot commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__from-bmp_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__from-bmp_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshot from-bmp commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__from-mrt_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__from-mrt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshot from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help_commands() {
+    local commands; commands=(
+'from-mrt:Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot' \
+'from-bmp:Convert a captured RFC 7854/8671 BMP byte stream into a snapshot' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp diff snapshot help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__from-bmp_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__from-bmp_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshot help from-bmp commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__from-mrt_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__from-mrt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshot help from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__diff__subcmd__snapshot__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp diff snapshot help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__doctor_commands] )) ||
+_rbgp__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp doctor commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__dynamic-neighbor_commands] )) ||
 _rbgp__subcmd__dynamic-neighbor_commands() {
@@ -2966,10 +3897,10 @@ _rbgp__subcmd__evpn_commands() {
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
-'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'instances:List local EVPN instances configured on this VTEP' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
-'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'vrfs:List configured IP-VRFs and their readiness verdict' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3018,9 +3949,9 @@ _rbgp__subcmd__evpn__subcmd__diagnose_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__es_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__es_commands() {
     local commands; commands=(
-'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
-'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
-'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'list:List configured Ethernet Segments' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance' \
+'undrain:Undrain an Ethernet Segment' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp evpn es commands' commands "$@"
@@ -3033,9 +3964,9 @@ _rbgp__subcmd__evpn__subcmd__es__subcmd__drain_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__es__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__es__subcmd__help_commands() {
     local commands; commands=(
-'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
-'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
-'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'list:List configured Ethernet Segments' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance' \
+'undrain:Undrain an Ethernet Segment' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp evpn es help commands' commands "$@"
@@ -3083,10 +4014,10 @@ _rbgp__subcmd__evpn__subcmd__help_commands() {
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
-'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'instances:List local EVPN instances configured on this VTEP' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
-'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'vrfs:List configured IP-VRFs and their readiness verdict' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3135,9 +4066,9 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__diagnose_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands() {
     local commands; commands=(
-'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
-'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
-'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'list:List configured Ethernet Segments' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance' \
+'undrain:Undrain an Ethernet Segment' \
     )
     _describe -t commands 'rbgp evpn help es commands' commands "$@"
 }
@@ -3342,22 +4273,27 @@ _rbgp__subcmd__help_commands() {
 'neighbor:Manage BGP neighbors' \
 'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
 'rib:Query and manage the RIB' \
+'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \
+'orr:Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)' \
+'diff:Compare live RIB views against an external snapshot (read-only)' \
 'flowspec:Manage FlowSpec routes' \
 'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
 'events:Show recent route update events' \
 'health:Check daemon health' \
+'doctor:Run red/green triage checks and write a redacted support bundle' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
 'mrt-dump:Trigger an on-demand MRT dump' \
-'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates for one peer (\`--peer X\`) or every currently-managed peer (omit \`--peer\`). Receivers that honor RFC 8326 will set local_pref = 0 on tagged paths, draining traffic ahead of planned maintenance' \
+'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates' \
 'top:Live TUI dashboard' \
-'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
-'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
-'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
-'dynamic-neighbor:Manage \`\[\[dynamic_neighbors\]\]\` prefix ranges that auto-accept inbound peers into a peer group. Backed by NeighborService' \
-'fib-table:Manage \`\[\[fib_tables\]\]\` (ADR-0061 general unicast FIB export) at runtime. Hot-applies through the FIB reconciler and persists to the config' \
+'policy:Manage policy definitions and import/export chains' \
+'neighbor-set:Manage named neighbor sets used by policy' \
+'peer-group:Manage peer groups and neighbor membership' \
+'dynamic-neighbor:Manage dynamic-neighbor prefix ranges' \
+'fib-table:Manage general unicast FIB export tables at runtime' \
 'completions:Generate shell completions' \
+'man:Print the rbgp man page (roff) to stdout' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp help commands' commands "$@"
@@ -3394,6 +4330,7 @@ _rbgp__subcmd__help__subcmd__config_commands() {
 'confirm:Confirm a pending confirmed config transaction' \
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
+'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
     )
     _describe -t commands 'rbgp help config commands' commands "$@"
 }
@@ -3417,6 +4354,11 @@ _rbgp__subcmd__help__subcmd__config__subcmd__diff_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help config diff commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__config__subcmd__effective_commands] )) ||
+_rbgp__subcmd__help__subcmd__config__subcmd__effective_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help config effective commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__config__subcmd__plan_commands] )) ||
 _rbgp__subcmd__help__subcmd__config__subcmd__plan_commands() {
     local commands; commands=()
@@ -3426,6 +4368,42 @@ _rbgp__subcmd__help__subcmd__config__subcmd__plan_commands() {
 _rbgp__subcmd__help__subcmd__config__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help config status commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff_commands() {
+    local commands; commands=(
+'advertised:Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot' \
+'snapshot:Produce an \`rbgp-ribsnap/1\` snapshot from an incumbent'\''s own output (offline; no daemon connection)' \
+    )
+    _describe -t commands 'rbgp help diff commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help diff advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot_commands() {
+    local commands; commands=(
+'from-mrt:Convert an RFC 6396 TABLE_DUMP_V2 MRT dump into a snapshot' \
+'from-bmp:Convert a captured RFC 7854/8671 BMP byte stream into a snapshot' \
+    )
+    _describe -t commands 'rbgp help diff snapshot commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-bmp_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-bmp_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help diff snapshot from-bmp commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-mrt_commands] )) ||
+_rbgp__subcmd__help__subcmd__diff__subcmd__snapshot__subcmd__from-mrt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help diff snapshot from-mrt commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__doctor_commands] )) ||
+_rbgp__subcmd__help__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help doctor commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__dynamic-neighbor_commands] )) ||
 _rbgp__subcmd__help__subcmd__dynamic-neighbor_commands() {
@@ -3494,10 +4472,10 @@ _rbgp__subcmd__help__subcmd__evpn_commands() {
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
-'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'instances:List local EVPN instances configured on this VTEP' \
 'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
 'managed-netdevs:List managed EVPN netdev ownership/status rows (ADR-0091)' \
-'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'vrfs:List configured IP-VRFs and their readiness verdict' \
 'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
     )
     _describe -t commands 'rbgp help evpn commands' commands "$@"
@@ -3545,9 +4523,9 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__diagnose_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands() {
     local commands; commands=(
-'list:List configured Ethernet Segments joined with live drain, DF/AC-gate, same-ESI bias, and FDB-NHG state' \
-'drain:Drain an Ethernet Segment before access-circuit maintenance\: withdraw its Type 4 + EAD routes (exiting DF election) and the member VNIs'\'' local Type 2 routes, and suppress new local-MAC origination. In-memory only — a daemon restart clears the drain' \
-'undrain:Undrain an Ethernet Segment\: re-originate its Type 4 + EAD routes, re-run DF election, and replay cached local MAC state' \
+'list:List configured Ethernet Segments' \
+'drain:Drain an Ethernet Segment before access-circuit maintenance' \
+'undrain:Undrain an Ethernet Segment' \
     )
     _describe -t commands 'rbgp help evpn es commands' commands "$@"
 }
@@ -3658,6 +4636,11 @@ _rbgp__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help help commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__man_commands] )) ||
+_rbgp__subcmd__help__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help man commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__metrics_commands] )) ||
 _rbgp__subcmd__help__subcmd__metrics_commands() {
     local commands; commands=()
@@ -3734,6 +4717,11 @@ _rbgp__subcmd__help__subcmd__neighbor-set__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help neighbor-set set commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__orr_commands] )) ||
+_rbgp__subcmd__help__subcmd__orr_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help orr commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__peer-group_commands] )) ||
 _rbgp__subcmd__help__subcmd__peer-group_commands() {
     local commands; commands=(
@@ -3780,19 +4768,23 @@ _rbgp__subcmd__help__subcmd__peer-group__subcmd__set_commands() {
 _rbgp__subcmd__help__subcmd__policy_commands() {
     local commands; commands=(
 'list:List configured policies (names + statement counts)' \
+'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
+'fmt:Format \`.rpol\` files in the one canonical style' \
+'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
-'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
+'stats:Show live per-term policy hit counters' \
+'explain:Explain the import-policy decision for a prefix on a neighbor' \
     )
     _describe -t commands 'rbgp help policy commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__chain_commands] )) ||
 _rbgp__subcmd__help__subcmd__policy__subcmd__chain_commands() {
     local commands; commands=(
-'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
-'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'show:Show the global or per-neighbor chains' \
+'set-import:Replace the import chain' \
 'set-export:Replace the export chain' \
 'clear-import:Clear the import chain entirely' \
 'clear-export:Clear the export chain entirely' \
@@ -3824,6 +4816,11 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy chain show commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__check_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy check commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__delete_commands] )) ||
 _rbgp__subcmd__help__subcmd__policy__subcmd__delete_commands() {
     local commands; commands=()
@@ -3833,6 +4830,11 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__delete_commands() {
 _rbgp__subcmd__help__subcmd__policy__subcmd__explain_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy explain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__fmt_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__fmt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy fmt commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__get_commands] )) ||
 _rbgp__subcmd__help__subcmd__policy__subcmd__get_commands() {
@@ -3849,6 +4851,16 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help policy set commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__stats_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy stats commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__policy__subcmd__test_commands] )) ||
+_rbgp__subcmd__help__subcmd__policy__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help policy test commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__rib_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib_commands() {
     local commands; commands=(
@@ -3856,6 +4868,10 @@ _rbgp__subcmd__help__subcmd__rib_commands() {
 'advertised:Show advertised routes to a neighbor' \
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show ADR-0061 general FIB route install status' \
+'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
+'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
+'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
     )
@@ -3870,6 +4886,11 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__add_commands() {
 _rbgp__subcmd__help__subcmd__rib__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help rib advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__bgpls_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__bgpls_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib bgpls commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__blackholes_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__blackholes_commands() {
@@ -3886,10 +4907,25 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__fib_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help rib fib commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib labeled commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__received_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help rib received commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__rtc_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__rtc_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib vpn commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__shutdown_commands] )) ||
 _rbgp__subcmd__help__subcmd__shutdown_commands() {
@@ -3901,10 +4937,33 @@ _rbgp__subcmd__help__subcmd__top_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help top commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__help__subcmd__topology_commands] )) ||
+_rbgp__subcmd__help__subcmd__topology_commands() {
+    local commands; commands=(
+'nodes:List topology nodes (BGP-LS node identities across all peers)' \
+'links:List usable directed topology links (with IGP metrics)' \
+    )
+    _describe -t commands 'rbgp help topology commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__topology__subcmd__links_commands] )) ||
+_rbgp__subcmd__help__subcmd__topology__subcmd__links_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help topology links commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__topology__subcmd__nodes_commands] )) ||
+_rbgp__subcmd__help__subcmd__topology__subcmd__nodes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help topology nodes commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__help__subcmd__watch_commands] )) ||
 _rbgp__subcmd__help__subcmd__watch_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help watch commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__man_commands] )) ||
+_rbgp__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp man commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__metrics_commands] )) ||
 _rbgp__subcmd__metrics_commands() {
@@ -4062,6 +5121,11 @@ _rbgp__subcmd__neighbor-set__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp neighbor-set set commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__orr_commands] )) ||
+_rbgp__subcmd__orr_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp orr commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__peer-group_commands] )) ||
 _rbgp__subcmd__peer-group_commands() {
     local commands; commands=(
@@ -4157,11 +5221,16 @@ _rbgp__subcmd__peer-group__subcmd__set_commands() {
 _rbgp__subcmd__policy_commands() {
     local commands; commands=(
 'list:List configured policies (names + statement counts)' \
+'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
+'fmt:Format \`.rpol\` files in the one canonical style' \
+'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
-'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
+'stats:Show live per-term policy hit counters' \
+'counters:Show live per-term policy hit counters' \
+'explain:Explain the import-policy decision for a prefix on a neighbor' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp policy commands' commands "$@"
@@ -4169,8 +5238,8 @@ _rbgp__subcmd__policy_commands() {
 (( $+functions[_rbgp__subcmd__policy__subcmd__chain_commands] )) ||
 _rbgp__subcmd__policy__subcmd__chain_commands() {
     local commands; commands=(
-'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
-'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'show:Show the global or per-neighbor chains' \
+'set-import:Replace the import chain' \
 'set-export:Replace the export chain' \
 'clear-import:Clear the import chain entirely' \
 'clear-export:Clear the export chain entirely' \
@@ -4191,8 +5260,8 @@ _rbgp__subcmd__policy__subcmd__chain__subcmd__clear-import_commands() {
 (( $+functions[_rbgp__subcmd__policy__subcmd__chain__subcmd__help_commands] )) ||
 _rbgp__subcmd__policy__subcmd__chain__subcmd__help_commands() {
     local commands; commands=(
-'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
-'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'show:Show the global or per-neighbor chains' \
+'set-import:Replace the import chain' \
 'set-export:Replace the export chain' \
 'clear-import:Clear the import chain entirely' \
 'clear-export:Clear the export chain entirely' \
@@ -4245,6 +5314,11 @@ _rbgp__subcmd__policy__subcmd__chain__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy chain show commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__check_commands] )) ||
+_rbgp__subcmd__policy__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy check commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__delete_commands] )) ||
 _rbgp__subcmd__policy__subcmd__delete_commands() {
     local commands; commands=()
@@ -4255,6 +5329,11 @@ _rbgp__subcmd__policy__subcmd__explain_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy explain commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__fmt_commands] )) ||
+_rbgp__subcmd__policy__subcmd__fmt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy fmt commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__get_commands] )) ||
 _rbgp__subcmd__policy__subcmd__get_commands() {
     local commands; commands=()
@@ -4264,11 +5343,15 @@ _rbgp__subcmd__policy__subcmd__get_commands() {
 _rbgp__subcmd__policy__subcmd__help_commands() {
     local commands; commands=(
 'list:List configured policies (names + statement counts)' \
+'check:Check an \`.rpol\` policy file locally (parse, typecheck, tests)' \
+'fmt:Format \`.rpol\` files in the one canonical style' \
+'test:Dry-run a candidate \`.rpol\` policy against the live RIB' \
 'get:Show one policy by name' \
 'set:Set (create or replace) a policy from a JSON file' \
 'delete:Delete a policy by name' \
 'chain:Manage global / per-neighbor import/export chains' \
-'explain:Explain the import-policy decision for a prefix on a neighbor (ADR-0073)\: why it was permitted / denied / withdrawn, or not-seen / evicted / stale. Reads the per-session decision cache; requires \`\[policy.explain\].enabled\` on the daemon' \
+'stats:Show live per-term policy hit counters' \
+'explain:Explain the import-policy decision for a prefix on a neighbor' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp policy help commands' commands "$@"
@@ -4276,8 +5359,8 @@ _rbgp__subcmd__policy__subcmd__help_commands() {
 (( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__chain_commands] )) ||
 _rbgp__subcmd__policy__subcmd__help__subcmd__chain_commands() {
     local commands; commands=(
-'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
-'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'show:Show the global or per-neighbor chains' \
+'set-import:Replace the import chain' \
 'set-export:Replace the export chain' \
 'clear-import:Clear the import chain entirely' \
 'clear-export:Clear the export chain entirely' \
@@ -4309,6 +5392,11 @@ _rbgp__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy help chain show commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__check_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help check commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__delete_commands] )) ||
 _rbgp__subcmd__policy__subcmd__help__subcmd__delete_commands() {
     local commands; commands=()
@@ -4318,6 +5406,11 @@ _rbgp__subcmd__policy__subcmd__help__subcmd__delete_commands() {
 _rbgp__subcmd__policy__subcmd__help__subcmd__explain_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy help explain commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__fmt_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__fmt_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help fmt commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__get_commands] )) ||
 _rbgp__subcmd__policy__subcmd__help__subcmd__get_commands() {
@@ -4339,6 +5432,16 @@ _rbgp__subcmd__policy__subcmd__help__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy help set commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__stats_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help stats commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__policy__subcmd__help__subcmd__test_commands] )) ||
+_rbgp__subcmd__policy__subcmd__help__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy help test commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__policy__subcmd__list_commands] )) ||
 _rbgp__subcmd__policy__subcmd__list_commands() {
     local commands; commands=()
@@ -4349,13 +5452,30 @@ _rbgp__subcmd__policy__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp policy set commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__policy__subcmd__stats_commands] )) ||
+_rbgp__subcmd__policy__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy stats commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__policy__subcmd__test_commands] )) ||
+_rbgp__subcmd__policy__subcmd__test_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp policy test commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rib_commands] )) ||
 _rbgp__subcmd__rib_commands() {
     local commands; commands=(
 'received:Show received routes from a neighbor' \
+'recv:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
+'sent:Show advertised routes to a neighbor' \
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show ADR-0061 general FIB route install status' \
+'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
+'bgp-ls:Show BGP-LS routes learned from peers (RFC 9552)' \
+'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
+'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -4371,6 +5491,11 @@ _rbgp__subcmd__rib__subcmd__add_commands() {
 _rbgp__subcmd__rib__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__bgpls_commands] )) ||
+_rbgp__subcmd__rib__subcmd__bgpls_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib bgpls commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__blackholes_commands] )) ||
 _rbgp__subcmd__rib__subcmd__blackholes_commands() {
@@ -4394,6 +5519,10 @@ _rbgp__subcmd__rib__subcmd__help_commands() {
 'advertised:Show advertised routes to a neighbor' \
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
 'fib:Show ADR-0061 general FIB route install status' \
+'bgpls:Show BGP-LS routes learned from peers (RFC 9552)' \
+'vpn:Show VPNv4/VPNv6 routes learned from peers (RFC 4364/4659)' \
+'labeled:Show IPv4/IPv6 labeled-unicast routes learned from peers (RFC 8277)' \
+'rtc:Show RT-Constrain routes (RFC 4684, single IPv4 family)' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -4409,6 +5538,11 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__add_commands() {
 _rbgp__subcmd__rib__subcmd__help__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib help advertised commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__bgpls_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__bgpls_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help bgpls commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__blackholes_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__blackholes_commands() {
@@ -4430,15 +5564,45 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib help help commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help labeled commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__received_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib help received commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__rtc_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__rtc_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help vpn commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__labeled_commands] )) ||
+_rbgp__subcmd__rib__subcmd__labeled_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib labeled commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rib__subcmd__received_commands] )) ||
 _rbgp__subcmd__rib__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib received commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__rtc_commands] )) ||
+_rbgp__subcmd__rib__subcmd__rtc_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib rtc commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__vpn_commands] )) ||
+_rbgp__subcmd__rib__subcmd__vpn_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib vpn commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__shutdown_commands] )) ||
 _rbgp__subcmd__shutdown_commands() {
@@ -4449,6 +5613,49 @@ _rbgp__subcmd__shutdown_commands() {
 _rbgp__subcmd__top_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp top commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology_commands] )) ||
+_rbgp__subcmd__topology_commands() {
+    local commands; commands=(
+'nodes:List topology nodes (BGP-LS node identities across all peers)' \
+'links:List usable directed topology links (with IGP metrics)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp topology commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__help_commands] )) ||
+_rbgp__subcmd__topology__subcmd__help_commands() {
+    local commands; commands=(
+'nodes:List topology nodes (BGP-LS node identities across all peers)' \
+'links:List usable directed topology links (with IGP metrics)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rbgp topology help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__help__subcmd__help_commands] )) ||
+_rbgp__subcmd__topology__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp topology help help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__help__subcmd__links_commands] )) ||
+_rbgp__subcmd__topology__subcmd__help__subcmd__links_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp topology help links commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__help__subcmd__nodes_commands] )) ||
+_rbgp__subcmd__topology__subcmd__help__subcmd__nodes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp topology help nodes commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__links_commands] )) ||
+_rbgp__subcmd__topology__subcmd__links_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp topology links commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__topology__subcmd__nodes_commands] )) ||
+_rbgp__subcmd__topology__subcmd__nodes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp topology nodes commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__watch_commands] )) ||
 _rbgp__subcmd__watch_commands() {
