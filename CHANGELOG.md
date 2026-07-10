@@ -24,6 +24,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not track an install generation yet. Explain queries and dry runs
   remain non-counting, now pinned by test on the import path. (LAN-248)
 
+- **M80 extended with rpol family / origin-AS parity and migration
+  proof.** The ADR-0096 policy-parity interop job now runs its route
+  matrix over IPv4 **and** IPv6 unicast on the same MP-BGP sessions and
+  proves the new predicate surfaces against FRR route-maps route for
+  route: `route.origin-as in <asn-set>` vs an anchored as-path regex,
+  and family-branched terms whose same-origin v4/v6 partner twins
+  diverge on LP/community purely by `route.family` (import and export —
+  the v6 export branch pins a family-scoped MED to the wire). The job
+  also asserts live import-side hit counters and the import-chain
+  install generation (`rbgp policy stats --direction import`), explain
+  traces naming the deciding source term in both directions, and keeps
+  the SIGHUP hot-apply receipt (zero flap, Route Refresh scoped to the
+  edited peer) on the dual-family topology; 44 scenario assertions, up
+  from 29. `docs/rpol-language.md` gains a "Migrating from BIRD and
+  FRR" section with the equivalent BIRD filter and FRR route-map for an
+  asn-set + family policy. (LAN-297)
+
 - **`.rpol` indexed ASN sets and origin-AS predicates.** New `asn-set`
   declarations (`asn-set customers { 64500, 64501 }`) compile to
   content-interned hash sets probed in O(1) by two new predicates:

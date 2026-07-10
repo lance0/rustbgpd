@@ -35,8 +35,10 @@ topology:
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
+        - ip -6 addr add fd00:0::1/64 dev eth1
         - ip link set eth1 up
         - ip addr add 10.0.1.1/24 dev eth2
+        - ip -6 addr add fd00:1::1/64 dev eth2
         - ip link set eth2 up
         - mkdir -p /etc/rustbgpd/policies
         - cp /etc/rustbgpd/core.initial.rpol /etc/rustbgpd/policies/core.rpol
@@ -51,8 +53,10 @@ topology:
         - ./configs/frr-bgpd-m80-src.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
+        - ip -6 addr add fd00:0::2/64 dev eth1
         - ip link set eth1 up
         - ip addr add 10.0.2.2/24 dev eth2
+        - ip -6 addr add fd00:2::2/64 dev eth2
         - ip link set eth2 up
 
     parity:
@@ -63,8 +67,10 @@ topology:
         - ./configs/frr-bgpd-m80-parity.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.2.1/24 dev eth1
+        - ip -6 addr add fd00:2::1/64 dev eth1
         - ip link set eth1 up
         - ip addr add 10.0.3.1/24 dev eth2
+        - ip -6 addr add fd00:3::1/64 dev eth2
         - ip link set eth2 up
 
     down:
@@ -75,8 +81,10 @@ topology:
         - ./configs/frr-bgpd-m80-down.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.1.2/24 dev eth1
+        - ip -6 addr add fd00:1::2/64 dev eth1
         - ip link set eth1 up
         - ip addr add 10.0.3.2/24 dev eth2
+        - ip -6 addr add fd00:3::2/64 dev eth2
         - ip link set eth2 up
 
   links:
@@ -85,7 +93,11 @@ topology:
     - endpoints: ["src:eth2", "parity:eth1"]
     - endpoints: ["parity:eth2", "down:eth2"]
 
-# 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ src    (10.0.0.2, AS 65002)
-# 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ down   (10.0.1.2, AS 65003)
-# 10.0.2.0/24 — parity   (10.0.2.1) ↔ src    (10.0.2.2)
-# 10.0.3.0/24 — parity   (10.0.3.1) ↔ down   (10.0.3.2)
+# 10.0.0.0/24 + fd00:0::/64 — rustbgpd (10.0.0.1) ↔ src    (10.0.0.2, AS 65002)
+# 10.0.1.0/24 + fd00:1::/64 — rustbgpd (10.0.1.1) ↔ down   (10.0.1.2, AS 65003)
+# 10.0.2.0/24 + fd00:2::/64 — parity   (10.0.2.1) ↔ src    (10.0.2.2)
+# 10.0.3.0/24 + fd00:3::/64 — parity   (10.0.3.1) ↔ down   (10.0.3.2)
+#
+# Sessions run over IPv4; IPv6 unicast is a second negotiated family
+# on the same sessions (MP-BGP). The fd00:N::/64 link addresses give
+# both engines usable global v6 next-hops for the v6 matrix routes.

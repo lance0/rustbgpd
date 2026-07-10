@@ -21,6 +21,10 @@ address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-src"
 hold_time = 90
+# Dual-stack over the one v4 session (MP-BGP): the same rpol chains
+# evaluate IPv4 and IPv6 unicast routes — route.family branches.
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd00:0::1"
 # customer-in instantiated with LP 200; src-default is the policy the
 # SIGHUP phase edits (referenced by this peer only).
 import_policy_chain = ["customer-in(200)", "src-default"]
@@ -30,6 +34,8 @@ address = "10.0.1.2"
 remote_asn = 65003
 description = "frr-down"
 hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd00:1::1"
 # The second instantiation of the same parameterized policy — LP 300.
 import_policy_chain = ["customer-in(300)"]
 export_policy_chain = ["edge-out"]
