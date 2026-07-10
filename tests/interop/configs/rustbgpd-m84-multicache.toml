@@ -1,0 +1,47 @@
+# M84 — multi-cache RTR/ASPA epoch conformance (LAN-243).
+# Three RTR caches; the *_ADDR placeholders are patched to the
+# containers' management IPs by the test runner before start.
+
+[global]
+asn = 65001
+router_id = "10.84.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[rpki]
+
+# Real RTR v2 cache (Routinator, offline SLURM-asserted data).
+[[rpki.cache_servers]]
+address = "ROUTINATOR_ADDR:3323"
+refresh_interval = 15
+retry_interval = 5
+expire_interval = 600
+
+# Real RTR v1-only cache (StayRTR) — exercises the v2→v1 fallback.
+[[rpki.cache_servers]]
+address = "STAYRTR_ADDR:3323"
+refresh_interval = 15
+retry_interval = 5
+expire_interval = 600
+
+# In-repo phased RTR v2 server — ASPA + incremental + serial regression.
+[[rpki.cache_servers]]
+address = "RTRV2_ADDR:3323"
+refresh_interval = 10
+retry_interval = 5
+expire_interval = 600
+
+[[neighbors]]
+address = "10.84.0.2"
+remote_asn = 65003
+description = "frr-m84"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

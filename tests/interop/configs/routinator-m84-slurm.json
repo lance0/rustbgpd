@@ -1,0 +1,18 @@
+{
+  "slurmVersion": 1,
+  "validationOutputFilters": {
+    "prefixFilters": [],
+    "bgpsecFilters": []
+  },
+  "locallyAddedAssertions": {
+    "prefixAssertions": [
+      {
+        "asn": 65003,
+        "prefix": "203.0.113.0/24",
+        "maxPrefixLength": 24,
+        "comment": "M84 routinator-backed probe prefix"
+      }
+    ],
+    "bgpsecAssertions": []
+  }
+}

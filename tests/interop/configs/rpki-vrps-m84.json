@@ -1,0 +1,14 @@
+{
+  "metadata": {
+    "generated": 1710000000,
+    "valid": 1900000000
+  },
+  "roas": [
+    {
+      "asn": "AS65003",
+      "prefix": "198.51.100.0/24",
+      "maxLength": 24,
+      "ta": "test-ta"
+    }
+  ]
+}

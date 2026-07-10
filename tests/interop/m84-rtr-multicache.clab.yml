@@ -1,0 +1,103 @@
+# Containerlab topology: rustbgpd ↔ FRR peer + three RTR caches
+# (M84 — multi-cache RTR/ASPA epoch conformance receipt, LAN-243)
+#
+# Drives the 8210bis per-cache epoch model (one CacheEpoch
+# {version, session_id, serial} advanced atomically at validated End
+# of Data; data retained through reconnect / Cache Reset / v1
+# fallback) against real caches plus a scriptable one:
+#
+#   routinator — real RTR v2 cache (nlnetlabs/routinator), run
+#     offline: --no-rir-tals with a SLURM local-assertion file, so the
+#     data set is deterministic and self-contained. Drives the
+#     reconnect scenario (docker restart → new session_id → client
+#     resynchronizes via Cache Reset while retaining data).
+#   stayrtr — real RTR v1 cache (rpki/stayrtr, no v2/ASPA support —
+#     the M27 finding). Answers a v2 Reset Query with a version-0
+#     Error Report; drives the shipped v2→v1 fallback path.
+#   rtr-v2 — the in-repo Python RTR v2 phased server (the only
+#     deterministic ASPA source: StayRTR removed ASPA and Routinator
+#     0.15 ignores SLURM aspaAssertions). Drives incremental updates,
+#     ASPA provider-set replace + empty-provider withdrawal, and a
+#     same-session serial regression.
+#
+# FRR (AS 65003) advertises the probe prefixes whose validation
+# states make each cache's data observable end-to-end:
+#   203.0.113.0/24  → VRP from routinator only  → rpki valid
+#   198.51.100.0/24 → VRP from stayrtr only     → rpki valid
+#   192.0.2.0/24    → VRP (AS65999) from rtr-v2 → rpki invalid
+#   198.18.9.0/24   → no VRP until rtr-v2 phase 2, gone again after
+#                     the phase-5 serial regression
+#   198.18.4.0/24   → prepend 65004: AS_PATH [65003, 65004]; ASPA
+#                     65004→providers from rtr-v2 walks valid →
+#                     invalid (replace) → unknown (withdraw)
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker pull nlnetlabs/routinator:latest
+#   containerlab deploy -t tests/interop/m84-rtr-multicache.clab.yml
+#   bash tests/interop/scripts/test-m84-rtr-multicache.sh
+#   containerlab destroy -t tests/interop/m84-rtr-multicache.clab.yml --cleanup
+
+name: m84-rtr-multicache
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m84-multicache.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.84.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m84.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.84.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    routinator:
+      kind: linux
+      image: nlnetlabs/routinator:latest
+      binds:
+        - ./configs/routinator-m84-slurm.json:/data/slurm.json:ro
+      # Offline + deterministic: no TALs, data comes from the SLURM
+      # local assertions. Short RTR timers so reconnect converges
+      # inside the test window.
+      cmd: >-
+        --no-rir-tals -r /tmp/rtcache --exceptions /data/slurm.json
+        server --rtr 0.0.0.0:3323 --refresh 15 --retry 5 --expire 600
+
+    stayrtr:
+      kind: linux
+      image: rpki/stayrtr:latest
+      binds:
+        - ./configs/rpki-vrps-m84.json:/data/vrps.json:ro
+      cmd: >-
+        -cache /data/vrps.json -bind :3323 -checktime=false -refresh 30
+        -rtr.refresh 15 -rtr.retry 5 -rtr.expire 600 -log.verbose
+
+    rtr-v2:
+      kind: linux
+      image: python:3.12-slim
+      cmd: sleep infinity
+      binds:
+        - ./scripts/rtr-v2-server-m84.py:/usr/local/bin/rtr-v2-server-m84.py:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.84.0.0/24 — rustbgpd (10.84.0.1, AS 65001) ↔ FRR (10.84.0.2, AS 65003)
+# All three caches: management network only (RTR over TCP 3323)

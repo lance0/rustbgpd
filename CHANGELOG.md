@@ -56,6 +56,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attributes, record and total bytes); incomplete, truncated, or
   mixed-generation captures are never reported in sync. Ingestion
   adapters (live gRPC, MRT, BMP) and the CLI surface land separately.
+- **M84 interop job: multi-cache RTR/ASPA epoch conformance** (LAN-243).
+  One containerlab receipt drives the 8210bis per-cache epoch model against
+  Routinator (real RTR v2, offline via `--no-rir-tals` + SLURM assertions),
+  StayRTR (real RTR v1-only), and the in-repo phased RTR v2 server at once:
+  per-cache load at validated End of Data, v2→v1 fallback, cache restart
+  with data retention and session rotation (no validation flap), incremental
+  epoch advance, ASPA provider-set replacement and empty-provider
+  withdrawal, and a same-session serial regression resolved by exactly one
+  Reset Query resync with the stale VRP purged. Local-only, like the other
+  RTR-cache jobs (M21/M27/M59).
+
+### Changed
 
 - **Release publication is now fail-closed.** The binary-release and
   container-image workflows refuse to publish unless the pushed tag

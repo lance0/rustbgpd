@@ -135,6 +135,7 @@ covered by later CI receipts). Procedures and results:
 | M31 | EVPN MAC mobility + sticky preservation (RFC 7432 §15.1/§7.7) | FRR 10.3.1 ×3 |
 | M32 / M32b | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (kernel bond / synthetic ESI) | FRR 10.3.1 ×3 |
 | M33 | EVPN RR scale: 50k Type 2 routes + 60 s of 1000/s churn | in-tree `bench/evpn-load` |
+| M84 | Multi-cache RTR/ASPA epoch conformance (LAN-243): per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
 
 ## Performance and scale receipts
 
