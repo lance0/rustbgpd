@@ -1,0 +1,4 @@
+{"record":"header","schema":"rbgp-ribsnap/1","source":"gobgp-adjout/1 view=adj-rib-out-capture m83-gobgp-member","generation":7}
+{"record":"route","peer":"10.83.2.1","peer_asn":65500,"prefix":"100.65.0.0/24","origin":0,"as_path":[65002],"next_hop":"10.83.2.2"}
+{"record":"route","peer":"10.83.2.1","peer_asn":65500,"prefix":"100.66.0.0/24","origin":0,"as_path":[65002],"next_hop":"10.83.2.2","med":77,"communities":[4259971294],"large_communities":["65002:2:2"]}
+{"record":"trailer","routes":2}

@@ -1480,6 +1480,340 @@ mod tests {
         assert_eq!(first_json, second_json);
     }
 
+    /// Golden-fixture matrix for the incumbent snapshot adapters
+    /// (LAN-308): each converter's output over a raw capture from a real
+    /// M83 lab container must match its checked-in golden byte for byte
+    /// (upstream schema drift breaks these first), parse as a valid
+    /// `rbgp-ribsnap/1` snapshot, and diff clean against a mock daemon
+    /// seeded with the same capture's wire-truth values under the
+    /// adapter's documented ignore set.
+    ///
+    /// Fixture provenance + refresh procedure: deploy the M83 lab
+    /// (tests/interop/m83-routeserver-multistack.clab.yml), start
+    /// BIRD/gobgpd and inject the GoBGP member routes per the M83 test
+    /// script, apply the attribute-marking route-map on FRR so the
+    /// capture exercises MED + communities
+    /// (`route-map RSOUT permit 10` + `set metric 55` +
+    /// `set community 65003:99`, applied out toward 10.83.3.1), then:
+    ///
+    ///   bird:  birdc show route export routeserver all
+    ///   frr:   vtysh -c "show ip bgp neighbor 10.83.3.1 \
+    ///            advertised-routes detail json"   (and the summary
+    ///            form, kept as the refusal fixture)
+    ///   gobgp: gobgp neighbor 10.83.2.1 adj-out -j
+    ///
+    /// Versions at capture: BIRD 2.0.12, FRR 10.3.1, GoBGP 3.37.0.
+    /// Regenerate the .expected.ndjson goldens by re-running the
+    /// converters with `--generation 7` and the per-adapter args below.
+    mod adapters {
+        use super::*;
+
+        const GENERATION: &str = "7";
+
+        #[derive(Clone, Copy)]
+        struct Converter {
+            script: &'static str,
+            raw_fixture: &'static str,
+            golden: &'static str,
+            peer: &'static str,
+            source: &'static str,
+        }
+
+        const BIRD: Converter = Converter {
+            script: "bird2-export-to-ribsnap.py",
+            raw_fixture: "bird-m83-export.txt",
+            golden: "bird-m83.expected.ndjson",
+            peer: "10.83.1.1",
+            source: "m83-bird-member",
+        };
+        const FRR: Converter = Converter {
+            script: "frr-advertised-to-ribsnap.py",
+            raw_fixture: "frr-m83-advertised-detail.json",
+            golden: "frr-m83.expected.ndjson",
+            peer: "10.83.3.1",
+            source: "m83-frr-member",
+        };
+        const GOBGP: Converter = Converter {
+            script: "gobgp-adjout-to-ribsnap.py",
+            raw_fixture: "gobgp-m83-adjout.json",
+            golden: "gobgp-m83.expected.ndjson",
+            peer: "10.83.2.1",
+            source: "m83-gobgp-member",
+        };
+        /// All snapshots record advertisement toward the M83 route
+        /// server (10.83.x.1, AS 65500).
+        const RS_ASN: u32 = 65500;
+
+        fn fixture_path(name: &str) -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ribsnap")
+                .join(name)
+        }
+
+        fn converter_output(converter: &Converter) -> std::process::Output {
+            let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/ribsnap")
+                .join(converter.script);
+            std::process::Command::new("python3")
+                .arg(script)
+                .args(["--peer", converter.peer])
+                .args(["--peer-asn", &RS_ASN.to_string()])
+                .args(["--source", converter.source])
+                .args(["--generation", GENERATION])
+                .arg(fixture_path(converter.raw_fixture))
+                .output()
+                .expect("python3 must be runnable for the adapter golden tests")
+        }
+
+        /// Converter stdout must match the golden byte for byte and the
+        /// golden must parse as a complete, valid snapshot.
+        fn check_golden(converter: &Converter) -> SnapshotData {
+            let output = converter_output(converter);
+            assert!(
+                output.status.success(),
+                "{} failed: {}",
+                converter.script,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let golden_path = fixture_path(converter.golden);
+            // BLESS=1 rewrites the golden (fixture refresh; review the diff).
+            if std::env::var_os("BLESS").is_some() {
+                std::fs::write(&golden_path, &output.stdout).unwrap();
+            }
+            let golden = std::fs::read(&golden_path).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&golden),
+                "{} output diverged from {} — an upstream output-format \
+                 change or a converter regression",
+                converter.script,
+                converter.golden
+            );
+            let opts = opts(&golden_path);
+            parse_snapshot(&golden[..], &opts, &[], &BTreeSet::new(), &[])
+                .expect("golden snapshot must parse as rbgp-ribsnap/1")
+        }
+
+        /// Mock daemon advertising the wire-truth routes captured from
+        /// the same lab (what `rbgp rib recv` on the RS reported each
+        /// member actually put on the wire).
+        async fn wire_truth_server(
+            peer: &str,
+            routes: Vec<server_proto::Route>,
+        ) -> crate::test_support::MockServerHandle {
+            let server = spawn_mock_server(None).await;
+            *server.state.list_neighbors_response.lock().await = vec![neighbor(peer, RS_ASN)];
+            let total = routes.len() as u64;
+            *server.state.list_route_pages.lock().await = vec![page(routes, "", total)];
+            server
+        }
+
+        fn wire_route(
+            prefix: &str,
+            len: u32,
+            next_hop: &str,
+            as_path: Vec<u32>,
+        ) -> server_proto::Route {
+            server_proto::Route {
+                prefix: prefix.to_string(),
+                prefix_length: len,
+                next_hop: next_hop.to_string(),
+                origin: 0, // all M83 member routes were IGP-origin
+                as_path,
+                ..Default::default()
+            }
+        }
+
+        async fn diff_golden_against(
+            converter: &Converter,
+            server: &crate::test_support::MockServerHandle,
+            ignore: &[&str],
+        ) -> (String, i32) {
+            let mut opts = opts(&fixture_path(converter.golden));
+            opts.ignore_attributes = ignore.iter().map(|s| s.to_string()).collect();
+            run_against(server, &opts).await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn bird_golden_matches_and_diffs_clean() {
+            check_golden(&BIRD);
+            // Wire truth from the lab: BIRD advertised 4 statics with
+            // next hop 10.83.1.2 and path [65001]. The BIRD export view
+            // omits as_path/next_hop/origin for locally-originated
+            // routes (pre-encoding view), hence the documented ignore
+            // set; MED and communities compare for real.
+            let routes = vec![
+                server_proto::Route {
+                    communities: vec![(65001 << 16) | 666],
+                    ..wire_route("100.65.0.0", 24, "10.83.1.2", vec![65001])
+                },
+                wire_route("100.69.0.0", 24, "10.83.1.2", vec![65001]),
+                wire_route("100.70.0.0", 24, "10.83.1.2", vec![65001]),
+                server_proto::Route {
+                    med: 120,
+                    communities: vec![(65001 << 16) | 111],
+                    large_communities: vec!["65001:1:1".to_string()],
+                    ..wire_route("203.0.113.0", 24, "10.83.1.2", vec![65001])
+                },
+            ];
+            let server = wire_truth_server(BIRD.peer, routes).await;
+            let (rendered, code) =
+                diff_golden_against(&BIRD, &server, &["as_path", "next_hop", "origin"]).await;
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            assert!(rendered.contains("matched 4"));
+        }
+
+        #[tokio::test]
+        async fn frr_golden_matches_and_diffs_clean() {
+            check_golden(&FRR);
+            // Wire truth: FRR advertised 3 networks with the RSOUT
+            // route-map applied (MED 55, community 65003:99), path
+            // [65003], next hop 10.83.3.2. The FRR detail view shows
+            // pre-prepend AS path and placeholder next hops for
+            // self-originated routes, hence the documented ignore set;
+            // origin, MED, and communities compare for real.
+            let routes = ["100.67.0.0", "100.68.0.0", "100.70.0.0"]
+                .into_iter()
+                .map(|p| server_proto::Route {
+                    med: 55,
+                    communities: vec![(65003 << 16) | 99],
+                    ..wire_route(p, 24, "10.83.3.2", vec![65003])
+                })
+                .collect();
+            let server = wire_truth_server(FRR.peer, routes).await;
+            let (rendered, code) =
+                diff_golden_against(&FRR, &server, &["as_path", "next_hop"]).await;
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            assert!(rendered.contains("matched 3"));
+        }
+
+        #[tokio::test]
+        async fn gobgp_golden_matches_and_diffs_clean() {
+            check_golden(&GOBGP);
+            // GoBGP adj-out is the true post-policy Adj-RIB-Out (own
+            // ASN prepended, next hop rewritten): full attribute
+            // comparison, no ignores.
+            let routes = vec![
+                wire_route("100.65.0.0", 24, "10.83.2.2", vec![65002]),
+                server_proto::Route {
+                    med: 77,
+                    communities: vec![(65002 << 16) | 222],
+                    large_communities: vec!["65002:2:2".to_string()],
+                    ..wire_route("100.66.0.0", 24, "10.83.2.2", vec![65002])
+                },
+            ];
+            let server = wire_truth_server(GOBGP.peer, routes).await;
+            let (rendered, code) = diff_golden_against(&GOBGP, &server, &[]).await;
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            assert!(rendered.contains("matched 2"));
+        }
+
+        /// The explained-difference outcome from the lab: the RS
+        /// rejected 100.68.0.0/24 at import (RPKI-invalid per the M83
+        /// VRP fixture), so the incumbent-side capture carries one
+        /// route the rustbgpd side does not — exit 1 with an
+        /// incumbent-only row, never a false "in sync".
+        #[tokio::test]
+        async fn frr_rov_rejection_reads_as_incumbent_only() {
+            let routes = ["100.67.0.0", "100.70.0.0"]
+                .into_iter()
+                .map(|p| server_proto::Route {
+                    med: 55,
+                    communities: vec![(65003 << 16) | 99],
+                    ..wire_route(p, 24, "10.83.3.2", vec![65003])
+                })
+                .collect();
+            let server = wire_truth_server(FRR.peer, routes).await;
+            let (rendered, code) =
+                diff_golden_against(&FRR, &server, &["as_path", "next_hop"]).await;
+            assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
+            assert!(rendered.contains("verdict: divergent"));
+            assert!(rendered.contains("100.68.0.0/24 [incumbent-only]"));
+        }
+
+        /// Drift protection for the refusal path: the FRR summary form
+        /// (a real 10.3.1 capture) omits communities entirely, so the
+        /// converter must refuse it (exit 2, nothing on stdout) rather
+        /// than emit a snapshot that can never show a communities
+        /// difference.
+        #[test]
+        fn frr_summary_form_is_refused() {
+            let mut converter = FRR;
+            converter.raw_fixture = "frr-m83-advertised-summary.json";
+            let output = converter_output(&converter);
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty(), "refusal must not emit a snapshot");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("summary form"));
+        }
+
+        /// Malformed input is refused (exit 2, no stdout) by every
+        /// converter — EOF-completeness fabrication is impossible
+        /// because the trailer is only written after a full parse.
+        #[test]
+        fn garbage_input_is_refused_by_all_converters() {
+            for converter in [&BIRD, &FRR, &GOBGP] {
+                let mut bad = *converter;
+                bad.raw_fixture = "bird-m83-export.txt"; // valid for BIRD only
+                if converter.script == BIRD.script {
+                    bad.raw_fixture = "gobgp-m83-adjout.json"; // JSON is not birdc text
+                }
+                let output = converter_output(&bad);
+                assert_eq!(
+                    output.status.code(),
+                    Some(2),
+                    "{} accepted foreign input",
+                    converter.script
+                );
+                assert!(output.stdout.is_empty());
+            }
+        }
+
+        /// `rbgp diff snapshot from-mrt` output (the from-mrt golden)
+        /// round-trips through the snapshot parser and diffs clean
+        /// against a daemon advertising the same routes — Add-Path
+        /// duplicates compare by multiplicity, path IDs are never
+        /// compared.
+        #[tokio::test]
+        async fn from_mrt_golden_diffs_clean() {
+            let golden = fixture_path("from-mrt.expected.ndjson");
+            let v6 = |path_id: u32| server_proto::Route {
+                prefix: "2001:db8::".to_string(),
+                prefix_length: 32,
+                next_hop: "2001:db8::1".to_string(),
+                origin: 0,
+                as_path: vec![65001],
+                path_id,
+                ..Default::default()
+            };
+            let routes = vec![
+                server_proto::Route {
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.1".to_string(),
+                    origin: 0,
+                    as_path: vec![65001, 65002],
+                    med: 120,
+                    local_pref_attr: Some(100),
+                    communities: vec![(65001 << 16) | 111],
+                    extended_communities: vec![0x0002_FDE9_0000_006F],
+                    large_communities: vec!["65001:1:1".to_string()],
+                    ..Default::default()
+                },
+                v6(1),
+                v6(2),
+            ];
+            let server = spawn_mock_server(None).await;
+            *server.state.list_neighbors_response.lock().await = vec![neighbor("192.0.2.9", 64501)];
+            *server.state.list_route_pages.lock().await = vec![page(routes, "", 3)];
+            let (rendered, code) = run_against(&server, &opts(&golden)).await.unwrap();
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            // Per-family summaries count NLRIs: 1 IPv4, 1 IPv6 (whose two
+            // Add-Path copies matched as a multiplicity-2 multiset).
+            assert!(rendered.contains("ipv4_unicast: matched 1"));
+            assert!(rendered.contains("ipv6_unicast: matched 1"));
+        }
+    }
+
     #[tokio::test]
     async fn peer_filter_selects_and_content_after_trailer_is_malformed() {
         // --peer restricts the comparison to the named peer.

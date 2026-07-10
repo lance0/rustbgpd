@@ -140,10 +140,13 @@ Unknown fields are rejected (typo protection). All fields except
 
 ### Producing a snapshot
 
-Any process that can list the incumbent's per-member advertised routes
-can produce the format. Python sketch (adapt `export_routes()` to your
-incumbent — `birdc show route export`, `vtysh -c "show ip bgp neighbor X
-advertised-routes json"`, an API, etc.):
+Bundled adapters cover MRT `TABLE_DUMP_V2` dumps and the three common
+incumbent stacks — see [Snapshot adapters](#snapshot-adapters) below.
+Beyond those, any process that can list the incumbent's per-member
+advertised routes can produce the format. Python sketch (adapt
+`export_routes()` to your incumbent — `birdc show route export`,
+`vtysh -c "show ip bgp neighbor X advertised-routes json"`, an API,
+etc.):
 
 ```python
 import json, sys
@@ -180,6 +183,75 @@ Or with `jq`, from a JSON export shaped like
      '{record:"trailer",routes:$n}'
 } > incumbent.ndjson
 ```
+
+## Snapshot adapters
+
+Four adapters turn an incumbent's own output into `rbgp-ribsnap/1`
+NDJSON. Each is a versioned contract: the header's `source` field is
+`<adapter>/<contract-version> view=adj-rib-out-capture [label]`, so a
+report always names which adapter (and which of its revisions) produced
+the incumbent side. Common rules:
+
+- **Completeness** is the counted trailer, written only after the whole
+  input converts; any parse failure exits 2 with nothing on stdout, so a
+  half-converted snapshot with a valid trailer cannot exist.
+- **No fabrication**: an attribute the source view does not expose is
+  omitted, never defaulted. Attribute kinds a source renders only
+  symbolically (BIRD/FRR/GoBGP extended communities) are skipped with a
+  note on stderr — compare with `--ignore-attribute extended_communities`.
+- **MED 0 is omitted** like an absent MED, matching the live side's
+  documented MED conflation.
+
+| Adapter | Capture command (verified against) | Form |
+|---------|-------------------------------------|------|
+| `from-mrt/1` | `rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <ip> --peer-asn <asn>` (RFC 6396 `TABLE_DUMP_V2`, RFC 8050 Add-Path subtypes) | in-binary subcommand |
+| `bird2-export/1` | `birdc show route export <member-proto> all` (BIRD 2.0.12) | [`scripts/ribsnap/bird2-export-to-ribsnap.py`](../scripts/ribsnap/bird2-export-to-ribsnap.py) |
+| `frr-advertised/1` | `vtysh -c "show ip bgp neighbor <ip> advertised-routes detail json"` (FRR 10.3.1) | [`scripts/ribsnap/frr-advertised-to-ribsnap.py`](../scripts/ribsnap/frr-advertised-to-ribsnap.py) |
+| `gobgp-adjout/1` | `gobgp neighbor <ip> adj-out -j` (GoBGP 3.37.0) | [`scripts/ribsnap/gobgp-adjout-to-ribsnap.py`](../scripts/ribsnap/gobgp-adjout-to-ribsnap.py) |
+
+The converters are stdlib-only Python 3; all take
+`--peer <ip> --peer-asn <asn> [--source <label>] [--generation <n>]` and
+read the capture from a file argument or stdin. Exit codes: 0 snapshot
+on stdout, 2 refused. Per-incumbent capture prerequisites, view
+limitations, and worked examples live in the
+[route-server migration cookbook](cookbook/route-server-migration.md#capturing-the-incumbents-advertised-view).
+
+### `rbgp diff snapshot from-mrt` and the `--view` contract
+
+RFC 6396 `TABLE_DUMP_V2` is, by default, a **collector RIB view** — best
+paths as seen by a collector, not what any client was sent after export
+policy. The required `--view` flag is the producer's attestation of what
+the dump actually is:
+
+- `adj-rib-out-capture` — the dump was produced by capturing one
+  client's post-policy advertised routes (e.g. a shadow session feeding
+  a dump tool). Accepted; this is the only view comparable against an
+  Adj-RIB-Out.
+- `loc-rib` / `adj-rib-in` — refused (exit 2, nothing emitted). A
+  Loc-RIB or pre-policy view compared against an Adj-RIB-Out would
+  report every export-policy effect as divergence — or worse, mask a
+  real divergence as an expected one. The adapter labels the input
+  non-comparable instead of pretending.
+
+Wire handling: AS_PATH is decoded as 4-octet (mandatory in
+`TABLE_DUMP_V2`); both the §4.3.4 abbreviated `MP_REACH_NLRI` (next-hop
+only) and the full RFC 4760 form some collectors emit are accepted (a
+leading zero octet can only be an AFI high byte, which disambiguates);
+RFC 8050 Add-Path entries carry their path identifier through as
+`path_id`. Extended and large communities are emitted from the raw
+attribute bytes.
+
+### Golden fixtures
+
+Each converter is pinned by golden tests in `cargo test -p rustbgpctl`
+(`commands::diff::tests::adapters`): a raw capture taken from a real
+container (the M83 route-server multi-stack lab: BIRD 2.0.12,
+FRR 10.3.1, GoBGP 3.37.0) must convert byte-for-byte to its checked-in
+`.expected.ndjson`, parse as a complete snapshot, and diff clean against
+the same capture's wire-truth values. An upstream output-format change
+breaks these tests first. The fixture-refresh procedure (redeploy the
+lab, recapture, re-run the converters with `BLESS=1`) is documented in
+the test module.
 
 ## JSON report
 

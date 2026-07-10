@@ -1,0 +1,5 @@
+{"generation":3,"record":"header","schema":"rbgp-ribsnap/1","source":"from-mrt/1 view=adj-rib-out-capture m83-capture"}
+{"as_path":[65001,65002],"communities":[4259905647],"extended_communities":[842127122628719],"large_communities":["65001:1:1"],"local_pref":100,"med":120,"next_hop":"192.0.2.1","origin":0,"peer":"192.0.2.9","peer_asn":64501,"prefix":"203.0.113.0/24","record":"route"}
+{"as_path":[65001],"next_hop":"2001:db8::1","origin":0,"path_id":1,"peer":"192.0.2.9","peer_asn":64501,"prefix":"2001:db8::/32","record":"route"}
+{"as_path":[65001],"next_hop":"2001:db8::1","origin":0,"path_id":2,"peer":"192.0.2.9","peer_asn":64501,"prefix":"2001:db8::/32","record":"route"}
+{"record":"trailer","routes":3}

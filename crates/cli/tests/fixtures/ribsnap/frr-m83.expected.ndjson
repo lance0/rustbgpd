@@ -1,0 +1,5 @@
+{"record":"header","schema":"rbgp-ribsnap/1","source":"frr-advertised/1 view=adj-rib-out-capture m83-frr-member","generation":7}
+{"record":"route","peer":"10.83.3.1","peer_asn":65500,"prefix":"100.67.0.0/24","origin":0,"med":55,"communities":["65003:99"]}
+{"record":"route","peer":"10.83.3.1","peer_asn":65500,"prefix":"100.68.0.0/24","origin":0,"med":55,"communities":["65003:99"]}
+{"record":"route","peer":"10.83.3.1","peer_asn":65500,"prefix":"100.70.0.0/24","origin":0,"med":55,"communities":["65003:99"]}
+{"record":"trailer","routes":3}

@@ -157,6 +157,143 @@ export_policy_chain = ["member-alpha-out"]
 per_client_best = true
 ```
 
+## Capturing the incumbent's advertised view
+
+One snapshot per member, produced on (or from) the incumbent route
+server with the bundled adapters (`scripts/ribsnap/`, stdlib-only
+Python 3; adapter contract in [`docs/ribdiff.md`](../ribdiff.md)). All
+converters exit 0 with the snapshot on stdout, or 2 (nothing emitted)
+when the input is malformed or not the expected form — a truncated or
+wrong-form capture can never read as "in sync".
+
+### BIRD 2 (verified: 2.0.12)
+
+```bash
+birdc show route export <member-protocol> all > bird-<member>.txt
+scripts/ribsnap/bird2-export-to-ribsnap.py \
+    --peer <member-ip> --peer-asn <member-asn> bird-<member>.txt \
+    > bird-<member>.ndjson
+```
+
+Prerequisites and limitations:
+
+- `show route export P` computes P's export filters on the fly — no
+  config change needed, but it reflects the table *now*, not what was
+  actually sent. If the incumbent has `export table on` (an Adj-RIB-Out
+  kept per protocol, at ~one table's memory cost per member), capture
+  that instead (`show route export table <member-protocol> all`) for a
+  true sent-view; the converter accepts both (same text format).
+- The view is pre-encoding: locally-originated routes carry no
+  `BGP.as_path` / `BGP.next_hop` / `BGP.origin` — those fields are
+  omitted, never fabricated. A transparent route server neither prepends
+  nor rewrites toward `rs client` members, so member-learned routes
+  compare fully; if your capture includes RS-originated routes, add
+  `--ignore-attribute` for the missing fields.
+- `BGP.ext_community` is printed symbolically and is skipped (stderr
+  note); compare with `--ignore-attribute extended_communities`.
+
+### FRR (verified: 10.3.1)
+
+```bash
+vtysh -c "show ip bgp neighbor <member-ip> advertised-routes detail json" \
+    > frr-<member>.json
+scripts/ribsnap/frr-advertised-to-ribsnap.py \
+    --peer <member-ip> --peer-asn <member-asn> frr-<member>.json \
+    > frr-<member>.ndjson
+```
+
+Prerequisites and limitations:
+
+- The `detail` form is required — the summary form
+  (`advertised-routes json`) has no community information at all, and
+  the converter refuses it (exit 2) rather than emit a snapshot that can
+  never show a communities difference. Both forms are post-policy
+  (outbound route-map rewrites are reflected; verified on 10.3.1).
+- The detail form lists every RIB path per advertised prefix, including
+  paths not advertised to this member; only the
+  `bestpath.overall == true` path is converted. Members with
+  `addpath-tx-all-paths` are not supported by this converter.
+- The view is pre-prepend / pre-nexthop-rewrite: `aspath` excludes FRR's
+  own ASN and self-originated routes show next hop `0.0.0.0` (omitted,
+  never fabricated). Toward `route-server-client` members there is no
+  prepend or rewrite, so member-learned routes compare fully.
+- FRR emits `metric: 0` whether MED was absent or zero; both convert to
+  an omitted `med` (matching the diff's documented MED conflation).
+- `extendedCommunity` is rendered symbolically and skipped (stderr
+  note).
+
+### GoBGP (verified: 3.37.0)
+
+```bash
+gobgp neighbor <member-ip> adj-out -j > gobgp-<member>.json
+scripts/ribsnap/gobgp-adjout-to-ribsnap.py \
+    --peer <member-ip> --peer-asn <member-asn> gobgp-<member>.json \
+    > gobgp-<member>.ndjson
+```
+
+Prerequisites and limitations:
+
+- `adj-out` is a true post-policy Adj-RIB-Out (own-ASN prepend and
+  next-hop rewrite included), so no attribute needs to be ignored.
+- With Add-Path send negotiated, `adj-out -j` emits one entry per path
+  but no path identifier (verified on 3.37.0): duplicates become
+  repeated route records. The diff compares multiplicity and never
+  compares path IDs, so this is lossless for the verdict.
+- Extended communities are rendered structurally and skipped (stderr
+  note).
+
+### MRT dumps
+
+If the incumbent's advertised view exists as an MRT `TABLE_DUMP_V2`
+file, convert it in-binary:
+
+```bash
+rbgp diff snapshot from-mrt capture.mrt --view adj-rib-out-capture \
+    --peer <member-ip> --peer-asn <member-asn> > mrt-<member>.ndjson
+```
+
+`--view` is the honesty gate: `TABLE_DUMP_V2` is by default a collector
+RIB view, and only a dump you can attest is a per-client post-policy
+capture (`adj-rib-out-capture`) is comparable. `--view loc-rib` and
+`--view adj-rib-in` are refused with exit 2 — a Loc-RIB compared against
+an Adj-RIB-Out reports every export-policy effect as divergence.
+
+### Example reports
+
+From the M83 multi-stack lab (FRR member AS 65003 advertising three
+prefixes with MED 55 and community 65003:99 toward the route server at
+10.83.3.1). The equal outcome, exit 0:
+
+```text
+diff advertised: incumbent "frr-advertised/1 view=adj-rib-out-capture m83-frr-member" (generation 7) vs rustbgpd-grpc (adj-rib-out, advertised)
+schema rbgp-ribdiff/1; normalization v1; ignored attributes: as_path, next_hop
+live-source notes:
+  - med: the daemon proto carries MED as a bare integer, so MED-absent and MED 0 are indistinguishable over gRPC; live med=0 is compared as absent (snapshot producers should omit `med` when it is zero or absent)
+  - as_path: the daemon proto exposes a flattened ASN list, so AS_PATH is compared as a single AS_SEQUENCE on both sides; AS_SET structure is not compared
+  - unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, med, local_pref, communities, extended/large communities) are not visible over gRPC and are not compared
+  - generation: the route-listing API exposes no RIB generation token; mid-walk listing drift is detected via per-page total_count instead, and the snapshot header's generation is adopted for the live side
+verdict: in_sync
+per-peer summary:
+  10.83.3.1 AS65500 ipv4_unicast: matched 3, incumbent-only 0, rustbgpd-only 0, attribute-changed 0, multiplicity-changed 0
+```
+
+The explained-difference outcome, exit 1: rustbgpd rejected
+100.68.0.0/24 at import (RPKI-invalid under the lab's VRP set), so the
+incumbent advertises one route the shadow does not — an expected,
+explainable divergence during a migration that tightens ROV:
+
+```text
+verdict: divergent
+per-peer summary:
+  10.83.3.1 AS65500 ipv4_unicast: matched 2, incumbent-only 1, rustbgpd-only 0, attribute-changed 0, multiplicity-changed 0
+differences (1 total, showing 1):
+  - 10.83.3.1 ipv4_unicast 100.68.0.0/24 [incumbent-only]
+```
+
+(Header and live-source notes identical to the equal report and elided
+here.) Divergences you cannot explain from a deliberate policy delta are
+cutover blockers.
+
 ## Cutover checklist
 
 1. Build the candidate config and run `rustbgpd --check`.
@@ -173,8 +310,9 @@ per_client_best = true
 
    Then run the systematic per-member advertised-view diff: export the
    incumbent's advertised routes to an `rbgp-ribsnap/1` NDJSON snapshot
-   (format and producer sketches in [`docs/ribdiff.md`](../ribdiff.md))
-   and compare it against the live Adj-RIB-Out:
+   with the bundled adapters (below; format details in
+   [`docs/ribdiff.md`](../ribdiff.md)) and compare it against the live
+   Adj-RIB-Out:
 
    ```bash
    rbgp diff advertised --against incumbent.ndjson          # all snapshot members
