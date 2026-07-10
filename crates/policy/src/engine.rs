@@ -72,8 +72,9 @@ impl PolicyResult {
 pub struct RouteContext<'a> {
     /// The route's NLRI prefix, when the address family carries one.
     ///
-    /// Prefix predicates do not match prefixless families such as BGP-LS
-    /// topology NLRIs.
+    /// Prefix predicates do not match prefixless routes such as BGP-LS
+    /// topology NLRIs or `FlowSpec` rules without a destination-prefix
+    /// component.
     pub prefix: Option<Prefix>,
     /// The route's resolved next-hop, if any.
     pub next_hop: Option<IpAddr>,

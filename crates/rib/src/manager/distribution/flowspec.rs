@@ -246,10 +246,10 @@ impl RibManager {
                     continue;
                 }
 
+                // A rule without a destination-prefix component stays
+                // `None` — fabricating `0.0.0.0/0` would spuriously match
+                // prefix-based policy terms (same class as the BGP-LS fix).
                 let dest_prefix = best.rule.destination_prefix();
-                let prefix_for_policy = dest_prefix.unwrap_or(Prefix::V4(
-                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
-                ));
                 let aspath_str = if needs_as_path_string {
                     best.as_path()
                         .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
@@ -258,7 +258,7 @@ impl RibManager {
                 };
                 let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                 let ctx = RouteContext {
-                    prefix: Some(prefix_for_policy),
+                    prefix: dest_prefix,
                     next_hop: None,
                     extended_communities: best.extended_communities(),
                     communities: best.communities(),

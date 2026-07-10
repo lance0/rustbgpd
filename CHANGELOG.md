@@ -269,6 +269,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   maps but left a withdrawn-then-re-added managed link or NHG member
   update suppressed until restart (and the stale NHG record kept the
   adoption-cleanup gate blocked). (LAN-290)
+- **Destination-less FlowSpec rules no longer fabricate `0.0.0.0/0` in the
+  export policy context.** A legal FlowSpec rule without a destination-prefix
+  component was presented to export policy as an IPv4 default route — for
+  IPv6 rules too — so exact-match `0.0.0.0/0` policy terms spuriously matched
+  (and could suppress or admit) rules that carry no destination at all. Such
+  rules are now `prefix = None` in the policy context, matching the import
+  path and the BGP-LS prefixless-context convention; rules that do carry a
+  destination prefix still evaluate it unchanged. (LAN-291)
 
 ## [0.50.0] — 2026-07-05
 
