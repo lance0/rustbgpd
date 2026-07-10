@@ -197,9 +197,10 @@ deliberately not part of this receipt.
 
 ## Reproduction
 
-The harness is a scratch crate (kept out of the repo, shape pinned
-here, matching the other perf receipts). Structure: a single tokio
-binary that (1) dials 700 real BGP sessions into a release-build
+The harness is committed at `bench/scale/reloadstall/` (a standalone
+crate kept out of the workspace; build it explicitly). Structure: a
+single tokio binary that (1) dials 700 real BGP sessions into a
+release-build
 rustbgpd started from a generated config (700 route-server-client
 neighbors, global rpol chains, gRPC UDS on), binding stub sources
 127.1.x.y with router-ids 240.1.x.y — higher than the daemon's, so
@@ -218,7 +219,13 @@ wall times come from the daemon's JSON log (`config reload
 complete`); the probe is a 50 ms shell loop timing `rbgp health`
 against the UDS socket.
 
-Run shape: `reloadstall 700 400400 <port> <daemon_pid> <live.rpol>
-<gen-a.rpol> <gen-b.rpol> 4 30` after a load-gated daemon start; the
-two policy generations are exactly the chains quoted in the Scenario
-section.
+Build and run shape:
+
+```text
+cd bench/scale/reloadstall && cargo build --release
+./target/release/reloadstall 700 400400 <port> <daemon_pid> \
+    <live.rpol> <gen-a.rpol> <gen-b.rpol> 4 30
+```
+
+after a load-gated daemon start; the two policy generations are
+exactly the chains quoted in the Scenario section.

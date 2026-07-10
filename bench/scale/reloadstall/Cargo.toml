@@ -1,0 +1,15 @@
+[package]
+name = "reloadstall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustbgpd-wire = { path = "../../../crates/wire" }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+libc = "0.2"
+
+[profile.release]
+debug = 1
+
+[workspace]
