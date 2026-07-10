@@ -1,6 +1,6 @@
 # ADR-0103: rpol execution model, purity contract, and evaluation budgets
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-09
 
 **Scope:** the gating decisions for every deep rpol extension — typed
@@ -90,33 +90,44 @@ signal.
 | 1,000-prefix list as 1,000 IR terms | 2,488 |
 | Same list as one indexed set probe | 19.5 |
 
-**Spike B — fuel-metered stack machine** (standalone spike crate: the
-same 15-term, mixed match/no-match program — prefix-set probe,
-community scans, scalar compares, checked arithmetic — lowered once to
-a guard tree and once to a 50-op jump-threaded bytecode; 1M-route
-mixed stream, verdict tallies asserted identical across evaluators;
-best-of-5 timing, three process runs):
+**Spike B — fuel-metered stack machine**
+(`docs/adr/0103-rpol-execution-model-spike/`; raw outputs of every run
+and exact reproduction commands in its README): the same 15-term,
+mixed match/no-match program — prefix-set probe, community scans,
+scalar compares, checked arithmetic — lowered once to a guard tree and
+once to a 50-op jump-threaded bytecode; 1M-route mixed stream;
+best-of-5 timing, three process runs. Two hard assertions guard the
+numbers: verdict tallies must be identical across all three
+evaluators, and the fuel actually consumed must equal an independently
+computed op-count oracle (24,557,144 ops for this workload) — the fuel
+decrement is provably live, not optimized away.
 
-| Evaluator | ns/route | vs tree-walk |
+| Evaluator | ns/route (best-of-5, per run) | vs tree-walk |
 |---|---|---|
-| Tree-walk (models the shipped IR) | 57–64 | 1.0× |
-| Bytecode dispatch loop | 53–60 | 0.86–1.04× |
-| Bytecode + per-instruction fuel decrement | 49–50 | 0.78–0.87× |
+| Tree-walk (models the shipped IR) | 57–62 | 1.0× |
+| Bytecode dispatch loop | 47–53 | 0.75–0.94× |
+| Bytecode + per-instruction fuel decrement | 52–56 | 0.84–0.99× (+0–20% over bare bytecode) |
 
 Two findings decide the question:
 
-1. **Bytecode is at parity, not a win.** 0.86–1.04× across runs — the
-   spread is codegen/layout jitter, not a signal. Evaluation cost lives
-   in the match-data probes (set lookups, community scans, regex), the
-   same conclusion ADR-0096 drew from the field survey; linearizing the
-   dispatch around those probes moves nothing that matters.
-2. **Fuel metering costs less than measurement noise.** The fueled
-   variant beat the unfueled one in every run — an inlining/layout
-   artifact, but conclusive as a bound: a decrement-and-branch per
-   instruction is invisible at these shapes. Metering therefore does
-   not need bytecode to be cheap; **the fuel/step budget lands on the
-   tree-walk** (Decision 3), and LAN-301 is re-scoped accordingly
-   (see the implementation plan).
+1. **Bytecode is a modest constant factor, not a step change.**
+   0.75–0.94× across runs — at best ~25% on a deliberately
+   dispatch-heavy synthetic, consistent with the 10–40% BIRD reported
+   from linearization in the ADR-0096 survey. Evaluation cost lives in
+   the match-data probes (set lookups, community scans, regex — Spike
+   A's 128× set-index ratio), and no constant factor of that size
+   justifies surrendering the analyzable tree that the four IR
+   consumers diff, render, and analyze directly.
+2. **Metering is affordable even at its worst case.** With the counter
+   provably live, a decrement-and-branch on *every instruction* costs
+   0–20% over bare bytecode run-to-run — and the fueled bytecode still
+   evaluates at or below the tree-walk's cost (0.84–0.99×). The
+   shipped design charges fuel only at loop back-edges and iteration
+   steps (Decision 3), a strict subset of per-instruction metering, so
+   this is an upper bound and V1-shaped programs pay zero. Metering
+   therefore does not need bytecode to be cheap; **the fuel/step
+   budget lands on the tree-walk**, and LAN-301 is re-scoped
+   accordingly (see the implementation plan).
 
 **Bytecode re-entry gate:** build the compact bytecode tier only when a
 profile of a real workload shows chain-walk dispatch (not set probes)
@@ -155,9 +166,11 @@ observe bytecode.
   If read-back semantics are ever demanded, they are a separate ADR —
   they break memoization (`ExportMemo` memoizes on source-attr
   identity + modifications) and are excluded here.
-- User functions (LAN-304) are **pure, total, non-recursive**
+- User functions (LAN-304) are **pure, terminating, non-recursive**
   expressions over these values: no side effects, call graph is a DAG
-  (the apply precedent), fully inlined at compile time.
+  (the apply precedent), fully inlined at compile time. They are *not*
+  total — checked arithmetic inside a function body can raise an
+  evaluation error, which propagates per Decision 4.
 
 ### Grammar evolution rules (binding for every slice)
 
