@@ -53,7 +53,7 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 }
 
 /// Verify an `AS_PATH` using the role-aware ASPA procedures from
-/// `draft-ietf-sidrops-aspa-verification-25` §5.4 and §5.5.
+/// `draft-ietf-sidrops-aspa-verification-26` §5.4 and §5.5.
 ///
 /// With no configured role, this preserves rustbgpd's legacy upstream-only
 /// behavior. When the local role is [`BgpRole::Customer`], routes are treated
@@ -67,7 +67,7 @@ pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) 
 }
 
 /// Verify an `AS_PATH` using upstream ASPA verification per
-/// `draft-ietf-sidrops-aspa-verification-25` §5.4.
+/// `draft-ietf-sidrops-aspa-verification-26` §5.4.
 ///
 /// The compressed path is indexed as `hop[0]` = neighbor AS (closest),
 /// `hop[N-1]` = origin AS (farthest). The algorithm walks from origin
@@ -489,15 +489,17 @@ mod tests {
 
     fn nist_brio_common_demo_table() -> AspaTable {
         // NIST-BRIO b7.1.2, commit 23ee402f (2025-08-08):
-        // brio-examples/demo-aspa-upstream/exp13.brio_rc.script and
-        // brio-examples/demo-aspa-downstream/exp1.brio_rc.script and
-        // brio-examples/demo-aspa-downstream/exp57.README.tpl.md.
+        // brio-examples/demo-aspa-upstream/{exp13,exp46,exp79}.brio_rc.script
+        // and brio-examples/demo-aspa-downstream/{exp1,exp14}.brio_rc.script
+        // and brio-examples/demo-aspa-downstream/exp57.README.tpl.md.
+        // AS 65060's record is the AS0-only "no providers" attestation,
+        // encoded exactly as the cache scripts send it (`addASPA 65060 0`).
         make_table(vec![
             (65000, vec![65020, 65030]),
             (65010, vec![65040]),
             (65020, vec![65050]),
             (65030, vec![65050, 65060]),
-            (65060, Vec::new()),
+            (65060, vec![0]),
         ])
     }
 
@@ -560,6 +562,68 @@ mod tests {
     }
 
     #[test]
+    fn nist_brio_exp46_upstream_vectors() {
+        let table = nist_brio_common_demo_table();
+        let upstream = Some(BgpRole::Provider);
+
+        // BRIO exp46 bundles upstream examples #4, #5, and #6, received
+        // by C: D E B => Unknown, A D E B => Invalid, A D G E B =>
+        // Invalid (G's AS0-only ASPA proves the G→D hop unauthorized).
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65030,
+            &[65030, 65040, 65010],
+            AspaValidation::Unknown,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65000,
+            &[65000, 65030, 65040, 65010],
+            AspaValidation::Invalid,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65000,
+            &[65000, 65030, 65060, 65040, 65010],
+            AspaValidation::Invalid,
+        );
+    }
+
+    #[test]
+    fn nist_brio_exp79_upstream_vectors() {
+        let table = nist_brio_common_demo_table();
+        let upstream = Some(BgpRole::Provider);
+
+        // BRIO exp79 bundles upstream examples #7, #8, and #9, received
+        // by D: A C F => Invalid, A C F G => Invalid (AS0-only ASPA on
+        // G), E B => Valid.
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65000,
+            &[65000, 65020, 65050],
+            AspaValidation::Invalid,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65000,
+            &[65000, 65020, 65050, 65060],
+            AspaValidation::Invalid,
+        );
+        assert_nist_brio_case(
+            &table,
+            upstream,
+            65040,
+            &[65040, 65010],
+            AspaValidation::Valid,
+        );
+    }
+
+    #[test]
     fn nist_brio_downstream_vectors() {
         let table = nist_brio_common_demo_table();
         let downstream = Some(BgpRole::Customer);
@@ -594,6 +658,55 @@ mod tests {
             downstream,
             65020,
             &[65020, 65030, 65060, 65040, 65010],
+            AspaValidation::Invalid,
+        );
+    }
+
+    #[test]
+    fn nist_brio_exp8_downstream_vector() {
+        // BRIO downstream exp8: D receives F C A from its provider F =>
+        // Valid (a pure up-ramp seen from the down side). exp8's cache
+        // script carries a subset of the common demo table; the extra
+        // rows (B, G) name ASes absent from this path and cannot change
+        // the verdict.
+        let table = nist_brio_common_demo_table();
+        assert_nist_brio_case(
+            &table,
+            Some(BgpRole::Customer),
+            65050,
+            &[65050, 65020, 65000],
+            AspaValidation::Valid,
+        );
+    }
+
+    #[test]
+    fn nist_brio_exp14_downstream_vectors() {
+        let table = nist_brio_common_demo_table();
+        let downstream = Some(BgpRole::Customer);
+
+        // BRIO exp14 bundles downstream examples received by B from its
+        // provider E (#1, E G F C A => Unknown, is already pinned by the
+        // exp1 vector above): E G D A => Valid, E D C A => Unknown,
+        // E G D C A => Invalid.
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65060, 65030, 65000],
+            AspaValidation::Valid,
+        );
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65030, 65020, 65000],
+            AspaValidation::Unknown,
+        );
+        assert_nist_brio_case(
+            &table,
+            downstream,
+            65040,
+            &[65040, 65060, 65030, 65020, 65000],
             AspaValidation::Invalid,
         );
     }

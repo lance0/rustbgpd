@@ -623,6 +623,26 @@ impl RtrClient {
                             customer_asn,
                             provider_asns,
                         } if pending_session.is_some() => {
+                            // 8210bis §5.12: an ASPA announcement MUST carry
+                            // at least one Provider ASN, and one carrying
+                            // multiple Provider ASNs MUST NOT contain AS 0
+                            // ("ASPA Provider List Error"). Accepting an
+                            // empty announcement would fabricate an
+                            // all-invalidating attestation for the customer.
+                            if flags & 1 == 1
+                                && (provider_asns.is_empty()
+                                    || (provider_asns.len() > 1 && provider_asns.contains(&0)))
+                            {
+                                warn!(
+                                    server = %self.config.server_addr,
+                                    customer_asn,
+                                    providers = provider_asns.len(),
+                                    "RTR ASPA announcement with invalid provider list"
+                                );
+                                return Err(RtrError::ProtocolViolation(
+                                    "ASPA provider list error",
+                                ));
+                            }
                             let record = AspaRecord {
                                 customer_asn,
                                 provider_asns,
@@ -2020,5 +2040,133 @@ mod tests {
 
         client_handle.abort();
         let _ = client_handle.await;
+    }
+
+    /// Drive one transaction whose payload contains `aspa`, and assert the
+    /// client rejects the response (8210bis §5.12 "ASPA Provider List
+    /// Error"): the connection is dropped without publishing and the
+    /// reconnect starts over with a Reset Query.
+    async fn assert_aspa_announcement_rejected(aspa: RtrPdu) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                aspa,
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert!(vrp_rx.try_recv().is_err());
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aspa_announcement_without_providers_is_rejected() {
+        // 8210bis §5.12: an announcement MUST contain at least one
+        // Provider ASN (an empty set is only valid on a withdrawal).
+        assert_aspa_announcement_rejected(RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![],
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aspa_announcement_with_as0_among_multiple_providers_is_rejected() {
+        // 8210bis §5.12: a multi-provider announcement MUST NOT contain
+        // AS 0. (A single-provider AS 0 announcement is the legal
+        // "no providers" attestation and stays accepted.)
+        assert_aspa_announcement_rejected(RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![0, 65002],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn aspa_as0_only_announcement_is_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Aspa {
+                    flags: 1,
+                    customer_asn: 65001,
+                    provider_asns: vec![0],
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 100,
+                    refresh: 60,
+                    retry: 5,
+                    expire: 120,
+                },
+            ],
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![],
+                aspa_records: vec![AspaRecord {
+                    customer_asn: 65001,
+                    provider_asns: vec![0],
+                }],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[test]
+    fn serial_not_before_rfc1982_boundaries() {
+        // Same serial: not a regression.
+        assert!(serial_not_before(100, 100));
+        // Forward step, including across the u32 wrap.
+        assert!(serial_not_before(100, 101));
+        assert!(serial_not_before(u32::MAX, 0));
+        assert!(serial_not_before(u32::MAX, (1 << 31) - 2));
+        // Backward step, including across the wrap, is a regression.
+        assert!(!serial_not_before(101, 100));
+        assert!(!serial_not_before(0, u32::MAX));
+        // Exactly half the number space away is undefined in RFC 1982;
+        // treated as a regression (the conservative reading).
+        assert!(!serial_not_before(0, 1 << 31));
     }
 }
