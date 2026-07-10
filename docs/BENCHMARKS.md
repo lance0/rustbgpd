@@ -7,6 +7,12 @@ For the consolidated operator-facing proof index that rolls benchmark, memory,
 interop, dataplane, and soak receipts together, see
 [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
 
+Releases newer than v0.50.0 build the published artifacts — the GHCR
+runtime image and the release tarballs — with this same `--release`
+profile plus `--features jemalloc`, so shipped binaries match the
+benchmarked build (earlier releases shipped a CI-profile, glibc-malloc
+build).
+
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation, distribution-fanout baseline, and memory
 attribution correction: 2026-06-02; structured high-N RIB memory profile:

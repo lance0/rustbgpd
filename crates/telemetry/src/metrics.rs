@@ -1662,6 +1662,11 @@ impl BgpMetrics {
             .register(Box::new(event_outbox_cursor_gap.clone()))
             .expect("metric not already registered");
 
+        #[cfg(feature = "jemalloc")]
+        registry
+            .register(Box::new(jemalloc_stats::JemallocCollector::new()))
+            .expect("metric not already registered");
+
         Self {
             registry,
             instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
@@ -3080,6 +3085,105 @@ impl Drop for EventStreamSubscriberGuard {
     }
 }
 
+/// jemalloc allocator statistics, refreshed at scrape time.
+///
+/// A custom [`prometheus::core::Collector`] rather than plain gauges:
+/// `Registry::gather()` calls `collect()` on every scrape, so the
+/// values are always current without any refresh plumbing in the
+/// daemon. Compiled only under the `jemalloc` feature — the same
+/// feature that installs jemalloc as the global allocator — so a
+/// glibc-malloc build registers nothing.
+#[cfg(feature = "jemalloc")]
+mod jemalloc_stats {
+    use prometheus::IntGauge;
+    use prometheus::core::{Collector, Desc};
+    use prometheus::proto::MetricFamily;
+    use tikv_jemalloc_ctl::{epoch, stats};
+
+    pub(super) struct JemallocCollector {
+        allocated: IntGauge,
+        active: IntGauge,
+        resident: IntGauge,
+        mapped: IntGauge,
+        descs: Vec<Desc>,
+    }
+
+    impl JemallocCollector {
+        pub(super) fn new() -> Self {
+            let allocated = IntGauge::new(
+                "jemalloc_allocated_bytes",
+                "Bytes allocated by the application (jemalloc stats.allocated).",
+            )
+            .expect("valid metric definition");
+            let active = IntGauge::new(
+                "jemalloc_active_bytes",
+                "Bytes in active pages allocated by the application (jemalloc stats.active); allocated plus allocator fragmentation.",
+            )
+            .expect("valid metric definition");
+            let resident = IntGauge::new(
+                "jemalloc_resident_bytes",
+                "Bytes in physically resident data pages mapped by the allocator (jemalloc stats.resident); jemalloc's contribution to RSS.",
+            )
+            .expect("valid metric definition");
+            let mapped = IntGauge::new(
+                "jemalloc_mapped_bytes",
+                "Bytes in active extents mapped by the allocator (jemalloc stats.mapped).",
+            )
+            .expect("valid metric definition");
+            let descs = allocated
+                .desc()
+                .into_iter()
+                .chain(active.desc())
+                .chain(resident.desc())
+                .chain(mapped.desc())
+                .cloned()
+                .collect();
+            Self {
+                allocated,
+                active,
+                resident,
+                mapped,
+                descs,
+            }
+        }
+    }
+
+    fn saturating(v: usize) -> i64 {
+        i64::try_from(v).unwrap_or(i64::MAX)
+    }
+
+    impl Collector for JemallocCollector {
+        fn desc(&self) -> Vec<&Desc> {
+            self.descs.iter().collect()
+        }
+
+        fn collect(&self) -> Vec<MetricFamily> {
+            // jemalloc caches its stats; advancing the epoch refreshes
+            // them. On any mallctl error keep the last-seen values —
+            // a scrape must never fail on allocator introspection.
+            if epoch::advance().is_ok() {
+                if let Ok(v) = stats::allocated::read() {
+                    self.allocated.set(saturating(v));
+                }
+                if let Ok(v) = stats::active::read() {
+                    self.active.set(saturating(v));
+                }
+                if let Ok(v) = stats::resident::read() {
+                    self.resident.set(saturating(v));
+                }
+                if let Ok(v) = stats::mapped::read() {
+                    self.mapped.set(saturating(v));
+                }
+            }
+            let mut families = self.allocated.collect();
+            families.extend(self.active.collect());
+            families.extend(self.resident.collect());
+            families.extend(self.mapped.collect());
+            families
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prometheus::Encoder;
@@ -4356,5 +4460,20 @@ mod tests {
             .with_label_values(&["127.0.0.1:5001"])
             .get();
         assert_eq!(b, 1);
+    }
+
+    #[cfg(feature = "jemalloc")]
+    #[test]
+    fn jemalloc_gauges_registered_and_scrapable() {
+        let m = BgpMetrics::new();
+        let text = gather_text(&m);
+        for name in [
+            "jemalloc_allocated_bytes",
+            "jemalloc_active_bytes",
+            "jemalloc_resident_bytes",
+            "jemalloc_mapped_bytes",
+        ] {
+            assert!(text.contains(name), "{name} missing from scrape:\n{text}");
+        }
     }
 }
