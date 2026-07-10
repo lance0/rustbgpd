@@ -31,7 +31,7 @@ those.
 |------|--------|-------|
 | BGP core (RFC 4271 FSM, 4-byte ASN, capabilities, collision detection) | Shipped | All 6 states, property-tested |
 | Address families: IPv4/IPv6 unicast (MP-BGP, RFC 4760) | Shipped | Dual-stack, FRR-interop validated |
-| Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Partial | Extended Message send/receive directionality correction queued from the post-v0.50 audit |
+| Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Partial | Extended Message send/receive directionality and per-type size-limit correction shipped |
 | Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; LLGR reconnect/consecutive-reset/per-AFI/SAFI timer corrections shipped; interop re-proof queued |
 | Route Refresh (2918) + Enhanced Route Refresh (7313) | Shipped | |
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
@@ -43,8 +43,8 @@ those.
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
-| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; multi-cache interop proof queued |
-| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; interop proof queued |
+| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped |
+| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
 | BFD single-hop async + RFC 5882 coupling | Partial | M51 base receipt; receive-work budgeting and remote-AdminDown coupling corrections shipped; re-receipt queued |
@@ -173,7 +173,7 @@ and the research-shaped queue below.
   resumable RIB actor queries with cancellation; stop `rbgp best`, `received`,
   and `advertised` from silently truncating at 100 rows; skip canceled MRT
   requests before snapshot/encoding/file creation.
-- [ ] **FlowSpec policy context.** Represent a legal FlowSpec rule without a
+- [x] **FlowSpec policy context.** Represent a legal FlowSpec rule without a
   destination-prefix component as `prefix = None`, never fabricated IPv4
   `0.0.0.0/0`, and prove IPv4/IPv6 import/export policy behavior.
 - [x] **BMP connection-generation synchronization.** Fence/cancel stale dump
@@ -182,20 +182,20 @@ and the research-shaped queue below.
 
 **Contained hardening and design follow-ups:**
 
-- [ ] Bound rpol `apply()` DAG depth, expansion, and evaluation work; remove the
+- [x] Bound rpol `apply()` DAG depth, expansion, and evaluation work; remove the
   unconditional policy-name allocation from the non-attributed hot path.
-- [ ] Make managed-netdev partial creation converge: roll back known in-process
+- [x] Make managed-netdev partial creation converge: roll back known in-process
   pre-stamp failures, retry safely stamped incomplete bindings, and prune stale
   managed/NHG permanent-suppression entries after intent withdrawal.
-- [ ] Make Type-1/2/4 EVPN origination acknowledgement-aware, with explicit
+- [x] Make Type-1/2/4 EVPN origination acknowledgement-aware, with explicit
   desired/pending/confirmed state and idempotent retry. Separately bound
   unmatched pending IP bindings; design a safe-forget contract before pruning
   MAC-mobility ratchet history.
-- [ ] Define NHID ownership authority. Numeric ranges plus `NHA_FDB` are not
+- [x] Define NHID ownership authority. Numeric ranges plus `NHA_FDB` are not
   kernel-enforced proof against arbitrary co-resident writers; either document
   and validate a single-writer reserved-range deployment contract or stamp and
   verify `nh_protocol` with a fail-closed fallback.
-- [ ] Correct Extended Message directionality and custom-limit encoding for
+- [x] Correct Extended Message directionality and custom-limit encoding for
   NOTIFICATION/ROUTE-REFRESH; rustbgpd's advertised capability controls inbound
   acceptance, while the peer's capability controls outbound size.
 - [ ] Add CI compilation for transport `bench-internals`; make fuzz target

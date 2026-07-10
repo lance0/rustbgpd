@@ -11,7 +11,7 @@ evaluation is `evaluate_export_chain` in
 `crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
 assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
 the RPC surface hangs off the route-explain group at
-`proto/rustbgpd.proto:1113` (`RibService.ExplainAdvertisedRoute`).
+`proto/rustbgpd.proto:1189` (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -27,7 +27,7 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_import_routes_{permitted,denied}_total{peer}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs:896`) carries
+- `PolicyEvaluation` (`crates/policy/src/engine.rs:1133`) carries
   the terminal-decision policy + action, which is what an explain
   surface should report — but it is consumed and discarded at the
   eval site.
@@ -154,7 +154,7 @@ rpc ExplainImportPolicy(ExplainImportPolicyRequest)
 Authorization tier: **`SensitiveRead`**, matching the existing
 route-explain surfaces (`crates/api/src/authz.rs`).
 
-Response carries one of six outcomes:
+Response carries one of eight outcomes:
 
 | Outcome | Meaning |
 |---|---|
@@ -164,6 +164,11 @@ Response carries one of six outcomes:
 | `WITHDRAWN` | Was permitted, withdrawn after; entry retained for visibility |
 | `EVICTED` | Was in the cache; pushed out by the per-peer bound |
 | `STALE` | Cached entry's `policy_generation` is older than current; result no longer represents current policy |
+| `CACHE_DISABLED` | The daemon has `[policy.explain] enabled = false`, so no decisions are cached to consult (distinct from `NOT_SEEN`) |
+| `NO_SESSION` | No live session with the neighbor |
+
+The CLI renders `CACHE_DISABLED` and `NO_SESSION` as errors (nonzero
+exit) rather than as answers.
 
 The query is a **read** — it must not increment policy counters,
 must not touch RIB, must not log a new policy decision.
@@ -308,11 +313,11 @@ built in stages but is not split across PRs:
 - Eval call sites: `evaluate_chain_with_attribution` in
   `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
   and MP-unicast paths)
-- `PolicyEvaluation`: `crates/policy/src/engine.rs:896`
+- `PolicyEvaluation`: `crates/policy/src/engine.rs:1133`
 - Export-explain reference: `evaluate_export_chain` in
   `crates/rib/src/manager/distribution/mod.rs` (assembly in
   `crates/rib/src/manager/distribution/unicast.rs`),
-  RPC at `proto/rustbgpd.proto:1113`
+  RPC at `proto/rustbgpd.proto:1189`
 - Existing import counters: `record_import_policy_eval` at
   `crates/transport/src/session/inbound.rs:21`
 - Authz tier reference: `crates/api/src/authz.rs`

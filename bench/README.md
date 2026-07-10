@@ -126,10 +126,15 @@ non-zero only when a row is a confident regression:
 - `min..max` is entirely above zero
 - `stddev` is below `--regression-max-stddev-pct` (default: 10)
 - `mean delta` is at least `--regression-threshold-pct` (default: 3)
+- the last run's propagated 95% CI is entirely above zero (all-positive
+  across-attempt deltas whose last-run CI straddles zero stay advisory)
 
 Verdict labels are:
 
 - `regression`: confident regression; `--fail-on-regression` exits non-zero.
+- `ci-straddles-zero`: all-positive deltas clearing the mean-delta threshold,
+  but the last run's own 95% CI straddles zero — advisory, does **not** fail
+  `--fail-on-regression`.
 - `noise`: `min..max` brackets zero, so the sign is not reliable.
 - `improvement`: the completed attempts are consistently faster.
 - `positive-under-threshold`: consistently slower, but below the configured

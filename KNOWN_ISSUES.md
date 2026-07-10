@@ -240,16 +240,6 @@ resolved.
   (replaying reverse commands to undo successful steps) is still
   out of scope — peer-group changes flap sessions, and unwinding
   flap them again.
-- **Inline `policy.import` / `policy.export` reload requires restart.**
-  Named-definition / chain edits hot-reload now (as of v0.12.0), but
-  the legacy inline global-fallback statements at `[policy.import]` /
-  `[policy.export]` are evaluated at session start and have no
-  runtime swap surface yet. `rustbgpd --diff` flags them under
-  "Restart-required" with a migration hint to named definitions plus
-  `import_chain` / `export_chain`. Adding a runtime swap is tractable
-  follow-up work — would need a new `ConfigEvent` variant and a
-  `PeerManagerCommand` that re-runs `effective_policy_chains_for_neighbor`
-  for every peer.
 - **MRT snapshot encoding is allocation-heavy at large scale.** The
   `TABLE_DUMP_V2` encoder groups routes by prefix and synthesizes
   per-entry attributes, which is correct but can create extra allocation

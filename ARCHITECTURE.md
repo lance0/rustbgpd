@@ -237,7 +237,6 @@ gRPC request
 | Config loading + validation | `src/config/` |
 | Scoped link-local / unnumbered neighbor identity | `src/config/validation.rs` + `src/config/mod.rs` (`interface` / `scope_id` parse + resolve), `crates/api/src/peer_types.rs` (`PeerKey`), `crates/transport/src/config.rs` (`peer_interface` / `peer_scope_id`), `crates/transport/src/socket_opts.rs` (scoped connect, AF-aware GTSM), `src/peer_manager/inbound.rs` (passive scope match) — ADR-0069 |
 | Startup wiring | `src/main.rs` |
-| Looking glass (REST API) | `src/looking_glass.rs` |
 | Prometheus metrics | `crates/telemetry/src/lib.rs` |
 
 ---
@@ -251,7 +250,7 @@ gRPC request
 3. Spawns RibManager task (owns all routing state).
 4. Spawns PeerManager task (owns neighbor lifecycle).
 5. Spawns BgpListener (accepts inbound TCP on port 179).
-6. Spawns gRPC API server. Optionally spawns Prometheus metrics server (if `prometheus_addr` configured) and looking glass HTTP server (if `[global.telemetry.looking_glass]` configured).
+6. Spawns gRPC API server. Optionally spawns Prometheus metrics server (if `prometheus_addr` configured).
 7. Optionally spawns BMP manager + per-collector clients, MRT manager, RPKI VRP manager + RTR clients.
 8. For each configured neighbor, sends `AddPeer` to PeerManager → PeerManager spawns a PeerSession task.
 
@@ -295,8 +294,7 @@ gRPC request
    refresh time, transient mpsc backpressure).
 6. Global config changes that are not hot-reloadable
    (`[global]` ASN/router-id/families, `[rpki]`, `[bmp]`, `[mrt]`,
-   `[global.telemetry.grpc_*]` listener config, inline
-   `policy.import` / `policy.export` legacy global-fallback statements)
+   `[global.telemetry.grpc_*]` listener config)
    are surfaced under "Restart-required" in `rustbgpd --diff` and logged
    at reload time. The runtime listener config for `grpc_tcp` / `grpc_uds`
    is pinned back to the live values so subsequent diffs keep flagging

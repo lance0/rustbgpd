@@ -35,6 +35,7 @@ matrix below runs on the hosted kernel-dataplane workflow or manual gates).
 - **Outbound Route Filtering** — RFC 5291/5292 receive-side prefix ORF against an FRR 10.3.1 peer: **M57**.
 - **EVPN + SIGHUP** — control-plane sanity, MAC reflection, policy soft-reset, VLAN-aware-bundle (non-zero Ethernet Tag) reflection: **M29**, **M30**, **M34**, **M82** (synthetic leg; the SR Linux vendor leg is local-only).
 - **Route-server profile** — RFC 7947 transparency at byte level, per-member policy views, ROV at import, RFC 9234 OTC toward members, and the §2.3 path-hiding contrast (single-best / `per_client_best` / Add-Path, ADR-0101) against BIRD 2 + GoBGP + FRR at once: **M83**.
+- **Core RR against incumbents** — RFC 4456 reflection + RFC 4724 GR helper-truth against BIRD 2 clients and OpenBGPD 9.1 clients: **M85**, **M86**.
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 - **BLACKHOLE FIB discard** — RFC 7999 receiver scoping plus opt-in kernel discard install / withdraw: **M41**.
 - **gRPC/gNMI + EVPN injection** — ADR-0064 mTLS tier enforcement, ADR-0070 gNMI / OpenConfig telemetry + Set, gNMI Subscribe ON_CHANGE, and EVPN Type 5 control-plane injection: **M44**, **M54**, **M56**, **M45**.
