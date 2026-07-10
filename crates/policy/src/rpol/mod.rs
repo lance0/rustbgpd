@@ -21,6 +21,7 @@
 //! language reference and the lowering/semantics decisions.
 
 mod ast;
+mod coverage;
 mod diag;
 mod fmt;
 mod lexer;
@@ -30,6 +31,9 @@ mod parser;
 mod testing;
 mod typeck;
 
+pub use coverage::{
+    CoverageReport, Lint, LintKind, PolicyCoverage, PolicyTestStatus, TermCoverage,
+};
 pub use diag::{Diagnostic, Diagnostics, Span, Spanned};
 pub use fmt::{FmtError, format_rpol};
 pub use modules::{
@@ -157,6 +161,26 @@ impl RpolFile {
         let mut store = SetStore::new();
         let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
         testing::run_tests(&self.file.tests, &mut lowerer, &mut store)
+    }
+
+    /// [`Self::run_tests`] additionally attributing per-term coverage
+    /// over the same walks, plus the static lints — the
+    /// `rbgp policy check --coverage` backend (LAN-323). Test outcomes
+    /// are identical to [`Self::run_tests`]. See
+    /// [`coverage`](crate::rpol::CoverageReport) for what is (and
+    /// deliberately is not) attributable.
+    #[must_use]
+    pub fn run_tests_with_coverage(&self) -> (TestReport, CoverageReport) {
+        let mut store = SetStore::new();
+        let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
+        let mut accum = coverage::CoverageAccum::new(&self.file);
+        let report = testing::run_tests_recording(
+            &self.file.tests,
+            &mut lowerer,
+            &mut store,
+            Some(&mut accum),
+        );
+        (report, accum.finish(&self.file))
     }
 
     /// `(name, kind)` for every `dataset` declared in the compilation

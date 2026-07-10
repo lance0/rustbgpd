@@ -440,6 +440,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repo, and the repo's own `.rpol` files are reformatted to the
   canonical style. New "Formatting" section in
   `docs/rpol-language.md`. (LAN-323)
+- **`rbgp policy check --coverage` — rpol test coverage and static
+  lints.** Reports, per term of every policy the in-language tests
+  exercise, two distinct facts the walk attribution already knows:
+  was the guard ever *evaluated* (never ⇒ earlier terms always
+  decide) and did it ever *match* (never ⇒ no fixture hits it) —
+  aggregated across parameterized instantiations and attributed to
+  the defining module under imports. Policies reached only through
+  `apply` are reported as `apply-only` (an inlined predicate carries
+  no term-level facts); unreferenced ones are called out with the
+  honest caveat that daemon config chains are not visible to a
+  standalone check. Static lints ride the same pass: `unused-set` /
+  `unused-dataset` / `unused-fn`, `unreachable-term`
+  (constant-guard/terminal cases only), and `unreferenced-policy`.
+  Coverage never fails the run by itself; `--coverage-min PCT` (CI
+  mode) exits 3 below the threshold, with diagnostics (1) and test
+  failures (2) taking precedence. `-j` adds a stable-keyed `coverage`
+  object. New "Coverage and lints" section in
+  `docs/rpol-language.md`. (LAN-323)
 
 - **`rbgp config effective` — dump the running post-defaults config.**
   New `ConfigService.GetEffectiveConfig` RPC (`sensitive_read`) returns
