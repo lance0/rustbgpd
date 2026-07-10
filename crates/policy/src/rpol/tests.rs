@@ -371,6 +371,167 @@ fn unknown_policy_in_apply_suggests() {
 }
 
 #[test]
+fn suggestions_label_the_definition_site() {
+    // LAN-328: the did-you-mean note carries a label at the
+    // candidate's definition, so the rendering names its file:line.
+    let (_, rendered) = diagnostics_of(
+        "prefix-set customers { 10.0.0.0/8 }
+         policy p { term t { if route.prefix in custmers { accept } } }",
+    );
+    assert!(rendered.contains("did you mean `customers`?"), "{rendered}");
+    assert!(
+        rendered.contains("`customers` is defined here"),
+        "{rendered}"
+    );
+
+    let (_, rendered) = diagnostics_of(
+        "policy bogon-filter { term t { reject } }
+         policy p { term t { if apply(bogon-fitler) { reject } } }",
+    );
+    assert!(
+        rendered.contains("`bogon-filter` is defined here"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn unknown_community_set_suggests() {
+    let (_, rendered) = diagnostics_of(
+        "community-set scrub-tags { 65000:1 }
+         policy p { term t { if route.communities in scrub-tagz { reject } } }",
+    );
+    assert!(
+        rendered.contains("unknown community-set `scrub-tagz`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("did you mean `scrub-tags`?"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("`scrub-tags` is defined here"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn unknown_asn_set_suggests() {
+    let (_, rendered) = diagnostics_of(
+        "asn-set peers { 64500 }
+         policy p { term t { if route.origin-as in peerz { accept } } }",
+    );
+    assert!(rendered.contains("unknown asn-set `peerz`"), "{rendered}");
+    assert!(rendered.contains("did you mean `peers`?"), "{rendered}");
+    assert!(rendered.contains("`peers` is defined here"), "{rendered}");
+}
+
+#[test]
+fn unknown_fn_suggestion_labels_the_definition() {
+    let (_, rendered) = diagnostics_of(
+        "fn shift(a: u32) -> u32 { a + 1 }
+         policy p { term t { if shitf(1) >= 2 { reject } } }",
+    );
+    assert!(rendered.contains("did you mean `shift`?"), "{rendered}");
+    assert!(rendered.contains("`shift` is defined here"), "{rendered}");
+}
+
+#[test]
+fn unknown_dataset_reference_suggests() {
+    // A typo'd `in` probe near a declared dataset suggests the
+    // dataset (LAN-328) — right-kind datasets are valid probe targets.
+    let (_, rendered) = diagnostics_of(
+        "dataset prefix-set bogons
+         policy p { term t { if route.prefix in bogonz { reject } } }",
+    );
+    assert!(
+        rendered.contains("unknown prefix-set `bogonz`"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("did you mean `bogons`?"), "{rendered}");
+    assert!(rendered.contains("`bogons` is defined here"), "{rendered}");
+
+    // Same for a test block's dataset override.
+    let (_, rendered) = diagnostics_of(
+        "dataset asn-set flappers
+         policy p { term t { if route.origin-as in flappers { accept } } }
+         test t { dataset flapperz { 64500 } route { prefix 10.0.0.0/8 } expect p == accept }",
+    );
+    assert!(
+        rendered.contains("unknown dataset `flapperz`"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("did you mean `flappers`?"), "{rendered}");
+    assert!(
+        rendered.contains("`flappers` is defined here"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn unknown_expect_policy_suggests() {
+    let (_, rendered) = diagnostics_of(
+        "policy guard { term t { reject } }
+         test t { route { prefix 10.0.0.0/8 } expect gaurd == reject }",
+    );
+    assert!(rendered.contains("unknown policy `gaurd`"), "{rendered}");
+    assert!(rendered.contains("did you mean `guard`?"), "{rendered}");
+    assert!(rendered.contains("`guard` is defined here"), "{rendered}");
+}
+
+#[test]
+fn no_suggestion_when_nothing_is_close() {
+    let (_, rendered) = diagnostics_of(
+        "prefix-set customers { 10.0.0.0/8 }
+         policy p { term t { if route.prefix in zzz { accept } } }",
+    );
+    assert!(rendered.contains("unknown prefix-set `zzz`"), "{rendered}");
+    assert!(!rendered.contains("did you mean"), "{rendered}");
+
+    let (_, rendered) = diagnostics_of(
+        "policy bogon-filter { term t { reject } }
+         policy p { term t { if apply(zzz) { reject } } }",
+    );
+    assert!(rendered.contains("unknown policy `zzz`"), "{rendered}");
+    assert!(!rendered.contains("did you mean"), "{rendered}");
+}
+
+#[test]
+fn exact_match_of_another_kind_names_it() {
+    // An exact name match in a different kind is a wrong reference,
+    // not a typo (LAN-328): say what the name is instead of
+    // suggesting a spelling fix.
+    let (_, rendered) = diagnostics_of(
+        "asn-set bogons { 64500 }
+         policy p { term t { if route.prefix in bogons { reject } } }",
+    );
+    assert!(
+        rendered.contains("`bogons` is an asn-set; `route.prefix in` needs a prefix-set"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("`bogons` is defined here"), "{rendered}");
+    assert!(!rendered.contains("did you mean"), "{rendered}");
+
+    let (_, rendered) = diagnostics_of(
+        "asn-set bogons { 64500 }
+         policy p { term t { if apply(bogons) { reject } } }",
+    );
+    assert!(
+        rendered.contains("`bogons` is an asn-set, not a policy"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("`bogons` is defined here"), "{rendered}");
+
+    let (_, rendered) = diagnostics_of(
+        "asn-set bogons { 64500 }
+         policy p { term t { if bogons(1) >= 2 { reject } } }",
+    );
+    assert!(
+        rendered.contains("`bogons` is an asn-set, not a function"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn unknown_field_suggests() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { if route.local-perf >= 100 { accept } } }");

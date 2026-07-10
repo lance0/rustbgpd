@@ -484,6 +484,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (2^28), and gzip decompression (4 GiB). Groundwork for MRT warm-boot
   restore. (LAN-337)
 
+- **rpol did-you-mean for unknown set/policy/function/dataset
+  references.** Every unknown-symbol diagnostic (prefix-set /
+  community-set / asn-set probes, `apply` and test `expect` targets,
+  function calls, dataset references and test overrides) now suggests
+  the closest same-kind name by edit distance — the same threshold the
+  field suggestions use — with a labeled span at the suggested
+  symbol's definition site (file:line in the rendering). An exact name
+  match of a different kind is named as such (`` `bogons` is an
+  asn-set; `route.prefix in` needs a prefix-set ``) instead of a
+  spelling suggestion. Right-kind datasets count as candidates for
+  typo'd `in` probes. Message/notes enrichment only — error codes and
+  exit contracts are unchanged. (LAN-328)
+
 ### Changed
 - **CLI consistency sweep (LAN-329).** One noun, one file-arg style, one
   empty-state shape across `rbgp`; every old spelling keeps working as
