@@ -375,14 +375,14 @@ fi
 log "Test 6: rbgp policy stats shows nonzero live term hits for edge-out"
 stats_json=$(rbgp --json policy stats --peer "$DOWN_PEER")
 noleak_hits=$(echo "$stats_json" | jq -r '
-    [.[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
      | select(.policy == "edge-out" and .term == "no-leak")][0].hits // 0')
 tag_hits=$(echo "$stats_json" | jq -r '
-    [.[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
      | select(.policy == "edge-out" and (.term // "" | startswith("tag-and-med")))
      | .hits] | add // 0')
 medv6_hits=$(echo "$stats_json" | jq -r '
-    [.[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
      | select(.policy == "edge-out" and .term == "med-v6")][0].hits // 0')
 if [ "$noleak_hits" -ge 1 ] && [ "$tag_hits" -ge 1 ] && [ "$medv6_hits" -ge 2 ]; then
     ok "live export term hits: no-leak=$noleak_hits tag-and-med=$tag_hits med-v6=$medv6_hits"
@@ -394,13 +394,13 @@ fi
 log "Test 6b: rbgp policy stats --direction import — live import term hits (#761)"
 import_stats=$(rbgp --json policy stats --peer "$SRC_PEER" --direction import)
 ip4_hits=$(echo "$import_stats" | jq -r '
-    [.[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
      | select(.term == "partner-v4")][0].hits // 0')
 ip6_hits=$(echo "$import_stats" | jq -r '
-    [.[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
      | select(.term == "partner-v6")][0].hits // 0')
 guard_hits=$(echo "$import_stats" | jq -r '
-    [.[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
+    [.chains[] | select(.peer_address == "'"$SRC_PEER"'") | .terms[]
      | select(.term == "transit-guard")][0].hits // 0')
 if [ "$ip4_hits" -ge 1 ] && [ "$ip6_hits" -ge 1 ] && [ "$guard_hits" -ge 1 ]; then
     ok "live import term hits: partner-v4=$ip4_hits partner-v6=$ip6_hits transit-guard=$guard_hits"
@@ -411,7 +411,7 @@ fi
 
 # The first install is generation 0 — assert presence, not value.
 import_gen=$(echo "$import_stats" | jq -r '
-    [.[] | select(.peer_address == "'"$SRC_PEER"'")][0]
+    [.chains[] | select(.peer_address == "'"$SRC_PEER"'")][0]
     | if has("policy_generation") then .policy_generation else "missing" end')
 if [ "$import_gen" != "missing" ] && [ "$import_gen" != "null" ]; then
     ok "import chain reports install generation $import_gen"
@@ -459,7 +459,7 @@ down_refresh_before=$(frr_refresh_recv "$DOWN" "10.0.1.1")
 # src's (its resolved chain changed) and leave down's alone.
 import_chain_gen() {
     rbgp --json policy stats --peer "$1" --direction import \
-        | jq -r '[.[] | select(.peer_address == "'"$1"'")][0].policy_generation // 0'
+        | jq -r '[.chains[] | select(.peer_address == "'"$1"'")][0].policy_generation // 0'
 }
 gen_src_before=$(import_chain_gen "$SRC_PEER")
 gen_down_before=$(import_chain_gen "$DOWN_PEER")
