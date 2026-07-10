@@ -947,9 +947,13 @@ impl RibManager {
             .set_update_group_residue_entries(i64::try_from(residue).unwrap_or(i64::MAX));
     }
 
-    /// A grouped member's resync succeeded (or had nothing to send):
+    /// A member's resync succeeded (or provably had nothing to send):
     /// drop its regroup residue and its group dirty flag; the last
-    /// dirty member syncing clears the tombstones.
+    /// dirty member syncing clears the tombstones. Also the drain
+    /// point for a peer on the per-peer path whose residue rode a
+    /// grouped→ungrouped move — the group half is a no-op for it.
+    /// Callers must have emitted the pending extra withdraws (or shown
+    /// them empty/retained) before calling: this drops them.
     pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: IpAddr) {
         self.pending_regroup_baseline.remove(&peer);
         self.pending_extra_withdraws.remove(&peer);
@@ -1730,6 +1734,10 @@ impl RibManager {
     /// (per-peer gRPC edits, ADR-0076 live-impact txns, SIGHUP rpol
     /// overlays). A key-stable recompute (content-equal chain
     /// reinstall) is a strict no-op.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the membership lifecycle keeps every residue-carry rule at one seam"
+    )]
     pub(super) fn recompute_update_group(&mut self, peer: IpAddr) {
         let membership = self.compute_update_group_membership(peer);
         let previous = self.update_groups.members.get(&peer).cloned();
@@ -1849,10 +1857,22 @@ impl RibManager {
                     }
                     self.pending_regroup_baseline.insert(peer, base);
                 }
-                (Some(base), None) => {
+                (Some(mut base), None) => {
                     // Back on the per-peer path: seed Adj-RIB-Out with
                     // the old advertised view so the dirty resync diffs
                     // against it instead of re-flooding the table.
+                    // Same union rule as the grouped arm above: a
+                    // still-dirty leaver's retained baseline is the
+                    // only record of its true wire state — fold it
+                    // into the seed (wire values win on conflict) and
+                    // consume the entry, or its keys could never be
+                    // withdrawn from the per-peer path.
+                    if self.dirty_peers.contains(&peer)
+                        && let Some(prev) = self.pending_regroup_baseline.remove(&peer)
+                    {
+                        base.unicast.extend(prev.unicast);
+                        base.vpn.extend(prev.vpn);
+                    }
                     let loc_rib_len = self.loc_rib.len();
                     let rib_out = self
                         .adj_ribs_out

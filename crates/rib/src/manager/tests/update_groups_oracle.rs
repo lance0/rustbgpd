@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 
 use rustbgpd_policy::{
-    NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+    NeighborSetMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
+    RouteModifications,
 };
 use rustbgpd_wire::RtcNlri;
 
@@ -1199,6 +1200,171 @@ async fn oracle_second_regroup_while_dirty_unions_baseline_no_leak() {
         fold(&grouped),
         fold(&ungrouped),
         "grouped final advertised state must converge with the per-peer oracle"
+    );
+}
+
+/// A permit-everything chain carrying a peer-context guard: the
+/// neighbor-set deny matches an ASN no test peer uses, so verdicts are
+/// unchanged, but `requires_peer_context` moves the peer off the
+/// grouped path — the grouped→per-peer membership transition.
+fn peer_context_permit_chain() -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: Some(NeighborSetMatch {
+                addresses: vec![],
+                remote_asns: vec![65099],
+                peer_groups: vec![],
+            }),
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// A grouped member that goes dirty, misses a withdraw (recorded as a
+/// group tombstone), and then moves to the per-peer path (its chain
+/// becomes peer-context-dependent) carries the tombstone as extra
+/// (over-)withdraw residue. The withdrawn key is in neither the
+/// Loc-RIB nor the Adj-RIB-Out seeded from the regroup baseline, so
+/// the residue is the ONLY record of the stale route — the per-peer
+/// resync must emit its withdraw, or the route strands on the wire
+/// until the session bounces.
+#[tokio::test]
+async fn oracle_dirty_leaver_extras_withdraw_on_per_peer_path() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a jammed send fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Sync C to wire {p1, p2}: each lands and is drained, so the
+        // channel empties between sends and C never goes dirty here.
+        for n in 1..=2u8 {
+            o.routes(A, vec![ibgp_route(pfx(n, 0), A, 100, vec![])], vec![])
+                .await;
+            o.drain_one(C).await;
+        }
+        // Jam: p3 lands in the cap-1 channel and is NOT drained.
+        o.routes(A, vec![ibgp_route(pfx(3, 0), A, 100, vec![])], vec![])
+            .await;
+        // p1 withdrawn: C's emission fails against the full channel →
+        // dirty, with the withdrawal recorded as a group tombstone.
+        o.routes(A, vec![], vec![pfx(1, 0)]).await;
+        // C's chain becomes peer-context-dependent (verdicts
+        // unchanged): a grouped→per-peer move while dirty — the
+        // tombstone rides C's extra-withdraw residue across it.
+        o.replace_policy(C, Some(peer_context_permit_chain())).await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "the withdraw missed while dirty must reach the wire after the move to the per-peer path"
+    );
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "p2 (still best) must stay advertised"
+    );
+    assert!(
+        c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)),
+        "p3 (still best) must stay advertised"
+    );
+}
+
+/// Regroup-while-dirty where the tombstoned keys survive ONLY in the
+/// carried extra-withdraw residue and every family's resync
+/// enumeration is empty: the Loc-RIB emptied while the member was
+/// dirty, the destination group's table is therefore empty, and the
+/// regroup baseline snapshot is empty. The resync must still emit the
+/// residue withdraws instead of dropping them on the empty-enumeration
+/// early exit.
+#[tokio::test]
+async fn oracle_regroup_while_dirty_empty_enumeration_emits_residue_withdraws() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        // C gets a capacity-1 channel so a jammed send fails try_reserve.
+        o.peer_up(C, false, true, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // Sync C to wire {p1}.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        o.drain_one(C).await;
+        // Jam: p2 lands in the cap-1 channel and is NOT drained.
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+            .await;
+        // p1 withdrawn: C's emission fails → dirty; tombstone {p1}.
+        o.routes(A, vec![], vec![pfx(1, 0)]).await;
+        // p2 withdrawn too: the Loc-RIB and the group table are now
+        // both empty; tombstones {p1, p2}. C's resync attempt fails
+        // against the still-full channel.
+        o.routes(A, vec![], vec![pfx(2, 0)]).await;
+        // Regroup while dirty: the baseline snapshot and the new
+        // group's table are both empty — the tombstones survive only
+        // as C's carried extra-withdraw residue.
+        o.replace_policy(C, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+
+        // Free the channel and let the resync timer fire.
+        o.drain_one(C).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
+        "the residue withdraw of p1 must be emitted, not dropped on the empty-enumeration exit"
+    );
+    assert!(
+        !c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "the residue withdraw of p2 must be emitted, not dropped on the empty-enumeration exit"
     );
 }
 

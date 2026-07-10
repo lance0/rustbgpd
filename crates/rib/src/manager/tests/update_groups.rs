@@ -597,6 +597,129 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     handle.await.unwrap();
 }
 
+/// The withdrawal-residue gauge across a grouped→per-peer move while
+/// dirty: the carried extra withdraws keep the gauge nonzero until the
+/// per-peer resync EMITS them; a successful resync must then drain the
+/// residue (gauge back to zero) — it must not floor at nonzero because
+/// the per-peer path never consumes the carried extras.
+#[tokio::test]
+async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
+    tokio::time::pause();
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
+    let quiesce = async || {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+    };
+    let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 5, 9)),
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    };
+
+    // Grouped member with a capacity-1 outbound channel so a second
+    // update jams it.
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 5, 1));
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    assert_eq!(query_update_group(&tx, peer).await, "group:0");
+
+    let p1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let p2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    let mk = |p: Ipv4Prefix| crate::test_support::make_route(p, Ipv4Addr::new(10, 0, 5, 9));
+
+    // p1 fills the channel; p2's emission fails → member goes dirty;
+    // p1 withdrawn WHILE dirty → tombstone.
+    send_routes(vec![mk(p1)], vec![]).await;
+    send_routes(vec![mk(p2)], vec![]).await;
+    send_routes(vec![], vec![(Prefix::V4(p1), 0)]).await;
+    quiesce().await;
+    assert_metric(
+        residue(),
+        1.0,
+        "tombstone recorded while a member is dirty must show in the residue gauge",
+    );
+
+    // The member's chain becomes peer-context-dependent: it moves to
+    // the per-peer path while dirty, carrying the tombstone as an
+    // extra withdraw — still residue.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: Some(peer_context_chain()),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+    assert_eq!(query_update_group(&tx, peer).await, "policy_peer_context");
+    assert_metric(
+        residue(),
+        1.0,
+        "the extra withdraw carried across the move must stay in the residue gauge",
+    );
+
+    // Free the channel and let the resync timer drain the residue.
+    let jammed = out_rx.recv().await.unwrap();
+    assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    quiesce().await;
+    let resync = out_rx
+        .try_recv()
+        .expect("the per-peer resync must emit the residue withdraw");
+    assert!(
+        resync
+            .withdraw
+            .iter()
+            .any(|(prefix, _)| *prefix == Prefix::V4(p1)),
+        "the per-peer resync must (over-)withdraw the carried tombstoned prefix"
+    );
+    quiesce().await;
+    assert_metric(
+        residue(),
+        0.0,
+        "a completed per-peer resync must drain the carried residue",
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// LAN-311 item 3 (the term-hit freeze): a content-equal chain
 /// reinstall must keep the INSTALLED chain instance, not just the
 /// group key. The group's staging handle shares the installed
