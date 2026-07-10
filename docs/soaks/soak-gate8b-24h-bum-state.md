@@ -3,7 +3,7 @@
 One-page record of the first 24-hour Gate 8b BUM-state soak, used as
 the gating evidence for relaxing the per-port flag-flip primitive
 from "single-pass validated" to "soak-validated" against the alpha
-checklist in [`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md) §
+checklist in [`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md) §
 "remaining multi-homing enforcement work".
 
 ## What this soak exercised
@@ -125,7 +125,7 @@ MAC-churn variant also clears. The two unblocking conditions from
 ## What this unblocks
 
 - Flipping the
-  [`apply_bum_enforcement`](evpn-enablement.md) default to `true`
+  [`apply_bum_enforcement`](../evpn-enablement.md) default to `true`
   is unblocked by **this soak plus the MAC-churn variant**. We
   hold the flag at default-off until the MAC-churn run also
   completes — concurrent FDB churn was not exercised here.
@@ -141,10 +141,10 @@ MAC-churn variant also clears. The two unblocking conditions from
 The four load-bearing artifacts are tracked in this repository so
 the postmortem stays self-contained when the soak host is recycled:
 
-- Per-sample CSV: [`artifacts/soak/gate8b-20260510T152451Z/samples.csv`](artifacts/soak/gate8b-20260510T152451Z/samples.csv)
-- Flip event log: [`artifacts/soak/gate8b-20260510T152451Z/flips.log`](artifacts/soak/gate8b-20260510T152451Z/flips.log)
-- Harness driver log: [`artifacts/soak/gate8b-20260510T152451Z/soak.log`](artifacts/soak/gate8b-20260510T152451Z/soak.log)
-- Run manifest: [`artifacts/soak/gate8b-20260510T152451Z/run.json`](artifacts/soak/gate8b-20260510T152451Z/run.json)
+- Per-sample CSV: [`artifacts/soak/gate8b-20260510T152451Z/samples.csv`](../artifacts/soak/gate8b-20260510T152451Z/samples.csv)
+- Flip event log: [`artifacts/soak/gate8b-20260510T152451Z/flips.log`](../artifacts/soak/gate8b-20260510T152451Z/flips.log)
+- Harness driver log: [`artifacts/soak/gate8b-20260510T152451Z/soak.log`](../artifacts/soak/gate8b-20260510T152451Z/soak.log)
+- Run manifest: [`artifacts/soak/gate8b-20260510T152451Z/run.json`](../artifacts/soak/gate8b-20260510T152451Z/run.json)
 
 `tests/soak/runs/` stays gitignored — it's the harness's per-machine
 working directory and runs there are bulky / transient. Any future
@@ -154,12 +154,12 @@ from a postmortem the same way as this one.
 
 ## Cross-references
 
-- [`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md) — alpha-soak
+- [`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md) — alpha-soak
   checklist where the BUM-state row was the gating item.
-- [`docs/evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md)
+- [`docs/evpn-vtep-troubleshooting.md`](../evpn-vtep-troubleshooting.md)
   — operator runbook the soak harness mirrors for sampling
   cadence.
-- [`ADR-0054`](adr/0054-evpn-linux-dataplane-boundary.md) §1 / §6
+- [`ADR-0054`](../adr/0054-evpn-linux-dataplane-boundary.md) §1 / §6
   — observe-only Linux boundary + level-triggered reconcile model
   that makes the flag-flip primitive tractable to soak in the
   first place.

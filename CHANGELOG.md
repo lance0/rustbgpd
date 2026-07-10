@@ -417,6 +417,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - Removed the deprecated `bgp_aspa_records_total` gauge alias; `bgp_aspa_records` is the only exported name
+- **Docs reorganized by task shape (Diátaxis).** `docs/README.md` now
+  indexes every doc under tutorials / how-to guides / reference /
+  explanation; archived soak postmortems moved from `docs/soak-*.md`
+  to `docs/soaks/` (all cross-references updated); two new operator
+  runbooks in the cookbook: peer-flap triage
+  (`docs/cookbook/peer-flap-triage.md`) and RR pair day-2 operations
+  (`docs/cookbook/rr-pair-day2.md`), plus a shadow-cutover pointer to
+  the existing migration guide. (LAN-327)
 
 - **`security.grpc.enforcement = "legacy"` now logs a startup warning.**
   Legacy mode keeps working, but the daemon warns at boot that
@@ -5736,9 +5744,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN production-default flip — `apply_bum_enforcement` now defaults to
   `true`.** The `[global].apply_bum_enforcement` field previously defaulted to
   `false` (observe-only). With both gating soaks PASS — Gate 8b 24h MAC-churn
-  (2026-05-16, postmortem `docs/soak-gate8b-mac-churn-24h.md`) and M37
+  (2026-05-16, postmortem `docs/soaks/soak-gate8b-mac-churn-24h.md`) and M37
   local-origination 24h MAC-churn (2026-05-19, postmortem
-  `docs/soak-m37-local-origination-churn-24h.md`) — the default flips to `true`,
+  `docs/soaks/soak-m37-local-origination-churn-24h.md`) — the default flips to `true`,
   so new and upgraded deployments program the kernel BUM-suppression triplet
   (`IFLA_BRPORT_*_FLOOD`) on CE-facing bridge ports out of the box. Operators
   who need the prior observe-only posture must opt out explicitly with
@@ -6503,7 +6511,7 @@ The wire crate stays at 0.9.0 — no source-level changes under
   (`gate9-slice6-20260511T214936Z`) — peak PE1 RSS 14.3438 MB,
   steady-state slope 0.025 MB/h, 0 BGP flaps, 0 route
   oscillations. Post-mortem at
-  [`docs/soak-gate9-slice6-24h-symmetric-irb.md`](docs/soak-gate9-slice6-24h-symmetric-irb.md)
+  [`docs/soaks/soak-gate9-slice6-24h-symmetric-irb.md`](docs/soaks/soak-gate9-slice6-24h-symmetric-irb.md)
   with raw artifacts pinned at
   [`docs/artifacts/soak/gate9-slice6-20260511T214936Z/`](docs/artifacts/soak/gate9-slice6-20260511T214936Z/).
   Validates the symmetric Interface-less IRB datapath that

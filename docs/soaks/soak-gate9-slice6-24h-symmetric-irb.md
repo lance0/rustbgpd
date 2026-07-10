@@ -298,7 +298,7 @@ path as anything that touches `reconcile.rs`).
 ## Files
 
 Four load-bearing files mirrored into version control at
-[`docs/artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/)
+[`docs/artifacts/soak/gate9-slice6-20260511T214936Z/`](../artifacts/soak/gate9-slice6-20260511T214936Z/)
 — `samples.csv`, `churn.log`, `soak.log`, `run.json`. Originals
 live on the cloud soak host at
 `<repo>/tests/soak/runs/gate9-slice6-20260511T214936Z/`

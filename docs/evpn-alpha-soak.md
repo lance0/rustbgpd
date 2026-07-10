@@ -46,7 +46,7 @@ none of them block the current release on their own.
   `originated_local_macs_count`.
 - [x] **24 h MAC-churn soak** of M37 — **PASS, 2026-05-19**. Run
   ID `m37-local-origination-20260518T015056Z`; postmortem at
-  `docs/soak-m37-local-origination-churn-24h.md`. 1 437 samples /
+  `docs/soaks/soak-m37-local-origination-churn-24h.md`. 1 437 samples /
   17 174 churn cycles / 430 400 inject == 430 400 withdraw / 10-of-10
   gates green. PE RSS plateau 19.13 → 23.53 MB, after-warmup
   cumulative slope 0.184 MB/h, clean drain to
@@ -66,12 +66,12 @@ none of them block the current release on their own.
   stays bounded on the two axes the M67 link-drain soak (2026-06-28)
   did not cover:
   - **M33 50k-route scale** — run `20260701T014045Z`, postmortem
-    `docs/soak-m33-evpn-scale-10h-leak.md`. 600 samples, Loc-RIB held
+    `docs/soaks/soak-m33-evpn-scale-10h-leak.md`. 600 samples, Loc-RIB held
     50 000, RSS 82.87 → 82.88 MB (slope 0.033 MB/h), 0 flaps / 0
     drops; `analyze-soak.py` verdict `clean`.
   - **Gate 8b MAC-mobility churn + DF flips** — run
     `gate8b-mac-churn-20260701T014434Z`, postmortem
-    `docs/soak-gate8b-mac-churn-10h-leak.md`. 591 samples, ~59 DF
+    `docs/soaks/soak-gate8b-mac-churn-10h-leak.md`. 591 samples, ~59 DF
     flips all re-established, `pe1` RSS slope 0.125 MB/h (peak
     34.9 MB), 26 560 deletes + 26 048 MAC moves, drift-repair 0;
     `analyze-gate8b-soak.py` verdict `pass`.
@@ -284,7 +284,7 @@ landing, tracked here for visibility)
   1. **MAC-churn variant of the 24 h BUM-state soak.** Single-pass
      primitive validation already landed via the Docker harness; the
      baseline 24 h BUM-state soak completed 2026-05-11
-     (full postmortem: [`docs/soak-gate8b-24h-bum-state.md`](soak-gate8b-24h-bum-state.md)).
+     (full postmortem: [`docs/soaks/soak-gate8b-24h-bum-state.md`](soaks/soak-gate8b-24h-bum-state.md)).
      PE1 RSS plateaued at 13.9453 MB after a one-time 3h 32m settle
      and stayed there for the remaining 20.5h (steady-state slope
      0.000 MB/h); all 142 flip events kept the BUM-port flag
@@ -303,9 +303,9 @@ landing, tracked here for visibility)
        the clab `eth1`/`10.0.0.x` so post-flip BGP can actually
        re-establish.
      - [x] 1 h dry-run soak — **PASSED** 2026-05-15
-       ([`docs/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md)).
+       ([`docs/soaks/soak-gate8b-mac-churn-1h.md`](soaks/soak-gate8b-mac-churn-1h.md)).
      - [x] 24 h soak — **PASSED** 2026-05-16
-       ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)).
+       ([`docs/soaks/soak-gate8b-mac-churn-24h.md`](soaks/soak-gate8b-mac-churn-24h.md)).
        0 FATAL / WARN / topology-loss across 24 h 0 m 14 s, 69
        complete DF-flip cycles, ~478 K FDB ops, PE1 RSS settled
        to a 17.23–18.93 MB plateau (peak 18.93 MB ≪ 100 MB gate;
@@ -454,8 +454,8 @@ landing, tracked here for visibility)
 - ADR-0058 — Gate 9 symmetric Interface-less IRB design
 - ADR-0059 — EVPN aliasing dataplane via FDB nexthop groups
 - `docs/evpn-enablement.md` — gate ladder + still-ahead lists
-- `docs/soak-gate8b-24h-bum-state.md` — Gate 8b BUM-state 24h soak
-- `docs/soak-gate9-slice6-24h-symmetric-irb.md` — Gate 9 slice 6 24h soak
+- `docs/soaks/soak-gate8b-24h-bum-state.md` — Gate 8b BUM-state 24h soak
+- `docs/soaks/soak-gate9-slice6-24h-symmetric-irb.md` — Gate 9 slice 6 24h soak
 - `docs/evpn-vtep-troubleshooting.md` — bidirectional VTEP runbook
 - `docs/INTEROP.md` — M36, M37 test coverage
 - `KNOWN_ISSUES.md` — by-design alpha limitations

@@ -4,7 +4,7 @@ One-page record of a ~10-hour Gate 8b MAC-churn soak confirming the
 EVPN attribute-intern table stays bounded under sustained bridge-FDB
 churn plus RFC 7432 §15.1 MAC mobility across repeated DF flips, on
 v0.45.0 HEAD. This complements the M67 link-drain receipt
-(2026-06-28, [`docs/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md))
+(2026-06-28, [`docs/soaks/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md))
 with the DF-flip + MAC-mobility-sequencing angle, and the M33
 50k-route scale receipt run the same night. Stopped at ~10h on a
 conclusive-flat signal — a leak-confirmation receipt.
@@ -76,22 +76,22 @@ receipts of the same fix.
 Tracked here so the postmortem stays self-contained when the soak host
 is recycled (`tests/soak/runs/` stays off-repo):
 
-- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/samples.csv`](artifacts/soak/gate8b-mac-churn-20260701T014434Z/samples.csv)
-- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/soak.log`](artifacts/soak/gate8b-mac-churn-20260701T014434Z/soak.log)
-- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/flips.log`](artifacts/soak/gate8b-mac-churn-20260701T014434Z/flips.log)
-- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/report.json`](artifacts/soak/gate8b-mac-churn-20260701T014434Z/report.json)
-- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/run.json`](artifacts/soak/gate8b-mac-churn-20260701T014434Z/run.json)
+- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/samples.csv`](../artifacts/soak/gate8b-mac-churn-20260701T014434Z/samples.csv)
+- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/soak.log`](../artifacts/soak/gate8b-mac-churn-20260701T014434Z/soak.log)
+- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/flips.log`](../artifacts/soak/gate8b-mac-churn-20260701T014434Z/flips.log)
+- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/report.json`](../artifacts/soak/gate8b-mac-churn-20260701T014434Z/report.json)
+- [`artifacts/soak/gate8b-mac-churn-20260701T014434Z/run.json`](../artifacts/soak/gate8b-mac-churn-20260701T014434Z/run.json)
 
 The raw per-batch churn log stays off-repo (bulky); churn totals are
 in `samples.csv`.
 
 ## Cross-references
 
-- [`docs/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md) —
+- [`docs/soaks/soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md) —
   the link-drain axis of the same fix.
-- [`docs/soak-m33-evpn-scale-10h-leak.md`](soak-m33-evpn-scale-10h-leak.md) —
+- [`docs/soaks/soak-m33-evpn-scale-10h-leak.md`](soak-m33-evpn-scale-10h-leak.md) —
   the 50k-route scale axis, run the same night.
-- [`docs/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md) —
+- [`docs/soaks/soak-gate8b-mac-churn-1h.md`](soak-gate8b-mac-churn-1h.md) —
   the 1h dry-run template.
 - `tests/soak/run-gate8b-mac-churn-soak.sh` /
   `tests/soak/analyze-gate8b-soak.py` — harness + gate analyzer.

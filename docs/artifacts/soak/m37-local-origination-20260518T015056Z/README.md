@@ -1,7 +1,7 @@
 # M37 local-origination MAC-churn 24h soak — raw artifacts
 
 Frozen snapshot of the repo-suitable files from the run that landed
-[`docs/soak-m37-local-origination-churn-24h.md`](../../../soak-m37-local-origination-churn-24h.md).
+[`docs/soaks/soak-m37-local-origination-churn-24h.md`](../../../soaks/soak-m37-local-origination-churn-24h.md).
 The large `churn.log` and `rustbgpd.log` stayed local to the soak host
 and are intentionally not checked in.
 

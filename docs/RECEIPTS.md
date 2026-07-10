@@ -156,14 +156,14 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 
 | Receipt | Duration | What it proves |
 |---------|----------|----------------|
-| [Gate 8b BUM-state](soak-gate8b-24h-bum-state.md) | 24 h | BUM-port flag triplet survives 71 DF-flip cycles; flat RSS |
-| [Gate 8b MAC-churn dry run](soak-gate8b-mac-churn-1h.md) | 1 h | Dry run gating the 24 h MAC-churn soak |
-| [Gate 8b MAC-churn](soak-gate8b-mac-churn-24h.md) | 24 h | 69 post-flip reconverges under MAC churn; zero WARN/FATAL; ~0.08 MB/h envelope |
-| [Gate 8b MAC-churn leak A/B](soak-gate8b-mac-churn-10h-leak.md) | ~10 h | EVPN attribute-intern table bounded under churn across DF flips (MAC-mobility leak fix, churn axis) |
-| [Gate 9 symmetric IRB](soak-gate9-slice6-24h-symmetric-irb.md) | 24 h | 703 Type 5 churn cycles; zero session or installed-route violations |
-| [M33 EVPN scale leak A/B](soak-m33-evpn-scale-10h-leak.md) | ~10 h | Attribute-intern table bounded at 50k Type 2 routes + churn (leak fix, scale axis) |
-| [M37 local-origination churn](soak-m37-local-origination-churn-24h.md) | 24 h | 430,400 injects balanced by 430,400 withdraws; zero flaps |
-| [M67 link-drain MAC-mobility](soak-m67-link-drain-24h-evpn-leak.md) | 24 h | 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat; blackout ≤ 300 ms |
+| [Gate 8b BUM-state](soaks/soak-gate8b-24h-bum-state.md) | 24 h | BUM-port flag triplet survives 71 DF-flip cycles; flat RSS |
+| [Gate 8b MAC-churn dry run](soaks/soak-gate8b-mac-churn-1h.md) | 1 h | Dry run gating the 24 h MAC-churn soak |
+| [Gate 8b MAC-churn](soaks/soak-gate8b-mac-churn-24h.md) | 24 h | 69 post-flip reconverges under MAC churn; zero WARN/FATAL; ~0.08 MB/h envelope |
+| [Gate 8b MAC-churn leak A/B](soaks/soak-gate8b-mac-churn-10h-leak.md) | ~10 h | EVPN attribute-intern table bounded under churn across DF flips (MAC-mobility leak fix, churn axis) |
+| [Gate 9 symmetric IRB](soaks/soak-gate9-slice6-24h-symmetric-irb.md) | 24 h | 703 Type 5 churn cycles; zero session or installed-route violations |
+| [M33 EVPN scale leak A/B](soaks/soak-m33-evpn-scale-10h-leak.md) | ~10 h | Attribute-intern table bounded at 50k Type 2 routes + churn (leak fix, scale axis) |
+| [M37 local-origination churn](soaks/soak-m37-local-origination-churn-24h.md) | 24 h | 430,400 injects balanced by 430,400 withdraws; zero flaps |
+| [M67 link-drain MAC-mobility](soaks/soak-m67-link-drain-24h-evpn-leak.md) | 24 h | 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat; blackout ≤ 300 ms |
 
 ## Continuous verification — CI schedules
 
@@ -180,6 +180,6 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 ## Adding a receipt
 
 Write the detailed source document first (interop procedure in
-[`INTEROP.md`](INTEROP.md), soak postmortem as `docs/soak-*.md` with artifacts
+[`INTEROP.md`](INTEROP.md), soak postmortem as `docs/soaks/soak-*.md` with artifacts
 under `docs/artifacts/soak/<run-id>/`, perf receipt under `docs/perf/`), then
 add the row here and in [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).

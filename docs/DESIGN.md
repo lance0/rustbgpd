@@ -481,7 +481,7 @@ controller-driven injection for Type 2 / Type 3. What remains:
   `apply_aliasing_ecmp` per-instance off-switch, periodic
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
   members. The MAC-churn variant of the BUM-state soak passed
-  2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)),
+  2026-05-16 ([`docs/soaks/soak-gate8b-mac-churn-24h.md`](soaks/soak-gate8b-mac-churn-24h.md)),
   which motivated flipping the `apply_bum_enforcement` and
   `apply_aliasing_ecmp` defaults to `true`, shipped in v0.23.0;
   operators who need observe-only behavior set them = `false`

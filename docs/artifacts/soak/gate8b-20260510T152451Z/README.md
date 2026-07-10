@@ -1,7 +1,7 @@
 # Gate 8b 24h BUM-state soak — raw artifacts
 
 Frozen snapshot of the four load-bearing files from the run that
-landed [`docs/soak-gate8b-24h-bum-state.md`](../../../soak-gate8b-24h-bum-state.md).
+landed [`docs/soaks/soak-gate8b-24h-bum-state.md`](../../../soaks/soak-gate8b-24h-bum-state.md).
 
 | File | Bytes | What it is |
 |---|---|---|

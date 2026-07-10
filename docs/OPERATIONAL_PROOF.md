@@ -16,7 +16,7 @@ operator-facing index that answers "what has actually been proved?"
 | Performance and scale | Criterion, bgperf2, distribution fanout, EVPN load, and RIB memory measurements are documented with hardware, noise floor, and measurement state. | [`BENCHMARKS.md`](BENCHMARKS.md) |
 | High-N memory regression tracking | Ignored RIB memory profile covers Adj-RIB-In, Full-RIB, and RR/route-server fanout at 100k/500k/900k prefixes; A/B summaries come from `bench/compare-rib-memory.sh`. | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md#rib-memory-compare) |
 | Long-running soak evidence | Archived 24-hour EVPN and local-origination soaks include run metadata, pass/fail gates, RSS slopes, and git-tracked artifacts. | [Soak receipts](#soak-receipts) |
-| EVPN link-drain churn soak | Archived M67 24-hour run covers the single-active ES link-drain surface with route/session/gauge/timing/RSS gates under live MAC-mobility churn. | [`soak-m67-link-drain-24h-evpn-leak.md`](soak-m67-link-drain-24h-evpn-leak.md), [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
+| EVPN link-drain churn soak | Archived M67 24-hour run covers the single-active ES link-drain surface with route/session/gauge/timing/RSS gates under live MAC-mobility churn. | [`soak-m67-link-drain-24h-evpn-leak.md`](soaks/soak-m67-link-drain-24h-evpn-leak.md), [`../tests/soak/README.md`](../tests/soak/README.md#m67-link-drain-churn-soak) |
 
 ## Interop and dataplane receipts
 
@@ -54,11 +54,11 @@ Compact M36-M83 index (details and assertions stay in
 
 | Receipt | Verdict | Key signals | Artifacts |
 |---------|---------|-------------|-----------|
-| [Gate 8b BUM-state 24h](soak-gate8b-24h-bum-state.md) | PASS | 24h 00m 32s; 71 complete DF-flip cycles; PE1 RSS steady-state slope 0.000 MB/h after settle; BUM-port flag triplet survived every sampled flip. | [`artifacts/soak/gate8b-20260510T152451Z/`](artifacts/soak/gate8b-20260510T152451Z/) |
-| [Gate 8b MAC-churn 24h](soak-gate8b-mac-churn-24h.md) | PASS | 24h 0m 14s; 69 post-flip reconverges; zero WARN/FATAL/topology-link-loss events; PE1 peak RSS 18.93 MB and post-settle envelope about 0.08 MB/h. | [`artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/`](artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/) |
-| [Gate 9 symmetric IRB 24h](soak-gate9-slice6-24h-symmetric-irb.md) | PASS | 24h 00m 44s; 703 churn cycles; zero BGP established violations; zero installed-route violations; PE1 peak RSS 14.3438 MB and steady-state slope 0.025 MB/h. | [`artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/) |
-| [M37 local-origination MAC-churn 24h](soak-m37-local-origination-churn-24h.md) | PASS | 24h 1m 53s; 17,174 churn cycles; 430,400 injects balanced by 430,400 withdraws; zero session flaps; PE peak RSS 23.531 MB and after-warmup slope 0.184 MB/h. | [`artifacts/soak/m37-local-origination-20260518T015056Z/`](artifacts/soak/m37-local-origination-20260518T015056Z/) |
-| [M67 link-drain MAC-mobility 24h](soak-m67-link-drain-24h-evpn-leak.md) | PASS | 24h; 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat at 0.006-0.016 MB/h; blackout max 300 ms; corrected sampler gate shows no sustained session-loss window. | [`artifacts/soak/m67-link-drain-20260628T141945Z/`](artifacts/soak/m67-link-drain-20260628T141945Z/) |
+| [Gate 8b BUM-state 24h](soaks/soak-gate8b-24h-bum-state.md) | PASS | 24h 00m 32s; 71 complete DF-flip cycles; PE1 RSS steady-state slope 0.000 MB/h after settle; BUM-port flag triplet survived every sampled flip. | [`artifacts/soak/gate8b-20260510T152451Z/`](artifacts/soak/gate8b-20260510T152451Z/) |
+| [Gate 8b MAC-churn 24h](soaks/soak-gate8b-mac-churn-24h.md) | PASS | 24h 0m 14s; 69 post-flip reconverges; zero WARN/FATAL/topology-link-loss events; PE1 peak RSS 18.93 MB and post-settle envelope about 0.08 MB/h. | [`artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/`](artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/) |
+| [Gate 9 symmetric IRB 24h](soaks/soak-gate9-slice6-24h-symmetric-irb.md) | PASS | 24h 00m 44s; 703 churn cycles; zero BGP established violations; zero installed-route violations; PE1 peak RSS 14.3438 MB and steady-state slope 0.025 MB/h. | [`artifacts/soak/gate9-slice6-20260511T214936Z/`](artifacts/soak/gate9-slice6-20260511T214936Z/) |
+| [M37 local-origination MAC-churn 24h](soaks/soak-m37-local-origination-churn-24h.md) | PASS | 24h 1m 53s; 17,174 churn cycles; 430,400 injects balanced by 430,400 withdraws; zero session flaps; PE peak RSS 23.531 MB and after-warmup slope 0.184 MB/h. | [`artifacts/soak/m37-local-origination-20260518T015056Z/`](artifacts/soak/m37-local-origination-20260518T015056Z/) |
+| [M67 link-drain MAC-mobility 24h](soaks/soak-m67-link-drain-24h-evpn-leak.md) | PASS | 24h; 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat at 0.006-0.016 MB/h; blackout max 300 ms; corrected sampler gate shows no sustained session-loss window. | [`artifacts/soak/m67-link-drain-20260628T141945Z/`](artifacts/soak/m67-link-drain-20260628T141945Z/) |
 
 ## Known proof gaps
 
@@ -94,6 +94,6 @@ bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
 
 For interop, start from [`INTEROP.md`](INTEROP.md). For soak runs, archive the
 small load-bearing files under `docs/artifacts/soak/<run-id>/` and write or
-refresh the matching `docs/soak-*.md` postmortem. Redact absolute local
+refresh the matching `docs/soaks/soak-*.md` postmortem. Redact absolute local
 checkout paths (replace the `.../rustbgpd` prefix with `<repo>`) in archived
 `run.json` / `soak.log` files before committing.

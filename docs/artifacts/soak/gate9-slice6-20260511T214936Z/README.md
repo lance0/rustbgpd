@@ -1,7 +1,7 @@
 # Gate 9 slice 6 24h symmetric IRB soak — raw artifacts
 
 Frozen snapshot of the four load-bearing files from the run that
-landed [`docs/soak-gate9-slice6-24h-symmetric-irb.md`](../../../soak-gate9-slice6-24h-symmetric-irb.md).
+landed [`docs/soaks/soak-gate9-slice6-24h-symmetric-irb.md`](../../../soaks/soak-gate9-slice6-24h-symmetric-irb.md).
 
 | File | Bytes | What it is |
 |---|---|---|

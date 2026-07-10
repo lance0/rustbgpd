@@ -3,7 +3,7 @@
 One-page record of the 1-hour Gate 8b MAC-churn validation soak,
 used as the dry run before the 24-hour soak that gates the
 production-default flip of `apply_bum_enforcement` and
-`apply_aliasing_ecmp` per [`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md).
+`apply_aliasing_ecmp` per [`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md).
 
 ## What this soak exercises
 

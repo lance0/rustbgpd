@@ -689,13 +689,13 @@ Shipped pieces:
 Concrete remaining slices:
 
 1. **MAC-churn variant of the 24 h Gate 8b soak** — **PASSED**
-   2026-05-16 ([`docs/soak-gate8b-mac-churn-24h.md`](soak-gate8b-mac-churn-24h.md)).
+   2026-05-16 ([`docs/soaks/soak-gate8b-mac-churn-24h.md`](soaks/soak-gate8b-mac-churn-24h.md)).
    Synthetic DF flips with concurrent FDB programming via the
    process-restart harness at
    `tests/soak/run-gate8b-mac-churn-soak.sh`. 69 complete flip cycles,
    ~478 K FDB ops, PE1 RSS plateau 17.23–18.93 MB (slope envelope
    0.08 MB/h), 0 FATAL / WARN / drift events. Combined with the M37
-   local-origination 24 h MAC-churn soak ([`docs/soak-m37-local-origination-churn-24h.md`](soak-m37-local-origination-churn-24h.md),
+   local-origination 24 h MAC-churn soak ([`docs/soaks/soak-m37-local-origination-churn-24h.md`](soaks/soak-m37-local-origination-churn-24h.md),
    PASSED 2026-05-19; 17 174 churn cycles, 430 400 inject == 430 400
    withdraw, after-warmup RSS slope 0.184 MB/h, 10/10 gates green),
    this cleared the gating evidence for flipping the
