@@ -1,0 +1,13 @@
+[package]
+name = "adr-0103-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone crate — deliberately NOT a workspace member. Build and run
+# it from this directory (see README.md).
+[workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1
