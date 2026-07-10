@@ -1652,6 +1652,9 @@ message Route {
   uint32 origin = 5;
   repeated uint32 as_path = 6;
   uint32 local_pref = 7;
+  // Deprecated for absence-sensitive consumers: a bare integer cannot
+  // distinguish "no MED attribute" from "MED 0" (absent encodes as 0).
+  // Prefer `med_attr`.
   uint32 med = 8;
   bool best = 9;
   repeated uint32 communities = 10;
@@ -1677,6 +1680,11 @@ message Route {
   // same recovery the RFC 9069 BMP Loc-RIB dump uses for its per-peer
   // header timestamp). 0 = unknown.
   uint64 received_at_epoch_seconds = 17;
+  // Distinguishes "explicit MED attribute set on the wire or by policy"
+  // (Some(value)) from "no MED attribute" (absent). Without this
+  // distinction `med = 0` could mean either "MED zero" or "no
+  // attribute". Mirrors `local_pref_attr`.
+  optional uint32 med_attr = 18;
 }
 
 message WatchRoutesRequest {

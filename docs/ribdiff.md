@@ -54,10 +54,13 @@ difference, not equality. Divergence classes: `incumbent_only`,
 
 Live-source limitations (also printed in every report):
 
-- **MED**: the daemon proto carries MED as a bare integer, so MED-absent
-  and MED 0 are indistinguishable over gRPC. Live `med=0` is compared as
-  absent; snapshot producers should omit `med` when it is zero or absent,
-  or pass `--ignore-attribute med`.
+- **MED** (older daemons only): daemons that populate the `med_attr`
+  proto field are compared exactly — MED-absent and MED 0 are distinct —
+  and no MED note appears in the report. Older daemons carry MED as a
+  bare integer only, where absent and 0 are indistinguishable over gRPC:
+  their live `med=0` is compared as absent (and the report says so);
+  snapshot producers targeting them should omit `med` when it is zero or
+  absent, or pass `--ignore-attribute med`.
 - **AS_PATH**: compared as a single flattened `AS_SEQUENCE` on both sides
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
 - **Unknown attributes**: path attributes outside the typed set are not
@@ -120,8 +123,9 @@ duplicates; multiplicity is compared):
 - `as_path`: flat ASN list (compared as one `AS_SEQUENCE`). Omit or `[]`
   for an empty path.
 - `med`, `local_pref`: omit when the attribute is absent — absent and 0
-  are distinct in the comparison (but see the MED live-source note above:
-  omit `med` when it is zero).
+  are distinct in the comparison (when targeting an older daemon without
+  `med_attr`, also omit `med` when it is zero — see the MED live-source
+  note above).
 - `communities`: `"ASN:value"` strings (well-known aliases like
   `NO_EXPORT` accepted) or raw u32 values.
 - `extended_communities`: raw 8-octet values as unsigned integers
@@ -169,8 +173,8 @@ for member, routes in export_routes():          # your incumbent's export
         rec = {"record": "route", "peer": member.ip, "peer_asn": member.asn,
                "prefix": r.prefix, "origin": r.origin, "as_path": r.as_path,
                "next_hop": r.next_hop, "communities": r.communities}
-        if r.med:                                # omit MED 0 (see note above)
-            rec["med"] = r.med
+        if r.med is not None:                    # omit MED 0 too for older
+            rec["med"] = r.med                   # daemons (see note above)
         if r.local_pref is not None:
             rec["local_pref"] = r.local_pref
         emit(rec)
@@ -206,8 +210,10 @@ the incumbent side. Common rules:
   omitted, never defaulted. Attribute kinds a source renders only
   symbolically (BIRD/FRR/GoBGP extended communities) are skipped with a
   note on stderr — compare with `--ignore-attribute extended_communities`.
-- **MED 0 is omitted** like an absent MED, matching the live side's
-  documented MED conflation.
+- **MED 0 is omitted** like an absent MED, matching the historical live
+  MED conflation. Against a daemon that populates `med_attr`, an
+  explicit live MED 0 therefore reports as a MED difference — pass
+  `--ignore-attribute med` until the adapter contracts are revised.
 
 | Adapter | Capture command (verified against) | Form |
 |---------|-------------------------------------|------|
