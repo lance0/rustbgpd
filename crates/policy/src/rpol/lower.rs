@@ -52,13 +52,15 @@ use std::sync::Arc;
 
 use rustbgpd_wire::ExtendedCommunity;
 
+use crate::datasets::DatasetBindings;
 use crate::engine::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, PolicyAction, RouteModifications,
 };
 use crate::eval::checked_arith;
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, ForEachNode, LoopSource, MatchExpr, PolicySource, RegexId,
-    SetId, Term, TermAction, ValueCmpNode, ValueCmpOp, ValueExpr,
+    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot, ForEachNode,
+    LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction, ValueCmpNode,
+    ValueCmpOp, ValueExpr,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
@@ -242,6 +244,15 @@ pub(super) struct Lowerer<'a> {
     community_set_ids: HashMap<String, SetId>,
     asn_set_ids: HashMap<String, SetId>,
     regex_ids: HashMap<String, RegexId>,
+    // ── per-chain-build dataset state (LAN-305), reset by
+    // `begin_chain`: unlike the set tables above — which carry every
+    // definition — only datasets the chain's guards actually reference
+    // get a slot, so the table is the chain's dependency list for
+    // swap-time refresh scoping. ──
+    datasets: Vec<DatasetSlot>,
+    dataset_ids: HashMap<String, DatasetId>,
+    bindings: DatasetBindings,
+    missing_datasets: Vec<String>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -261,6 +272,10 @@ impl<'a> Lowerer<'a> {
             community_set_ids: HashMap::new(),
             asn_set_ids: HashMap::new(),
             regex_ids: HashMap::new(),
+            datasets: Vec::new(),
+            dataset_ids: HashMap::new(),
+            bindings: DatasetBindings::new(),
+            missing_datasets: Vec::new(),
         };
         for def in &file.prefix_sets {
             let entries: Vec<PrefixSetEntry> = def
@@ -304,10 +319,79 @@ impl<'a> Lowerer<'a> {
         lowerer
     }
 
+    /// Reset per-chain dataset state and adopt `bindings` for the
+    /// coming build (LAN-305). Every chain builder calls this first;
+    /// bindings differ per build in the test runner (per-test
+    /// overrides), and dataset slots must not leak between chains —
+    /// the slot table is the chain's refresh-scoping dependency list.
+    fn begin_chain(&mut self, bindings: &DatasetBindings) {
+        self.datasets.clear();
+        self.dataset_ids.clear();
+        self.bindings = bindings.clone();
+        self.missing_datasets.clear();
+    }
+
+    /// The declared kind of a dataset, for the test runner's override
+    /// construction (LAN-305).
+    pub(super) fn dataset_kind(&self, name: &str) -> Option<crate::datasets::DatasetKind> {
+        self.file
+            .datasets
+            .iter()
+            .find(|d| d.name.node == name)
+            .map(|d| d.kind)
+    }
+
+    /// Dataset names referenced during the current build that had no
+    /// (kind-matching) binding. Non-empty ⇒ the built chain is invalid
+    /// and must be discarded by the caller — its dataset guards are
+    /// never-match placeholders.
+    pub(super) fn take_missing_datasets(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.missing_datasets)
+    }
+
+    /// The chain-local [`DatasetId`] for a declared dataset, binding
+    /// its slot on first reference. `None` (and a recorded missing
+    /// name) when no kind-matching binding exists — the caller
+    /// discards the chain via [`take_missing_datasets`](Self::take_missing_datasets).
+    fn dataset_ref(&mut self, name: &str) -> Option<DatasetId> {
+        if let Some(&id) = self.dataset_ids.get(name) {
+            return Some(id);
+        }
+        let decl = self
+            .file
+            .datasets
+            .iter()
+            .find(|d| d.name.node == name)
+            .expect("callers check the declaration exists");
+        match self.bindings.get(name) {
+            Some(handle) if handle.kind() == decl.kind => {
+                let id = DatasetId(u32::try_from(self.datasets.len()).expect("fits u32"));
+                self.datasets.push(DatasetSlot {
+                    name: handle.name().clone(),
+                    kind: decl.kind,
+                    handle: Arc::clone(handle),
+                });
+                self.dataset_ids.insert(name.to_string(), id);
+                Some(id)
+            }
+            _ => {
+                if !self.missing_datasets.iter().any(|m| m == name) {
+                    self.missing_datasets.push(name.to_string());
+                }
+                None
+            }
+        }
+    }
+
     /// A chain of every zero-parameter policy, in source order, with
     /// the current set tables. Parameterized policies are templates —
     /// they compile where instantiated (`apply`, tests, PR-3 chains).
-    pub(super) fn zero_param_chain(&mut self, store: &mut SetStore) -> CompiledChain {
+    pub(super) fn zero_param_chain(
+        &mut self,
+        store: &mut SetStore,
+        bindings: &DatasetBindings,
+    ) -> CompiledChain {
+        self.begin_chain(bindings);
         let policies: Vec<CompiledPolicy> = self
             .file
             .policies
@@ -324,6 +408,7 @@ impl<'a> Lowerer<'a> {
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
             asn_set_names: self.asn_set_names.clone(),
+            datasets: std::mem::take(&mut self.datasets),
             local_asn: None,
         }
     }
@@ -335,7 +420,9 @@ impl<'a> Lowerer<'a> {
         name: &str,
         args: &[u32],
         store: &mut SetStore,
+        bindings: &DatasetBindings,
     ) -> CompiledChain {
+        self.begin_chain(bindings);
         let def = self
             .file
             .policies
@@ -352,6 +439,7 @@ impl<'a> Lowerer<'a> {
             prefix_set_names: self.prefix_set_names.clone(),
             community_set_names: self.community_set_names.clone(),
             asn_set_names: self.asn_set_names.clone(),
+            datasets: std::mem::take(&mut self.datasets),
             local_asn: None,
         }
     }
@@ -621,6 +709,10 @@ impl<'a> Lowerer<'a> {
     /// `binds` receives the hoisted `Bind` terms of any user-function
     /// calls inside the guard's value expressions (LAN-304); the
     /// caller emits them ahead of the guard's terms.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per expression form; splitting would scatter the lowering table"
+    )]
     fn lower_expr(
         &mut self,
         expr: &Expr,
@@ -665,17 +757,62 @@ impl<'a> Lowerer<'a> {
                 lhs: self.lower_value(lhs, &Names::Policy(env), lets, binds),
                 rhs: self.lower_value(rhs, &Names::Policy(env), lets, binds),
             })),
-            Expr::In { field, set } => match resolve_field(field).expect("typechecked") {
-                Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
-                Field::OriginAs => MatchExpr::OriginAsInSet(self.asn_set_ids[&set.node]),
-                Field::PeerAsn => MatchExpr::PeerAsInSet(self.asn_set_ids[&set.node]),
-                _ => MatchExpr::CommunityInSet(self.community_set_ids[&set.node]),
-            },
+            Expr::In { field, set } => {
+                // LAN-305: a dataset reference lowers to a pinned
+                // runtime probe — content is external and never folds.
+                if self.file.datasets.iter().any(|d| d.name.node == set.node) {
+                    let probe = match resolve_field(field).expect("typechecked") {
+                        Field::Prefix => DatasetProbe::Prefix,
+                        Field::OriginAs => DatasetProbe::OriginAs,
+                        Field::PeerAsn => DatasetProbe::PeerAs,
+                        _ => DatasetProbe::Community,
+                    };
+                    return match self.dataset_ref(&set.node) {
+                        Some(id) => MatchExpr::InDataset { probe, id },
+                        // Missing binding: never-match placeholder in a
+                        // chain the caller discards (take_missing_datasets).
+                        None => MatchExpr::Or(Vec::new()),
+                    };
+                }
+                match resolve_field(field).expect("typechecked") {
+                    Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
+                    Field::OriginAs => MatchExpr::OriginAsInSet(self.asn_set_ids[&set.node]),
+                    Field::PeerAsn => MatchExpr::PeerAsInSet(self.asn_set_ids[&set.node]),
+                    _ => MatchExpr::CommunityInSet(self.community_set_ids[&set.node]),
+                }
+            }
             // LAN-303: `<binding> in <set>` — a binding probes at
             // runtime; a parameter is a compile-time constant and the
             // probe folds to its truth value here (True / empty-Or =
             // never matches).
             Expr::IdentIn { ident, set } => {
+                // LAN-305: `<binding|param> in <dataset>` stays a
+                // runtime probe either way — dataset content swaps at
+                // runtime, so even a parameter probe cannot fold.
+                if let Some(decl) = self.file.datasets.iter().find(|d| d.name.node == set.node) {
+                    let asn_kind = decl.kind == crate::datasets::DatasetKind::Asn;
+                    let probe = if let Some(slot) = lets.lookup(&ident.node) {
+                        let name = ident.node.clone().into_boxed_str();
+                        if asn_kind {
+                            DatasetProbe::LocalAsn { slot, name }
+                        } else {
+                            DatasetProbe::LocalCommunity { slot, name }
+                        }
+                    } else {
+                        let value = *env
+                            .get(ident.node.as_str())
+                            .expect("typechecked: parameter in scope");
+                        if asn_kind {
+                            DatasetProbe::ConstAsn(value)
+                        } else {
+                            DatasetProbe::ConstCommunity(value)
+                        }
+                    };
+                    return match self.dataset_ref(&set.node) {
+                        Some(id) => MatchExpr::InDataset { probe, id },
+                        None => MatchExpr::Or(Vec::new()),
+                    };
+                }
                 if let Some(slot) = lets.lookup(&ident.node) {
                     if let Some(&id) = self.asn_set_ids.get(&set.node) {
                         MatchExpr::LocalInAsnSet {

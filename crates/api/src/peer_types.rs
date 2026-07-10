@@ -896,8 +896,35 @@ pub enum PeerManagerCommand {
         rpol_files: Vec<String>,
         /// New compiled registry.
         rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        /// Dataset bindings the new registry's `dataset` declarations
+        /// resolve through (LAN-305) — handles reused from the running
+        /// config where declarations are unchanged, so a
+        /// content-equal reload still diffs chains as no-ops.
+        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), CatalogMutationError>>,
+    },
+    /// LAN-305: one or more external dataset snapshots swapped content
+    /// during a reload. Refresh exactly the peers whose chains
+    /// reference a swapped dataset — Route Refresh inbound for import
+    /// chains, forced outbound re-emission for export chains — and
+    /// count failed refreshes (prior snapshot retained) in metrics.
+    /// Chains themselves are untouched: they share the swapped
+    /// handles and pin the new generation at their next walk.
+    RefreshDatasetDependents {
+        /// Dataset names whose content swapped (generation bumped).
+        swapped: Vec<String>,
+        /// `(name, reason)` for datasets whose refresh failed.
+        failed: Vec<(String, String)>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// LAN-305: operator-facing status of every bound external
+    /// dataset (name, kind, generation, records, path, last refresh
+    /// error), sorted by name. Read-only; backs `rbgp policy stats`.
+    QueryPolicyDatasets {
+        /// Reply channel returning one row per bound dataset.
+        reply: oneshot::Sender<Vec<PolicyDatasetStatusRow>>,
     },
     /// List all named policy definitions.
     ListPolicies {
@@ -1770,4 +1797,14 @@ pub struct PeerInfo {
     /// observability — should treat `stale = true` as "state unknown" rather
     /// than as an authoritative Idle reading.
     pub stale: bool,
+}
+
+/// One `QueryPolicyDatasets` reply row (LAN-305): the policy crate's
+/// dataset status plus the config-bound snapshot path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyDatasetStatusRow {
+    /// Name / kind / generation / records / last-error snapshot.
+    pub status: rustbgpd_policy::datasets::DatasetStatus,
+    /// Bound snapshot file path (`[policy.datasets.<name>].path`).
+    pub path: String,
 }

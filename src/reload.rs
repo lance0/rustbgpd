@@ -484,7 +484,14 @@ pub(crate) async fn reload_config(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
 ) -> Option<ReloadedConfig> {
-    let desired_config = match Config::load_with_diagnostics(config_path) {
+    // LAN-305: carry the running dataset bindings into the load so
+    // declared datasets reuse their handles — content re-reads swap in
+    // place (scoped refresh below) and a bad file keeps the prior
+    // snapshot instead of rejecting the reload.
+    let desired_config = match Config::load_with_diagnostics_and_datasets(
+        config_path,
+        Some(&current.policy.dataset_bindings),
+    ) {
         Ok(c) => c,
         Err(diagnostic) => {
             error!("{diagnostic}");
@@ -840,6 +847,7 @@ pub(crate) async fn reload_config(
             .send(PeerManagerCommand::SyncRpolPolicies {
                 rpol_files: new_config.policy.rpol_files.clone(),
                 rpol: new_config.policy.rpol.clone(),
+                dataset_bindings: new_config.policy.dataset_bindings.clone(),
                 reply: ack_tx,
             })
             .await
@@ -883,6 +891,47 @@ pub(crate) async fn reload_config(
                     },
                 );
             }
+        }
+    }
+
+    // LAN-305: dataset bindings and their `[policy.datasets]` table
+    // ride every reload — handles were reused (or freshly built) by
+    // the load above, so this is bookkeeping for the runtime snapshot,
+    // never a live-chain mutation. Content swaps already happened
+    // atomically inside the shared handles during the load; here we
+    // fan out the dependency-scoped refresh so routes evaluated under
+    // the old generation get re-evaluated. A refresh failure is
+    // warned, not halted: the swap itself is durable, and the stale
+    // evaluations converge on the next churn or refresh.
+    working_config
+        .policy
+        .datasets
+        .clone_from(&new_config.policy.datasets);
+    working_config.policy.dataset_bindings = new_config.policy.dataset_bindings.clone();
+    let dataset_events = &new_config.policy.dataset_events;
+    if !dataset_events.swapped.is_empty() || !dataset_events.failed.is_empty() {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let send_failed = peer_mgr_tx
+            .send(PeerManagerCommand::RefreshDatasetDependents {
+                swapped: dataset_events.swapped.clone(),
+                failed: dataset_events.failed.clone(),
+                reply: ack_tx,
+            })
+            .await
+            .is_err();
+        let outcome = if send_failed {
+            Err("peer manager unavailable".to_string())
+        } else {
+            match ack_rx.await {
+                Ok(result) => result,
+                Err(_) => Err("peer manager dropped dataset refresh reply".to_string()),
+            }
+        };
+        if let Err(error) = outcome {
+            warn!(
+                error = %error,
+                "dataset-swap dependency-scoped refresh incomplete; affected peers converge on next churn or manual refresh"
+            );
         }
     }
 

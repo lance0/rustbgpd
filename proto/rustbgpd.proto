@@ -1109,6 +1109,29 @@ message PolicyChainStats {
 
 message GetPolicyStatsResponse {
   repeated PolicyChainStats chains = 1;
+  // External dataset status (LAN-305), sorted by name. One row per
+  // dataset declared in the loaded rpol files; empty when the config
+  // declares none.
+  repeated PolicyDatasetStatus datasets = 2;
+}
+
+// Operator-facing status of one external policy dataset (LAN-305).
+message PolicyDatasetStatus {
+  // Declared dataset name.
+  string name = 1;
+  // Declared kind: "prefix-set", "asn-set", or "community-set".
+  string kind = 2;
+  // Current snapshot generation (monotonic per daemon run; starts
+  // at 1).
+  uint64 generation = 3;
+  // Records in the current snapshot (canonicalized: sorted,
+  // deduplicated).
+  uint64 records = 4;
+  // Bound snapshot file path.
+  string path = 5;
+  // Most recent refresh failure, empty when the last refresh
+  // succeeded. While set, the prior snapshot keeps serving probes.
+  string last_error = 6;
 }
 
 message TestPolicyResponse {

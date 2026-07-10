@@ -26,6 +26,8 @@ pub struct SourceFile {
     pub community_sets: Vec<CommunitySetDef>,
     /// `asn-set` definitions.
     pub asn_sets: Vec<AsnSetDef>,
+    /// `dataset` declarations (LAN-305), in source order.
+    pub datasets: Vec<DatasetDecl>,
     /// `fn` definitions (LAN-304), in source order.
     pub fns: Vec<FnDef>,
     /// `policy` definitions, in source order.
@@ -82,6 +84,51 @@ pub struct PrefixEntryAst {
     pub ge: Option<u8>,
     /// Maximum candidate length (inclusive).
     pub le: Option<u8>,
+}
+
+/// `dataset <kind> NAME` (LAN-305) — declares an external dataset:
+/// a named set whose members come from an operator-maintained file
+/// (bound to a path by the daemon's `[policy.datasets]` config)
+/// instead of source text. Declaration only: kind and name are
+/// compile-time knowledge, content is a runtime snapshot. Datasets
+/// share the flat set namespace — a dataset and a set with the same
+/// name is a compile error.
+#[derive(Debug)]
+pub struct DatasetDecl {
+    /// Dataset name.
+    pub name: Spanned<String>,
+    /// Declared kind (which probe positions accept it and how its
+    /// file parses).
+    pub kind: crate::datasets::DatasetKind,
+    /// Span of the kind keyword, for diagnostics.
+    pub kind_span: Span,
+}
+
+/// One member of a `test`-block `dataset NAME { ... }` override
+/// (LAN-305): the literal forms are token-distinguishable, so the
+/// parser accepts any of them and the typechecker pins the member
+/// kinds against the declared dataset kind.
+#[derive(Debug)]
+pub enum DatasetEntryAst {
+    /// A prefix entry with optional `ge`/`le`.
+    Prefix(PrefixEntryAst),
+    /// A bare u32 ASN.
+    Asn(u32),
+    /// A community literal of any kind.
+    Community(CommunityLit),
+}
+
+/// `dataset NAME { members }` inside a `test` block (LAN-305): the
+/// test's content for a declared dataset — tests never read operator
+/// files, so a test whose policy probes a dataset must provide the
+/// snapshot it runs against.
+#[derive(Debug)]
+pub struct TestDatasetDef {
+    /// The declared dataset this overrides.
+    pub name: Spanned<String>,
+    /// Members, parsed with the same literal parsers set definitions
+    /// use.
+    pub entries: Vec<Spanned<DatasetEntryAst>>,
 }
 
 /// `asn-set NAME { 64500, 64501, ... }`.
@@ -695,6 +742,9 @@ impl Expr {
 pub struct TestDef {
     /// Test name.
     pub name: Spanned<String>,
+    /// `dataset NAME { ... }` content overrides (LAN-305), before the
+    /// fixture.
+    pub datasets: Vec<TestDatasetDef>,
     /// The route fixture.
     pub route: Vec<RouteField>,
     /// Optional peer fixture.

@@ -324,10 +324,15 @@ pub(crate) enum ChainDirection {
 /// reload, the rpol overlay, config transactions, and the gRPC policy
 /// admin — resolves through this function, so the direction check
 /// holds everywhere by construction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the chain resolver threads every policy namespace; a params struct would just rename them"
+)]
 pub(super) fn resolve_chain(
     names: &[String],
     definitions: &HashMap<String, NamedPolicyConfig>,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
+    datasets: &rustbgpd_policy::datasets::DatasetBindings,
     neighbor_sets: &HashMap<String, NeighborSetConfig>,
     peer_groups: &HashMap<String, PeerGroupConfig>,
     direction: ChainDirection,
@@ -349,7 +354,7 @@ pub(super) fn resolve_chain(
                     }
                 });
             }
-            resolve_rpol_chain_ref(name, rpol, &mut store, local_asn)
+            resolve_rpol_chain_ref(name, rpol, datasets, &mut store, local_asn)
         })
         .collect::<Result<Vec<_>, _>>()?;
     // LAN-296 direction legality: `prepend as peer` on an export chain
@@ -385,6 +390,7 @@ pub(super) fn resolve_chain(
 fn resolve_rpol_chain_ref(
     reference: &str,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
+    datasets: &rustbgpd_policy::datasets::DatasetBindings,
     store: &mut rustbgpd_policy::sets::SetStore,
     local_asn: u32,
 ) -> Result<rustbgpd_policy::NamedPolicy, ConfigError> {
@@ -411,8 +417,14 @@ fn resolve_rpol_chain_ref(
     }
     let mut compiled = entry
         .file
-        .compile_policy(base, &args, store)
-        .expect("registry entry names a policy defined in its file");
+        .compile_policy_bound(base, &args, store, datasets)
+        .expect("registry entry names a policy defined in its file")
+        .map_err(|missing| ConfigError::InvalidPolicyEntry {
+            // Unreachable through `Config::load` (bind_datasets runs
+            // before validation and covers every declaration), kept
+            // as a real error for direct callers.
+            reason: format!("chain reference {reference:?}: {missing}"),
+        })?;
     // Attach-time stamp backing `prepend as self` (LAN-296): the
     // daemon's `[global] asn`. Deterministic from config, so reloads
     // of an unchanged file still diff as no-ops.

@@ -1522,6 +1522,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         )))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "three sequential backend queries (export, import, datasets) with shared shaping"
+    )]
     async fn get_policy_stats(
         &self,
         request: Request<proto::GetPolicyStatsRequest>,
@@ -1616,7 +1620,32 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             );
         }
 
-        Ok(Response::new(proto::GetPolicyStatsResponse { chains: out }))
+        // LAN-305: dataset status rides the stats surface — the
+        // operator-visible half of "failed refresh keeps the prior
+        // snapshot" (name, kind, generation, records, last error).
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::QueryPolicyDatasets { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let datasets = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .into_iter()
+            .map(|row| proto::PolicyDatasetStatus {
+                name: row.status.name,
+                kind: row.status.kind.as_str().to_string(),
+                generation: row.status.generation,
+                records: u64::try_from(row.status.records).unwrap_or(u64::MAX),
+                path: row.path,
+                last_error: row.status.last_error.unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(Response::new(proto::GetPolicyStatsResponse {
+            chains: out,
+            datasets,
+        }))
     }
 }
 
@@ -2831,6 +2860,18 @@ policy customer-in(peer_lp: u32) {
                             },
                         )]);
                     }
+                    PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                        let _ = reply.send(vec![crate::peer_types::PolicyDatasetStatusRow {
+                            status: rustbgpd_policy::datasets::DatasetStatus {
+                                name: "customers".to_string(),
+                                kind: rustbgpd_policy::datasets::DatasetKind::Asn,
+                                generation: 7,
+                                records: 42,
+                                last_error: Some("line 3: bad".to_string()),
+                            },
+                            path: "/var/lib/rustbgpd/datasets/customers.list".to_string(),
+                        }]);
+                    }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
@@ -2898,6 +2939,15 @@ policy customer-in(peer_lp: u32) {
             chain.policy_generation, 0,
             "export chains do not track an install generation yet (LAN-311)"
         );
+        // LAN-305: dataset status rides the same response.
+        assert_eq!(resp.datasets.len(), 1);
+        let dataset = &resp.datasets[0];
+        assert_eq!(dataset.name, "customers");
+        assert_eq!(dataset.kind, "asn-set");
+        assert_eq!(dataset.generation, 7);
+        assert_eq!(dataset.records, 42);
+        assert_eq!(dataset.last_error, "line 3: bad");
+        assert_eq!(dataset.path, "/var/lib/rustbgpd/datasets/customers.list");
     }
 
     /// The import direction reads the session-side counters through

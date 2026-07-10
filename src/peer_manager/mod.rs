@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY, SessionEvent,
-    SessionLifecycleEvent, StageConfigSnapshotError,
+    PeerManagerNeighborConfig, PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY,
+    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -807,9 +807,36 @@ impl PeerManager {
                             self.current_config.policy.explain.cache_size = cache_size;
                             let _ = reply.send(());
                         }
-                        PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, reply } => {
-                            let result = self.sync_rpol_policies(rpol_files, rpol).await;
+                        PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, dataset_bindings, reply } => {
+                            let result = self.sync_rpol_policies(rpol_files, rpol, dataset_bindings).await;
                             let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::RefreshDatasetDependents { swapped, failed, reply } => {
+                            let result = self.refresh_dataset_dependents(&swapped, &failed).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                            // LAN-305: status straight off the shared
+                            // handles; sorted for deterministic output.
+                            let mut rows: Vec<PolicyDatasetStatusRow> = self
+                                .current_config
+                                .policy
+                                .dataset_bindings
+                                .handles()
+                                .map(|handle| {
+                                    let status = handle.status();
+                                    let path = self
+                                        .current_config
+                                        .policy
+                                        .datasets
+                                        .get(&status.name)
+                                        .map(|entry| entry.path.clone())
+                                        .unwrap_or_default();
+                                    PolicyDatasetStatusRow { status, path }
+                                })
+                                .collect();
+                            rows.sort_by(|a, b| a.status.name.cmp(&b.status.name));
+                            let _ = reply.send(rows);
                         }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));

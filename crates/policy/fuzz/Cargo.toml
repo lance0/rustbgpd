@@ -20,3 +20,9 @@ test = false
 doc = false
 
 [workspace]
+
+[[bin]]
+name = "dataset_parse"
+path = "fuzz_targets/dataset_parse.rs"
+test = false
+doc = false

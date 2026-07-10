@@ -10,16 +10,20 @@
 //! omitted `rpki` is `not-found`, omitted `aspa` is `unknown`.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use rustbgpd_wire::{
     AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, LargeCommunity, Prefix,
     RpkiValidation,
 };
 
+use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use crate::engine::{NextHopAction, PolicyAction, RouteContext, RouteFamily, RouteType};
-use crate::sets::SetStore;
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
-use super::ast::{CommunityLit, NextHopArg, PeerField, RouteField, TestDef, WithAssertion};
+use super::ast::{
+    CommunityLit, DatasetEntryAst, NextHopArg, PeerField, RouteField, TestDef, WithAssertion,
+};
 use super::lower::{Lowerer, ext_community_value};
 
 /// The outcome of running a source file's `test` blocks.
@@ -278,9 +282,33 @@ pub(super) fn run_tests(
         let fixture = Fixture::build(test);
         let ctx = fixture.context();
         let mut problems: Vec<String> = Vec::new();
+        // LAN-305: the test's `dataset NAME { ... }` overrides are its
+        // dataset content — fresh generation-1 handles per test, never
+        // operator files. Kind agreement was typechecked.
+        let mut bindings = DatasetBindings::new();
+        for def in &test.datasets {
+            let kind = lowerer
+                .dataset_kind(&def.name.node)
+                .expect("typechecked: override names a declared dataset");
+            bindings.insert(Arc::new(DatasetHandle::new(
+                &def.name.node,
+                kind,
+                override_data(kind, &def.entries),
+            )));
+        }
         for expect in &test.expects {
             let args: Vec<u32> = expect.args.iter().map(|arg| arg.node).collect();
-            let mut chain = lowerer.instantiate_chain(&expect.policy.node, &args, store);
+            let mut chain = lowerer.instantiate_chain(&expect.policy.node, &args, store, &bindings);
+            let missing = lowerer.take_missing_datasets();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{}: probes dataset{} {} with no `dataset {{ ... }}` override in this test",
+                    render_call(&expect.policy.node, &args),
+                    if missing.len() == 1 { "" } else { "s" },
+                    missing.join(", "),
+                ));
+                continue;
+            }
             // The fixture's `peer { local-as N }` plays the config
             // resolver's role for `prepend as self` (LAN-296).
             chain.local_asn = fixture.local_asn;
@@ -309,6 +337,44 @@ pub(super) fn run_tests(
         }
     }
     report
+}
+
+/// Build a test override's [`DatasetData`] from its parsed members.
+/// Kind agreement between members and the declared kind is a
+/// typecheck guarantee; mismatched members are unreachable here and
+/// are skipped defensively.
+fn override_data(
+    kind: DatasetKind,
+    entries: &[super::diag::Spanned<DatasetEntryAst>],
+) -> DatasetData {
+    match kind {
+        DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new(entries.iter().filter_map(
+            |entry| match &entry.node {
+                DatasetEntryAst::Prefix(p) => Some(PrefixSetEntry {
+                    prefix: p.prefix,
+                    ge: p.ge,
+                    le: p.le,
+                }),
+                _ => None,
+            },
+        ))),
+        DatasetKind::Asn => {
+            DatasetData::Asn(AsnSet::new(entries.iter().filter_map(
+                |entry| match &entry.node {
+                    DatasetEntryAst::Asn(asn) => Some(*asn),
+                    _ => None,
+                },
+            )))
+        }
+        DatasetKind::Community => {
+            DatasetData::Community(CommunitySet::new(entries.iter().filter_map(|entry| {
+                match &entry.node {
+                    DatasetEntryAst::Community(lit) => Some(lit.to_match()),
+                    _ => None,
+                }
+            })))
+        }
+    }
 }
 
 fn verdict(accept: bool) -> &'static str {

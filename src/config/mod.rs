@@ -47,6 +47,15 @@ impl Config {
         source_name: &str,
         base_dir: Option<&std::path::Path>,
     ) -> Result<Self, String> {
+        Self::load_from_toml_source_with_datasets(content, source_name, base_dir, None)
+    }
+
+    fn load_from_toml_source_with_datasets(
+        content: &str,
+        source_name: &str,
+        base_dir: Option<&std::path::Path>,
+        prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+    ) -> Result<Self, String> {
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
@@ -66,6 +75,15 @@ impl Config {
                 other => diagnostic::render_diagnostic(content, source_name, other)
                     .unwrap_or_else(|| format!("error: {other}")),
             });
+        }
+        // Bind dataset declarations to their snapshot files (LAN-305)
+        // before validation: chain references probe datasets, so the
+        // resolver needs the handles. With `prior_datasets` (the
+        // SIGHUP reload path) existing handles are reused — content
+        // swaps happen inside them and a failed refresh keeps the
+        // prior snapshot instead of failing the load.
+        if let Err(error) = config.bind_datasets(base_dir, prior_datasets) {
+            return Err(format!("error: {error}"));
         }
         if let Err(error) = config.validate() {
             return Err(diagnostic::render_diagnostic(content, source_name, &error)
@@ -177,6 +195,148 @@ impl Config {
         Ok(())
     }
 
+    /// Bind every `dataset` declared across the loaded `.rpol` units
+    /// to its `[policy.datasets]` snapshot file (LAN-305), populating
+    /// `policy.dataset_bindings` and `policy.dataset_events`.
+    ///
+    /// Validation (all load errors): kind agreement when two units
+    /// declare the same name, a `[policy.datasets]` entry for every
+    /// declaration, and a declaration for every entry. Loading:
+    /// declared datasets with a kind-matching handle in `prior` reuse
+    /// it — fresh content swaps atomically inside the handle
+    /// (generation bump, recorded in `dataset_events.swapped`),
+    /// content-equal files are no-ops, and a load/parse failure keeps
+    /// the prior snapshot with the error recorded on the handle and in
+    /// `dataset_events.failed` (never empty data — ADR-0103 Decision
+    /// 8.5). Datasets with no prior handle (initial load, new
+    /// declarations, kind changes) must load cleanly or the whole load
+    /// fails — introducing a dataset is a config transaction.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "declaration collection, two-way coverage checks, and the load/refresh state machine in one linear pass"
+    )]
+    fn bind_datasets(
+        &mut self,
+        base_dir: Option<&std::path::Path>,
+        prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+    ) -> Result<(), ConfigError> {
+        use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind, load_dataset_file};
+
+        // Declarations across every loaded unit: name → (kind, owner
+        // path), kind conflicts rejected. Iterate registry entries
+        // deduped by owning file (entries share `Arc<RpolFile>`).
+        let mut declared: HashMap<String, (DatasetKind, String)> = HashMap::new();
+        let mut seen_files: Vec<*const rustbgpd_policy::rpol::RpolFile> = Vec::new();
+        for entry in self.policy.rpol.policies.values() {
+            let ptr = Arc::as_ptr(&entry.file);
+            if seen_files.contains(&ptr) {
+                continue;
+            }
+            seen_files.push(ptr);
+            for (name, kind) in entry.file.dataset_decls() {
+                match declared.get(name) {
+                    Some((existing, owner)) if *existing != kind => {
+                        return Err(ConfigError::InvalidPolicyEntry {
+                            reason: format!(
+                                "dataset {name:?} is declared as {existing} in {owner:?} but as                                  {kind} in {:?}; dataset kinds are daemon-global",
+                                entry.path
+                            ),
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        declared.insert(name.to_string(), (kind, entry.path.clone()));
+                    }
+                }
+            }
+        }
+
+        // Both directions of declaration ↔ binding coverage.
+        for (name, (_, owner)) in &declared {
+            if !self.policy.datasets.contains_key(name) {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "dataset {name:?} (declared in {owner:?}) has no [policy.datasets.{name}] entry naming its snapshot file"
+                    ),
+                });
+            }
+        }
+        for name in self.policy.datasets.keys() {
+            if !declared.contains_key(name) {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "[policy.datasets.{name}] does not match any `dataset` declaration in the loaded rpol files — remove the entry or declare the dataset"
+                    ),
+                });
+            }
+        }
+
+        // Absolutize + rewrite paths like `rpol_files`.
+        for entry in self.policy.datasets.values_mut() {
+            let mut path = PathBuf::from(&entry.path);
+            if path.is_relative()
+                && let Some(base) = base_dir
+            {
+                path = base.join(path);
+            }
+            entry.path = path.display().to_string();
+        }
+
+        // Load / refresh, deterministically ordered for stable logs.
+        let mut names: Vec<&String> = declared.keys().collect();
+        names.sort();
+        for name in names {
+            let (kind, _) = declared[name.as_str()];
+            let path = PathBuf::from(&self.policy.datasets[name.as_str()].path);
+            let existing = prior
+                .and_then(|bindings| bindings.get(name))
+                .filter(|handle| handle.kind() == kind);
+            match (existing, load_dataset_file(&path, kind)) {
+                (Some(handle), Ok(data)) => {
+                    if let Some(generation) = handle.refresh(data) {
+                        tracing::info!(
+                            dataset = %name,
+                            %generation,
+                            "dataset content swapped; scoped peer refresh follows"
+                        );
+                        self.policy.dataset_events.swapped.push(name.clone());
+                    }
+                    self.policy.dataset_bindings.insert(Arc::clone(handle));
+                }
+                (Some(handle), Err(reason)) => {
+                    // Keep the prior snapshot serving probes; surface
+                    // the failure (WARN here, counter + `rbgp policy
+                    // stats` via the recorded error).
+                    tracing::warn!(
+                        dataset = %name,
+                        error = %reason,
+                        "dataset refresh failed; retaining prior snapshot"
+                    );
+                    handle.record_error(reason.clone());
+                    self.policy
+                        .dataset_events
+                        .failed
+                        .push((name.clone(), reason));
+                    self.policy.dataset_bindings.insert(Arc::clone(handle));
+                }
+                (None, Ok(data)) => {
+                    self.policy
+                        .dataset_bindings
+                        .insert(Arc::new(DatasetHandle::new(name, kind, data)));
+                }
+                (None, Err(reason)) => {
+                    return Err(ConfigError::InvalidPolicyEntry {
+                        reason: format!(
+                            "dataset {name:?}: cannot load {}: {reason}",
+                            path.display()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Load config from TOML text and render diagnostics against `source_name`.
     ///
     /// Used by read-only API surfaces that receive candidate config
@@ -197,13 +357,32 @@ impl Config {
     /// printing to stderr). Falls back to plain `Display` if no source span
     /// can be determined.
     pub fn load_with_diagnostics(path: &str) -> Result<Self, String> {
+        Self::load_with_diagnostics_and_datasets(path, None)
+    }
+
+    /// [`Self::load_with_diagnostics`] carrying the running config's
+    /// dataset bindings (LAN-305) — the SIGHUP reload entry point.
+    /// Declared datasets reuse the running handles: unchanged content
+    /// is a no-op, changed content swaps in place (generation bump,
+    /// recorded in `policy.dataset_events.swapped`), and a file that
+    /// fails to load/parse keeps the prior snapshot with the error
+    /// recorded instead of rejecting the reload.
+    pub fn load_with_diagnostics_and_datasets(
+        path: &str,
+        prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+    ) -> Result<Self, String> {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
         let content = test_only_inject_legacy_grpc_security(&content);
         let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
-        let mut config = Self::load_from_toml_source(content.as_ref(), path, base_dir.as_deref())?;
+        let mut config = Self::load_from_toml_source_with_datasets(
+            content.as_ref(),
+            path,
+            base_dir.as_deref(),
+            prior_datasets,
+        )?;
         config.file_path = Some(PathBuf::from(path));
         Ok(config)
     }
@@ -436,6 +615,7 @@ impl Config {
                 &self.policy.import_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Import,
@@ -460,6 +640,7 @@ impl Config {
                 &self.policy.export_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Export,
@@ -593,6 +774,7 @@ impl Config {
                     &group.import_policy_chain,
                     &self.policy.definitions,
                     &self.policy.rpol,
+                    &self.policy.dataset_bindings,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                     ChainDirection::Import,
@@ -615,6 +797,7 @@ impl Config {
                     &group.export_policy_chain,
                     &self.policy.definitions,
                     &self.policy.rpol,
+                    &self.policy.dataset_bindings,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                     ChainDirection::Export,
@@ -641,6 +824,7 @@ impl Config {
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Import,
@@ -664,6 +848,7 @@ impl Config {
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
+                &self.policy.dataset_bindings,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
                 ChainDirection::Export,

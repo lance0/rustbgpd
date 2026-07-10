@@ -12,13 +12,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::datasets::{DatasetKind, MAX_UNIT_DATASETS};
 use crate::engine::AsPathRegex;
 use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityKind, Expr, FieldPath, FieldRoot, FnDef, ForSource,
-    ForStmt, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr, FieldPath,
+    FieldRoot, FnDef, ForSource, ForStmt, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile,
+    Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, Span, Spanned, closest};
 
@@ -311,6 +313,59 @@ impl<'a> Checker<'a> {
         self.duplicate_check("fn", self.file.fns.iter().map(|f| &f.name));
         self.duplicate_check("policy", self.file.policies.iter().map(|p| &p.name));
         self.duplicate_check("test", self.file.tests.iter().map(|t| &t.name));
+        // LAN-305: datasets share the flat set namespace — reference
+        // positions (`in`) cannot tell a dataset from a set, so a
+        // shared name is ambiguity, not shadowing.
+        self.duplicate_check("dataset", self.file.datasets.iter().map(|d| &d.name));
+        for decl in &self.file.datasets {
+            if let Some((kind, span)) = self.set_def_of(&decl.name.node) {
+                self.diags.push(
+                    Diagnostic::new(
+                        decl.name.span,
+                        format!(
+                            "dataset `{}` collides with the {kind} of the same name",
+                            decl.name.node
+                        ),
+                        "datasets share the set namespace",
+                    )
+                    .with_label(span, "set defined here")
+                    .with_note("rename one of them — `in` could not tell which to probe"),
+                );
+            }
+        }
+        if self.file.datasets.len() > MAX_UNIT_DATASETS {
+            let extra = &self.file.datasets[MAX_UNIT_DATASETS];
+            self.diags.push(Diagnostic::new(
+                extra.name.span,
+                format!(
+                    "more than {MAX_UNIT_DATASETS} dataset declarations in one compilation unit"
+                ),
+                "dataset budget exceeded",
+            ));
+        }
+    }
+
+    /// The declaration of a dataset by name (LAN-305).
+    fn dataset_of(&self, name: &str) -> Option<&'a DatasetDecl> {
+        self.file.datasets.iter().find(|d| d.name.node == name)
+    }
+
+    /// The kind and definition span of a source-defined set by name.
+    fn set_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
+        if let Some(def) = self.file.prefix_sets.iter().find(|s| s.name.node == name) {
+            Some(("prefix-set", def.name.span))
+        } else if let Some(def) = self
+            .file
+            .community_sets
+            .iter()
+            .find(|s| s.name.node == name)
+        {
+            Some(("community-set", def.name.span))
+        } else if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name) {
+            Some(("asn-set", def.name.span))
+        } else {
+            None
+        }
     }
 
     // ── functions (LAN-304) ─────────────────────────────────────────
@@ -663,6 +718,23 @@ impl<'a> Checker<'a> {
                 ),
             },
             ForSource::Set(name) => {
+                // LAN-305: datasets are probe-only in this slice —
+                // content is a runtime snapshot, so iteration bounds
+                // are not compile-time knowledge the cost DP can use.
+                if let Some(decl) = self.dataset_of(&name.node) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            name.span,
+                            format!("dataset `{}` is not iterable", name.node),
+                            "datasets are probe-only",
+                        )
+                        .with_label(decl.kind_span, "declared here")
+                        .with_note(
+                            "dataset content is an external runtime snapshot; probe it with `in` (one hash lookup) instead of iterating",
+                        ),
+                    );
+                    return;
+                }
                 if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name.node) {
                     // Set sizes are compile-time knowledge: enforce
                     // the per-loop bound here instead of erroring per
@@ -1183,6 +1255,23 @@ impl<'a> Checker<'a> {
                     // Community-set probes match standard members only
                     // (the binding is a raw u32) — documented in the
                     // language reference.
+                } else if let Some(decl) = self.dataset_of(&set.node) {
+                    // LAN-305: asn-set / community-set datasets probe
+                    // exactly like their in-language kinds; prefix
+                    // datasets are not u32-probeable.
+                    if decl.kind == DatasetKind::Prefix {
+                        self.diags.push(
+                            Diagnostic::new(
+                                set.span,
+                                format!(
+                                    "`{}` is a prefix-set dataset; bindings are u32 values and cannot probe prefixes",
+                                    set.node
+                                ),
+                                "wrong dataset kind",
+                            )
+                            .with_label(decl.kind_span, "declared here"),
+                        );
+                    }
                 } else {
                     let mut diag = Diagnostic::new(
                         set.span,
@@ -1671,6 +1760,33 @@ impl<'a> Checker<'a> {
                 return;
             }
         };
+        // LAN-305: a dataset reference resolves like a set of its
+        // declared kind; a wrong-kind dataset is the same class of
+        // error as a wrong-kind set.
+        let expected_kind = match resolved {
+            Field::Prefix => Some(DatasetKind::Prefix),
+            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
+                Some(DatasetKind::Community)
+            }
+            Field::OriginAs | Field::PeerAsn => Some(DatasetKind::Asn),
+            _ => None,
+        };
+        if let (Some(expected), Some(decl)) = (expected_kind, self.dataset_of(&set.node)) {
+            if decl.kind != expected {
+                self.diags.push(
+                    Diagnostic::new(
+                        set.span,
+                        format!(
+                            "`{}` is a {} dataset but this probe needs a {expected}",
+                            set.node, decl.kind
+                        ),
+                        "wrong dataset kind",
+                    )
+                    .with_label(decl.kind_span, "declared here"),
+                );
+            }
+            return;
+        }
         match resolved {
             Field::Prefix => self.check_set_reference(
                 set,
@@ -1801,6 +1917,10 @@ impl<'a> Checker<'a> {
 
     // ── tests ───────────────────────────────────────────────────────
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fixture fields, dataset overrides, and expect arity in one linear pass"
+    )]
     fn check_tests(&mut self) {
         for test in &self.file.tests {
             let mut seen_fields: HashMap<&'static str, Span> = HashMap::new();
@@ -1850,6 +1970,59 @@ impl<'a> Checker<'a> {
                         self.check_fixture_community_kinds(lits, CommunityKind::Ext);
                     }
                     _ => {}
+                }
+            }
+            // LAN-305: dataset overrides must name declared datasets,
+            // once each, with members of the declared kind.
+            let mut seen_datasets: HashMap<&str, Span> = HashMap::new();
+            for def in &test.datasets {
+                if let Some(&first) = seen_datasets.get(def.name.node.as_str()) {
+                    self.diags.push(
+                        Diagnostic::new(
+                            def.name.span,
+                            format!("duplicate dataset override `{}`", def.name.node),
+                            "already provided",
+                        )
+                        .with_label(first, "first override is here"),
+                    );
+                } else {
+                    seen_datasets.insert(&def.name.node, def.name.span);
+                }
+                let Some(decl) = self.dataset_of(&def.name.node) else {
+                    let mut diag = Diagnostic::new(
+                        def.name.span,
+                        format!("unknown dataset `{}`", def.name.node),
+                        "no dataset declared with this name",
+                    );
+                    if let Some(suggestion) = closest(
+                        &def.name.node,
+                        self.file.datasets.iter().map(|d| d.name.node.as_str()),
+                    ) {
+                        diag = diag.with_note(format!("did you mean `{suggestion}`?"));
+                    }
+                    self.diags.push(diag);
+                    continue;
+                };
+                for entry in &def.entries {
+                    let ok = matches!(
+                        (&entry.node, decl.kind),
+                        (DatasetEntryAst::Prefix(_), DatasetKind::Prefix)
+                            | (DatasetEntryAst::Asn(_), DatasetKind::Asn)
+                            | (DatasetEntryAst::Community(_), DatasetKind::Community)
+                    );
+                    if !ok {
+                        self.diags.push(
+                            Diagnostic::new(
+                                entry.span,
+                                format!(
+                                    "member kind mismatch: dataset `{}` is a {}",
+                                    def.name.node, decl.kind
+                                ),
+                                "wrong member kind",
+                            )
+                            .with_label(decl.kind_span, "declared here"),
+                        );
+                    }
                 }
             }
             for expect in &test.expects {

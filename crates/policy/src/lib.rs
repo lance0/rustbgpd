@@ -11,6 +11,7 @@
 pub mod engine;
 
 pub mod compile;
+pub mod datasets;
 pub mod ir;
 pub mod rpol;
 pub mod sets;

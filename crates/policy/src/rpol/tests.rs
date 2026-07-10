@@ -4270,3 +4270,486 @@ fn fn_legal_call_depth_on_small_stack() {
     // med 0: f1(0) = 60 + 7 = 67; 67 + 60 = 127 < 100000 -> accept.
     assert_eq!(verdict, PolicyAction::Permit);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// External datasets (LAN-305, ADR-0103 Decisions 8.5 / 9)
+// ─────────────────────────────────────────────────────────────────────
+
+mod datasets {
+    use std::sync::Arc;
+
+    use rustbgpd_wire::RpkiValidation;
+
+    use crate::datasets::{
+        DatasetBindings, DatasetData, DatasetHandle, DatasetKind, MAX_UNIT_DATASETS,
+    };
+    use crate::engine::{CommunityMatch, PolicyAction};
+    use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
+
+    use super::super::{RpolFile, compile_rpol, parse_dataset_text, run_rpol_tests};
+    use super::{route_ctx, v4};
+
+    const DATASET_POLICY: &str = r"
+dataset asn-set customers
+dataset prefix-set bogons
+dataset community-set scrub-tags
+
+policy origin-guard {
+    term customers { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+
+policy bogon-guard {
+    term bogons { if route.prefix in bogons { reject } }
+}
+
+policy tag-guard {
+    term tagged { if route.communities in scrub-tags { reject } }
+}
+
+policy peer-guard {
+    term peers { if peer.asn in customers { accept } }
+    term rest { reject }
+}
+";
+
+    fn asn_handle(name: &str, asns: &[u32]) -> Arc<DatasetHandle> {
+        Arc::new(DatasetHandle::new(
+            name,
+            DatasetKind::Asn,
+            DatasetData::Asn(AsnSet::new(asns.iter().copied())),
+        ))
+    }
+
+    fn bindings_for(handles: &[Arc<DatasetHandle>]) -> DatasetBindings {
+        let mut bindings = DatasetBindings::new();
+        for handle in handles {
+            bindings.insert(Arc::clone(handle));
+        }
+        bindings
+    }
+
+    fn full_bindings() -> (Arc<DatasetHandle>, DatasetBindings) {
+        let customers = asn_handle("customers", &[64500]);
+        let bogons = Arc::new(DatasetHandle::new(
+            "bogons",
+            DatasetKind::Prefix,
+            DatasetData::Prefix(PrefixSet::new([PrefixSetEntry {
+                prefix: v4(127, 0, 0, 0, 8),
+                ge: Some(8),
+                le: Some(32),
+            }])),
+        ));
+        let tags = Arc::new(DatasetHandle::new(
+            "scrub-tags",
+            DatasetKind::Community,
+            DatasetData::Community(CommunitySet::new([CommunityMatch::Standard {
+                value: (65000 << 16) | 0x29A,
+            }])),
+        ));
+        let bindings = bindings_for(&[Arc::clone(&customers), bogons, tags]);
+        (customers, bindings)
+    }
+
+    #[test]
+    fn dataset_probes_evaluate_like_sets() {
+        let file = RpolFile::parse(DATASET_POLICY).expect("clean rpol");
+        let (_, bindings) = full_bindings();
+        let mut store = SetStore::new();
+
+        // ASN probe.
+        let chain = file
+            .compile_policy_bound("origin-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        let mut hit = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        hit.origin_asn = Some(64500);
+        assert_eq!(chain.evaluate(&hit).action, PolicyAction::Permit);
+        let mut miss = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        miss.origin_asn = Some(64999);
+        assert_eq!(chain.evaluate(&miss).action, PolicyAction::Deny);
+
+        // Prefix probe.
+        let chain = file
+            .compile_policy_bound("bogon-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        let bogon = route_ctx(v4(127, 1, 0, 0, 16), &[], RpkiValidation::NotFound);
+        assert_eq!(chain.evaluate(&bogon).action, PolicyAction::Deny);
+        let clean = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        assert_eq!(chain.evaluate(&clean).action, PolicyAction::Permit);
+
+        // Community probe.
+        let chain = file
+            .compile_policy_bound("tag-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        let tagged = route_ctx(
+            v4(10, 0, 0, 0, 24),
+            &[(65000 << 16) | 0x29A],
+            RpkiValidation::NotFound,
+        );
+        assert_eq!(chain.evaluate(&tagged).action, PolicyAction::Deny);
+
+        // Peer-ASN probe counts toward peer context (update-group
+        // disqualification), route-only probes do not.
+        let peer_chain = file
+            .compile_policy_bound("peer-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        assert!(peer_chain.requires_peer_context());
+        assert!(!chain.requires_peer_context());
+    }
+
+    /// The Decision 8.5 core: a content swap is visible to the
+    /// installed chain at its next walk WITHOUT recompiling or
+    /// replacing it, and chain identity (the #775 skip / live-impact
+    /// diff input) is untouched by the swap.
+    #[test]
+    fn content_swap_reaches_installed_chains_without_recompile() {
+        let file = RpolFile::parse(DATASET_POLICY).expect("clean rpol");
+        let (customers, bindings) = full_bindings();
+        let mut store = SetStore::new();
+        let chain = file
+            .compile_policy_bound("origin-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+
+        let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        ctx.origin_asn = Some(64999);
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+
+        let before_swap = chain.clone();
+        customers
+            .refresh(DatasetData::Asn(AsnSet::new([64500, 64999])))
+            .expect("content changed");
+        // Same chain instance, new verdict: the swap reached it.
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+        // …and identity is stable: content is data, not program
+        // (ADR-0103 Decision 5.3).
+        assert_eq!(chain, before_swap);
+        assert!(chain.references_dataset("customers"));
+        assert!(!chain.references_dataset("bogons"));
+    }
+
+    /// Torn-generation proof at the walk level: one evaluation pins
+    /// each dataset once, so a guard set of `in D` / `!(in D)` terms
+    /// resolves consistently even while another thread swaps the
+    /// snapshot in a tight loop. A torn read would deny (both terms
+    /// miss); a pinned walk always permits through exactly one term.
+    #[test]
+    fn walk_pins_one_generation_under_concurrent_swaps() {
+        let file = RpolFile::parse(
+            r"
+dataset asn-set flappers
+
+policy pinned {
+    term member { if route.origin-as in flappers { accept } }
+    term nonmember { if !(route.origin-as in flappers) { accept } }
+    term unreachable { reject }
+}
+",
+        )
+        .expect("clean rpol");
+        let handle = asn_handle("flappers", &[64500]);
+        let bindings = bindings_for(&[Arc::clone(&handle)]);
+        let mut store = SetStore::new();
+        let chain = file
+            .compile_policy_bound("pinned", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut member = false;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    member = !member;
+                    let asns: &[u32] = if member { &[64500] } else { &[] };
+                    handle.refresh(DatasetData::Asn(AsnSet::new(asns.iter().copied())));
+                }
+            });
+            let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+            ctx.origin_asn = Some(64500);
+            for _ in 0..50_000 {
+                assert_eq!(
+                    chain.evaluate(&ctx).action,
+                    PolicyAction::Permit,
+                    "a walk observed two generations of one dataset"
+                );
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn missing_or_wrong_kind_binding_is_a_compile_error() {
+        let file = RpolFile::parse(DATASET_POLICY).expect("clean rpol");
+        let mut store = SetStore::new();
+        // No bindings at all.
+        let missing = file
+            .compile_policy_bound("origin-guard", &[], &mut store, &DatasetBindings::new())
+            .expect("policy exists")
+            .expect_err("unbound dataset");
+        assert_eq!(missing.0, vec!["customers".to_string()]);
+        // A binding of the wrong kind is as good as missing.
+        let wrong = Arc::new(DatasetHandle::new(
+            "customers",
+            DatasetKind::Prefix,
+            DatasetData::Prefix(PrefixSet::new([])),
+        ));
+        let missing = file
+            .compile_policy_bound("origin-guard", &[], &mut store, &bindings_for(&[wrong]))
+            .expect("policy exists")
+            .expect_err("kind mismatch");
+        assert_eq!(missing.0, vec!["customers".to_string()]);
+        // Inline compilation cannot bind datasets: zero-param policies
+        // probing one are a diagnostic.
+        let err = compile_rpol(DATASET_POLICY, &mut SetStore::new())
+            .expect_err("inline compile has no bindings");
+        assert!(
+            err.0[0].message.contains("cannot bind dataset"),
+            "{}",
+            err.0[0].message
+        );
+    }
+
+    #[test]
+    fn diagnostics_cover_dataset_misuse() {
+        let cases: &[(&str, &str)] = &[
+            // Wrong kind in a probe position.
+            (
+                "dataset prefix-set nets\npolicy p { term t { if route.origin-as in nets { accept } } }",
+                "prefix-set dataset but this probe needs a asn-set",
+            ),
+            // Namespace collision with a source-defined set.
+            (
+                "asn-set customers { 64500 }\ndataset asn-set customers\npolicy p { term t { reject } }",
+                "collides with the asn-set of the same name",
+            ),
+            // Duplicate declaration.
+            (
+                "dataset asn-set d\ndataset asn-set d\npolicy p { term t { reject } }",
+                "duplicate dataset `d`",
+            ),
+            // Datasets are probe-only.
+            (
+                "dataset asn-set d\npolicy p { term t { for asn in d { reject } } }",
+                "datasets are probe-only",
+            ),
+            // Bindings cannot probe prefix datasets.
+            (
+                "dataset prefix-set nets\npolicy p { term t { for c in route.communities { if c in nets { reject } } } }",
+                "cannot probe prefixes",
+            ),
+            // Test override must name a declared dataset.
+            (
+                "dataset asn-set d\npolicy p { term t { reject } }\ntest t { dataset nope { 1 } route { prefix 10.0.0.0/8 } expect p == reject }",
+                "unknown dataset `nope`",
+            ),
+            // Test override member kind must match.
+            (
+                "dataset asn-set d\npolicy p { term t { reject } }\ntest t { dataset d { 10.0.0.0/8 } route { prefix 10.0.0.0/8 } expect p == reject }",
+                "member kind mismatch",
+            ),
+        ];
+        for (source, needle) in cases {
+            let err = RpolFile::parse(source).expect_err("should not typecheck");
+            let rendered = format!("{err:?}");
+            assert!(rendered.contains(needle), "{needle:?} not in {rendered}");
+        }
+    }
+
+    #[test]
+    fn unit_dataset_budget_is_enforced() {
+        use std::fmt::Write as _;
+        let mut source = String::new();
+        for index in 0..=MAX_UNIT_DATASETS {
+            let _ = writeln!(source, "dataset asn-set d{index}");
+        }
+        source.push_str("policy p { term t { reject } }\n");
+        let err = RpolFile::parse(&source).expect_err("over budget");
+        assert!(format!("{err:?}").contains("dataset budget exceeded"));
+    }
+
+    /// In-language tests provide dataset content with per-test
+    /// `dataset` overrides; a test probing an un-overridden dataset
+    /// fails with a message naming it.
+    #[test]
+    fn test_blocks_override_dataset_content() {
+        let report = run_rpol_tests(
+            r#"
+dataset asn-set customers
+
+policy origin-guard {
+    term customers { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+
+test member-accepted {
+    dataset customers { 64500, 64501 }
+    route { prefix 10.0.0.0/24; as-path "64777 64500" }
+    expect origin-guard == accept
+}
+
+test nonmember-rejected {
+    dataset customers { 64501 }
+    route { prefix 10.0.0.0/24; as-path "64777 64500" }
+    expect origin-guard == reject
+}
+
+test missing-override-fails {
+    route { prefix 10.0.0.0/24; as-path "64777 64500" }
+    expect origin-guard == accept
+}
+"#,
+        )
+        .expect("compiles");
+        assert_eq!(report.total, 3);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].name, "missing-override-fails");
+        assert!(
+            report.failures[0]
+                .message
+                .contains("no `dataset { ... }` override"),
+            "{}",
+            report.failures[0].message
+        );
+    }
+
+    /// The file format: one entry per line, `#` comments, whitespace
+    /// tolerant, same literal grammar as source sets, errors carry
+    /// line numbers.
+    #[test]
+    fn dataset_file_format_parses_and_reports_lines() {
+        let asn = parse_dataset_text(
+            "# customer ASNs\n 64500 \n64501 # trailing comment\n\n64502\n",
+            DatasetKind::Asn,
+        )
+        .expect("clean asn file");
+        assert_eq!(asn.records(), 3);
+
+        let prefixes = parse_dataset_text(
+            "10.0.0.0/8 ge 24 le 28\n192.0.2.0/24\n2001:db8::/32 ge 48\n",
+            DatasetKind::Prefix,
+        )
+        .expect("clean prefix file");
+        assert_eq!(prefixes.records(), 3);
+
+        let communities = parse_dataset_text(
+            "65000:100\n65000:1:2\nRT:65001:7\nNO_EXPORT\n",
+            DatasetKind::Community,
+        )
+        .expect("clean community file");
+        assert_eq!(communities.records(), 4);
+
+        // Errors carry 1-based line numbers.
+        let err = parse_dataset_text("64500\nnot-an-asn\n", DatasetKind::Asn).expect_err("bad");
+        assert!(err.starts_with("line 2:"), "{err}");
+        // One entry per line — a second entry is an error, not a
+        // silent merge.
+        let err = parse_dataset_text("64500 64501\n", DatasetKind::Asn).expect_err("two");
+        assert!(err.contains("one entry per line"), "{err}");
+        // Wrong-kind content fails parse (this is what keeps a
+        // mis-pointed path from silently probing garbage).
+        assert!(parse_dataset_text("10.0.0.0/8\n", DatasetKind::Asn).is_err());
+    }
+
+    /// Explain names the dataset and the pinned generation without
+    /// dumping content.
+    #[test]
+    fn explain_names_dataset_and_generation() {
+        use crate::engine::{NamedPolicy, PolicyChain};
+
+        let file = RpolFile::parse(DATASET_POLICY).expect("clean rpol");
+        let (customers, bindings) = full_bindings();
+        let mut store = SetStore::new();
+        let compiled = file
+            .compile_policy_bound("origin-guard", &[], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "origin-guard".to_string(),
+            Arc::new(compiled),
+        )]);
+        // Move to generation 7 to pin the rendered number.
+        for extra in 0..6u32 {
+            customers
+                .refresh(DatasetData::Asn(AsnSet::new([64500, 64600 + extra])))
+                .expect("content changed");
+        }
+        let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        ctx.origin_asn = Some(64500);
+        let trace = crate::explain_chain_statements(Some(&chain), &ctx);
+        let lines = trace.steps[0].term_traces.join("\n");
+        assert!(
+            lines.contains("route.origin-as in customers [dataset asn-set customers, gen 7]"),
+            "{lines}"
+        );
+        assert!(!lines.contains("64500"), "content leaked: {lines}");
+    }
+
+    /// Datasets declared in imported modules are usable by importers
+    /// (declarations merge like set definitions).
+    #[test]
+    fn imported_module_datasets_merge() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("lib.rpol"), "dataset asn-set customers\n")
+            .expect("write lib");
+        std::fs::write(
+            dir.path().join("main.rpol"),
+            "import \"lib.rpol\"\npolicy p { term t { if route.origin-as in customers { accept } } term r { reject } }\n",
+        )
+        .expect("write main");
+        let file = RpolFile::load(&dir.path().join("main.rpol"), &[]).expect("loads");
+        assert_eq!(
+            file.dataset_decls().collect::<Vec<_>>(),
+            vec![("customers", DatasetKind::Asn)]
+        );
+        let handle = asn_handle("customers", &[64500]);
+        let mut store = SetStore::new();
+        let chain = file
+            .compile_policy_bound("p", &[], &mut store, &bindings_for(&[handle]))
+            .expect("policy exists")
+            .expect("bindings complete");
+        let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        ctx.origin_asn = Some(64500);
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    }
+
+    /// Binding and parameter probes stay runtime probes (content is
+    /// external — a parameter probe must see swaps too).
+    #[test]
+    fn binding_and_parameter_probes_track_swaps() {
+        let file = RpolFile::parse(
+            r"
+dataset asn-set customers
+
+policy scrub(target: u32) {
+    term param-probe { if target in customers { accept } }
+    term binding-probe {
+        for asn in route.as-path {
+            if asn in customers { accept }
+        }
+    }
+    term rest { reject }
+}
+",
+        )
+        .expect("clean rpol");
+        let handle = asn_handle("customers", &[]);
+        let bindings = bindings_for(&[Arc::clone(&handle)]);
+        let mut store = SetStore::new();
+        let chain = file
+            .compile_policy_bound("scrub", &[64500], &mut store, &bindings)
+            .expect("policy exists")
+            .expect("bindings complete");
+        let ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+        handle
+            .refresh(DatasetData::Asn(AsnSet::new([64500])))
+            .expect("content changed");
+        // The parameter probe fires post-swap without any recompile.
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    }
+}

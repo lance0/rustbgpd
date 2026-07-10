@@ -4028,6 +4028,7 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
     mgr.sync_rpol_policies(
         vec!["policies/core.rpol".to_string()],
         registry("policy edge-in { term all { set local-pref 250; accept } }"),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
     )
     .await
     .expect("sync succeeds");
@@ -4084,6 +4085,10 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
 /// session created afterwards resolves against). Asserted at decision
 /// level: the live chain still evaluates the OLD local-pref.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the extra dataset-bindings argument pushed this linear scenario over the line cap"
+)]
 async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessions() {
     use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
 
@@ -4136,12 +4141,14 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
         "policy edge-in { term all { set local-pref 150; accept } }",
     );
     // Materialize the live chain from the OLD registry.
-    mgr.sync_rpol_policies(vec!["policies/core.rpol".to_string()], {
+    mgr.sync_rpol_policies(
+        vec!["policies/core.rpol".to_string()],
         registry(
             "edge-in",
             "policy edge-in { term all { set local-pref 150; accept } }",
-        )
-    })
+        ),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
+    )
     .await
     .expect("baseline sync succeeds");
 
@@ -4154,6 +4161,7 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
             "edge-in-renamed",
             "policy edge-in-renamed { term all { set local-pref 250; accept } }",
         ),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
     )
     .await
     .expect_err("chain resolution failure must reject the sync");

@@ -1311,6 +1311,15 @@ impl PolicyChain {
         self.requires_rpki_validation() || self.requires_aspa_validation()
     }
 
+    /// Whether some compiled guard probes the named external dataset
+    /// (LAN-305). Dataset-swap callers use this exactly like the
+    /// RPKI/ASPA `requires_*` gates: a content swap refreshes only the
+    /// peers whose chains satisfy it.
+    #[must_use]
+    pub fn references_dataset(&self, name: &str) -> bool {
+        self.compiled().references_dataset(name)
+    }
+
     /// Whether evaluating this chain depends on the evaluation peer's
     /// identity (peer address / ASN / peer-group matching, TOML
     /// `match_neighbor_set` or rpol `peer.*` comparisons). Update-group

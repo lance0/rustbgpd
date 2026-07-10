@@ -463,6 +463,132 @@ impl PeerManager {
         }
     }
 
+    /// LAN-305: dependency-scoped refresh after dataset content swaps.
+    /// Mirrors [`Self::soft_reset_import_validation_dependents`] (the
+    /// RPKI/ASPA cache-update pattern): only peers whose chains
+    /// structurally reference a swapped dataset are touched — Route
+    /// Refresh inbound where the *import* chain references one (the
+    /// peer re-sends, routes re-evaluate against the new generation),
+    /// forced outbound re-emission (`RibUpdate::RefreshPeerOutbound`)
+    /// where the *export* chain does. Chains are never replaced:
+    /// they share the swapped handles, so counters, generations, and
+    /// unrelated peers are untouched. `failed` datasets (prior
+    /// snapshot retained) are counted into
+    /// `bgp_policy_dataset_refresh_errors_total`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear pass: failure metrics, candidate scoping, then the import/export refresh legs"
+    )]
+    pub(super) async fn refresh_dataset_dependents(
+        &self,
+        swapped: &[String],
+        failed: &[(String, String)],
+    ) -> Result<(), String> {
+        for (dataset, reason) in failed {
+            warn!(
+                dataset = %dataset,
+                error = %reason,
+                "dataset refresh failed; prior snapshot still serving"
+            );
+            self.metrics.record_policy_dataset_refresh_error(dataset);
+        }
+        if swapped.is_empty() {
+            return Ok(());
+        }
+        let references_any = |chain: &Option<rustbgpd_policy::PolicyChain>| {
+            chain
+                .as_ref()
+                .is_some_and(|chain| swapped.iter().any(|name| chain.references_dataset(name)))
+        };
+        let candidates: Vec<(PeerKey, bool, bool)> = self
+            .peers
+            .iter()
+            .filter_map(|(peer_key, managed)| {
+                let import = references_any(&managed.import_policy);
+                let export = references_any(&managed.export_policy);
+                (import || export).then(|| (peer_key.clone(), import, export))
+            })
+            .collect();
+
+        let mut failures = Vec::new();
+        let mut refreshed = 0usize;
+        let mut skipped_not_established = 0usize;
+        for (peer_key, import, export) in &candidates {
+            let Some(managed) = self.peers.get(peer_key) else {
+                continue;
+            };
+            let state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+            if !state
+                .as_ref()
+                .is_some_and(|s| s.fsm_state == SessionState::Established)
+            {
+                // Nothing in AdjRibIn/Out yet; the session evaluates
+                // against the current generation when it comes up.
+                skipped_not_established += 1;
+                continue;
+            }
+            if *import {
+                match tokio::time::timeout(
+                    PEER_POLICY_UPDATE_TIMEOUT,
+                    self.soft_reset_in(peer_key.clone(), Vec::new()),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => failures.push(format!("{peer_key} (import): {error}")),
+                    Err(_) => failures.push(format!(
+                        "{peer_key} (import): route refresh timed out after                          {PEER_POLICY_UPDATE_TIMEOUT:?}"
+                    )),
+                }
+            }
+            if *export {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let outcome = if self
+                    .rib_tx
+                    .send(RibUpdate::RefreshPeerOutbound {
+                        peer: peer_key.address,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    Err("RIB manager unavailable".to_string())
+                } else {
+                    match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
+                        Err(_) => Err(format!(
+                            "RIB manager did not reply within {:?}",
+                            super::RIB_REPLY_TIMEOUT
+                        )),
+                    }
+                };
+                if let Err(error) = outcome {
+                    failures.push(format!("{peer_key} (export): {error}"));
+                }
+            }
+            refreshed += 1;
+        }
+        info!(
+            swapped = ?swapped,
+            eligible = candidates.len(),
+            refreshed,
+            skipped_not_established,
+            failures = failures.len(),
+            "processed dataset-swap dependency-scoped refresh"
+        );
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "dataset refresh failed for {} of {} referencing peers: {}",
+                failures.len(),
+                candidates.len(),
+                failures.join("; ")
+            ))
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn update_runtime_policies_for_peer_key(
         &mut self,
@@ -862,10 +988,14 @@ impl PeerManager {
         &mut self,
         rpol_files: Vec<String>,
         rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
     ) -> Result<(), CatalogMutationError> {
         let mut next_config = self.current_config.clone();
         next_config.policy.rpol_files = rpol_files;
         next_config.policy.rpol = rpol;
+        // LAN-305: the new registry's `dataset` declarations resolve
+        // through these handles during the chain re-resolution below.
+        next_config.policy.dataset_bindings = dataset_bindings;
         let applied = self.refresh_policies_for_config(next_config, None).await?;
         info!(
             peers = applied,

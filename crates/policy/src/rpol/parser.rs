@@ -14,11 +14,15 @@ use crate::engine::{CommunityMatch, parse_community_match};
 
 use crate::ir::ArithOp;
 
+use crate::datasets::{DatasetData, DatasetKind, MAX_DATASET_RECORDS};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry};
+
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    ExpectDef, Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfStmt, NextHopArg,
-    PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile,
-    Stmt, TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    DatasetDecl, DatasetEntryAst, ExpectDef, Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource,
+    ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg,
+    Rhs, RouteField, SourceFile, Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst,
+    WithAssertion,
 };
 use super::diag::{Diagnostic, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -408,6 +412,13 @@ impl Parser<'_> {
                 Tok::Ident if self.text(token) == "import" => {
                     self.import_def().map(|path| file.imports.push(path))
                 }
+                // Top-level contextual `dataset` (LAN-305, ADR-0103
+                // Decision 2.2): same additive footing as `fn` and
+                // `import` — a set or policy named `dataset` keeps
+                // working.
+                Tok::Ident if self.text(token) == "dataset" => {
+                    self.dataset_decl().map(|decl| file.datasets.push(decl))
+                }
                 _ => Err(self.error_expected(
                     "a top-level item (`import`, `prefix-set`, `community-set`, `asn-set`, `fn`, `policy`, or `test`)",
                 )),
@@ -440,24 +451,101 @@ impl Parser<'_> {
         self.expect(Tok::LBrace, "`{`")?;
         let mut entries = Vec::new();
         while !self.at(Tok::RBrace) {
-            let (prefix, _) = self.expect_prefix()?;
-            let mut ge = None;
-            let mut le = None;
-            if self.eat(Tok::GeKw).is_some() {
-                let (value, value_span) = self.expect_u32("a prefix length after `ge`")?;
-                ge = Some(self.prefix_len_bound(prefix, value, value_span)?);
-            }
-            if self.eat(Tok::LeKw).is_some() {
-                let (value, value_span) = self.expect_u32("a prefix length after `le`")?;
-                le = Some(self.prefix_len_bound(prefix, value, value_span)?);
-            }
-            entries.push(PrefixEntryAst { prefix, ge, le });
+            entries.push(self.prefix_entry()?);
             if self.eat(Tok::Comma).is_none() {
                 break;
             }
         }
         self.expect(Tok::RBrace, "`}` or `,` and another prefix")?;
         Ok(PrefixSetDef { name, entries })
+    }
+
+    /// One prefix-set member: `<prefix> [ge N] [le N]` — shared by set
+    /// definitions, `test` dataset overrides, and the dataset file
+    /// format (LAN-305: one literal grammar everywhere).
+    fn prefix_entry(&mut self) -> PResult<PrefixEntryAst> {
+        let (prefix, _) = self.expect_prefix()?;
+        let mut ge = None;
+        let mut le = None;
+        if self.eat(Tok::GeKw).is_some() {
+            let (value, value_span) = self.expect_u32("a prefix length after `ge`")?;
+            ge = Some(self.prefix_len_bound(prefix, value, value_span)?);
+        }
+        if self.eat(Tok::LeKw).is_some() {
+            let (value, value_span) = self.expect_u32("a prefix length after `le`")?;
+            le = Some(self.prefix_len_bound(prefix, value, value_span)?);
+        }
+        Ok(PrefixEntryAst { prefix, ge, le })
+    }
+
+    /// `dataset <kind> NAME` (LAN-305): a declaration-only top-level
+    /// item — kind and name for the compiler, content from the file
+    /// the daemon config binds the name to. Self-delimiting like
+    /// `import`.
+    fn dataset_decl(&mut self) -> PResult<DatasetDecl> {
+        self.bump(); // the contextual `dataset` identifier
+        let kind_token = self.peek();
+        let kind = match kind_token.map(|t| t.kind) {
+            Some(Tok::PrefixSetKw) => DatasetKind::Prefix,
+            Some(Tok::AsnSetKw) => DatasetKind::Asn,
+            Some(Tok::CommunitySetKw) => DatasetKind::Community,
+            _ => {
+                return Err(self.error_expected(
+                    "a dataset kind (`prefix-set`, `asn-set`, or `community-set`)",
+                ));
+            }
+        };
+        let kind_span = kind_token.expect("peeked above").span;
+        self.bump();
+        let name = self.expect_ident("a dataset name")?;
+        Ok(DatasetDecl {
+            name,
+            kind,
+            kind_span,
+        })
+    }
+
+    /// One `test`-block dataset override member (LAN-305). The literal
+    /// forms are token-distinguishable; kind agreement with the
+    /// declared dataset is a typecheck concern.
+    fn dataset_entry(&mut self) -> PResult<Spanned<DatasetEntryAst>> {
+        let Some(token) = self.peek() else {
+            return Err(self.error_expected("a dataset member"));
+        };
+        match token.kind {
+            Tok::PrefixLit => {
+                let start = token.span;
+                let entry = self.prefix_entry()?;
+                Ok(Spanned::new(DatasetEntryAst::Prefix(entry), start))
+            }
+            Tok::Int => {
+                let (asn, span) = self.expect_u32("an ASN (a u32 integer)")?;
+                Ok(Spanned::new(DatasetEntryAst::Asn(asn), span))
+            }
+            Tok::StdCommunityLit | Tok::LargeCommunityLit | Tok::ExtCommunityLit | Tok::Ident => {
+                let lit = self.community_lit()?;
+                Ok(Spanned::new(DatasetEntryAst::Community(lit.node), lit.span))
+            }
+            _ => Err(self.error_expected(
+                "a dataset member (a prefix entry, an ASN, or a community literal)",
+            )),
+        }
+    }
+
+    /// `dataset NAME { members }` inside a `test` block (LAN-305).
+    fn test_dataset_def(&mut self) -> PResult<TestDatasetDef> {
+        self.bump(); // the contextual `dataset` identifier
+        let name = self.expect_ident("a dataset name")?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut entries = Vec::new();
+        while !self.at(Tok::RBrace) {
+            entries.push(self.dataset_entry()?);
+            if self.eat(Tok::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace, "`}` or `,` and another member")?;
+        Ok(TestDatasetDef { name, entries })
     }
 
     fn prefix_len_bound(&mut self, prefix: Prefix, value: u32, span: Span) -> PResult<u8> {
@@ -1391,6 +1479,17 @@ impl Parser<'_> {
         let name = self.expect_ident("a test name")?;
         self.expect(Tok::LBrace, "`{`")?;
 
+        // LAN-305: `dataset NAME { ... }` content overrides come
+        // before the route fixture (contextual identifier — a route
+        // fixture never starts with a bare ident here).
+        let mut datasets = Vec::new();
+        while self
+            .peek()
+            .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "dataset")
+        {
+            datasets.push(self.test_dataset_def()?);
+        }
+
         self.expect(Tok::RouteKw, "a `route { ... }` fixture")?;
         self.expect(Tok::LBrace, "`{`")?;
         let mut route = Vec::new();
@@ -1425,6 +1524,7 @@ impl Parser<'_> {
         self.expect(Tok::RBrace, "`}`")?;
         Ok(TestDef {
             name,
+            datasets,
             route,
             peer,
             expects,
@@ -1650,6 +1750,85 @@ impl Parser<'_> {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Dataset file parsing (LAN-305)
+// ---------------------------------------------------------------------
+
+/// Parse dataset file text as `kind` — the operator-facing file
+/// format: one entry per line, `#` comments (the rpol lexer's own
+/// comment syntax), whitespace-tolerant. Entries go through the same
+/// literal parsers `.rpol` set definitions use ([`Parser::prefix_entry`],
+/// `expect_u32`, [`Parser::community_lit`]), so a value that is valid
+/// in source is valid in a file and vice versa. Enforces
+/// [`MAX_DATASET_RECORDS`]; byte bounds are the file loader's job.
+///
+/// # Errors
+///
+/// The first parse failure, prefixed with its 1-based line number.
+pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<DatasetData, String> {
+    let mut prefixes: Vec<PrefixSetEntry> = Vec::new();
+    let mut asns: Vec<u32> = Vec::new();
+    let mut communities: Vec<crate::engine::CommunityMatch> = Vec::new();
+    let mut records = 0usize;
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let (tokens, lex_diags) = lex(line, 0);
+        if let Some(diag) = lex_diags.first() {
+            return Err(format!("line {number}: {}", diag.message));
+        }
+        if tokens.is_empty() {
+            // Blank or comment-only line.
+            continue;
+        }
+        records += 1;
+        if records > MAX_DATASET_RECORDS {
+            return Err(format!(
+                "line {number}: more than {MAX_DATASET_RECORDS} records"
+            ));
+        }
+        let mut parser = Parser {
+            src: line,
+            tokens,
+            pos: 0,
+            file: 0,
+            diags: Vec::new(),
+        };
+        let result = match kind {
+            DatasetKind::Prefix => parser.prefix_entry().map(|entry| {
+                prefixes.push(PrefixSetEntry {
+                    prefix: entry.prefix,
+                    ge: entry.ge,
+                    le: entry.le,
+                });
+            }),
+            DatasetKind::Asn => parser
+                .expect_u32("an ASN (a u32 integer)")
+                .map(|(asn, _)| asns.push(asn)),
+            DatasetKind::Community => parser
+                .community_lit()
+                .map(|lit| communities.push(lit.node.to_match())),
+        };
+        if result.is_err() {
+            let message = parser
+                .diags
+                .first()
+                .map_or_else(|| "invalid entry".to_string(), |diag| diag.message.clone());
+            return Err(format!("line {number}: {message}"));
+        }
+        if let Some(extra) = parser.peek() {
+            return Err(format!(
+                "line {number}: unexpected {} after the entry — one entry per line",
+                extra.kind.describe()
+            ));
+        }
+    }
+    Ok(match kind {
+        DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new(prefixes)),
+        DatasetKind::Asn => DatasetData::Asn(AsnSet::new(asns)),
+        DatasetKind::Community => DatasetData::Community(CommunitySet::new(communities)),
+    })
 }
 
 #[cfg(test)]

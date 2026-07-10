@@ -175,6 +175,166 @@ policy customer-origins {
 }
 ```
 
+## Datasets — external set content
+
+```rpol
+dataset prefix-set bogons
+dataset asn-set customers
+dataset community-set scrub-tags
+```
+
+A **dataset** is a named set whose members come from an
+operator-maintained file instead of source text — the LAN-305 shape of
+"data the daemon doesn't have": bogon feeds, IX participant lists,
+customer origin sets, tag feeds produced by external automation. The
+declaration carries only the name and kind; the daemon config binds
+the name to a snapshot file:
+
+```toml
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[policy.datasets.customers]
+path = "/var/lib/rustbgpd/datasets/customers.list"
+```
+
+Guards reference a dataset **exactly like a set of its kind** —
+`route.prefix in bogons`, `route.origin-as in customers`,
+`peer.asn in customers`, `route.communities in scrub-tags`, and the
+binding/parameter forms `<binding> in customers`. Probes run the same
+indexed structures in-language sets compile into, at the same cost.
+The differences from a source-defined set:
+
+- **Content is a runtime snapshot.** Each dataset has an immutable,
+  atomically-swapped snapshot with a monotonic generation. Every
+  evaluation pins each referenced snapshot **once at walk start** —
+  one route never observes two generations of the same dataset, even
+  when a refresh lands mid-walk.
+- **Content changes are data, not policy.** A refresh never
+  recompiles or replaces chains; installed chains see the new
+  generation at their next walk, and the daemon refreshes exactly the
+  peers whose chains reference the swapped dataset (Route Refresh
+  inbound for import chains, forced re-advertisement for export
+  chains). Unrelated peers, chains, and hit counters are untouched.
+- **Namespace is shared.** Datasets live in the flat set namespace: a
+  dataset and a set with the same name is a compile error, as is
+  declaring one name with two kinds (across imports too). At most 16
+  datasets per compilation unit.
+- **Probe-only in this slice.** `for x in <dataset>` is a compile
+  error — content is a runtime snapshot, so iteration bounds are not
+  compile-time knowledge. Probe with `in` instead.
+- **Parameter probes stay runtime probes.** `<parameter> in <set>`
+  folds to a constant for source sets; against a dataset it stays a
+  live probe, because the answer changes with the content.
+- **Membership only — no tag maps.** A key→value dataset kind
+  (prefix → customer tag, ASN → tier) is deliberately deferred: the
+  language's value model is `u32` membership and comparison, and a
+  map lookup would introduce a new value-producing guard form. Model
+  tags as one membership dataset per tag value for now.
+
+There is deliberately **no external code tier** — no WASM, no host
+functions, no per-route callouts (ADR-0103 Decision 9). External
+*computation* runs outside the daemon on its own schedule and writes
+snapshot files; datasets are the entire external surface of the
+policy language.
+
+### Snapshot file format
+
+One entry per line; `#` starts a comment; blank lines and surrounding
+whitespace are ignored. Entries use the exact literal grammar of the
+declared kind's set definition:
+
+```text
+# customers.list (asn-set)
+64500
+64501   # trailing comments are fine
+4200000001
+```
+
+```text
+# bogons.list (prefix-set)
+10.0.0.0/8 ge 8 le 32
+192.0.2.0/24
+2001:db8::/32 ge 48
+```
+
+```text
+# scrub-tags.list (community-set)
+65000:666
+65000:1:2
+RT:65001:7
+NO_EXPORT
+```
+
+Bounds: 64 MiB per file, 1,000,000 records. A line that does not
+parse — or a file of the wrong kind — fails the whole snapshot with a
+line-numbered error; there are no partially-loaded snapshots.
+
+**Produce snapshots atomically**: write to a temporary file on the
+same filesystem, then `rename(2)` over the target (`mv -f tmp final`)
+— the daemon reads the file on refresh and must never see a torn
+write. A cron job shape:
+
+```sh
+fetch-customers > /var/lib/rustbgpd/datasets/.customers.list.tmp \
+  && mv -f /var/lib/rustbgpd/datasets/.customers.list.tmp \
+           /var/lib/rustbgpd/datasets/customers.list
+```
+
+### Refresh, failure, and observability
+
+Dataset files are (re)read at config load and on every SIGHUP reload —
+there is no file watcher and no dedicated refresh RPC; `kill -HUP` (or
+`systemctl reload`) after the rename is the refresh trigger. Refresh
+semantics:
+
+- **Content-equal re-reads are no-ops** — no generation bump, no peer
+  refresh (the same content-equality discipline chain reinstalls use,
+  so a SIGHUP with nothing changed touches nothing).
+- **Changed content swaps atomically** and bumps the generation, then
+  refreshes only the referencing peers.
+- **A file that fails to load or parse keeps the prior snapshot.**
+  The reload still succeeds; the error is a WARN log, a
+  `bgp_policy_dataset_refresh_errors_total{dataset}` counter
+  increment, and a `last refresh FAILED` line in `rbgp policy stats`.
+  Empty data is never substituted — an empty snapshot requires an
+  explicitly empty file.
+- **Introducing a dataset** (a new declaration, or a kind change) is
+  a config transaction: its file must load cleanly or the whole
+  load/reload is rejected, like any other config error.
+- Superseded snapshots are retained only while in-flight walks still
+  pin them; there is no generation history.
+
+`rbgp policy stats` reports every dataset's kind, generation, record
+count, bound path, and last refresh error. Explain traces annotate
+dataset probes with the pinned generation —
+`route.origin-as in customers [dataset asn-set customers, gen 7]` —
+without ever dumping content.
+
+In-language `test` blocks never read operator files: a test whose
+policy probes a dataset provides the content itself with a `dataset`
+override before the fixture (kind-checked against the declaration; a
+missing override fails the test with a message naming the dataset):
+
+```rpol
+dataset asn-set customers
+
+policy origin-guard {
+    term customers { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+
+test member-accepted {
+    dataset customers { 64500, 64501 }
+    route { prefix 10.0.0.0/24; as-path "64777 64500" }
+    expect origin-guard == accept
+}
+```
+
+`rbgp policy check` works on dataset-declaring files (tests supply
+content); compiling a dataset-referencing policy for live use requires
+the daemon config's bindings.
+
 ## Policies, terms, and evaluation order
 
 ```rpol

@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use rustbgpd_wire::{AspaValidation, Prefix, RpkiValidation};
 
+use crate::datasets::{DatasetHandle, DatasetKind};
 use crate::engine::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, PolicyAction, RouteFamily, RouteModifications,
     RouteType,
@@ -34,6 +35,87 @@ use crate::sets::{AsnSet, CommunitySet, PrefixSet};
 /// (`prefix_sets` or `community_sets`, per the referencing node).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetId(pub u32);
+
+/// Index of a dataset binding within its owning [`CompiledChain`]'s
+/// `datasets` table (LAN-305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatasetId(pub u32);
+
+/// What a [`MatchExpr::InDataset`] guard probes against the pinned
+/// dataset snapshot — the dataset mirror of the per-kind `*InSet`
+/// nodes (LAN-305). Kind agreement (an ASN probe against an asn-set
+/// dataset, …) is a typecheck guarantee; the evaluator fails closed on
+/// a mismatch, like every compiler-bug rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetProbe {
+    /// `route.prefix in <dataset>` (prefix-set kind).
+    Prefix,
+    /// `route.origin-as in <dataset>` (asn-set kind). Never matches
+    /// when the origin is absent, mirroring [`MatchExpr::OriginAsInSet`].
+    OriginAs,
+    /// `peer.asn in <dataset>` (asn-set kind). Reads peer identity, so
+    /// it counts toward [`CompiledChain::requires_peer_context`].
+    PeerAs,
+    /// A community-list `in <dataset>` (community-set kind) — the
+    /// OR-any criteria semantics of [`MatchExpr::CommunityInSet`].
+    Community,
+    /// `<binding> in <dataset>` (asn-set kind): one frame load plus
+    /// one hash probe, mirroring [`MatchExpr::LocalInAsnSet`].
+    LocalAsn {
+        /// Frame slot to read.
+        slot: u8,
+        /// The binding name as written (explain rendering; equality
+        /// participant like set names).
+        name: Box<str>,
+    },
+    /// `<binding> in <dataset>` (community-set kind): probes the
+    /// standard partition by raw `u32`, mirroring
+    /// [`MatchExpr::LocalInCommunitySet`].
+    LocalCommunity {
+        /// Frame slot to read.
+        slot: u8,
+        /// The binding name as written.
+        name: Box<str>,
+    },
+    /// `<parameter> in <dataset>` (asn-set kind). Unlike parameter
+    /// probes against in-language sets — which fold to their truth
+    /// value at compile time — dataset content is external and swaps
+    /// at runtime, so the probe stays a runtime probe of the constant.
+    ConstAsn(u32),
+    /// `<parameter> in <dataset>` (community-set kind): standard
+    /// partition probe of the constant.
+    ConstCommunity(u32),
+}
+
+/// One dataset binding in a [`CompiledChain`]'s `datasets` table: the
+/// declared name and kind plus the shared live handle the evaluator
+/// pins snapshots from.
+///
+/// **Equality is (name, kind) only** — deliberately excluding the
+/// handle and its content. This is ADR-0103 Decision 5.3 ("data diffs
+/// as data"): a dataset content swap must not make the referencing
+/// chain diff as changed (no spurious live-impact classification, no
+/// counter reset), while renaming or re-kinding a dataset is a source
+/// change that honestly does.
+#[derive(Debug, Clone)]
+pub struct DatasetSlot {
+    /// The declared dataset name.
+    pub name: Arc<str>,
+    /// The declared kind.
+    pub kind: DatasetKind,
+    /// The live handle; `Arc`-shared with the daemon's dataset
+    /// registry so content swaps are visible to installed chains
+    /// without reinstalling them.
+    pub handle: Arc<DatasetHandle>,
+}
+
+impl PartialEq for DatasetSlot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.kind == other.kind
+    }
+}
+
+impl Eq for DatasetSlot {}
 
 /// Index of a compiled AS-path regex within its owning
 /// [`CompiledChain`]'s `as_path_regexes` table.
@@ -519,6 +601,19 @@ pub enum MatchExpr {
         /// The probed set (indexes [`CompiledChain::community_sets`]).
         set: SetId,
     },
+    /// A membership probe against a generation-pinned external dataset
+    /// (LAN-305, ADR-0103 Decision 8.5). `id` indexes
+    /// [`CompiledChain::datasets`]; the evaluator resolves it against
+    /// the snapshot frame pinned once at walk start, so every probe in
+    /// one walk sees the same generation. Semantics per probe form
+    /// mirror the corresponding `*InSet` node exactly — the same
+    /// indexed structures do the matching.
+    InDataset {
+        /// What is probed.
+        probe: DatasetProbe,
+        /// The dataset (indexes [`CompiledChain::datasets`]).
+        id: DatasetId,
+    },
     /// All children match (empty = true).
     And(Vec<MatchExpr>),
     /// Any child matches (empty = false).
@@ -571,6 +666,13 @@ impl MatchExpr {
             // route's lists).
             | MatchExpr::LocalInAsnSet { .. }
             | MatchExpr::LocalInCommunitySet { .. } => 1,
+            // Dataset probes cost what the same-kind set probe costs
+            // (same structures); the community form scans the route's
+            // lists (tier 3), everything else is a hash probe (tier 1).
+            MatchExpr::InDataset { probe, .. } => match probe {
+                DatasetProbe::Community => 3,
+                _ => 1,
+            },
             MatchExpr::NeighborIn(_) => 2,
             MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
             MatchExpr::AsPathMatches(_) => 4,
@@ -770,6 +872,15 @@ pub struct CompiledChain {
     pub community_set_names: Vec<Option<String>>,
     /// Source names of `asn_sets` entries (same indexing).
     pub asn_set_names: Vec<Option<String>>,
+    /// External dataset bindings referenced by
+    /// [`MatchExpr::InDataset`] nodes, indexed by [`DatasetId`]
+    /// (LAN-305). Unlike the set tables — which carry every definition
+    /// in the source file — only datasets some guard actually
+    /// references get a slot, so this table *is* the chain's dataset
+    /// dependency list (the `requires_*`-style scoping input for
+    /// swap-time refresh). Slot equality is (name, kind), never
+    /// content: a content swap does not change chain identity.
+    pub datasets: Vec<DatasetSlot>,
     /// The local speaker's ASN, stamped at attach time by the config
     /// chain resolver — the value `.rpol` `prepend as self` resolves
     /// to (LAN-296, see [`crate::engine::PrependAs`]). Carried on the
@@ -798,8 +909,24 @@ impl CompiledChain {
             prefix_set_names: Vec::new(),
             community_set_names: Vec::new(),
             asn_set_names: Vec::new(),
+            datasets: Vec::new(),
             local_asn: None,
         }
+    }
+
+    /// Whether some guard probes the named external dataset (LAN-305)
+    /// — the scoping predicate for swap-time refresh: a dataset
+    /// content swap refreshes exactly the peers whose chains satisfy
+    /// this, mirroring the RPKI/ASPA cache-update pattern.
+    #[must_use]
+    pub fn references_dataset(&self, name: &str) -> bool {
+        self.datasets.iter().any(|slot| &*slot.name == name)
+    }
+
+    /// The datasets this chain's guards reference, in [`DatasetId`]
+    /// order.
+    pub fn referenced_datasets(&self) -> impl Iterator<Item = &DatasetSlot> {
+        self.datasets.iter()
     }
 
     /// Whether evaluating this chain needs the rendered `AS_PATH`
@@ -855,7 +982,11 @@ impl CompiledChain {
             MatchExpr::NeighborIn(_)
             | MatchExpr::NextHopEqPeer
             | MatchExpr::NextHopNePeer
-            | MatchExpr::PeerAsInSet(_) => true,
+            | MatchExpr::PeerAsInSet(_)
+            | MatchExpr::InDataset {
+                probe: DatasetProbe::PeerAs,
+                ..
+            } => true,
             MatchExpr::ValueCmp(node) => node.lhs.reads_peer() || node.rhs.reads_peer(),
             _ => false,
         }) || self.peer_prepend_action().is_some()

@@ -23,6 +23,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   language servers (taplo / Even Better TOML) get as-you-type
   completion, inline validation, and hover docs; see the new "Editor
   integration" section in `docs/CONFIGURATION.md`. (LAN-319)
+- **rpol external datasets (`dataset`).** Generation-pinned external
+  match data (LAN-305, ADR-0103 Decisions 8.5/9): declare
+  `dataset <kind> <name>` in `.rpol`, bind it to an
+  operator-maintained snapshot file via `[policy.datasets.<name>]
+  path = "..."`, and probe it exactly like a named set
+  (`route.origin-as in customers`) — the same indexed structures at
+  the same cost. Content refreshes ride SIGHUP: atomic snapshot swap
+  with a monotonic generation, per-walk pinning (one route never sees
+  two generations), content-equal no-ops, and dependency-scoped peer
+  refresh (only chains referencing the swapped dataset re-evaluate;
+  chains are never recompiled or replaced). A file that fails to
+  load/parse keeps the prior snapshot (WARN +
+  `bgp_policy_dataset_refresh_errors_total` + `rbgp policy stats`
+  dataset rows); empty data is never substituted. In-language `test`
+  blocks supply content with per-test `dataset name { ... }`
+  overrides; explain traces annotate probes with the pinned
+  generation. File format: one entry per line, `#` comments, set-
+  literal syntax; bounds 64 MiB / 1M records / 16 datasets per unit.
+  Datasets are the entire external surface — no WASM/host-function
+  code tier (ADR-0103 Decision 9). New fuzz target `dataset_parse`.
 
 - **rpol pure user-defined functions (`fn`).** The fourth ADR-0103
   Phase B slice: `fn penalty(len: u32, weight: u32) -> u32 { let base

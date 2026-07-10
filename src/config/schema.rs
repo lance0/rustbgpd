@@ -1040,7 +1040,63 @@ pub struct PolicyConfig {
     /// reload as a no-op.
     #[serde(skip)]
     pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
+    /// External dataset file bindings (LAN-305): `[policy.datasets.<name>]`
+    /// maps each `dataset` declared in an `.rpol` file to the snapshot
+    /// file its content loads from. Every declared dataset needs an
+    /// entry and every entry needs a declaration — both directions are
+    /// load errors. Relative paths resolve against the config file's
+    /// directory and are rewritten absolute at load, like `rpol_files`.
+    #[serde(default)]
+    pub datasets: HashMap<String, DatasetFileConfig>,
+    /// Live dataset handles (name → shared handle), populated at load,
+    /// not serialized. `PartialEq` is handle identity: a SIGHUP reload
+    /// reuses the running handles (content swaps happen *inside* them
+    /// and are invisible here), so unchanged configs diff as no-ops
+    /// while a rebind (new dataset, kind change) diffs as a policy
+    /// change.
+    #[serde(skip)]
+    pub dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
+    /// What the dataset load step observed (populated at load, not
+    /// serialized, excluded from equality): which datasets swapped
+    /// content vs. the prior bindings, and which failed to refresh
+    /// (prior snapshot retained). The reload path turns `swapped` into
+    /// the dependency-scoped peer refresh and `failed` into metrics.
+    #[serde(skip)]
+    pub dataset_events: DatasetLoadEvents,
 }
+
+/// One `[policy.datasets.<name>]` binding (LAN-305).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetFileConfig {
+    /// Path of the dataset snapshot file: one entry per line, `#`
+    /// comments, entries in `.rpol` set-literal syntax for the
+    /// declared kind. Producers should write-temp-then-rename so the
+    /// daemon never reads a torn file.
+    pub path: String,
+}
+
+/// Load-time dataset observations (LAN-305). Deliberately **excluded
+/// from config equality**: these are events about one load, not
+/// configuration identity — two configs differing only here are the
+/// same config.
+#[derive(Debug, Clone, Default)]
+pub struct DatasetLoadEvents {
+    /// Datasets whose content swapped vs. the prior bindings
+    /// (generation bumped). Drives the dependency-scoped peer refresh.
+    pub swapped: Vec<String>,
+    /// `(name, reason)` for datasets whose file failed to load/parse;
+    /// the prior snapshot was retained.
+    pub failed: Vec<(String, String)>,
+}
+
+impl PartialEq for DatasetLoadEvents {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DatasetLoadEvents {}
 
 /// Tuning for the per-session import-decision cache that backs
 /// `rbgp policy explain` / `PolicyService.ExplainImportPolicy`
