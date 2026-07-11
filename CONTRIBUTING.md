@@ -31,6 +31,27 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+### Replaying update-group faults
+
+The PR-sized deterministic corpus compares the grouped manager path with the
+forced-per-peer oracle under bounded channel saturation, dirty policy regroup,
+stale session generations, and RT-Constrain membership churn:
+
+```bash
+cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
+```
+
+Failure output includes the scenario name, seed, comparison mode, and ordered
+operation log. To run the hard-capped 24-seed corpus used by the weekly
+GitHub-hosted workflow:
+
+```bash
+cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
+```
+
+The extended corpus uses virtual time and fixed operation caps; it is not a
+replacement for a live or multi-day soak.
+
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any
 `#[allow(clippy::...)]` or `#[expect(clippy::...)]` in a ratcheted path must

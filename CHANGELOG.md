@@ -48,6 +48,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Update-group correctness now has a deterministic differential fault
+  corpus.** The grouped manager path and forced-per-peer oracle are compared
+  with explicit exact-stream or folded-state semantics across bounded channel
+  saturation and virtual-time retry, repeated policy regroup while dirty, stale
+  session generations, and RT-Constrain membership churn. Every path must emit
+  non-empty traffic, deliver a terminal sentinel, finish its manager task, and
+  clear dirty/force/regroup/residue state. A hard-capped 24-seed extension runs
+  weekly and by manual dispatch on GitHub-hosted runners. (LAN-357)
+
 - **Reload UPDATE-stall receipt re-run and re-validated.**
   `docs/perf/reload-stall-2026-07.md` replaces the July run that was withdrawn
   as not-acceptance evidence. The corrected harness counts unique re-advertised

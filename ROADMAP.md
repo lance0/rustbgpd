@@ -233,11 +233,14 @@ new AFI/SAFI and EVPN dataplane expansion.
   peers/families, private outbound-view count, regroup/full-resync scope, and a
   bounded capacity class. Do not present byte-precise memory or time estimates
   until a calibrated model exists.
-- **Keep update-group correctness as a permanent fault program.** Differentially
-  compare grouped and forced-per-peer output under channel saturation, policy
-  swaps, repeated regrouping, dirty-member recovery, session loss, and restart;
-  add long-running folded-state comparison rather than relying only on happy-
-  path convergence receipts.
+- **Keep update-group correctness as a permanent fault program.** The bounded
+  deterministic foundation is shipped: grouped and forced-per-peer output are
+  compared under channel saturation/virtual retry, dirty policy swaps and
+  repeated regrouping, stale session generations, and RTC membership churn,
+  with a fixed PR corpus plus a hard-capped weekly 24-seed extension. Remaining:
+  automated failure minimization, a broader fault matrix, restart/persistence,
+  growth measurement, and long-running folded-state comparison (LAN-18) rather
+  than relying only on bounded convergence receipts.
 - **Turn shipped shadow tooling into external evidence.** The canonical semantic
   diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
   importer are shipped. The remaining adoption gate is a real BIRD/FRR/GoBGP
