@@ -11,10 +11,13 @@ an EVPN VXLAN VTEP / IRB speaker (alpha), with Rust's memory safety and
 predictable, GC-free performance under load. The goal is to be the best
 programmable BGP control plane for data-center fabrics, route servers, and
 automation-heavy environments — not to replace FRR or BIRD as a complete
-routing suite. v1.0 is not on a timeline: the core programmable-control-plane
-path is feature-complete by the criteria that matter, and the project keeps
-shipping focused v0.x cuts; real-world deployment feedback, if it materializes,
-will reshape priorities.
+routing suite. v1.0 is not on a timeline. Its intended contract is narrower
+than the complete daemon surface: stable IPv4/IPv6 route-server and
+route-reflector operation, policy, automation, and monitoring APIs, with the
+already-proven controller-feed/RR families explicitly scoped. EVPN VTEP/IRB
+and broader dataplane roles remain alpha outside that contract. Until real
+shadow/canary deployment feedback supports a freeze, the project keeps
+shipping focused v0.x cuts.
 
 ---
 
@@ -198,7 +201,7 @@ and the research-shaped queue below.
 - [x] Correct Extended Message directionality and custom-limit encoding for
   NOTIFICATION/ROUTE-REFRESH; rustbgpd's advertised capability controls inbound
   acceptance, while the peer's capability controls outbound size.
-- [ ] Add CI compilation for transport `bench-internals`; make fuzz target
+- [x] Add CI compilation for transport `bench-internals`; make fuzz target
   discovery fail on errors/zero targets and align public PR-smoke claims with
   the actual workflow.
 
@@ -206,6 +209,45 @@ The hosted-runner VRF/TCP-AO **skip-with-notice** behavior remains an accepted,
 documented availability contract, not an audit defect. A green conditional job
 does not claim a skipped receipt ran; coverage resumes automatically when the
 host capability is available.
+
+### Post-v0.51 stabilization path
+
+The next product milestone is operational trust for the route-server / route-
+reflector beachhead, not another breadth sprint. Work in this section outranks
+new AFI/SAFI and EVPN dataplane expansion.
+
+- **Define the narrow v1 role contract.** Freeze only the configuration and API
+  used by IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA,
+  Roles/OTC, transactions, BMP/MRT/events, and the already-proven RR/controller-
+  feed families. Publish explicit stability, migration, deprecation, and
+  compatibility rules. Keep EVPN VTEP/IRB alpha and out of this first contract.
+- **Make changed-policy reload the primary performance program.** First rerun
+  the corrected 700-client × 400,400-route harness with unique-generation
+  completion. Then compute shared group-to-group migration work once, chunk
+  member resync so queries and churn interleave, and gate repeated heterogeneous
+  reloads on completion time, control-query latency, session continuity, and
+  folded advertised-state equivalence. The withdrawn historical `< 1 s` claim
+  is not evidence until the corrected run replaces it.
+- **Expose groupability before apply.** Extend config planning and policy linting
+  with projected update-group membership, exact fallback reasons, affected
+  peers/families, private outbound-view count, regroup/full-resync scope, and a
+  bounded capacity class. Do not present byte-precise memory or time estimates
+  until a calibrated model exists.
+- **Keep update-group correctness as a permanent fault program.** Differentially
+  compare grouped and forced-per-peer output under channel saturation, policy
+  swaps, repeated regrouping, dirty-member recovery, session loss, and restart;
+  add long-running folded-state comparison rather than relying only on happy-
+  path convergence receipts.
+- **Turn shipped shadow tooling into external evidence.** The canonical semantic
+  diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
+  importer are shipped. The remaining adoption gate is a real BIRD/FRR/GoBGP
+  shadow or canary run with explained differences, exact sanitized inputs, and
+  an operator-readable rollback record.
+- **Tighten lifecycle security without reopening scope.** Preserve the shipped
+  unprivileged base service and opt-in dataplane capability profile; finish
+  typed API-error migration and decide the v1 posture for live management-plane
+  credential rotation and received eBGP-only attributes. Privilege separation
+  remains a larger architectural choice, not a release-checkbox claim.
 
 ### Next (research-shaped, July 2026)
 
@@ -257,9 +299,11 @@ Details in the "Recently shipped" section below and ADR-0097.
   secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
   path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /
   gRPC-added peers), ASPA/ROV/reject-AS_SET hygiene, RFC 8097 OV_* tagging,
-  and a curated `examples/route-server` profile. Remaining demand-shaped work:
-  Alice-LG adapter, a 1000+-peer route-server scale receipt, shadow/canary
-  RIB-diff tooling, and an ARouteServer target.
+  and a curated `examples/route-server` profile. The canonical semantic diff
+  engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
+  are also shipped. Remaining demand-shaped work: a real shadow/canary receipt,
+  Alice-LG adapter, a 1000+-peer route-server scale receipt, and an ARouteServer
+  target.
 - **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
   RFC, no open-source implementation found, drops onto the existing
   BGP-LS substrate; deepens the controller feed (TE controllers reading
