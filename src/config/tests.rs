@@ -9383,6 +9383,16 @@ fn protected_dynamic_range_reorder_is_not_a_tcp_ao_restart_change() {
 }
 
 #[test]
+fn protected_dynamic_range_effective_prefix_identity_avoids_restart_change() {
+    let canonical = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "secret")), "");
+    let host_bits = dynamic_tcp_ao_transaction_config(Some(("192.0.2.1/24", "secret")), "");
+
+    let diff = diff_config(&canonical, &host_bits);
+    assert!(!diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+}
+
+#[test]
 fn mixed_dynamic_tcp_ao_and_disjoint_unprotected_diff_reports_both_portions() {
     let old = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "old-secret")), "");
     let new = dynamic_tcp_ao_transaction_config(

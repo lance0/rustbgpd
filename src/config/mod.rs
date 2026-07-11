@@ -4324,7 +4324,11 @@ fn protected_dynamic_ranges_equal(old: &Config, new: &Config) -> bool {
         .collect();
     old_protected.sort_unstable_by(|left, right| protected_dynamic_range_cmp(left, right));
     new_protected.sort_unstable_by(|left, right| protected_dynamic_range_cmp(left, right));
-    old_protected == new_protected
+    old_protected.len() == new_protected.len()
+        && old_protected
+            .iter()
+            .zip(new_protected)
+            .all(|(old, new)| protected_dynamic_range_cmp(old, new).is_eq())
 }
 
 fn protected_dynamic_range_cmp(
@@ -4333,8 +4337,8 @@ fn protected_dynamic_range_cmp(
 ) -> std::cmp::Ordering {
     let left_ao = left.tcp_ao.as_ref().expect("protected range");
     let right_ao = right.tcp_ao.as_ref().expect("protected range");
-    left.prefix
-        .cmp(&right.prefix)
+    effective_prefix_str(&left.prefix)
+        .cmp(&effective_prefix_str(&right.prefix))
         .then_with(|| left.peer_group.cmp(&right.peer_group))
         .then_with(|| left.remote_asn.cmp(&right.remote_asn))
         .then_with(|| left.description.cmp(&right.description))

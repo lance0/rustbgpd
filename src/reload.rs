@@ -4676,6 +4676,15 @@ peer_group = "dynamic"
 
         for (label, ranges, expected) in [
             (
+                "equivalent host bits",
+                vec![
+                    ("192.0.2.1/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                    ("203.0.113.0/24", "three"),
+                ],
+                0,
+            ),
+            (
                 "reorder",
                 vec![
                     ("203.0.113.0/24", "three"),
@@ -4720,6 +4729,8 @@ peer_group = "dynamic"
                     candidate.dynamic_neighbors, current.dynamic_neighbors,
                     "{label}"
                 );
+            } else if label == "equivalent host bits" {
+                assert_eq!(candidate.dynamic_neighbors[0].prefix, "192.0.2.1/24");
             }
         }
     }
