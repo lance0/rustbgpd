@@ -230,17 +230,20 @@ resolved.
   reported as ordinary foreign state after ownership is released.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
-- **gRPC listener config (including mTLS) is restart-required.**
-  Adding, removing, or rotating `[global.telemetry.grpc_tcp]` fields
-  — including `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`,
-  `address`, `token_file`, and `access_mode` — does **not** take
-  effect on SIGHUP. The live gRPC listener keeps serving the prior
-  security mode and material until the daemon is restarted. Reload
-  emits an explicit `error!` log when these fields change, so the
-  drift is visible. Listener rebind on reload is post-v1 scope; the
-  workaround for cert rotation today is `systemctl restart rustbgpd`
-  or equivalent. UDS listener config (`grpc_uds`) has the same
-  restart-required semantics.
+- **gRPC listener shape is restart-required; credential bytes rotate on
+  SIGHUP.** The listener *shape* — `address`, `access_mode`, the auth mode,
+  and the configured `token_file` / `tls_cert_file` / `tls_key_file` /
+  `tls_client_ca_file` **paths** — is fixed for the process. Adding, removing,
+  or repointing any of those on `[global.telemetry.grpc_tcp]` does **not** take
+  effect on SIGHUP; the live listener keeps its prior shape until the daemon is
+  restarted, and reload emits an explicit `error!` log so the drift is visible.
+  The credential *material* behind those unchanged paths does rotate: SIGHUP
+  re-reads the bytes, validates the complete token / server identity / client CA
+  for every listener, and atomically publishes one process-wide generation.
+  Existing TLS connections and admitted streams continue; new TLS accepts and
+  new bearer-authenticated RPCs use the new generation; a malformed or partial
+  rotation retains the last-known-good generation. UDS listener config
+  (`grpc_uds`) shape has the same restart-required semantics.
 
 - **SIGHUP reconcile is not transactional.** Reload now applies
   named-policy / neighbor-set / peer-group / global-chain edits in
@@ -331,9 +334,9 @@ resolved.
 - **TCP-AO not supported for RTR connections.** RPKI cache (RTR) server
   connections use plain TCP; TCP-AO (RFC 5925) is not available for the
   RTR transport. Use network-level access controls or SSH tunnels for RTR
-  transport security. (TCP-AO *is* supported for BGP static-neighbor
-  startup keys on Linux — see the dynamic-neighbor / runtime-rotation
-  follow-ups in the limitations list.)
+  transport security. (TCP-AO *is* supported for BGP static-neighbor and
+  dynamic-prefix startup keys on Linux — see the runtime-rotation follow-up
+  in the limitations list.)
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID
