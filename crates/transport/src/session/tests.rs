@@ -3023,6 +3023,159 @@ async fn send_route_update_splits_oversized_ipv4_withdrawals_across_updates() {
         "every prefix in the oversized withdrawal must be sent"
     );
 }
+
+/// Extended Next Hop carries IPv4 NLRI in `MP_REACH` rather than the UPDATE
+/// body. Keep that construction path covered by the same oversized-group
+/// regression as ordinary IPv4 announcements.
+#[tokio::test]
+async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    session.config.route_server_client = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, true));
+
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]);
+    let count: u32 = 1500;
+    let routes: Vec<Route> = (0..count)
+        .map(|i| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::from(0x1400_0000_u32 | (i << 8)),
+                24,
+            )),
+            next_hop: IpAddr::V6("fe80::2".parse().unwrap()),
+            link_local_next_hop: Some("fe80::2".parse().unwrap()),
+            next_hop_scope: None,
+            peer: IpAddr::V6("fe80::2".parse().unwrap()),
+            attributes: Arc::clone(&attrs),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: vec![None; count as usize].into(),
+        ..empty_outbound_update()
+    });
+
+    let mut seen = std::collections::HashSet::new();
+    let mut updates = 0usize;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= 4096, "MP_REACH UPDATE is {} bytes", raw.len());
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("Extended Next Hop announcement must use MP_REACH");
+        assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+        for entry in &mp.announced {
+            let Prefix::V4(prefix) = entry.prefix else {
+                panic!("IPv4 MP_REACH contained non-IPv4 NLRI");
+            };
+            assert!(seen.insert(u32::from(prefix.addr)));
+        }
+        updates += 1;
+    }
+    assert!(updates >= 2, "oversized MP_REACH group was not split");
+    assert_eq!(seen.len(), count as usize);
+}
+
+/// Extended Next Hop also moves IPv4 withdrawals into `MP_UNREACH`. Verify an
+/// oversized set is split without dropping or duplicating any withdrawn NLRI.
+#[tokio::test]
+async fn send_route_update_splits_oversized_ipv4_mp_unreach_across_updates() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, true));
+
+    let count: u32 = 2000;
+    let withdraw = (0..count)
+        .map(|i| {
+            (
+                Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x1400_0000_u32 | (i << 8)),
+                    24,
+                )),
+                0,
+            )
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        withdraw,
+        ..empty_outbound_update()
+    });
+
+    let mut seen = std::collections::HashSet::new();
+    let mut updates = 0usize;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(
+            raw.len() <= 4096,
+            "MP_UNREACH UPDATE is {} bytes",
+            raw.len()
+        );
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpUnreachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("Extended Next Hop withdrawal must use MP_UNREACH");
+        assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+        for entry in &mp.withdrawn {
+            let Prefix::V4(prefix) = entry.prefix else {
+                panic!("IPv4 MP_UNREACH contained non-IPv4 NLRI");
+            };
+            assert!(seen.insert(u32::from(prefix.addr)));
+        }
+        updates += 1;
+    }
+    assert!(updates >= 2, "oversized MP_UNREACH set was not split");
+    assert_eq!(seen.len(), count as usize);
+}
 #[tokio::test]
 async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
