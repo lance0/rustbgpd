@@ -1,11 +1,11 @@
 //! Atomic management-plane credential generations.
 
 use std::fs;
-use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
@@ -196,7 +196,7 @@ fn build_tls(index: usize, source: &TlsSource) -> Result<Arc<ServerConfig>, Stri
     let cert_bytes = read_file(index, "certificate", &source.cert_file)?;
     let key_bytes = read_file(index, "private key", &source.key_file)?;
     let ca_bytes = read_file(index, "client CA", &source.client_ca_file)?;
-    let certs = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(cert_bytes)))
+    let certs = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .map_err(|e| format!("listener {index}: invalid certificate PEM: {e}"))?;
     if certs.is_empty() {
@@ -204,11 +204,9 @@ fn build_tls(index: usize, source: &TlsSource) -> Result<Arc<ServerConfig>, Stri
             "listener {index}: certificate PEM contains no certificates"
         ));
     }
-    let key: PrivateKeyDer<'static> =
-        rustls_pemfile::private_key(&mut BufReader::new(Cursor::new(key_bytes)))
-            .map_err(|e| format!("listener {index}: invalid private-key PEM: {e}"))?
-            .ok_or_else(|| format!("listener {index}: private-key PEM contains no key"))?;
-    let ca_certs = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(ca_bytes)))
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|e| format!("listener {index}: invalid private-key PEM: {e}"))?;
+    let ca_certs = CertificateDer::pem_slice_iter(&ca_bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("listener {index}: invalid client-CA PEM: {e}"))?;
     let mut roots = RootCertStore::empty();
@@ -221,10 +219,14 @@ fn build_tls(index: usize, source: &TlsSource) -> Result<Arc<ServerConfig>, Stri
     let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| format!("listener {index}: invalid client-CA verifier: {e}"))?;
-    let config = ServerConfig::builder()
+    let mut config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .map_err(|e| format!("listener {index}: certificate/private-key mismatch: {e}"))?;
+    // tonic's `ServerTlsConfig` advertises HTTP/2 over ALPN; the manual
+    // rustls config must do the same, or ALPN-strict gRPC clients
+    // (grpc-go: gnmic, gobgp) refuse to negotiate h2 on the TLS session.
+    config.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Arc::new(config))
 }
 
@@ -497,6 +499,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let old_server_config = store.load().listener(0).tls.clone().unwrap();
+        assert_eq!(old_server_config.alpn_protocols, vec![b"h2".to_vec()]);
         let old_server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             TlsAcceptor::from(old_server_config)
