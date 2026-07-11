@@ -2252,6 +2252,10 @@ pub struct ConfigDiff {
     /// new. Reload-applied by replacing the peer-manager config snapshot and
     /// rebuilding the live longest-prefix matcher.
     pub dynamic_neighbors_changed: bool,
+    /// The startup-pinned dynamic TCP-AO protected range set changed. Any
+    /// add/remove/move, protected-row edit, or key-material rotation requires
+    /// a daemon restart before the listener and matcher can advance together.
+    pub dynamic_neighbor_tcp_ao_changed: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
@@ -2457,7 +2461,7 @@ impl ConfigDiff {
             || self.policy.rpol_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
-            || self.dynamic_neighbors_changed
+            || (self.dynamic_neighbors_changed && !self.dynamic_neighbor_tcp_ao_changed)
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
     }
@@ -2472,6 +2476,7 @@ impl ConfigDiff {
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
+            || self.dynamic_neighbor_tcp_ao_changed
             || self.bfd_changed
             || self.policy_explain_changed
             || self.fib_tables_requires_restart
@@ -2793,7 +2798,8 @@ impl Config {
         }
 
         // Redact secret material everywhere it appears in the schema:
-        // neighbor md5_password / tcp_ao.key and peer-group md5_password.
+        // neighbor/dynamic-range tcp_ao.key, neighbor md5_password, and
+        // peer-group md5_password.
         for neighbor in &mut effective.neighbors {
             if neighbor.md5_password.is_some() {
                 neighbor.md5_password = Some(REDACTED_SECRET.to_string());
@@ -2805,6 +2811,11 @@ impl Config {
         for group in effective.peer_groups.values_mut() {
             if group.md5_password.is_some() {
                 group.md5_password = Some(REDACTED_SECRET.to_string());
+            }
+        }
+        for range in &mut effective.dynamic_neighbors {
+            if let Some(tcp_ao) = &mut range.tcp_ao {
+                tcp_ao.key = REDACTED_SECRET.to_string();
             }
         }
 
@@ -2851,7 +2862,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .supported_sections
             .push(TRANSACTION_NEIGHBOR_MODIFY_SECTION.to_string());
     }
-    if diff.dynamic_neighbors_changed {
+    if diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed {
         class
             .supported_sections
             .push(TRANSACTION_DYNAMIC_SECTION.to_string());
@@ -3013,6 +3024,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[neighbors]].tcp_ao".to_string());
     }
+    if diff.dynamic_neighbor_tcp_ao_changed {
+        class
+            .restart_required_sections
+            .push("[[dynamic_neighbors]].tcp_ao".to_string());
+    }
     if diff.bfd_changed {
         class
             .restart_required_sections
@@ -3134,7 +3150,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "rpol_changed": diff.policy.rpol_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
-            "dynamic_neighbors_changed": diff.dynamic_neighbors_changed,
+            "dynamic_neighbors_changed": diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
@@ -3157,6 +3173,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
+            "dynamic_neighbor_tcp_ao_changed": diff.dynamic_neighbor_tcp_ao_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
         },
@@ -3342,7 +3359,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
-        if diff.dynamic_neighbors_changed {
+        if diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed {
             let _ = writeln!(
                 out,
                 "  {} [[dynamic_neighbors]] matcher rebuilt",
@@ -3408,6 +3425,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.neighbor_tcp_ao_changed {
         restart_sections.push("[[neighbors]].tcp_ao");
     }
+    if diff.dynamic_neighbor_tcp_ao_changed {
+        restart_sections.push("[[dynamic_neighbors]].tcp_ao");
+    }
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]] / [neighbors.bfd] / [peer_groups.*.bfd]");
     }
@@ -3433,6 +3453,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
 /// Compare two full configurations and return a structured diff.
 pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
+    let dynamic_neighbor_tcp_ao_changed =
+        dynamic_neighbor_tcp_ao_restart_required_changed(old, new);
     let bfd_changed = bfd_restart_required_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
@@ -3525,6 +3547,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,
+        dynamic_neighbor_tcp_ao_changed,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
@@ -4274,6 +4297,18 @@ fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool 
     old.neighbors.iter().any(|old_neighbor| {
         old_neighbor.tcp_ao.is_some() && !new_by_addr.contains_key(old_neighbor.address.as_str())
     })
+}
+
+fn dynamic_neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
+    let protected = |config: &Config| {
+        config
+            .dynamic_neighbors
+            .iter()
+            .filter(|range| range.tcp_ao.is_some())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    protected(old) != protected(new)
 }
 
 /// Pin TCP-AO runtime state to the live startup snapshot.

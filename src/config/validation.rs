@@ -1052,6 +1052,18 @@ impl Config {
                 return Err(placeholder_error(&neighbor.address, "tcp_ao.key"));
             }
         }
+        for range in &self.dynamic_neighbors {
+            if range
+                .tcp_ao
+                .as_ref()
+                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+            {
+                return Err(placeholder_error(
+                    &format!("dynamic_neighbors.{}", range.prefix),
+                    "tcp_ao.key",
+                ));
+            }
+        }
         for (name, group) in &self.peer_groups {
             if group.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
                 return Err(placeholder_error(
