@@ -177,7 +177,7 @@ impl GrpcAuthAuditContext {
             .map_or("unmapped", |role| role.as_str())
     }
 
-    pub(super) fn principal_for_extensions<'a>(
+    pub(crate) fn principal_for_extensions<'a>(
         &'a self,
         extensions: &http::Extensions,
     ) -> Cow<'a, str> {

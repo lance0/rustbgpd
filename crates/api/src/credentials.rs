@@ -244,6 +244,7 @@ mod tests {
     use tokio_rustls::rustls::ClientConfig;
     use tokio_rustls::{TlsAcceptor, TlsConnector};
     use tonic::metadata::MetadataMap;
+    use tonic::transport::server::Connected;
 
     use super::*;
 
@@ -504,7 +505,20 @@ mod tests {
                 .unwrap()
         });
         let mut old_client = connect(old.client.clone(), addr).await.unwrap();
-        let mut old_server = old_server.await.unwrap();
+        let old_server = old_server.await.unwrap();
+        let wrapped = crate::connect_info::RustbgpdTcpStream::from_tls(old_server);
+        let mut extensions = tonic::codegen::http::Extensions::new();
+        extensions.insert(wrapped.connect_info());
+        let context = crate::authz_runtime::GrpcAuthAuditContext::new(
+            "tcp://127.0.0.1:0",
+            "read_write",
+            crate::authz::AuthTier::OperatorOnly,
+            crate::authz_runtime::GrpcAuthnKind::Mtls,
+            "mtls-unresolved",
+        )
+        .with_mtls_peer_principal();
+        assert_eq!(context.principal_for_extensions(&extensions), "old");
+        let mut old_server = wrapped;
 
         overwrite(&mut cert, new.server_pem.as_bytes());
         overwrite(&mut key, new.server_key_pem.as_bytes());

@@ -6,15 +6,15 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt as FuturesStreamExt;
+use futures::{Future, Stream};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
-use tokio_stream::{
-    StreamExt,
-    wrappers::{TcpListenerStream, UnixListenerStream},
-};
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::service::Interceptor;
 use tonic::transport::Server;
 use tonic::{Request, Status};
@@ -56,6 +56,20 @@ use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
+
+const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
+const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn bounded_handshakes<S, F, T, E>(incoming: S) -> impl Stream<Item = Result<T, E>>
+where
+    S: Stream<Item = F>,
+    F: Future<Output = Option<Result<T, E>>>,
+{
+    FuturesStreamExt::filter_map(
+        FuturesStreamExt::buffer_unordered(incoming, MAX_CONCURRENT_GRPC_TLS_HANDSHAKES),
+        std::future::ready,
+    )
+}
 
 /// Error returned by the daemon-owned config transaction apply hook.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1099,29 +1113,39 @@ async fn run_tcp_listener(
     let interceptor = AuthInterceptor::new(credential_store.clone(), credential_index);
     let builder = Server::builder();
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
-    let incoming = TcpListenerStream::new(tcp_listener)
-        .then(move |accepted| {
-            let credential_store = credential_store.clone();
-            async move {
-                let stream = match accepted {
-                    Ok(stream) => stream,
-                    Err(error) => return Some(Err(error)),
-                };
-                let generation = credential_store.load();
-                if let Some(tls) = generation.listener(credential_index).tls.clone() {
-                    match TlsAcceptor::from(tls).accept(stream).await {
-                        Ok(stream) => Some(Ok(RustbgpdTcpStream::from_tls(stream))),
-                        Err(error) => {
-                            warn!(%error, "rejected gRPC mTLS handshake");
-                            None
-                        }
+    let incoming = FuturesStreamExt::map(TcpListenerStream::new(tcp_listener), move |accepted| {
+        let generation = credential_store.load();
+        async move {
+            let stream = match accepted {
+                Ok(stream) => stream,
+                Err(error) => return Some(Err(error)),
+            };
+            if let Some(tls) = generation.listener(credential_index).tls.clone() {
+                match tokio::time::timeout(
+                    GRPC_TLS_HANDSHAKE_TIMEOUT,
+                    TlsAcceptor::from(tls).accept(stream),
+                )
+                .await
+                {
+                    Ok(Ok(stream)) => Some(Ok(RustbgpdTcpStream::from_tls(stream))),
+                    Ok(Err(error)) => {
+                        warn!(%error, "rejected gRPC mTLS handshake");
+                        None
                     }
-                } else {
-                    Some(Ok(RustbgpdTcpStream::new(stream)))
+                    Err(_) => {
+                        warn!(
+                            timeout_seconds = GRPC_TLS_HANDSHAKE_TIMEOUT.as_secs(),
+                            "timed out gRPC mTLS handshake"
+                        );
+                        None
+                    }
                 }
+            } else {
+                Some(Ok(RustbgpdTcpStream::new(stream)))
             }
-        })
-        .filter_map(std::convert::identity);
+        }
+    });
+    let incoming = bounded_handshakes(incoming);
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
         RibService::with_status_snapshots_and_metrics(
@@ -1532,6 +1556,12 @@ mod tests {
 
     use super::*;
     use crate::credentials::CredentialSource;
+    use crate::peer_types::SessionLifecycleEventType;
+    use crate::proto::GetGlobalRequest;
+    use crate::proto::event_service_client::EventServiceClient;
+    use crate::proto::global_service_client::GlobalServiceClient;
+    use crate::proto::{EventCategory, WatchEventsRequest};
+    use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
     fn empty_roles() -> Arc<BTreeMap<String, PrincipalRole>> {
         Arc::new(BTreeMap::new())
@@ -1641,6 +1671,121 @@ mod tests {
         new.metadata_mut()
             .insert("authorization", "Bearer new".parse().unwrap());
         assert!(interceptor.call(new).is_ok());
+    }
+
+    #[tokio::test]
+    async fn bounded_handshakes_do_not_serialize_behind_stalled_client() {
+        type TestHandshake = Pin<Box<dyn Future<Output = Option<Result<u8, ()>>> + Send>>;
+        let stalled = Box::pin(std::future::pending::<Option<Result<u8, ()>>>());
+        let ready = Box::pin(std::future::ready(Some(Ok(7))));
+        let futures: Vec<TestHandshake> = vec![stalled, ready];
+        let mut admitted = bounded_handshakes(tokio_stream::iter(futures));
+        let result = tokio::time::timeout(Duration::from_millis(100), admitted.next())
+            .await
+            .expect("ready handshake must not queue behind stalled handshake");
+        assert_eq!(result, Some(Ok(7)));
+    }
+
+    #[tokio::test]
+    async fn live_http2_channel_uses_rotated_token_on_each_rpc() {
+        let mut token = tempfile::NamedTempFile::new().unwrap();
+        token.write_all(b"old").unwrap();
+        token.flush().unwrap();
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FuturesStreamExt::map(TcpListenerStream::new(listener), |stream| {
+            stream.map(RustbgpdTcpStream::new)
+        });
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, session_events, _) = spawn_fake_peer_manager();
+        let context = tcp_audit_context(
+            addr,
+            AccessMode::ReadOnly,
+            AuthTier::SensitiveRead,
+            legacy_authz(),
+            None,
+            false,
+            Some("test"),
+        )
+        .with_dynamic_bearer(store.clone(), 0);
+        let interceptor = AuthInterceptor::new(store.clone(), 0);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .layer(GrpcAuthzLayer::new(context, BgpMetrics::new()))
+                .add_service(GlobalServiceServer::with_interceptor(
+                    GlobalService::new(65000, "192.0.2.1".into(), 179),
+                    interceptor.clone(),
+                ))
+                .add_service(EventServiceServer::with_interceptor(
+                    EventService::new(rib_tx, peer_tx),
+                    interceptor,
+                ))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = GlobalServiceClient::new(channel.clone());
+        let mut request = Request::new(GetGlobalRequest {});
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer old".parse().unwrap());
+        client.get_global(request).await.unwrap();
+        let mut events = EventServiceClient::new(channel);
+        let mut watch = Request::new(WatchEventsRequest {
+            categories: vec![EventCategory::Session as i32],
+            ..Default::default()
+        });
+        watch
+            .metadata_mut()
+            .insert("authorization", "Bearer old".parse().unwrap());
+        let mut stream = events.watch_events(watch).await.unwrap().into_inner();
+
+        token.as_file_mut().set_len(0).unwrap();
+        token.rewind().unwrap();
+        token.write_all(b"new").unwrap();
+        token.flush().unwrap();
+        store.reload().unwrap();
+        let mut old = Request::new(GetGlobalRequest {});
+        old.metadata_mut()
+            .insert("authorization", "Bearer old".parse().unwrap());
+        assert_eq!(
+            client.get_global(old).await.unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+        let mut new = Request::new(GetGlobalRequest {});
+        new.metadata_mut()
+            .insert("authorization", "Bearer new".parse().unwrap());
+        client.get_global(new).await.unwrap();
+        session_events
+            .send(session_event(
+                "192.0.2.9".parse().unwrap(),
+                SessionLifecycleEventType::Established,
+            ))
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.peer_address, "192.0.2.9");
+        drop(stream);
+        drop(events);
+        drop(client);
+        let _ = shutdown_tx.send(());
+        server.await.unwrap();
     }
 
     #[test]
