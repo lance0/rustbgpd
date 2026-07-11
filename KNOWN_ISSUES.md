@@ -111,6 +111,24 @@ resolved.
   both files. Proven by SIGKILL-mid-window real-binary tests
   (`tests/commit_confirm_binary.rs`). See ADR-0076 Decision 6 amendment.
 
+- **Implicit LOCAL_PREF/MED policy defaults (resolved).** Policy matches now
+  apply the BGP implicit defaults when these attributes are absent: 100 for
+  `LOCAL_PREF` and 0 for `MED`. Routes that rely on those defaults therefore
+  match `match_local_pref_ge/le` and `match_med_ge/le` consistently with routes
+  carrying the equivalent explicit attribute values.
+
+- **Typed catalog deletion preconditions (resolved).** Policy and peer-group
+  deletion paths now return the typed `CatalogMutationError::StillReferenced`
+  variant when an object remains in use. The gRPC API maps that variant to
+  `FAILED_PRECONDITION` without coupling behavior to error-message text.
+
+- **Peer-supplied eBGP LOCAL_PREF handling (resolved).** A `LOCAL_PREF`
+  received from an eBGP peer is ignored before policy evaluation, explain-cache
+  capture, Adj-RIB-In storage, and best-path selection. iBGP `LOCAL_PREF` and
+  values set by import policy remain effective, while byte-exact pre-policy BMP
+  monitoring retains the original wire UPDATE, including the peer-supplied
+  attribute.
+
 ## Limitations (by design, not bugs)
 
 - **RFC 9687 send hold timer is a per-write deadline, not the RFC's
@@ -212,10 +230,6 @@ resolved.
   reported as ordinary foreign state after ownership is released.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
-- **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
-  LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
-  not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
-  eBGP) is not yet fully distinguished. Will be enforced post-v1.
 - **gRPC listener config (including mTLS) is restart-required.**
   Adding, removing, or rotating `[global.telemetry.grpc_tcp]` fields
   — including `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`,
@@ -339,16 +353,6 @@ resolved.
 - **Add-Path explain only covers best path.** `ExplainAdvertisedRoute`
   operates on the single Loc-RIB best path. For Add-Path peers, non-best
   candidates that are actually advertised are invisible to explain.
-- **Policy match on absent LOCAL_PREF/MED returns false.**
-  `match_local_pref_ge/le` and `match_med_ge/le` return false when the
-  attribute is absent rather than using BGP implicit defaults (100 for
-  LOCAL_PREF, 0 for MED). This means policies matching on these values
-  won't fire for routes that rely on the implicit default.
-- **String-based error matching in API deletion handlers.** Policy and
-  peer-group deletion operations match `PeerManager` error messages with
-  `error.contains("still referenced")` to distinguish precondition
-  failures from not-found errors. Fragile coupling that could break if
-  error messages are changed.
 - **MRT `originated_time` silently clamps to `u32::MAX`.** The MRT
   `TABLE_DUMP_V2` encoder clamps `originated_time` to `u32::MAX`
   instead of returning an error when the timestamp exceeds the 32-bit
