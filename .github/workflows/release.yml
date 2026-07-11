@@ -142,11 +142,17 @@ jobs:
         run: |
           set -euo pipefail
           SUFFIX=${{ matrix.suffix }}
+          # List the archive once and match against the captured text. A
+          # `tar -tzf ... | grep -q` pipeline breaks here: grep exits on the
+          # first match and closes the pipe, tar takes SIGPIPE, and under
+          # `pipefail` that non-zero tar status fails the check on the first
+          # present entry (LICENSE-MIT) even though it is there.
+          entries="$(tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz")"
           for f in LICENSE-MIT LICENSE-APACHE \
                    share/man/man1/rbgp.1 share/man/man8/rustbgpd.8 \
                    share/completions/rbgp.bash share/completions/rbgp.zsh \
                    share/completions/rbgp.fish; do
-            if ! tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz" | grep -qx "$f"; then
+            if ! grep -qxF "$f" <<<"$entries"; then
               echo "::error::${f} missing from dist/rustbgpd-${SUFFIX}.tar.gz"
               exit 1
             fi
