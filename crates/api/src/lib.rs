@@ -17,6 +17,7 @@ pub mod bfd_service;
 mod config_service;
 mod connect_info;
 mod control_service;
+pub mod credentials;
 pub mod event_history_sinks;
 mod event_service;
 pub mod evpn_service;

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
 use tokio_stream::{
     StreamExt,
     wrappers::{TcpListenerStream, UnixListenerStream},
@@ -20,11 +21,13 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
-use crate::authz_runtime::{BearerAuthSecret, GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
+use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::bfd_service::BfdService;
 use crate::config_service::ConfigService;
 use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
+use crate::credentials::CredentialStore;
+use crate::credentials::PinnedCredentialGeneration;
 use crate::event_service::{DataplaneEventBroadcaster, EventService, dataplane_event_broadcaster};
 use crate::evpn_service::{
     BumEnforcementSnapshotFn, DuplicateMacClearFn, EthernetSegmentDrainReasonsFn,
@@ -545,29 +548,29 @@ pub struct ListenerConfig {
     pub enforcement: AuthEnforcement,
     /// Global principal-to-role map used when `enforcement = tier`.
     pub roles: Arc<BTreeMap<String, PrincipalRole>>,
-    pub auth_token: Option<String>,
+    pub credential_store: CredentialStore,
+    pub credential_index: usize,
     /// Optional stable principal label for audit records. Bearer-token
     /// and UDS listeners may use it to avoid placeholder identities in
     /// `grpc_authz` logs; mTLS listeners derive their audit principal
     /// from the peer certificate instead.
     pub principal: Option<String>,
-    /// Optional native mTLS for TCP listeners. The server presents
-    /// `cert_pem` and accepts client connections that present a
-    /// certificate signed by `client_ca_pem`. Ignored on UDS
-    /// endpoints — file-system permissions are the auth surface there.
-    pub tls: Option<TlsParams>,
 }
 
-/// PEM-encoded TLS material for a gRPC listener (server identity +
-/// client-authentication CA root). Loaded from disk by the daemon
-/// before the listener spawns; storing the bytes inline rather than
-/// the paths means a config reload that changes the path doesn't
-/// silently keep using stale material.
-#[derive(Clone, Debug)]
-pub struct TlsParams {
-    pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
-    pub client_ca_pem: Vec<u8>,
+impl ListenerConfig {
+    #[must_use]
+    pub fn auth_enabled(&self) -> bool {
+        self.credential_store
+            .load()
+            .listener(self.credential_index)
+            .bearer
+            .is_some()
+    }
+
+    #[must_use]
+    pub fn credential_store(&self) -> CredentialStore {
+        self.credential_store.clone()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -670,13 +673,27 @@ fn uds_audit_context(
 
 #[derive(Clone, Debug)]
 struct AuthInterceptor {
-    bearer_auth: Option<BearerAuthSecret>,
+    credential_store: Option<CredentialStore>,
+    credential_index: usize,
+    static_bearer: Option<crate::authz_runtime::BearerAuthSecret>,
 }
 
 impl AuthInterceptor {
-    fn new(token: Option<&str>) -> Self {
-        let bearer_auth = token.map(BearerAuthSecret::from_token);
-        Self { bearer_auth }
+    fn new(credential_store: CredentialStore, credential_index: usize) -> Self {
+        Self {
+            credential_store: Some(credential_store),
+            credential_index,
+            static_bearer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_token(token: Option<&str>) -> Self {
+        Self {
+            credential_store: None,
+            credential_index: 0,
+            static_bearer: token.map(crate::authz_runtime::BearerAuthSecret::from_token),
+        }
     }
 }
 
@@ -692,10 +709,26 @@ pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
 
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        let Some(bearer_auth) = self.bearer_auth.as_ref() else {
-            return Ok(request);
-        };
-        bearer_auth.authenticate_metadata(request.metadata())?;
+        if let Some(store) = &self.credential_store {
+            let pinned = request
+                .extensions()
+                .get::<PinnedCredentialGeneration>()
+                .cloned();
+            let generation = pinned.is_none().then(|| store.load());
+            let bearer_auth = pinned
+                .as_ref()
+                .and_then(PinnedCredentialGeneration::bearer)
+                .or_else(|| {
+                    generation.as_ref().and_then(|generation| {
+                        generation.listener(self.credential_index).bearer.as_ref()
+                    })
+                });
+            if let Some(bearer_auth) = bearer_auth {
+                bearer_auth.authenticate_metadata(request.metadata())?;
+            }
+        } else if let Some(bearer_auth) = &self.static_bearer {
+            bearer_auth.authenticate_metadata(request.metadata())?;
+        }
         Ok(request)
     }
 }
@@ -859,22 +892,22 @@ async fn run_listener(
         max_tier,
         enforcement,
         roles,
-        auth_token,
+        credential_store,
+        credential_index,
         principal,
-        tls,
     } = listener;
 
     match endpoint {
         ListenerEndpoint::Tcp(addr) => {
-            run_tcp_listener(
+            Box::pin(run_tcp_listener(
                 addr,
                 access_mode,
                 max_tier,
                 enforcement,
                 roles,
-                auth_token,
+                credential_store,
+                credential_index,
                 principal,
-                tls,
                 rib_tx,
                 rib_query_tx,
                 peer_mgr_tx,
@@ -917,7 +950,7 @@ async fn run_listener(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
-            )
+            ))
             .await
         }
         ListenerEndpoint::Uds { path, mode } => {
@@ -928,7 +961,8 @@ async fn run_listener(
                 max_tier,
                 enforcement,
                 roles,
-                auth_token,
+                credential_store,
+                credential_index,
                 principal,
                 rib_tx,
                 rib_query_tx,
@@ -989,9 +1023,9 @@ async fn run_tcp_listener(
     max_tier: AuthTier,
     enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
-    auth_token: Option<String>,
+    credential_store: CredentialStore,
+    credential_index: usize,
     principal: Option<String>,
-    tls: Option<TlsParams>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -1035,7 +1069,10 @@ async fn run_tcp_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
-    let tls_enabled = tls.is_some();
+    let initial_generation = credential_store.load();
+    let credentials = initial_generation.listener(credential_index);
+    let tls_enabled = credentials.tls.is_some();
+    let auth_enabled = credentials.bearer.is_some();
     let tcp_listener = TcpListener::bind(addr)
         .await
         .map_err(|e| format!("failed to bind gRPC TCP listener {addr}: {e}"))?;
@@ -1044,7 +1081,7 @@ async fn run_tcp_listener(
         %bound_addr,
         requested_addr = %addr,
         access_mode = ?access_mode,
-        auth_enabled = auth_token.is_some(),
+        auth_enabled,
         tls_enabled,
         "starting gRPC TCP listener"
     );
@@ -1053,25 +1090,38 @@ async fn run_tcp_listener(
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
-        auth_token.as_deref(),
+        None,
         tls_enabled,
         principal.as_deref(),
     );
-    let interceptor = AuthInterceptor::new(auth_token.as_deref());
-    let mut builder = Server::builder();
-    if let Some(tls) = tls {
-        let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
-        let client_ca = tonic::transport::Certificate::from_pem(&tls.client_ca_pem);
-        let tls_cfg = tonic::transport::ServerTlsConfig::new()
-            .identity(identity)
-            .client_ca_root(client_ca);
-        builder = builder
-            .tls_config(tls_cfg)
-            .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
-    }
+    let audit_context =
+        audit_context.with_dynamic_bearer(credential_store.clone(), credential_index);
+    let interceptor = AuthInterceptor::new(credential_store.clone(), credential_index);
+    let builder = Server::builder();
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
-    let incoming =
-        TcpListenerStream::new(tcp_listener).map(|accepted| accepted.map(RustbgpdTcpStream::new));
+    let incoming = TcpListenerStream::new(tcp_listener)
+        .then(move |accepted| {
+            let credential_store = credential_store.clone();
+            async move {
+                let stream = match accepted {
+                    Ok(stream) => stream,
+                    Err(error) => return Some(Err(error)),
+                };
+                let generation = credential_store.load();
+                if let Some(tls) = generation.listener(credential_index).tls.clone() {
+                    match TlsAcceptor::from(tls).accept(stream).await {
+                        Ok(stream) => Some(Ok(RustbgpdTcpStream::from_tls(stream))),
+                        Err(error) => {
+                            warn!(%error, "rejected gRPC mTLS handshake");
+                            None
+                        }
+                    }
+                } else {
+                    Some(Ok(RustbgpdTcpStream::new(stream)))
+                }
+            }
+        })
+        .filter_map(std::convert::identity);
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
         RibService::with_status_snapshots_and_metrics(
@@ -1194,11 +1244,13 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ));
     }
-    builder
-        .add_routes(routes.routes())
-        .serve_with_incoming_shutdown(incoming, await_shutdown(shutdown_rx))
-        .await
-        .map_err(|e| format!("TCP listener {bound_addr} failed: {e}"))
+    Box::pin(
+        builder
+            .add_routes(routes.routes())
+            .serve_with_incoming_shutdown(incoming, await_shutdown(shutdown_rx)),
+    )
+    .await
+    .map_err(|e| format!("TCP listener {bound_addr} failed: {e}"))
 }
 
 #[expect(
@@ -1213,7 +1265,8 @@ async fn run_uds_listener(
     max_tier: AuthTier,
     enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
-    auth_token: Option<String>,
+    credential_store: CredentialStore,
+    credential_index: usize,
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
@@ -1259,13 +1312,17 @@ async fn run_uds_listener(
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) -> Result<(), String> {
     let uds_listener = bind_uds_listener(&path, mode)?;
-    let auth_enabled = auth_token.is_some();
+    let auth_enabled = credential_store
+        .load()
+        .listener(credential_index)
+        .bearer
+        .is_some();
     let audit_context = uds_audit_context(
         &path,
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
-        auth_token.as_deref(),
+        None,
         principal.as_deref(),
     );
     info!(
@@ -1274,7 +1331,9 @@ async fn run_uds_listener(
         auth_enabled,
         "starting gRPC UDS listener"
     );
-    let interceptor = AuthInterceptor::new(auth_token.as_deref());
+    let audit_context =
+        audit_context.with_dynamic_bearer(credential_store.clone(), credential_index);
+    let interceptor = AuthInterceptor::new(credential_store, credential_index);
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
         RibService::with_status_snapshots_and_metrics(
@@ -1469,7 +1528,10 @@ async fn await_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Seek, Write};
+
     use super::*;
+    use crate::credentials::CredentialSource;
 
     fn empty_roles() -> Arc<BTreeMap<String, PrincipalRole>> {
         Arc::new(BTreeMap::new())
@@ -1518,20 +1580,20 @@ mod tests {
 
     #[test]
     fn auth_interceptor_allows_unprotected_requests() {
-        let mut interceptor = AuthInterceptor::new(None);
+        let mut interceptor = AuthInterceptor::from_token(None);
         assert!(interceptor.call(Request::new(())).is_ok());
     }
 
     #[test]
     fn auth_interceptor_rejects_missing_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret"));
+        let mut interceptor = AuthInterceptor::from_token(Some("secret"));
         let err = interceptor.call(Request::new(())).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn auth_interceptor_accepts_matching_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret"));
+        let mut interceptor = AuthInterceptor::from_token(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()
@@ -1541,13 +1603,44 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_wrong_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret"));
+        let mut interceptor = AuthInterceptor::from_token(Some("secret"));
         let mut request = Request::new(());
         request
             .metadata_mut()
             .insert("authorization", "Bearer wrong".parse().unwrap());
         let err = interceptor.call(request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn dynamic_interceptor_applies_rotation_to_next_rpc_on_same_instance() {
+        let mut token = tempfile::NamedTempFile::new().unwrap();
+        token.write_all(b"old").unwrap();
+        token.flush().unwrap();
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap();
+        let mut interceptor = AuthInterceptor::new(store.clone(), 0);
+        let mut old = Request::new(());
+        old.metadata_mut()
+            .insert("authorization", "Bearer old".parse().unwrap());
+        assert!(interceptor.call(old).is_ok());
+
+        token.as_file_mut().set_len(0).unwrap();
+        token.rewind().unwrap();
+        token.write_all(b"new").unwrap();
+        token.flush().unwrap();
+        store.reload().unwrap();
+        let mut old = Request::new(());
+        old.metadata_mut()
+            .insert("authorization", "Bearer old".parse().unwrap());
+        assert!(interceptor.call(old).is_err());
+        let mut new = Request::new(());
+        new.metadata_mut()
+            .insert("authorization", "Bearer new".parse().unwrap());
+        assert!(interceptor.call(new).is_ok());
     }
 
     #[test]

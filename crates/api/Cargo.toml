@@ -29,6 +29,9 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 tokio-stream.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+arc-swap.workspace = true
 prometheus.workspace = true
 bytes.workspace = true
 x509-parser.workspace = true
@@ -40,5 +43,4 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 rcgen.workspace = true
-tokio-rustls.workspace = true
 tempfile.workspace = true

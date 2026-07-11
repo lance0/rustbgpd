@@ -65,6 +65,7 @@ where
     }
 
     fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+        self.context.pin_credentials(req.extensions_mut());
         let path = req.uri().path().to_string();
         let lookup = audit_lookup_for_path(&path);
         let decision = lookup.decision;
@@ -74,7 +75,10 @@ where
             // over-cap bearer-token request, authenticate first so
             // invalid callers still receive UNAUTHENTICATED instead of
             // learning listener tier details via PERMISSION_DENIED.
-            if let Some(status) = self.context.bearer_auth_error(req.headers()) {
+            if let Some(status) = self
+                .context
+                .bearer_auth_error(req.headers(), req.extensions())
+            {
                 record_audit_decision(
                     &path,
                     &lookup,
@@ -105,7 +109,10 @@ where
             return Box::pin(async move { Ok(response) });
         }
         if let Some(denial) = self.context.role_denial(principal.as_ref(), decision.tier) {
-            if let Some(status) = self.context.bearer_auth_error(req.headers()) {
+            if let Some(status) = self
+                .context
+                .bearer_auth_error(req.headers(), req.extensions())
+            {
                 record_audit_decision(
                     &path,
                     &lookup,

@@ -104,6 +104,7 @@ pub struct BgpMetrics {
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
     grpc_authz_decisions: IntCounterVec,
+    grpc_credential_reloads: IntCounterVec,
     config_transaction_lifecycle: IntCounterVec,
 
     // ── Policy ──────────────────────────────────────────────────
@@ -442,6 +443,14 @@ impl BgpMetrics {
                 "ADR-0064 gRPC authorization tier decisions by bounded listener and decision labels.",
             ),
             &["tier", "result", "authn", "access_mode"],
+        )
+        .expect("valid metric definition");
+        let grpc_credential_reloads = IntCounterVec::new(
+            Opts::new(
+                "bgp_grpc_credential_reloads_total",
+                "Management-plane credential reload attempts by bounded outcome label.",
+            ),
+            &["outcome"],
         )
         .expect("valid metric definition");
 
@@ -1394,6 +1403,9 @@ impl BgpMetrics {
             .register(Box::new(grpc_authz_decisions.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(grpc_credential_reloads.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(config_transaction_lifecycle.clone()))
             .expect("metric not already registered");
         registry
@@ -1722,6 +1734,7 @@ impl BgpMetrics {
             event_stream_lagged,
             event_stream_subscribers,
             grpc_authz_decisions,
+            grpc_credential_reloads,
             config_transaction_lifecycle,
             max_prefix_exceeded,
             outbound_route_drops,
@@ -2162,6 +2175,15 @@ impl BgpMetrics {
     ) {
         self.grpc_authz_decisions
             .with_label_values(&[tier, result, authn, access_mode])
+            .inc();
+    }
+
+    /// Record a credential-generation reload attempt. The only labels are
+    /// `success` and `failure`; listener paths and errors remain in logs.
+    pub fn record_grpc_credential_reload(&self, outcome: &str) {
+        debug_assert!(matches!(outcome, "success" | "failure"));
+        self.grpc_credential_reloads
+            .with_label_values(&[outcome])
             .inc();
     }
 
@@ -3457,6 +3479,16 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_grpc_authz_decisions_total"));
         assert!(!text.contains("rustbgpd.v1.ControlService"));
+    }
+
+    #[test]
+    fn grpc_credential_reload_counter_uses_only_outcome() {
+        let m = BgpMetrics::new();
+        m.record_grpc_credential_reload("success");
+        m.record_grpc_credential_reload("failure");
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_grpc_credential_reloads_total{outcome=\"success\"} 1"));
+        assert!(text.contains("bgp_grpc_credential_reloads_total{outcome=\"failure\"} 1"));
     }
 
     #[test]
