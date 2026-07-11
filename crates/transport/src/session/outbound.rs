@@ -457,49 +457,50 @@ impl PeerSession {
                     "not sending IPv4 withdrawals to scoped link-local peer without negotiated Extended Next Hop"
                 );
             } else {
-                let msg = if use_extended_nexthop_ipv4 {
-                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                        afi: Afi::Ipv4,
-                        safi: Safi::Unicast,
-                        withdrawn: v4_withdraw
-                            .iter()
-                            .map(|entry| NlriEntry {
-                                path_id: entry.path_id,
-                                prefix: Prefix::V4(entry.prefix),
-                            })
-                            .collect(),
-                        flowspec_withdrawn: vec![],
-                        evpn_withdrawn: vec![],
-                        bgpls_withdrawn: vec![],
-                        labeled_withdrawn: vec![],
-                        vpn_withdrawn: vec![],
-                        rtc_withdrawn: vec![],
-                    })];
-                    UpdateMessage::build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        add_path_ipv4_send,
-                        Ipv4UnicastMode::MpReach,
-                    )
+                let max_len = usize::from(self.outbound_max_message_len());
+                let ok = if use_extended_nexthop_ipv4 {
+                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
+                        let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                            afi: Afi::Ipv4,
+                            safi: Safi::Unicast,
+                            withdrawn: chunk
+                                .iter()
+                                .map(|entry| NlriEntry {
+                                    path_id: entry.path_id,
+                                    prefix: Prefix::V4(entry.prefix),
+                                })
+                                .collect(),
+                            flowspec_withdrawn: vec![],
+                            evpn_withdrawn: vec![],
+                            bgpls_withdrawn: vec![],
+                            labeled_withdrawn: vec![],
+                            vpn_withdrawn: vec![],
+                            rtc_withdrawn: vec![],
+                        })];
+                        UpdateMessage::build(
+                            &[],
+                            &[],
+                            &attrs,
+                            four_octet_as,
+                            add_path_ipv4_send,
+                            Ipv4UnicastMode::MpReach,
+                        )
+                    })
                 } else {
-                    UpdateMessage::build(
-                        &[],
-                        &v4_withdraw,
-                        &[],
-                        four_octet_as,
-                        add_path_ipv4_send,
-                        Ipv4UnicastMode::Body,
-                    )
+                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
+                        UpdateMessage::build(
+                            &[],
+                            chunk,
+                            &[],
+                            four_octet_as,
+                            add_path_ipv4_send,
+                            Ipv4UnicastMode::Body,
+                        )
+                    })
                 };
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
+                if !ok {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`
@@ -658,36 +659,37 @@ impl PeerSession {
                     });
                 }
             }
-            for group in v4_groups {
-                let mut attrs = group.attrs.as_ref().clone();
-                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                    afi: Afi::Ipv4,
-                    safi: Safi::Unicast,
-                    next_hop: group.next_hop,
-                    link_local_next_hop: group.link_local_next_hop,
-                    announced: group.prefixes,
-                    flowspec_announced: vec![],
-                    evpn_announced: vec![],
-                    bgpls_announced: vec![],
-                    labeled_announced: vec![],
-                    vpn_announced: vec![],
-                    rtc_announced: vec![],
-                }));
-                let msg = UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    add_path_ipv4_send,
-                    Ipv4UnicastMode::MpReach,
-                );
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+            let max_len = usize::from(self.outbound_max_message_len());
+            for group in &v4_groups {
+                let base_attrs = group.attrs.as_ref();
+                let next_hop = group.next_hop;
+                let link_local_next_hop = group.link_local_next_hop;
+                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
+                    let mut attrs = base_attrs.clone();
+                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        next_hop,
+                        link_local_next_hop,
+                        announced: chunk.to_vec(),
+                        flowspec_announced: vec![],
+                        evpn_announced: vec![],
+                        bgpls_announced: vec![],
+                        labeled_announced: vec![],
+                        vpn_announced: vec![],
+                        rtc_announced: vec![],
+                    }));
+                    UpdateMessage::build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        add_path_ipv4_send,
+                        Ipv4UnicastMode::MpReach,
+                    )
+                }) {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         } else if self.is_scoped_link_local_peer() {
             if !v4_routes.is_empty() {
@@ -732,22 +734,21 @@ impl PeerSession {
                     }
                 }
             }
+            let max_len = usize::from(self.outbound_max_message_len());
             for group in &v4_groups {
-                let msg = UpdateMessage::build(
-                    &group.prefixes,
-                    &[],
-                    group.attrs.as_ref(),
-                    four_octet_as,
-                    add_path_ipv4_send,
-                    Ipv4UnicastMode::Body,
-                );
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+                let attrs = group.attrs.as_ref();
+                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
+                    UpdateMessage::build(
+                        chunk,
+                        &[],
+                        attrs,
+                        four_octet_as,
+                        add_path_ipv4_send,
+                        Ipv4UnicastMode::Body,
+                    )
+                }) {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
         // Resolve IPv6 eBGP next-hop: config override > socket address > suppress.
@@ -1442,6 +1443,78 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
     }
+    /// Split `entries` into as many wire UPDATEs as needed so each
+    /// `build`-produced message fits `max_len`, enqueueing each in order.
+    /// `UpdateMessage::build` emits one message regardless of size, so a large
+    /// same-attribute IPv4 group (e.g. 1000 /24s ≈ 4114 bytes) exceeds the
+    /// 4096-byte limit: `enqueue_bulk` rejects it and the session logs and
+    /// abandons the rest of the batch, and — the actual defect — that partial
+    /// delivery is never reported back across the RIB/session boundary, so the
+    /// RIB believes the whole group was advertised. Chunking keeps every prefix
+    /// on the wire. On overflow the chunk halves down to one entry; a lone
+    /// entry that still cannot fit tears the session down (see below). `kind`
+    /// names the traffic for the failure log. Returns false on a send failure
+    /// so the caller stops. Used by all four IPv4-unicast paths (body/MP
+    /// announce and withdrawal); the per-family helpers below follow the same
+    /// shape.
+    fn send_v4_chunked<E, F>(
+        &mut self,
+        entries: &[E],
+        max_len: usize,
+        kind: &'static str,
+        mut build: F,
+    ) -> bool
+    where
+        F: FnMut(&[E]) -> UpdateMessage,
+    {
+        // Optimistic starting chunk: aim to fill the negotiated message (4096,
+        // or the 65535-byte Extended Message) rather than a fixed count, then
+        // let the encoded_len() check and halving correct for attribute size,
+        // variable prefix lengths, and Add-Path path-IDs. `max_len / 2` is a
+        // probe, not an exact byte budget.
+        let mut chunk_size: usize = entries.len().min(max_len / 2).max(1);
+        let mut idx: usize = 0;
+        while idx < entries.len() {
+            let end = (idx + chunk_size).min(entries.len());
+            let msg = build(&entries[idx..end]);
+            let encoded_len = msg.encoded_len();
+            if encoded_len > max_len {
+                if chunk_size <= 1 {
+                    // A single entry plus its attributes exceeds the negotiated
+                    // maximum. The RIB has already committed this batch to
+                    // logical Adj-RIB-Out and this local encode failure is
+                    // invisible to the dirty/resync path, so just returning
+                    // would leave the wire permanently behind the RIB with the
+                    // session still Established. Tear the session down instead
+                    // (matching the BGP-LS/VPN chunkers): reconnect rebuilds
+                    // Adj-RIB-Out from scratch, so the peer is visibly unhealthy
+                    // rather than falsely advertised. A route that is
+                    // intrinsically un-sendable will loop until withdrawn; the
+                    // durable fix is an exportability check before Adj-RIB-Out
+                    // commit.
+                    warn!(
+                        peer = %self.peer_label,
+                        size = encoded_len,
+                        max = max_len,
+                        "single IPv4 {kind} entry exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
+                    );
+                    self.trigger_outbound_saturation_teardown();
+                    return false;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            if let Err(e) = self.enqueue_bulk(&Message::Update(msg)) {
+                warn!(peer = %self.peer_label, error = %e, "failed to send IPv4 {kind} UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+
     /// Send a batch of EVPN announcements as one or more `MP_REACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     /// Starts with a generous chunk size and halves on `MessageTooLong`,

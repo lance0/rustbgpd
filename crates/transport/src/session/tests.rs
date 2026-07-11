@@ -2849,6 +2849,180 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     assert_eq!(second_mp.announced.len(), 1);
     assert_ne!(first_mp.next_hop, second_mp.next_hop);
 }
+
+/// A single attribute group whose NLRI exceeds one 4096-byte UPDATE must be
+/// split across multiple wire UPDATEs with every prefix advertised — not
+/// truncated. Before the size-aware chunker, `send_route_update` built one
+/// oversized UPDATE per attribute group; `enqueue_bulk` rejected it
+/// (`MessageTooLong`) and returned early, silently advertising nothing while
+/// the RIB believed the whole group was sent.
+#[tokio::test]
+async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.route_server_client = true;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // One shared attribute set + next hop => one attribute group. 1500 /24s
+    // (4 NLRI bytes each = 6000 bytes) cannot fit a single 4096-byte UPDATE.
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]);
+    let count: u32 = 1500;
+    let route = |i: u32| Route {
+        prefix: Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(0x1400_0000_u32 | (i << 8)),
+            24,
+        )),
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::clone(&attrs),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    };
+    let routes: Vec<Route> = (0..count).map(route).collect();
+    let sent_before = session.updates_sent;
+    session.send_route_update(OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: vec![None; count as usize].into(),
+        ..empty_outbound_update()
+    });
+
+    // Drain every emitted UPDATE: each must fit the limit, and the union of
+    // announced prefixes must cover all 1500 with none dropped or duplicated.
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut updates = 0usize;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(
+            raw.len() <= 4096,
+            "emitted UPDATE is {} bytes, over the 4096 limit",
+            raw.len()
+        );
+        let mut buf = Bytes::from(raw);
+        let Message::Update(u) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = u.parse(true, false, &[]).unwrap();
+        for e in &parsed.announced {
+            assert!(
+                seen.insert(u32::from(e.prefix.addr)),
+                "prefix advertised more than once"
+            );
+        }
+        updates += 1;
+    }
+    assert!(
+        updates >= 2,
+        "oversized group must split across multiple UPDATEs, got {updates}"
+    );
+    assert_eq!(
+        seen.len(),
+        count as usize,
+        "every prefix in the oversized group must be advertised"
+    );
+    assert_eq!(
+        session.updates_sent - sent_before,
+        updates as u64,
+        "updates_sent must count exactly the emitted wire UPDATEs"
+    );
+}
+
+/// The withdrawal path has the same single-UPDATE construction as the
+/// announcement path: a large IPv4 withdrawal set must also split across
+/// multiple wire UPDATEs, none over 4096 bytes, covering every prefix.
+#[tokio::test]
+async fn send_route_update_splits_oversized_ipv4_withdrawals_across_updates() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.route_server_client = true;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let count: u32 = 2000;
+    let withdraw: Vec<(Prefix, u32)> = (0..count)
+        .map(|i| {
+            (
+                Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x1400_0000_u32 | (i << 8)),
+                    24,
+                )),
+                0u32,
+            )
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        withdraw,
+        ..empty_outbound_update()
+    });
+
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut updates = 0usize;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(
+            raw.len() <= 4096,
+            "withdrawal UPDATE is {} bytes",
+            raw.len()
+        );
+        let mut buf = Bytes::from(raw);
+        let Message::Update(u) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = u.parse(true, false, &[]).unwrap();
+        for e in &parsed.withdrawn {
+            assert!(
+                seen.insert(u32::from(e.prefix.addr)),
+                "prefix withdrawn twice"
+            );
+        }
+        updates += 1;
+    }
+    assert!(
+        updates >= 2,
+        "oversized withdrawal must split across multiple UPDATEs, got {updates}"
+    );
+    assert_eq!(
+        seen.len(),
+        count as usize,
+        "every prefix in the oversized withdrawal must be sent"
+    );
+}
 #[tokio::test]
 async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

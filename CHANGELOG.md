@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound IPv4-unicast UPDATEs are split by encoded message size.** A
+  same-attribute Adj-RIB-Out group larger than one BGP message (≈1000 /24s
+  ≈ 4114 bytes against the 4096-byte limit) was built as a single UPDATE; the
+  transport rejected it with `MessageTooLong`, logged, and abandoned the rest
+  of the batch — but never reported that partial delivery back across the
+  RIB/session boundary, so the RIB kept believing the whole group was
+  advertised. Affected peers were left silently under-advertised with no
+  dirty-resync recovery (surfaced most sharply after a changed-policy reload,
+  where every route is re-advertised at once). All four IPv4-unicast paths
+  (body/MP_REACH announcement and body/MP_UNREACH withdrawal) now chunk to the
+  negotiated maximum message size, filling Extended Messages when negotiated. A
+  lone entry that still cannot fit tears the session down so Adj-RIB-Out is
+  rebuilt on reconnect, rather than falsely reporting the route advertised.
+
 ## [0.51.0] — 2026-07-11
 
 ### Added
