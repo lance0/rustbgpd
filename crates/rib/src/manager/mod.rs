@@ -1193,6 +1193,15 @@ impl RibManager {
             RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
                 self.handle_test_query_vpn_advertised(peer, reply);
             }
+            #[cfg(test)]
+            RibUpdate::TestQueryOutboundHealth { reply } => {
+                let _ = reply.send((
+                    self.dirty_peers.len(),
+                    self.force_outbound_peers.len(),
+                    self.pending_regroup_baseline.len(),
+                    self.pending_extra_withdraws.len(),
+                ));
+            }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }

@@ -25,11 +25,16 @@ use rustbgpd_wire::RtcNlri;
 use super::*;
 use crate::route::{RouteOrigin, RtcRibRoute, VpnRibRouteKey};
 
-const SESSION: u64 = 1;
+pub(super) const SESSION: u64 = 1;
 
 /// An iBGP-learned route fixture: `LOCAL_PREF` ranks it, optional
 /// communities ride along (e.g. `COMMUNITY_LLGR_STALE`).
-fn ibgp_route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32, communities: Vec<u32>) -> Route {
+pub(super) fn ibgp_route(
+    prefix: Ipv4Prefix,
+    src: Ipv4Addr,
+    local_pref: u32,
+    communities: Vec<u32>,
+) -> Route {
     let mut attributes = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
@@ -57,7 +62,7 @@ fn ibgp_route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32, communities: V
     }
 }
 
-fn pfx(a: u8, b: u8) -> Ipv4Prefix {
+pub(super) fn pfx(a: u8, b: u8) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(10, 200, a, b), 24)
 }
 
@@ -117,7 +122,7 @@ fn vpn_route(
 
 /// RT-Constrain default-NLRI advertisement from a peer (RFC 4684
 /// wildcard interest — membership passes every RT).
-fn rtc_default(src: Ipv4Addr) -> RtcRibRoute {
+pub(super) fn rtc_default(src: Ipv4Addr) -> RtcRibRoute {
     RtcRibRoute {
         nlri: RtcNlri::DEFAULT,
         next_hop: IpAddr::V4(src),
@@ -139,7 +144,7 @@ fn vpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)]
 }
 
-fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
+pub(super) fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
     vec![
         (Afi::Ipv4, Safi::Unicast),
         (Afi::Ipv4, Safi::MplsVpn),
@@ -174,7 +179,7 @@ fn permit_all_with(modifications: RouteModifications) -> PolicyChain {
     }])
 }
 
-fn deny_prefix_chain(prefix: Ipv4Prefix) -> PolicyChain {
+pub(super) fn deny_prefix_chain(prefix: Ipv4Prefix) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: Some(Prefix::V4(prefix)),
@@ -204,7 +209,7 @@ fn deny_prefix_chain(prefix: Ipv4Prefix) -> PolicyChain {
 /// Deny several prefixes, permit the rest — a multi-statement variant of
 /// [`deny_prefix_chain`] so a second regroup lands on a *different* chain
 /// (a content-equal reinstall is key-stable and would not regroup).
-fn deny_prefixes_chain(prefixes: &[Ipv4Prefix]) -> PolicyChain {
+pub(super) fn deny_prefixes_chain(prefixes: &[Ipv4Prefix]) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: prefixes
             .iter()
@@ -239,7 +244,7 @@ fn deny_prefixes_chain(prefixes: &[Ipv4Prefix]) -> PolicyChain {
 /// aligned next-hop-override flag), sorted so intra-message iteration
 /// order is not compared.
 /// (prefix, path id, next hop, source peer, attributes, nh-override).
-type NormAnnounce = (
+pub(super) type NormAnnounce = (
     Prefix,
     u32,
     IpAddr,
@@ -252,15 +257,15 @@ type NormAnnounce = (
 /// stack, next hop, source peer, attributes). Keys/NLRI are `Debug`
 /// strings — `VpnRouteKey` has no `Display` and only sort stability
 /// matters here.
-type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttribute>);
+pub(super) type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttribute>);
 
 #[derive(Debug, PartialEq, Clone)]
-struct NormMsg {
-    announce: Vec<NormAnnounce>,
-    withdraw: Vec<(Prefix, u32)>,
-    end_of_rib: Vec<(Afi, Safi)>,
-    vpn_announce: Vec<NormVpnAnnounce>,
-    vpn_withdraw: Vec<(String, u32)>,
+pub(super) struct NormMsg {
+    pub(super) announce: Vec<NormAnnounce>,
+    pub(super) withdraw: Vec<(Prefix, u32)>,
+    pub(super) end_of_rib: Vec<(Afi, Safi)>,
+    pub(super) vpn_announce: Vec<NormVpnAnnounce>,
+    pub(super) vpn_withdraw: Vec<(String, u32)>,
 }
 
 fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
@@ -315,15 +320,15 @@ fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     }
 }
 
-type Streams = BTreeMap<IpAddr, Vec<NormMsg>>;
+pub(super) type Streams = BTreeMap<IpAddr, Vec<NormMsg>>;
 
 /// Fold a stream into the final advertised state (announce replaces,
 /// withdraw removes; unknown withdraws are RFC 4271 no-ops).
 /// (next hop, source peer, attributes, nh-override).
-type FoldedEntry = (IpAddr, IpAddr, Vec<PathAttribute>, Option<NextHopAction>);
-type FoldedState = BTreeMap<IpAddr, HashMap<(Prefix, u32), FoldedEntry>>;
+pub(super) type FoldedEntry = (IpAddr, IpAddr, Vec<PathAttribute>, Option<NextHopAction>);
+pub(super) type FoldedState = BTreeMap<IpAddr, HashMap<(Prefix, u32), FoldedEntry>>;
 
-fn fold(streams: &Streams) -> FoldedState {
+pub(super) fn fold(streams: &Streams) -> FoldedState {
     let mut state = FoldedState::new();
     for (peer, msgs) in streams {
         let table = state.entry(*peer).or_default();
@@ -363,7 +368,7 @@ fn fold_vpn(streams: &Streams) -> FoldedVpnState {
     state
 }
 
-struct Oracle {
+pub(super) struct Oracle {
     tx: mpsc::Sender<RibUpdate>,
     outs: BTreeMap<IpAddr, mpsc::Receiver<OutboundRouteUpdate>>,
     handle: tokio::task::JoinHandle<()>,
@@ -374,7 +379,7 @@ struct Oracle {
 }
 
 impl Oracle {
-    fn spawn(force_ungrouped: bool, cluster_id: Option<Ipv4Addr>) -> Self {
+    pub(super) fn spawn(force_ungrouped: bool, cluster_id: Option<Ipv4Addr>) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
@@ -407,9 +412,34 @@ impl Oracle {
         .await;
     }
 
-    async fn peer_up_families(
+    pub(super) async fn peer_up_families(
         &mut self,
         peer: Ipv4Addr,
+        is_ebgp: bool,
+        route_reflector_client: bool,
+        export_policy: Option<PolicyChain>,
+        capacity: usize,
+        sendable_families: Vec<(Afi, Safi)>,
+    ) {
+        self.peer_up_families_generation(
+            peer,
+            SESSION,
+            is_ebgp,
+            route_reflector_client,
+            export_policy,
+            capacity,
+            sendable_families,
+        )
+        .await;
+    }
+
+    // Mirrors the production PeerUp event so schedules can state every
+    // grouping input and the session generation at the call site.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn peer_up_families_generation(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
         is_ebgp: bool,
         route_reflector_client: bool,
         export_policy: Option<PolicyChain>,
@@ -420,7 +450,7 @@ impl Oracle {
         self.tx
             .send(RibUpdate::PeerUp {
                 per_client_best: false,
-                session_id: SESSION,
+                session_id,
                 peer: IpAddr::V4(peer),
                 peer_asn: if is_ebgp { 65010 } else { 65000 },
                 peer_router_id: peer,
@@ -449,21 +479,41 @@ impl Oracle {
         self.quiesce().await;
     }
 
-    async fn peer_down(&mut self, peer: Ipv4Addr) {
+    pub(super) async fn peer_down(&mut self, peer: Ipv4Addr) {
+        self.peer_down_generation(peer, SESSION).await;
+    }
+
+    pub(super) async fn peer_down_generation(&mut self, peer: Ipv4Addr, session_id: u64) {
         self.tx
             .send(RibUpdate::PeerDown {
                 peer: IpAddr::V4(peer),
-                session_id: SESSION,
+                session_id,
             })
             .await
             .unwrap();
         self.quiesce().await;
     }
 
-    async fn routes(&mut self, from: Ipv4Addr, announce: Vec<Route>, withdraw: Vec<Ipv4Prefix>) {
+    pub(super) async fn routes(
+        &mut self,
+        from: Ipv4Addr,
+        announce: Vec<Route>,
+        withdraw: Vec<Ipv4Prefix>,
+    ) {
+        self.routes_generation(from, SESSION, announce, withdraw)
+            .await;
+    }
+
+    pub(super) async fn routes_generation(
+        &mut self,
+        from: Ipv4Addr,
+        session_id: u64,
+        announce: Vec<Route>,
+        withdraw: Vec<Ipv4Prefix>,
+    ) {
         self.tx
             .send(RibUpdate::RoutesReceived {
-                session_id: SESSION,
+                session_id,
                 peer: IpAddr::V4(from),
                 announced: announce,
                 withdrawn: withdraw.into_iter().map(|p| (Prefix::V4(p), 0)).collect(),
@@ -497,23 +547,35 @@ impl Oracle {
 
     /// RFC 4684 RT-Constrain advertisement from a peer — rebuilds the
     /// peer's RT membership (the per-peer VPN filter).
-    async fn rtc_routes(&mut self, from: Ipv4Addr, announce: Vec<RtcRibRoute>) {
-        self.rtc_routes_full(from, announce, vec![]).await;
+    pub(super) async fn rtc_routes(&mut self, from: Ipv4Addr, announce: Vec<RtcRibRoute>) {
+        self.rtc_routes_full_generation(from, SESSION, announce, vec![])
+            .await;
         self.quiesce().await;
     }
 
     /// RTC announce + withdraw, WITHOUT quiescing — racing scenarios
     /// queue this back-to-back with route updates.
-    async fn rtc_routes_full(
+    pub(super) async fn rtc_routes_full(
         &mut self,
         from: Ipv4Addr,
+        announce: Vec<RtcRibRoute>,
+        withdraw: Vec<crate::route::RtcRibRouteKey>,
+    ) {
+        self.rtc_routes_full_generation(from, SESSION, announce, withdraw)
+            .await;
+    }
+
+    pub(super) async fn rtc_routes_full_generation(
+        &mut self,
+        from: Ipv4Addr,
+        session_id: u64,
         announce: Vec<RtcRibRoute>,
         withdraw: Vec<crate::route::RtcRibRouteKey>,
     ) {
         self.tx
             .send(RibUpdate::RtcRoutesReceived {
                 peer: IpAddr::V4(from),
-                session_id: SESSION,
+                session_id,
                 announced: announce,
                 withdrawn: withdraw,
             })
@@ -617,7 +679,7 @@ impl Oracle {
 
     /// The peer's update-group membership label (`group:N` or the
     /// ungrouped reason).
-    async fn group_label(&mut self, peer: Ipv4Addr) -> String {
+    pub(super) async fn group_label(&mut self, peer: Ipv4Addr) -> String {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryPeerUpdateGroup {
@@ -629,7 +691,11 @@ impl Oracle {
         reply_rx.await.unwrap()
     }
 
-    async fn replace_policy(&mut self, peer: Ipv4Addr, export_policy: Option<PolicyChain>) {
+    pub(super) async fn replace_policy(
+        &mut self,
+        peer: Ipv4Addr,
+        export_policy: Option<PolicyChain>,
+    ) {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::ReplacePeerExportPolicy {
@@ -673,7 +739,7 @@ impl Oracle {
     /// handles it after every prior update (and its route chunks) has
     /// been fully processed, so all resulting outbound sends have
     /// happened by the time the reply arrives.
-    async fn quiesce(&mut self) {
+    pub(super) async fn quiesce(&mut self) {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
@@ -685,7 +751,7 @@ impl Oracle {
     /// Drain one pending message from a peer's channel (channel-fill
     /// scenarios). The message stays in the collected stream so folded
     /// comparisons and the VPN invariant checker see the whole history.
-    async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
+    pub(super) async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
         let update = self
             .outs
             .get_mut(&IpAddr::V4(peer))
@@ -703,7 +769,17 @@ impl Oracle {
     /// Collect every message every peer has received so far, including
     /// those drained mid-scenario by `drain_one` and the invariant
     /// checker — the returned streams are the complete emission history.
-    async fn finish(mut self) -> Streams {
+    pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize) {
+        self.quiesce().await;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::TestQueryOutboundHealth { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    pub(super) async fn finish(mut self) -> Streams {
         self.quiesce().await;
         self.drain_collected();
         for peer in self.outs.keys() {

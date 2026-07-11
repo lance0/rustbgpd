@@ -945,5 +945,6 @@ mod rpki;
 mod rtc;
 mod unicast;
 mod update_groups;
+mod update_groups_fault_corpus;
 mod update_groups_oracle;
 mod vpn;
