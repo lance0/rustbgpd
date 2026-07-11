@@ -538,9 +538,9 @@ pub(crate) async fn reload_config(
         error!(
             "[global.telemetry.grpc_tcp] differs from the live listener \
              (address / token / TLS): live listener is unchanged. \
-             Restart rustbgpd to apply. Adding, removing, or rotating \
-             tls_cert_file / tls_key_file / tls_client_ca_file does NOT \
-             take effect on SIGHUP."
+             Restart rustbgpd to apply path/auth-mode changes. Credential \
+             bytes behind unchanged token/TLS paths rotate independently \
+             on SIGHUP."
         );
         new_config.global.telemetry.grpc_tcp = live_grpc_tcp.cloned();
     }

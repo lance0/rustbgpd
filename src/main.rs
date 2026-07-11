@@ -505,64 +505,53 @@ fn write_gr_restart_marker(path: &Path, expires_at: SystemTime) -> std::io::Resu
     std::fs::write(path, encoded)
 }
 
-fn load_grpc_token(path: &Path) -> Result<String, String> {
-    let token = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read gRPC token file {}: {e}", path.display()))?;
-    let token = token.trim_end().to_string();
-    if token.is_empty() {
-        return Err(format!(
-            "gRPC token file {} must contain a non-empty token",
-            path.display()
-        ));
-    }
-    Ok(token)
-}
-
-fn load_grpc_pem(path: &Path, label: &str) -> Result<Vec<u8>, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("failed to read gRPC {label} file {}: {e}", path.display()))?;
-    if bytes.is_empty() {
-        return Err(format!("gRPC {label} file {} is empty", path.display()));
-    }
-    Ok(bytes)
-}
-
 fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, String> {
+    use rustbgpd_api::credentials::{CredentialSource, CredentialStore, TlsSource};
     let enforcement = grpc_enforcement_to_auth_enforcement(config.security.grpc.enforcement);
     let roles = Arc::new(grpc_principal_roles(config));
-    config
-        .grpc_listeners()
-        .into_iter()
+    let declared = config.grpc_listeners();
+    let sources = declared
+        .iter()
         .map(|listener| match listener {
+            GrpcListener::Tcp {
+                token_file, tls, ..
+            } => CredentialSource {
+                token_file: token_file.clone(),
+                tls: tls.as_ref().map(|paths| TlsSource {
+                    cert_file: paths.cert_file.clone(),
+                    key_file: paths.key_file.clone(),
+                    client_ca_file: paths.client_ca_file.clone(),
+                }),
+            },
+            GrpcListener::Uds { token_file, .. } => CredentialSource {
+                token_file: token_file.clone(),
+                tls: None,
+            },
+        })
+        .collect();
+    let credential_store = CredentialStore::stage(sources)?;
+    declared
+        .into_iter()
+        .enumerate()
+        .map(|(credential_index, listener)| match listener {
             GrpcListener::Tcp {
                 addr,
                 access_mode,
                 max_tier,
-                token_file,
+                token_file: _,
                 principal,
                 tls,
             } => {
-                let tls_params = tls
-                    .map(|paths| {
-                        Ok::<_, String>(rustbgpd_api::server::TlsParams {
-                            cert_pem: load_grpc_pem(&paths.cert_file, "tls_cert_file")?,
-                            key_pem: load_grpc_pem(&paths.key_file, "tls_key_file")?,
-                            client_ca_pem: load_grpc_pem(
-                                &paths.client_ca_file,
-                                "tls_client_ca_file",
-                            )?,
-                        })
-                    })
-                    .transpose()?;
+                let _ = tls;
                 Ok(GrpcListenerConfig {
                     endpoint: ListenerEndpoint::Tcp(addr),
                     access_mode: access_mode.into(),
                     max_tier: grpc_max_tier_to_auth_tier(max_tier),
                     enforcement,
                     roles: Arc::clone(&roles),
-                    auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                    credential_store: credential_store.clone(),
+                    credential_index,
                     principal,
-                    tls: tls_params,
                 })
             }
             GrpcListener::Uds {
@@ -570,7 +559,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 mode,
                 access_mode,
                 max_tier,
-                token_file,
+                token_file: _,
                 principal,
             } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Uds { path, mode },
@@ -578,9 +567,9 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 max_tier: grpc_max_tier_to_auth_tier(max_tier),
                 enforcement,
                 roles: Arc::clone(&roles),
-                auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                credential_store: credential_store.clone(),
+                credential_index,
                 principal,
-                tls: None,
             }),
         })
         .collect()
@@ -759,7 +748,7 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
             ListenerEndpoint::Tcp(addr) => format!("grpc: tcp://{addr}"),
             ListenerEndpoint::Uds { path, .. } => format!("grpc: unix://{}", path.display()),
         };
-        let auth = if listener.auth_token.is_some() {
+        let auth = if listener.auth_enabled() {
             " (token auth)"
         } else {
             ""
@@ -1449,6 +1438,9 @@ async fn run<T>(
         error!(error = %e, "invalid gRPC listener configuration");
         process::exit(1);
     });
+    let grpc_credentials = grpc_listeners
+        .first()
+        .map(GrpcListenerConfig::credential_store);
 
     // Startup banner — human-friendly topology summary on stderr.
     print_startup_banner(&config, &grpc_listeners);
@@ -1893,10 +1885,10 @@ async fn run<T>(
             ListenerEndpoint::Tcp(addr) => {
                 info!(
                     %addr,
-                    auth_enabled = listener.auth_token.is_some(),
+                    auth_enabled = listener.auth_enabled(),
                     "configured gRPC TCP listener"
                 );
-                if !addr.ip().is_loopback() && listener.auth_token.is_none() {
+                if !addr.ip().is_loopback() && !listener.auth_enabled() {
                     warn!(
                         %addr,
                         "gRPC TCP listener bound to a non-loopback address without authentication; prefer UDS for local administration or a proxy with mTLS for remote access"
@@ -1912,7 +1904,7 @@ async fn run<T>(
                 info!(
                     path = %path.display(),
                     mode = format_args!("{mode:o}"),
-                    auth_enabled = listener.auth_token.is_some(),
+                    auth_enabled = listener.auth_enabled(),
                     "configured gRPC UDS listener"
                 );
             }
@@ -3051,6 +3043,8 @@ async fn run<T>(
                 let config_transaction_controller = config_transaction_controller.clone();
                 let pm_internal = peer_mgr_internal_tx.clone();
                 let bridge_replace = bridge_replace_tx.clone();
+                let grpc_credentials = grpc_credentials.clone();
+                let reload_metrics = metrics.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
                     if let Err(error) = config_transaction_controller
@@ -3062,6 +3056,18 @@ async fn run<T>(
                             "SIGHUP reload ignored while confirmed config transaction is applying or pending"
                         );
                         return None;
+                    }
+                    if let Some(credentials) = grpc_credentials {
+                        match credentials.reload() {
+                            Ok(generation) => {
+                                reload_metrics.record_grpc_credential_reload("success");
+                                info!(generation, "gRPC credential generation reloaded");
+                            }
+                            Err(error) => {
+                                reload_metrics.record_grpc_credential_reload("failure");
+                                error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
+                            }
+                        }
                     }
                     let snapshot = match runtime_config_snapshot(&pm_tx).await {
                         Ok(snapshot) => snapshot,

@@ -7,6 +7,8 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::server::TlsStream;
 use tonic::transport::server::Connected;
 
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
@@ -38,12 +40,14 @@ impl MtlsPrincipalCache {
 #[derive(Clone, Debug)]
 pub(crate) struct RustbgpdTcpConnectInfo {
     mtls_principal: MtlsPrincipalCache,
+    peer_certs: Option<Arc<[CertificateDer<'static>]>>,
 }
 
 impl RustbgpdTcpConnectInfo {
     fn new() -> Self {
         Self {
             mtls_principal: MtlsPrincipalCache::default(),
+            peer_certs: None,
         }
     }
 
@@ -56,20 +60,49 @@ impl RustbgpdTcpConnectInfo {
     {
         self.mtls_principal.resolve(certs)
     }
+
+    pub(crate) fn peer_certs(&self) -> Option<&[CertificateDer<'static>]> {
+        self.peer_certs.as_deref()
+    }
 }
 
 /// TCP stream wrapper that carries rustbgpd-specific connect info through
 /// tonic's `Connected` extension path.
 #[derive(Debug)]
 pub(crate) struct RustbgpdTcpStream {
-    inner: TcpStream,
+    inner: RustbgpdTcpStreamInner,
     info: RustbgpdTcpConnectInfo,
+}
+
+#[derive(Debug)]
+enum RustbgpdTcpStreamInner {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl RustbgpdTcpStream {
     pub(crate) fn new(inner: TcpStream) -> Self {
         let info = RustbgpdTcpConnectInfo::new();
-        Self { inner, info }
+        Self {
+            inner: RustbgpdTcpStreamInner::Plain(inner),
+            info,
+        }
+    }
+
+    pub(crate) fn from_tls(inner: TlsStream<TcpStream>) -> Self {
+        let peer_certs = inner
+            .get_ref()
+            .1
+            .peer_certificates()
+            .map(|certs| Arc::<[CertificateDer<'static>]>::from(certs.to_vec()));
+        let info = RustbgpdTcpConnectInfo {
+            mtls_principal: MtlsPrincipalCache::default(),
+            peer_certs,
+        };
+        Self {
+            inner: RustbgpdTcpStreamInner::Tls(Box::new(inner)),
+            info,
+        }
     }
 }
 
@@ -87,7 +120,10 @@ impl AsyncRead for RustbgpdTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        match &mut self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            RustbgpdTcpStreamInner::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
     }
 }
 
@@ -97,19 +133,31 @@ impl AsyncWrite for RustbgpdTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        match &mut self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            RustbgpdTcpStreamInner::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        match &mut self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => Pin::new(s).poll_flush(cx),
+            RustbgpdTcpStreamInner::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        match &mut self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            RustbgpdTcpStreamInner::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
     }
 
     fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
+        match &self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => s.is_write_vectored(),
+            RustbgpdTcpStreamInner::Tls(s) => s.is_write_vectored(),
+        }
     }
 
     fn poll_write_vectored(
@@ -117,7 +165,10 @@ impl AsyncWrite for RustbgpdTcpStream {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+        match &mut self.inner {
+            RustbgpdTcpStreamInner::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            RustbgpdTcpStreamInner::Tls(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
     }
 }
 

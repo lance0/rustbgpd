@@ -11,6 +11,7 @@ use tracing::debug;
 use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 use crate::connect_info::RustbgpdTcpConnectInfo;
+use crate::credentials::{CredentialStore, PinnedCredentialGeneration};
 
 use super::decision::RoleDenial;
 
@@ -52,6 +53,7 @@ pub struct GrpcAuthAuditContext {
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     resolve_mtls_principal: bool,
     expected_bearer_header: Option<BearerAuthSecret>,
+    dynamic_bearer: Option<(CredentialStore, usize)>,
 }
 
 impl GrpcAuthAuditContext {
@@ -74,6 +76,7 @@ impl GrpcAuthAuditContext {
             roles: Arc::new(BTreeMap::new()),
             resolve_mtls_principal: false,
             expected_bearer_header: None,
+            dynamic_bearer: None,
         }
     }
 
@@ -103,6 +106,12 @@ impl GrpcAuthAuditContext {
         self
     }
 
+    #[must_use]
+    pub fn with_dynamic_bearer(mut self, store: CredentialStore, listener: usize) -> Self {
+        self.dynamic_bearer = Some((store, listener));
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn authn(&self) -> GrpcAuthnKind {
         self.authn
@@ -118,7 +127,30 @@ impl GrpcAuthAuditContext {
         self.max_tier
     }
 
-    pub(super) fn bearer_auth_error(&self, headers: &http::HeaderMap) -> Option<Status> {
+    pub(super) fn pin_credentials(&self, extensions: &mut http::Extensions) {
+        if let Some((store, listener)) = &self.dynamic_bearer {
+            extensions.insert(PinnedCredentialGeneration::new(store.load(), *listener));
+        }
+    }
+
+    pub(super) fn bearer_auth_error(
+        &self,
+        headers: &http::HeaderMap,
+        extensions: &http::Extensions,
+    ) -> Option<Status> {
+        if let Some(pinned) = extensions.get::<PinnedCredentialGeneration>() {
+            return pinned
+                .bearer()
+                .and_then(|expected| expected.auth_error_from_http_headers(headers));
+        }
+        if let Some((store, listener)) = &self.dynamic_bearer {
+            let generation = store.load();
+            return generation
+                .listener(*listener)
+                .bearer
+                .as_ref()
+                .and_then(|expected| expected.auth_error_from_http_headers(headers));
+        }
         let expected = self.expected_bearer_header.as_ref()?;
         expected.auth_error_from_http_headers(headers)
     }
@@ -145,7 +177,7 @@ impl GrpcAuthAuditContext {
             .map_or("unmapped", |role| role.as_str())
     }
 
-    pub(super) fn principal_for_extensions<'a>(
+    pub(crate) fn principal_for_extensions<'a>(
         &'a self,
         extensions: &http::Extensions,
     ) -> Cow<'a, str> {
@@ -170,6 +202,14 @@ impl GrpcAuthAuditContext {
 fn mtls_principal_from_extensions(
     extensions: &http::Extensions,
 ) -> Result<String, PrincipalExtractionError> {
+    if let Some(info) = extensions.get::<RustbgpdTcpConnectInfo>() {
+        let certs = info
+            .peer_certs()
+            .ok_or(PrincipalExtractionError::MissingPeerCertificate)?;
+        return info
+            .mtls_principal(certs)
+            .map(|principal| principal.to_string());
+    }
     if let Some(connect_info) = extensions.get::<TlsConnectInfo<RustbgpdTcpConnectInfo>>() {
         let certs = connect_info
             .peer_certs()

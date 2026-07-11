@@ -2822,7 +2822,9 @@ dependencies = [
 name = "rustbgpd-api"
 version = "0.51.0"
 dependencies = [
+ "arc-swap",
  "bytes",
+ "futures",
  "prometheus",
  "prost",
  "prost-types",

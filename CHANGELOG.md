@@ -9,6 +9,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
+  mTLS server identity, and client CA material behind unchanged configured paths
+  are staged for every gRPC/gNMI listener and published as one immutable
+  process-wide generation. New RPCs on an existing HTTP/2 connection use the
+  new bearer token; existing streams survive. New TLS accepts use the new
+  identity/CA while established TLS connections survive. Invalid or partial
+  material preserves the complete last-known-good generation, and confirmed
+  config transactions fence reload through the existing runtime lock. Listener
+  shape, paths, authorization roles, and access policy remain restart-required.
+  A bounded success/failure metric and redacted logs expose outcomes. (LAN-359)
+
 ### Fixed
 
 - **EVPN load generation validates unsafe workloads and honors exact event
