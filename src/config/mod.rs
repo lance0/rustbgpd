@@ -4435,7 +4435,11 @@ pub(crate) fn pin_dynamic_tcp_ao_startup_only(new_config: &mut Config, current: 
     affected_ranges
 }
 
-fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
+/// Return whether two validated effective IP prefixes cover any common address.
+///
+/// Shared by config validation, reload pinning, and runtime dynamic-range CRUD
+/// so TCP-AO authentication boundaries use one intersection definition.
+pub(crate) fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
     let min_len = left.1.min(right.1);
     effective_prefix(left.0, min_len).0 == effective_prefix(right.0, min_len).0
 }

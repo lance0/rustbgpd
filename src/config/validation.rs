@@ -13,7 +13,8 @@ use super::schema::{
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig, is_unicast_nonzero_mac, parse_mac_address,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, dynamic_prefixes_intersect,
+    is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -914,7 +915,7 @@ impl Config {
             }
             let protected_prefix = parsed_dynamic_prefixes[i];
             for (j, other_prefix) in parsed_dynamic_prefixes.iter().copied().enumerate() {
-                if i != j && prefixes_intersect(protected_prefix, other_prefix) {
+                if i != j && dynamic_prefixes_intersect(protected_prefix, other_prefix) {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
                             "dynamic_neighbors[{i}]: TCP-AO range {:?} overlaps \
@@ -929,7 +930,7 @@ impl Config {
                     continue;
                 };
                 let host_prefix = (address, if address.is_ipv4() { 32 } else { 128 });
-                if prefixes_intersect(protected_prefix, host_prefix) {
+                if dynamic_prefixes_intersect(protected_prefix, host_prefix) {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
                             "dynamic_neighbors[{i}]: TCP-AO range {:?} contains static \
@@ -1018,11 +1019,6 @@ impl Config {
             effective.iter().any(|f| f == "linkstate")
         })
     }
-}
-
-fn prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
-    let min_len = left.1.min(right.1);
-    effective_prefix(left.0, min_len).0 == effective_prefix(right.0, min_len).0
 }
 
 impl Config {

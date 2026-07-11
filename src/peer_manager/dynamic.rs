@@ -184,8 +184,9 @@ impl PeerManager {
         let key = crate::config::effective_prefix(addr, prefix_len);
         if self.current_config.dynamic_neighbors.iter().any(|range| {
             range.tcp_ao.is_some()
-                && crate::config::effective_prefix_str(&range.prefix)
-                    .is_some_and(|protected| dynamic_prefixes_intersect(key, protected))
+                && crate::config::effective_prefix_str(&range.prefix).is_some_and(|protected| {
+                    crate::config::dynamic_prefixes_intersect(key, protected)
+                })
         }) {
             return Err(DynamicRangeError::Invalid(format!(
                 "dynamic range {}/{} overlaps a startup-pinned TCP-AO range; restart \
@@ -430,12 +431,6 @@ impl PeerManager {
             "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
         );
     }
-}
-
-fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
-    let min_len = left.1.min(right.1);
-    crate::config::effective_prefix(left.0, min_len).0
-        == crate::config::effective_prefix(right.0, min_len).0
 }
 
 #[cfg(test)]
