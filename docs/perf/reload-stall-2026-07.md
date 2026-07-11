@@ -16,7 +16,16 @@ the receiver, under churn, against a pre-committed gate:
 #821, global attribute interning #826, and the update-group resync
 fixes #822/#823).
 
-## Headline
+> **Receipt status: historical, invalidated pending rerun.** The original
+> harness treated repeated base-prefix announcements as additional completion
+> progress. A duplicate could therefore close an observer's measurement window
+> before every unique prefix carrying the new policy-generation community had
+> arrived. The figures below are retained as the original run record, but the
+> `< 1 s` result is not release or acceptance evidence. The committed harness
+> now requires every expected unique prefix with the expected generation marker;
+> a corrected route-server-scale rerun will replace this notice.
+
+## Historical headline (invalidated pending corrected rerun)
 
 | Metric (700 route-server clients × 400,400 IPv4 routes, churn running) | Value |
 |---|---|
@@ -29,7 +38,8 @@ fixes #822/#823).
 | Concurrent `rbgp health` query latency (baseline → during reload, p50) | 7.8 ms → **207.8 ms** (max 235 ms) |
 | Daemon RSS (converged → after 4 reload cycles) | 814 MiB → 1316 MiB (plateaus; +60/+10 MiB on cycles 3/4) |
 
-**Verdict: the < 1 s stall gate holds — but marginally (0.85 s worst
+**Historical verdict, not currently accepted: the < 1 s stall gate appeared to
+hold — but marginally (0.85 s worst
 case), and full repropagation of the new policy is minutes, not
 seconds, with the responsible code path identified below.** UPDATEs
 never stop flowing: churn keeps being delivered throughout the entire
@@ -211,10 +221,11 @@ AS_PATH + non-loopback NEXT_HOP — a 127/8 NEXT_HOP is rejected with
 UPDATE error subcode 8); (3) answers ROUTE_REFRESH by re-announcing
 its slice; (4) flaps churn blocks from 8 members; (5) copies the
 next-generation `.rpol` over the live file, SIGHUPs the daemon, and
-waits until every observer's post-SIGHUP base-table announce delta
-reaches full-table-minus-own; (6) reports per-observer max-gap /
-completion percentiles, samples delivered communities to verify the
-live policy generation, and reads daemon RSS from `/proc`. Reload
+waits until every observer has received every unique base-table prefix
+except its own carrying the expected policy-generation community; (6)
+reports per-observer max-gap / completion percentiles, records delivered
+communities to verify the live policy generation, and reads daemon RSS from
+`/proc`. Reload
 wall times come from the daemon's JSON log (`config reload
 complete`); the probe is a 50 ms shell loop timing `rbgp health`
 against the UDS socket.

@@ -13,7 +13,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Perf-receipt harnesses committed in-repo (`bench/scale/`).** The two
   harnesses backing the published perf receipts are now checked in so the
-  receipts are reproducible: `bench/scale/rrharness/` (RibManager flood/churn
+  receipt harness source is auditable: `bench/scale/rrharness/` (RibManager flood/churn
   CPU+memory profiler, backs `docs/perf/rebaseline-2026-07.md`) and
   `bench/scale/reloadstall/` (route-server-scale policy-reload UPDATE-stall
   driver, backs `docs/perf/reload-stall-2026-07.md`). Both are standalone
@@ -723,6 +723,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventoried). (LAN-194)
 
 ### Fixed
+
+- **LLGR promotion preserves global attribute interning.** GR-to-LLGR
+  promotion now re-interns each locally modified attribute set, so a full table
+  sharing one attribute allocation does not expand into one identical allocation
+  per retained route for the LLGR stale window.
+- **Reload-stall completion is unique and generation-aware.** The committed
+  route-server-scale harness now completes only after every expected unique
+  base prefix arrives with the requested policy-generation community; duplicate
+  or stale-generation announcements cannot shorten the measured window. The
+  original July numbers are explicitly invalidated pending a corrected rerun.
+- **M66 authorization assertion follows the canonical CLI error.** The EVPN ES
+  drain interop proof now recognizes the shipped `permission denied` rendering
+  while retaining the nonzero-exit and `operator_only` checks.
 
 - **Unicast routes now carry their graceful-restart stale flags
   through the API.** The unicast RIB conversion was the only family

@@ -432,7 +432,7 @@ impl RibManager {
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 // Promote LLGR-negotiated families to LLGR-stale
                 for &family in &llgr_families {
-                    let promoted = rib.promote_to_llgr_stale(family);
+                    let promoted = rib.promote_to_llgr_stale(family, &mut self.attr_intern);
                     for p in promoted {
                         affected.insert(p);
                     }
@@ -440,7 +440,8 @@ impl RibManager {
                     for r in fs_promoted {
                         fs_affected.insert(r);
                     }
-                    let evpn_promoted = rib.promote_to_llgr_stale_evpn(family);
+                    let evpn_promoted =
+                        rib.promote_to_llgr_stale_evpn(family, &mut self.attr_intern);
                     for k in evpn_promoted {
                         evpn_affected.insert(k);
                     }
@@ -468,10 +469,14 @@ impl RibManager {
                 // Each helper is a family-scoped no-op for non-matching
                 // tuples.
                 for &family in &llgr_families {
-                    vpn_affected.extend(rib.promote_to_llgr_stale_vpn(family));
-                    labeled_affected.extend(rib.promote_to_llgr_stale_labeled(family));
-                    bgpls_affected.extend(rib.promote_to_llgr_stale_bgpls(family));
-                    rtc_affected.extend(rib.promote_to_llgr_stale_rtc(family));
+                    vpn_affected
+                        .extend(rib.promote_to_llgr_stale_vpn(family, &mut self.attr_intern));
+                    labeled_affected
+                        .extend(rib.promote_to_llgr_stale_labeled(family, &mut self.attr_intern));
+                    bgpls_affected
+                        .extend(rib.promote_to_llgr_stale_bgpls(family, &mut self.attr_intern));
+                    rtc_affected
+                        .extend(rib.promote_to_llgr_stale_rtc(family, &mut self.attr_intern));
                 }
                 for &family in &non_llgr_families {
                     vpn_affected.extend(rib.sweep_stale_family_vpn(family));

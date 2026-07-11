@@ -51,10 +51,11 @@ impl AttrInternTable {
     /// caller's copy drops; otherwise this allocation is recorded as the
     /// canonical one.
     ///
-    /// Callers intern *before* storing a route, never after — an `Arc`
-    /// already stored in a RIB is never swapped out from under it, so
-    /// pointer-identity contracts downstream (`ExportMemo` keys on
-    /// `Arc::as_ptr`, the `routes_equal` `ptr_eq` fast paths) hold.
+    /// Normal announce callers intern before storing a route. The one mutation
+    /// exception is GR-to-LLGR promotion: it copy-on-write transforms a stored
+    /// attribute set, immediately re-interns the replacement, then recomputes
+    /// every affected route before distribution. That ordering invalidates any
+    /// old pointer-keyed export memo before the transformed route is emitted.
     pub fn intern(&mut self, attrs: &mut Arc<Vec<PathAttribute>>) {
         if let Some(existing) = self.set.get(attrs) {
             *attrs = Arc::clone(existing);

@@ -403,7 +403,11 @@ impl AdjRibIn {
     ///   `LLGR_STALE` community added.
     ///
     /// Returns prefixes affected (for best-path recalc).
-    pub fn promote_to_llgr_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+    pub fn promote_to_llgr_stale(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<Prefix> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
 
         // First pass: remove routes with NO_LLGR community
@@ -444,6 +448,7 @@ impl AdjRibIn {
                     self.llgr_stale_local_tags
                         .insert((route.prefix, route.path_id));
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.prefix);
             }
         }
@@ -669,7 +674,11 @@ impl AdjRibIn {
     ///   `LLGR_STALE` community added via `Arc::make_mut`.
     ///
     /// Returns keys affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
+    pub fn promote_to_llgr_stale_evpn(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<EvpnRouteKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
 
         if family != (Afi::L2Vpn, Safi::Evpn) {
@@ -707,6 +716,7 @@ impl AdjRibIn {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.evpn_llgr_stale_local_tags.insert(route.key());
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
         }
@@ -918,7 +928,11 @@ impl AdjRibIn {
     ///   `LLGR_STALE` community added via `Arc::make_mut`.
     ///
     /// Returns keys affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+    pub fn promote_to_llgr_stale_bgpls(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<BgpLsRouteKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
 
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
@@ -958,6 +972,7 @@ impl AdjRibIn {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.bgpls_llgr_stale_local_tags.insert(route.key());
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
         }
@@ -1217,7 +1232,11 @@ impl AdjRibIn {
     ///   `LLGR_STALE` community added via `Arc::make_mut`.
     ///
     /// Returns keys affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+    pub fn promote_to_llgr_stale_vpn(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<VpnRibRouteKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
 
         if family.1 != Safi::MplsVpn {
@@ -1256,6 +1275,7 @@ impl AdjRibIn {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.vpn_llgr_stale_local_tags.insert(route.key());
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
         }
@@ -1514,6 +1534,7 @@ impl AdjRibIn {
     pub fn promote_to_llgr_stale_labeled(
         &mut self,
         family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<LabeledRibRouteKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
 
@@ -1553,6 +1574,7 @@ impl AdjRibIn {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.labeled_llgr_stale_local_tags.insert(route.key());
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
         }
@@ -1763,7 +1785,11 @@ impl AdjRibIn {
     ///   `LLGR_STALE` community added via `Arc::make_mut`.
     ///
     /// Returns keys affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+    pub fn promote_to_llgr_stale_rtc(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+    ) -> Vec<RtcRibRouteKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
 
         if family != RtcRibRouteKey::afi_safi() {
@@ -1801,6 +1827,7 @@ impl AdjRibIn {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.rtc_llgr_stale_local_tags.insert(route.key());
                 }
+                attr_intern.intern(&mut route.attributes);
                 affected.push(route.key());
             }
         }
@@ -2691,7 +2718,10 @@ mod tests {
         // to LLGR-stale (real promotion path — injects the community).
         rib.insert(make_route(llgr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
         rib.mark_stale((Afi::Ipv4, Safi::Unicast));
-        rib.promote_to_llgr_stale((Afi::Ipv4, Safi::Unicast));
+        rib.promote_to_llgr_stale(
+            (Afi::Ipv4, Safi::Unicast),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
 
         // Reconnect re-advertises a second prefix (not the first); the
         // session drops again, marking the fresh route GR-stale.
@@ -2750,7 +2780,7 @@ mod tests {
         rib.mark_stale(family); // session drop
         assert_coupled(&rib, "mark_stale");
 
-        rib.promote_to_llgr_stale(family); // GR timer expiry
+        rib.promote_to_llgr_stale(family, &mut crate::attr_intern::AttrInternTable::new()); // GR timer expiry
         assert_coupled(&rib, "promote_to_llgr_stale");
         assert!(rib.iter().any(|r| r.is_llgr_stale));
 
@@ -2767,13 +2797,13 @@ mod tests {
         // Second cycle ending in End-of-RIB hygiene: both clear paths drop
         // the flag together with the locally injected community.
         rib.mark_stale(family);
-        rib.promote_to_llgr_stale(family);
+        rib.promote_to_llgr_stale(family, &mut crate::attr_intern::AttrInternTable::new());
         rib.clear_llgr_stale(family);
         assert_coupled(&rib, "clear_llgr_stale");
         assert!(rib.iter().all(|r| !r.is_llgr_stale));
 
         rib.mark_stale(family);
-        rib.promote_to_llgr_stale(family);
+        rib.promote_to_llgr_stale(family, &mut crate::attr_intern::AttrInternTable::new());
         rib.clear_stale(family);
         assert_coupled(&rib, "clear_stale");
         assert!(rib.iter().all(|r| !r.is_llgr_stale));
@@ -2939,7 +2969,10 @@ mod tests {
         route.is_stale = true;
         rib.insert(route);
 
-        rib.promote_to_llgr_stale((Afi::Ipv4, Safi::Unicast));
+        rib.promote_to_llgr_stale(
+            (Afi::Ipv4, Safi::Unicast),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         assert!(
             rib.get(&Prefix::V4(prefix), 0)
                 .unwrap()
@@ -3224,7 +3257,10 @@ mod tests {
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
 
         // Reconnect advertises a second route; two more drops follow. The
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
@@ -3251,7 +3287,10 @@ mod tests {
 
         // Stale → promote → LLGR_STALE community locally injected
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         let promoted = &rib.evpn_routes[&key];
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
@@ -3298,7 +3337,10 @@ mod tests {
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
 
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         assert!(
             rib.evpn_llgr_stale_local_tags.contains(&key),
             "promotion should record the local LLGR_STALE injection"
@@ -3335,7 +3377,10 @@ mod tests {
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
         assert!(rib.evpn_llgr_stale_local_tags.contains(&key));
 
         assert!(rib.withdraw_evpn(&key));
@@ -3360,7 +3405,10 @@ mod tests {
         );
 
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
-        let affected = rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        let affected = rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
 
         // NO_LLGR route removed entirely
         assert!(!rib.evpn_routes.contains_key(&no_llgr_key));
@@ -3398,7 +3446,10 @@ mod tests {
 
         // Mark only route A stale, promote — route B must NOT gain LLGR_STALE
         rib.evpn_routes.get_mut(&key_a).unwrap().is_stale = true;
-        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn(
+            (Afi::L2Vpn, Safi::Evpn),
+            &mut crate::attr_intern::AttrInternTable::new(),
+        );
 
         assert!(
             rib.evpn_routes[&key_a]
@@ -3518,7 +3569,7 @@ mod tests {
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 2, 0], 24, 200), vec![]);
         rib.mark_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         // Reconnect advertises a second route; two more drops follow. The
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
@@ -3544,7 +3595,7 @@ mod tests {
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
 
         rib.mark_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
         let promoted = &rib.vpn_routes[&key];
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
@@ -3606,7 +3657,8 @@ mod tests {
 
         rib.mark_stale_vpn(VPN_V4);
         rib.mark_stale_vpn(VPN_V6);
-        let affected = rib.promote_to_llgr_stale_vpn(VPN_V4);
+        let affected =
+            rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         // NO_LLGR route removed entirely (RFC 9494 §4.3)
         assert!(!rib.vpn_routes.contains_key(&no_llgr_key));
@@ -3643,7 +3695,7 @@ mod tests {
         let key = insert_vpn_with(&mut rib, nlri.clone(), vec![]);
 
         rib.mark_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
 
         // Peer re-advertises the same key, itself carrying LLGR_STALE.
@@ -3670,7 +3722,7 @@ mod tests {
         let mut rib = AdjRibIn::new(peer);
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
 
         assert!(rib.withdraw_vpn(&key));
@@ -3915,7 +3967,7 @@ mod tests {
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 2, 0], 24, 200), vec![]);
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         // Reconnect advertises a second route; two more drops follow. The
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
@@ -3941,7 +3993,7 @@ mod tests {
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
 
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
         let promoted = &rib.labeled_routes[&key];
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
@@ -4007,7 +4059,8 @@ mod tests {
 
         rib.mark_stale_labeled(LU_V4);
         rib.mark_stale_labeled(LU_V6);
-        let affected = rib.promote_to_llgr_stale_labeled(LU_V4);
+        let affected = rib
+            .promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         // NO_LLGR route removed entirely (RFC 9494 §4.3)
         assert!(!rib.labeled_routes.contains_key(&no_llgr_key));
@@ -4042,8 +4095,8 @@ mod tests {
         insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
         rib.mark_stale_labeled(LU_V4);
         rib.mark_stale_labeled(LU_V6);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_labeled(LU_V6);
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_labeled(LU_V6, &mut crate::attr_intern::AttrInternTable::new());
 
         let swept = rib.sweep_llgr_stale_family_labeled(LU_V4);
         assert_eq!(swept, vec![v4_key]);
@@ -4065,7 +4118,7 @@ mod tests {
         let key = insert_labeled_with(&mut rib, nlri.clone(), vec![]);
 
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
 
         // Peer re-advertises the same key, itself carrying LLGR_STALE.
@@ -4092,7 +4145,7 @@ mod tests {
         let mut rib = AdjRibIn::new(peer);
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
 
         assert!(rib.withdraw_labeled(&key));
@@ -4132,7 +4185,7 @@ mod tests {
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(2), vec![]);
         rib.mark_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
 
         // Reconnect advertises a second route; two more drops follow. The
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
@@ -4158,7 +4211,7 @@ mod tests {
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
 
         rib.mark_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.bgpls_routes[&key].is_llgr_stale);
         assert!(
             rib.bgpls_routes[&key]
@@ -4237,7 +4290,8 @@ mod tests {
 
         rib.mark_stale_bgpls(LS_BASE);
         rib.mark_stale_bgpls(LS_VPN);
-        let affected = rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        let affected = rib
+            .promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
 
         assert!(!rib.bgpls_routes.contains_key(&no_llgr_key));
         assert!(rib.bgpls_routes[&keep_key].is_llgr_stale);
@@ -4268,7 +4322,7 @@ mod tests {
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, nlri.clone(), vec![]);
 
         rib.mark_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
 
         let readvertised = insert_bgpls_with(
@@ -4294,7 +4348,7 @@ mod tests {
         let mut rib = AdjRibIn::new(peer);
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         rib.mark_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
 
         assert!(rib.withdraw_bgpls(&key));
@@ -4323,7 +4377,7 @@ mod tests {
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
         let llgr_key = insert_rtc_with(&mut rib, rtc_nlri(200), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
 
         // Reconnect advertises a second route; two more drops follow. The
         // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
@@ -4349,7 +4403,7 @@ mod tests {
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
 
         rib.mark_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.rtc_routes[&key].is_llgr_stale);
         assert!(
             rib.rtc_routes[&key]
@@ -4409,7 +4463,8 @@ mod tests {
         );
 
         rib.mark_stale_rtc(RTC_FAM);
-        let affected = rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        let affected =
+            rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
 
         assert!(!rib.rtc_routes.contains_key(&no_llgr_key));
         assert!(rib.rtc_routes[&keep_key].is_llgr_stale);
@@ -4436,7 +4491,7 @@ mod tests {
         let key = insert_rtc_with(&mut rib, nlri, vec![]);
 
         rib.mark_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
 
         let readvertised = insert_rtc_with(
@@ -4461,7 +4516,7 @@ mod tests {
         let mut rib = AdjRibIn::new(peer);
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
         assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
 
         assert!(rib.withdraw_rtc(&key));
@@ -4480,10 +4535,10 @@ mod tests {
         rib.mark_stale_bgpls(LS_BASE);
         rib.mark_stale_rtc(RTC_FAM);
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
         assert!(!rib.vpn_llgr_stale_local_tags.is_empty());
         assert!(!rib.bgpls_llgr_stale_local_tags.is_empty());
         assert!(!rib.rtc_llgr_stale_local_tags.is_empty());
@@ -4508,10 +4563,10 @@ mod tests {
         rib.mark_stale_bgpls(LS_BASE);
         rib.mark_stale_rtc(RTC_FAM);
         rib.mark_stale_labeled(LU_V4);
-        rib.promote_to_llgr_stale_vpn(VPN_V4);
-        rib.promote_to_llgr_stale_bgpls(LS_BASE);
-        rib.promote_to_llgr_stale_rtc(RTC_FAM);
-        rib.promote_to_llgr_stale_labeled(LU_V4);
+        rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
+        rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
 
         rib.withdraw_all_vpn();
         rib.withdraw_all_bgpls();

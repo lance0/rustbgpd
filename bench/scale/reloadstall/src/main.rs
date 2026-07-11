@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,6 +42,8 @@ const CHURN_BLOCK: u32 = 16;
 const CHURN_MS: u64 = 125;
 const NLRI_PER_MSG: usize = 900;
 const HOLD_TIME: u16 = 180;
+const COMMUNITY_GEN_A: u32 = (65_500 << 16) | 1_000;
+const COMMUNITY_GEN_B: u32 = (65_500 << 16) | 2_000;
 
 /// One received-UPDATE observation.
 #[derive(Clone, Copy)]
@@ -60,6 +62,52 @@ struct Obs {
     established: AtomicBool,
     /// communities seen on the most recently sampled fully-parsed UPDATE
     last_comms: Mutex<Vec<u32>>,
+    /// Community marker required for the active reload generation.
+    expected_community: AtomicU32,
+    /// Unique base prefixes observed with `expected_community`.
+    generation: Mutex<GenerationProgress>,
+}
+
+#[derive(Default)]
+struct GenerationProgress {
+    seen: Vec<u64>,
+    unique: u64,
+    target: u64,
+    excluded_start: usize,
+    excluded_end: usize,
+    completed_at_us: Option<u64>,
+}
+
+impl GenerationProgress {
+    fn reset(&mut self, total_prefixes: u32, target: u64, excluded_start: u32, excluded_len: u32) {
+        self.seen.clear();
+        self.seen
+            .resize(usize::try_from(total_prefixes).unwrap().div_ceil(64), 0);
+        self.unique = 0;
+        self.target = target;
+        self.excluded_start = usize::try_from(excluded_start).unwrap();
+        self.excluded_end = usize::try_from(excluded_start + excluded_len).unwrap();
+        self.completed_at_us = None;
+    }
+
+    fn observe(&mut self, prefix_index: usize, t_us: u64) {
+        if (self.excluded_start..self.excluded_end).contains(&prefix_index) {
+            return;
+        }
+        let word = prefix_index / 64;
+        let bit = 1u64 << (prefix_index % 64);
+        let Some(slot) = self.seen.get_mut(word) else {
+            return;
+        };
+        if *slot & bit != 0 {
+            return;
+        }
+        *slot |= bit;
+        self.unique += 1;
+        if self.unique >= self.target && self.completed_at_us.is_none() {
+            self.completed_at_us = Some(t_us);
+        }
+    }
 }
 
 struct Ctx {
@@ -100,6 +148,36 @@ fn base_prefix(idx: u32) -> Ipv4Prefix {
     let b = u8::try_from((idx >> 8) & 0xff).unwrap();
     let c = u8::try_from(idx & 0xff).unwrap();
     Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
+}
+
+fn base_prefix_index(prefix: Ipv4Prefix, total_prefixes: u32) -> Option<usize> {
+    if prefix.len != 24 {
+        return None;
+    }
+    let [a, b, c, d] = prefix.addr.octets();
+    if d != 0 || !(20..30).contains(&a) {
+        return None;
+    }
+    let index = (u32::from(a - 20) << 16) | (u32::from(b) << 8) | u32::from(c);
+    (index < total_prefixes).then(|| usize::try_from(index).unwrap())
+}
+
+fn observe_generation(
+    progress: &mut GenerationProgress,
+    expected_community: u32,
+    communities: &[u32],
+    announced: &[Ipv4Prefix],
+    total_prefixes: u32,
+    t_us: u64,
+) {
+    if expected_community == 0 || !communities.contains(&expected_community) {
+        return;
+    }
+    for prefix in announced {
+        if let Some(index) = base_prefix_index(*prefix, total_prefixes) {
+            progress.observe(index, t_us);
+        }
+    }
 }
 
 fn churn_prefix(churner: u32, j: u32) -> Ipv4Prefix {
@@ -285,7 +363,6 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
     tokio::spawn(async move {
         let mut frame = BytesMut::with_capacity(1 << 16);
         let mut tmp = vec![0u8; 1 << 16];
-        let mut msg_n: u64 = 0;
         loop {
             let n = match reader.read(&mut tmp).await {
                 Ok(0) | Err(_) => {
@@ -316,7 +393,6 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 };
                 match msg {
                     Message::Update(u) => {
-                        msg_n += 1;
                         let ann = rustbgpd_wire::nlri::decode_nlri(&u.nlri).unwrap_or_default();
                         let wd_n = rustbgpd_wire::nlri::decode_nlri(&u.withdrawn_routes)
                             .map(|v| v.len())
@@ -331,23 +407,44 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 other += 1;
                             }
                         }
-                        // Sample full attribute parse occasionally so the
-                        // driver can verify which policy generation the
-                        // delivered routes carry (community marker).
-                        if msg_n.is_multiple_of(31) && base > 0 {
-                            if let Ok(parsed) = u.parse(true, false, &[]) {
-                                for a in parsed.attributes {
-                                    if let PathAttribute::Communities(cs) = a {
-                                        *rctx.obs[i as usize].last_comms.lock().unwrap() = cs;
-                                    }
+                        let ob = &rctx.obs[i as usize];
+                        let t_us = now_us(&rctx);
+                        if base > 0 {
+                            let communities = u
+                                .parse(true, false, &[])
+                                .ok()
+                                .and_then(|parsed| {
+                                    parsed.attributes.into_iter().find_map(|attribute| {
+                                        if let PathAttribute::Communities(communities) = attribute {
+                                            Some(communities)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .unwrap_or_default();
+                            *ob.last_comms.lock().unwrap() = communities.clone();
+
+                            let expected = ob.expected_community.load(Ordering::Acquire);
+                            if expected != 0 && communities.contains(&expected) {
+                                let total_prefixes = rctx.n_peers * rctx.per_peer;
+                                let mut generation = ob.generation.lock().unwrap();
+                                if ob.expected_community.load(Ordering::Acquire) == expected {
+                                    observe_generation(
+                                        &mut generation,
+                                        expected,
+                                        &communities,
+                                        &ann,
+                                        total_prefixes,
+                                        t_us,
+                                    );
                                 }
                             }
                         }
-                        let ob = &rctx.obs[i as usize];
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
                         ob.events.lock().unwrap().push(Event {
-                            t_us: now_us(&rctx),
+                            t_us,
                             base_ann: base,
                             other,
                         });
@@ -401,21 +498,10 @@ fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 
     max_gap as f64 / 1000.0
 }
 
-/// First event time (us) at which the observer's cumulative base-space
-/// announce delta since `s_us` reaches `target`. None if not reached.
-fn completion_us(ctx: &Ctx, i: usize, s_us: u64, target: u64) -> Option<u64> {
-    let ev = ctx.obs[i].events.lock().unwrap();
-    let mut acc = 0u64;
-    for e in ev.iter() {
-        if e.t_us < s_us {
-            continue;
-        }
-        acc += u64::from(e.base_ann);
-        if acc >= target {
-            return Some(e.t_us);
-        }
-    }
-    None
+/// First event time at which every expected unique base prefix was observed
+/// with the active policy-generation community marker.
+fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
+    ctx.obs[i].generation.lock().unwrap().completed_at_us
 }
 
 fn rss_mib(pid: i32) -> u64 {
@@ -484,6 +570,8 @@ fn main() {
                     base_ann_total: AtomicU64::new(0),
                     established: AtomicBool::new(false),
                     last_comms: Mutex::new(Vec::new()),
+                    expected_community: AtomicU32::new(0),
+                    generation: Mutex::new(GenerationProgress::default()),
                 })
                 .collect(),
         });
@@ -583,38 +671,50 @@ fn main() {
         // --- Reload loop. ---
         for r in 1..=reloads {
             let next = if r % 2 == 1 { &policy_b } else { &policy_a };
+            let expected_community = if r % 2 == 1 {
+                COMMUNITY_GEN_B
+            } else {
+                COMMUNITY_GEN_A
+            };
             std::fs::copy(next, &policy_live).unwrap();
             let rss_before = rss_mib(pid);
-            let base_before: Vec<u64> = ctx
-                .obs
-                .iter()
-                .map(|o| o.base_ann_total.load(Ordering::Relaxed))
-                .collect();
+            for (i, observer) in ctx.obs.iter().enumerate() {
+                observer.expected_community.store(0, Ordering::Release);
+                observer.generation.lock().unwrap().reset(
+                    total,
+                    expected,
+                    u32::try_from(i).unwrap() * per_peer,
+                    per_peer,
+                );
+                observer
+                    .expected_community
+                    .store(expected_community, Ordering::Release);
+            }
             let t_hup = now_us(&ctx);
             println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
-            unsafe {
-                libc::kill(pid, libc::SIGHUP);
+            let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+            if kill_rc != 0 {
+                eprintln!(
+                    "reload {r} failed to deliver SIGHUP: {}",
+                    std::io::Error::last_os_error()
+                );
+                std::process::exit(1);
             }
             // Wait for every observer to receive the full re-advertisement.
             let deadline = Instant::now() + Duration::from_secs(900);
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let done = (0..n_peers as usize).all(|i| {
-                    ctx.obs[i].base_ann_total.load(Ordering::Relaxed) - base_before[i] >= expected
-                });
+                let done = (0..n_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
                 }
                 if Instant::now() > deadline {
                     println!("reload {r} TIMEOUT waiting for re-advertisement");
                     let sat = (0..n_peers as usize)
-                        .filter(|&i| {
-                            ctx.obs[i].base_ann_total.load(Ordering::Relaxed) - base_before[i]
-                                >= expected
-                        })
+                        .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    println!("reload {r} observers_complete {sat}/{n_peers}");
-                    break;
+                    eprintln!("reload {r} observers_complete {sat}/{n_peers}");
+                    std::process::exit(1);
                 }
             }
             // Per-observer completion + max gap over the reload window.
@@ -622,7 +722,7 @@ fn main() {
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
             for i in 0..n_peers as usize {
-                if let Some(tc) = completion_us(&ctx, i, t_hup, expected) {
+                if let Some(tc) = completion_us(&ctx, i) {
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
                     // Leading stall: SIGHUP -> first UPDATE of any kind.
@@ -653,4 +753,93 @@ fn main() {
         println!("done rss_mib={}", rss_mib(pid));
         std::process::exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_progress_counts_unique_prefixes_only() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(128, 2, 100, 26);
+
+        progress.observe(7, 10);
+        progress.observe(7, 20);
+        assert_eq!(
+            progress.unique, 1,
+            "a duplicate announce is not completion progress"
+        );
+        assert_eq!(progress.completed_at_us, None);
+
+        progress.observe(63, 30);
+        assert_eq!(progress.unique, 2);
+        assert_eq!(progress.completed_at_us, Some(30));
+        progress.observe(64, 40);
+        assert_eq!(
+            progress.completed_at_us,
+            Some(30),
+            "completion time is stable"
+        );
+    }
+
+    #[test]
+    fn generation_progress_rejects_stale_policy_markers() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(128, 1, 100, 27);
+        let announced = [base_prefix(7)];
+
+        observe_generation(
+            &mut progress,
+            COMMUNITY_GEN_B,
+            &[COMMUNITY_GEN_A],
+            &announced,
+            128,
+            10,
+        );
+        assert_eq!(progress.unique, 0);
+        assert_eq!(progress.completed_at_us, None);
+
+        observe_generation(
+            &mut progress,
+            COMMUNITY_GEN_B,
+            &[COMMUNITY_GEN_B],
+            &announced,
+            128,
+            20,
+        );
+        assert_eq!(progress.unique, 1);
+        assert_eq!(progress.completed_at_us, Some(20));
+    }
+
+    #[test]
+    fn generation_progress_rejects_observers_own_slice() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(4, 3, 2, 1);
+
+        progress.observe(0, 10);
+        progress.observe(1, 20);
+        progress.observe(2, 30);
+        assert_eq!(progress.unique, 2, "own prefix must not advance completion");
+        assert_eq!(progress.completed_at_us, None);
+
+        progress.observe(3, 40);
+        assert_eq!(progress.unique, 3);
+        assert_eq!(progress.completed_at_us, Some(40));
+    }
+
+    #[test]
+    fn base_prefix_index_round_trips_and_rejects_non_base_routes() {
+        for index in [0, 1, 65_535, 65_536, 400_399] {
+            assert_eq!(
+                base_prefix_index(base_prefix(index), 400_400),
+                Some(index as usize)
+            );
+        }
+        assert_eq!(base_prefix_index(base_prefix(400_400), 400_400), None);
+        assert_eq!(
+            base_prefix_index(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 24), 400_400),
+            None
+        );
+    }
 }

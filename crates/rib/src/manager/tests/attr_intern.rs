@@ -263,8 +263,8 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     );
     assert_eq!(
         manager.attr_intern.len(),
-        0,
-        "GR expiry must reclaim the pre-promotion interned set after Loc-RIB recompute"
+        1,
+        "GR expiry must replace the pre-promotion set with one canonical live LLGR set"
     );
 
     // Re-advertise the route during the LLGR window: RFC 4724 §4.1 (via
@@ -295,6 +295,60 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
         1,
         "only the re-advertised route's live interned set survives EoR — the \
          orphaned pre-promotion set stays reclaimed"
+    );
+}
+
+#[test]
+fn llgr_promotion_preserves_global_attribute_sharing() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefixes = [
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+    ];
+    let routes = prefixes
+        .into_iter()
+        .map(|prefix| {
+            let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+            route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+            route
+        })
+        .collect();
+    manager.process_announce_chunk(peer, routes);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    });
+    manager.sweep_gr_stale(peer);
+
+    let rib = &manager.ribs[&peer];
+    let first = rib
+        .iter_prefix(&Prefix::V4(prefixes[0]))
+        .next()
+        .expect("first promoted route");
+    let second = rib
+        .iter_prefix(&Prefix::V4(prefixes[1]))
+        .next()
+        .expect("second promoted route");
+    assert!(first.is_llgr_stale && second.is_llgr_stale);
+    assert!(
+        Arc::ptr_eq(&first.attributes, &second.attributes),
+        "identical LLGR_STALE transformations must remain globally interned"
     );
 }
 
