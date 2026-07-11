@@ -39,6 +39,22 @@ enum RouteType {
     EadPerEvi,
 }
 
+#[derive(Copy, Clone)]
+struct RouteParams {
+    vni: u32,
+    ethernet_tag: u32,
+    router_id: Ipv4Addr,
+    rd: RouteDistinguisher,
+    route_type: RouteType,
+}
+
+#[derive(Copy, Clone)]
+struct PhaseParams {
+    count: u32,
+    rate: u32,
+    batch: u32,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "evpn-tester")]
 #[command(about = "bulk Type 2 EVPN route generator for rustbgpd RR scale validation")]
@@ -159,18 +175,22 @@ async fn main() -> anyhow::Result<()> {
     // the NLRI payload itself. That keeps per-route CPU to a minimum on
     // the generator side so the RR's scale is what we measure.
     let rd = make_rd(args.router_id);
+    let route_params = RouteParams {
+        vni: args.vni,
+        ethernet_tag: args.ethernet_tag,
+        router_id: args.router_id,
+        rd,
+        route_type: args.route_type,
+    };
 
     inject_phase(
         &handle.tx,
-        args.count,
-        args.rate,
-        args.batch,
-        args.vni,
-        args.ethernet_tag,
-        args.router_id,
-        args.local_as,
-        rd,
-        args.route_type,
+        PhaseParams {
+            count: args.count,
+            rate: args.rate,
+            batch: args.batch,
+        },
+        route_params,
         false,
     )
     .await?;
@@ -189,15 +209,12 @@ async fn main() -> anyhow::Result<()> {
         );
         run_churn(
             &handle.tx,
-            args.count,
-            args.churn_rate,
-            args.batch,
-            args.vni,
-            args.ethernet_tag,
-            args.router_id,
-            args.local_as,
-            rd,
-            args.route_type,
+            PhaseParams {
+                count: args.count,
+                rate: args.churn_rate,
+                batch: args.batch,
+            },
+            route_params,
             Duration::from_secs(args.churn_duration_sec),
         )
         .await?;
@@ -252,24 +269,24 @@ fn build_ead_per_evi(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_update(
     routes: Vec<EvpnRoute>,
     withdraws: Vec<EvpnRoute>,
-    next_hop: Ipv4Addr,
-    local_as: u32,
+    route_params: RouteParams,
 ) -> Message {
     use rustbgpd_wire::attribute::MpUnreachNlri;
 
     let mut attrs: Vec<PathAttribute> = Vec::new();
     if !routes.is_empty() {
         attrs.push(PathAttribute::Origin(Origin::Igp));
+        // Empty AS_PATH for this iBGP test peer; four-octet AS support is
+        // negotiated by the session and does not alter UPDATE construction.
         attrs.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
         attrs.push(PathAttribute::LocalPref(100));
         attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
-            next_hop: v4_next_hop(next_hop),
+            next_hop: v4_next_hop(route_params.router_id),
             link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
@@ -293,8 +310,6 @@ fn build_update(
             rtc_withdrawn: vec![],
         }));
     }
-    let _ = local_as; // 4-octet AS negotiated via capability; empty AS_PATH for iBGP
-
     let update = UpdateMessage::build(
         &[],
         &[],
@@ -306,25 +321,17 @@ fn build_update(
     Message::Update(update)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn inject_phase(
     tx: &tokio::sync::mpsc::Sender<Message>,
-    count: u32,
-    rate: u32,
-    batch: u32,
-    vni: u32,
-    ethernet_tag: u32,
-    router_id: Ipv4Addr,
-    local_as: u32,
-    rd: RouteDistinguisher,
-    route_type: RouteType,
+    phase_params: PhaseParams,
+    route_params: RouteParams,
     is_withdraw: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
-    let batch_per_sec = if rate == 0 {
+    let batch_per_sec = if phase_params.rate == 0 {
         u32::MAX
     } else {
-        rate / batch.max(1)
+        phase_params.rate / phase_params.batch.max(1)
     };
     let mut sent = 0u32;
     let mut idx = 0u32;
@@ -335,18 +342,28 @@ async fn inject_phase(
         Duration::from_millis(1000 / u64::from(batch_per_sec.max(1)))
     };
 
-    while idx < count {
-        let end = (idx + batch).min(count);
+    while idx < phase_params.count {
+        let end = (idx + phase_params.batch).min(phase_params.count);
         let chunk: Vec<EvpnRoute> = (idx..end)
-            .map(|i| match route_type {
-                RouteType::MacIp => build_type2(i, rd, ethernet_tag, vni),
-                RouteType::EadPerEvi => build_ead_per_evi(i, rd, ethernet_tag, vni),
+            .map(|i| match route_params.route_type {
+                RouteType::MacIp => build_type2(
+                    i,
+                    route_params.rd,
+                    route_params.ethernet_tag,
+                    route_params.vni,
+                ),
+                RouteType::EadPerEvi => build_ead_per_evi(
+                    i,
+                    route_params.rd,
+                    route_params.ethernet_tag,
+                    route_params.vni,
+                ),
             })
             .collect();
         let msg = if is_withdraw {
-            build_update(vec![], chunk, router_id, local_as)
+            build_update(vec![], chunk, route_params)
         } else {
-            build_update(chunk, vec![], router_id, local_as)
+            build_update(chunk, vec![], route_params)
         };
         if tx.send(msg).await.is_err() {
             anyhow::bail!("send channel closed before inject complete");
@@ -354,7 +371,7 @@ async fn inject_phase(
         sent += end - idx;
         idx = end;
 
-        if rate > 0 {
+        if phase_params.rate > 0 {
             next_tick += tick;
             let now = Instant::now();
             if next_tick > now {
@@ -370,18 +387,10 @@ async fn inject_phase(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_churn(
     tx: &tokio::sync::mpsc::Sender<Message>,
-    count: u32,
-    rate: u32,
-    batch: u32,
-    vni: u32,
-    ethernet_tag: u32,
-    router_id: Ipv4Addr,
-    local_as: u32,
-    rd: RouteDistinguisher,
-    route_type: RouteType,
+    phase_params: PhaseParams,
+    route_params: RouteParams,
     total: Duration,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + total;
@@ -391,23 +400,33 @@ async fn run_churn(
     // Without the factor of 2 the effective churn rate is doubled — the
     // RR sees 2x what the operator configured, which is fine for the
     // M33 reflection-throughput shape but misleading in the report.
-    let ops_per_tick = u64::from(batch.max(1)) * 2;
-    let ticks_per_sec = u64::from(rate.max(1)) / ops_per_tick;
+    let ops_per_tick = u64::from(phase_params.batch.max(1)) * 2;
+    let ticks_per_sec = u64::from(phase_params.rate.max(1)) / ops_per_tick;
     let tick = Duration::from_millis(1000 / ticks_per_sec.max(1));
     let mut idx = 0u32;
 
     while Instant::now() < deadline {
-        let start = idx % count;
-        let end = (start + batch).min(count);
+        let start = idx % phase_params.count;
+        let end = (start + phase_params.batch).min(phase_params.count);
         let chunk: Vec<EvpnRoute> = (start..end)
-            .map(|i| match route_type {
-                RouteType::MacIp => build_type2(i, rd, ethernet_tag, vni),
-                RouteType::EadPerEvi => build_ead_per_evi(i, rd, ethernet_tag, vni),
+            .map(|i| match route_params.route_type {
+                RouteType::MacIp => build_type2(
+                    i,
+                    route_params.rd,
+                    route_params.ethernet_tag,
+                    route_params.vni,
+                ),
+                RouteType::EadPerEvi => build_ead_per_evi(
+                    i,
+                    route_params.rd,
+                    route_params.ethernet_tag,
+                    route_params.vni,
+                ),
             })
             .collect();
         // Withdraw + re-advertise as two UPDATEs back-to-back.
-        let withdraw = build_update(vec![], chunk.clone(), router_id, local_as);
-        let advertise = build_update(chunk, vec![], router_id, local_as);
+        let withdraw = build_update(vec![], chunk.clone(), route_params);
+        let advertise = build_update(chunk, vec![], route_params);
         if tx.send(withdraw).await.is_err() || tx.send(advertise).await.is_err() {
             anyhow::bail!("send channel closed during churn");
         }
