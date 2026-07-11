@@ -435,7 +435,10 @@ impl Oracle {
 
     // Mirrors the production PeerUp event so schedules can state every
     // grouping input and the session generation at the call site.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors every grouping input in the production PeerUp event"
+    )]
     pub(super) async fn peer_up_families_generation(
         &mut self,
         peer: Ipv4Addr,
