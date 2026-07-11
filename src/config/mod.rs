@@ -4342,16 +4342,45 @@ pub(crate) fn pin_dynamic_tcp_ao_startup_only(new_config: &mut Config, current: 
         .iter()
         .filter_map(|range| effective_prefix_str(&range.prefix))
         .collect();
-    new_config.dynamic_neighbors.retain(|range| {
+    let mut restored = vec![false; current_protected.len()];
+    new_config.dynamic_neighbors.retain_mut(|range| {
         let Some(prefix) = effective_prefix_str(&range.prefix) else {
             return true;
         };
+        if range.tcp_ao.is_some() {
+            if let Some((index, startup_range)) =
+                current_protected
+                    .iter()
+                    .enumerate()
+                    .find(|(index, startup_range)| {
+                        !restored[*index]
+                            && effective_prefix_str(&startup_range.prefix) == Some(prefix)
+                    })
+            {
+                *range = startup_range.clone();
+                restored[index] = true;
+                return true;
+            }
+            return false;
+        }
+
         !current_prefixes
             .iter()
             .any(|protected| dynamic_prefixes_intersect(prefix, *protected))
-            && range.tcp_ao.is_none()
     });
-    new_config.dynamic_neighbors.extend(current_protected);
+    for (index, startup_range) in current_protected.into_iter().enumerate() {
+        if !restored[index] {
+            let startup_index = current
+                .dynamic_neighbors
+                .iter()
+                .position(|range| range == &startup_range)
+                .unwrap_or(new_config.dynamic_neighbors.len());
+            new_config.dynamic_neighbors.insert(
+                startup_index.min(new_config.dynamic_neighbors.len()),
+                startup_range,
+            );
+        }
+    }
     new_protected.len().max(current_prefixes.len())
 }
 

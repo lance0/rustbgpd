@@ -4612,6 +4612,43 @@ tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" 
         );
     }
 
+    #[test]
+    fn reload_pins_dynamic_tcp_ao_range_without_reordering_unchanged_ranges() {
+        let config = |key: &str| {
+            format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "dynamic"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "dynamic"
+tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
+[[dynamic_neighbors]]
+prefix = "198.51.100.0/24"
+peer_group = "dynamic"
+"#
+            )
+        };
+        let current = config::Config::load_toml_with_diagnostics(&config("old"), "old").unwrap();
+        let mut candidate =
+            config::Config::load_toml_with_diagnostics(&config("new"), "new").unwrap();
+
+        assert_eq!(
+            config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+            1
+        );
+        assert_eq!(candidate.dynamic_neighbors, current.dynamic_neighbors);
+    }
+
     #[tokio::test]
     async fn reload_pins_tcp_ao_dependency_edits_to_startup_snapshot() {
         let initial = r#"
