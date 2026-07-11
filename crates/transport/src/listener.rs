@@ -1,6 +1,5 @@
 //! BGP inbound TCP listener.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::config::TcpAoConfig;
@@ -27,8 +26,10 @@ pub struct AcceptedConnection {
 /// TCP-AO key to install on the inbound listener socket.
 #[derive(Clone)]
 pub struct TcpAoListenerKey {
-    /// Remote peer address matched by this listener MKT.
+    /// Remote network address matched by this listener MKT.
     pub peer: IpAddr,
+    /// Prefix length for the remote network.
+    pub prefix_len: u8,
     /// TCP-AO key configuration for the peer.
     pub config: TcpAoConfig,
 }
@@ -45,7 +46,7 @@ pub struct ListenerSocketOptions {
 pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
-    tcp_ao_peers: HashSet<IpAddr>,
+    tcp_ao_keys: Vec<TcpAoListenerKey>,
 }
 
 impl BgpListener {
@@ -80,7 +81,7 @@ impl BgpListener {
         options: ListenerSocketOptions,
     ) -> std::io::Result<Self> {
         let tcp_ao_keys = options.tcp_ao_keys.len();
-        let tcp_ao_peers = options.tcp_ao_keys.iter().map(|key| key.peer).collect();
+        let installed_tcp_ao_keys = options.tcp_ao_keys.clone();
         let listener = bind_socket2_listener(addr, &options)?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
         info!(
@@ -92,7 +93,7 @@ impl BgpListener {
         Ok(Self {
             listener,
             accept_tx,
-            tcp_ao_peers,
+            tcp_ao_keys: installed_tcp_ao_keys,
         })
     }
 
@@ -115,7 +116,13 @@ impl BgpListener {
                 Ok((stream, peer_addr)) => {
                     let peer_ip = peer_addr.ip();
                     debug!(%peer_ip, "inbound TCP connection");
-                    let tcp_ao_info = self.inspect_tcp_ao_accept(&stream, peer_ip);
+                    let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
+                        Ok(info) => info,
+                        Err(err) => {
+                            warn!(peer = %peer_ip, error = %err, "rejecting TCP-AO-protected inbound connection");
+                            continue;
+                        }
+                    };
                     let conn = AcceptedConnection {
                         stream,
                         peer_addr,
@@ -137,10 +144,10 @@ impl BgpListener {
         &self,
         stream: &TcpStream,
         peer_ip: IpAddr,
-    ) -> Option<TcpAoInfoSnapshot> {
-        if !self.tcp_ao_peers.contains(&peer_ip) {
-            return None;
-        }
+    ) -> std::io::Result<Option<TcpAoInfoSnapshot>> {
+        let Some(key) = self.tcp_ao_keys.iter().find(|key| key.covers(peer_ip)) else {
+            return Ok(None);
+        };
 
         match crate::socket_opts::get_tcp_ao_info(stream) {
             Ok(info) => {
@@ -159,7 +166,19 @@ impl BgpListener {
                     pkt_dropped_icmp = info.pkt_dropped_icmp,
                     "TCP-AO accepted socket inspected"
                 );
-                Some(info)
+                if !accepted_tcp_ao_info_is_valid(&info, key.config.send_id) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!(
+                            "TCP-AO accepted socket state is inconsistent: expected current key {} and at least one verified packet, got has_current_key={}, current_key={}, pkt_good={}",
+                            key.config.send_id,
+                            info.has_current_key,
+                            info.current_key,
+                            info.pkt_good
+                        ),
+                    ));
+                }
+                Ok(Some(info))
             }
             Err(err) => {
                 warn!(
@@ -167,8 +186,36 @@ impl BgpListener {
                     error = %err,
                     "failed to inspect TCP-AO accepted socket"
                 );
-                None
+                Err(err)
             }
+        }
+    }
+}
+
+fn accepted_tcp_ao_info_is_valid(info: &TcpAoInfoSnapshot, expected_send_id: u8) -> bool {
+    info.has_current_key && info.current_key == expected_send_id && info.pkt_good > 0
+}
+
+impl TcpAoListenerKey {
+    fn covers(&self, addr: IpAddr) -> bool {
+        match (self.peer, addr) {
+            (IpAddr::V4(network), IpAddr::V4(addr)) if self.prefix_len <= 32 => {
+                let mask = if self.prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - self.prefix_len)
+                };
+                u32::from(network) & mask == u32::from(addr) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(addr)) if self.prefix_len <= 128 => {
+                let mask = if self.prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - self.prefix_len)
+                };
+                u128::from(network) & mask == u128::from(addr) & mask
+            }
+            _ => false,
         }
     }
 }
@@ -215,6 +262,7 @@ fn install_listener_tcp_ao_key(socket: &Socket, key: &TcpAoListenerKey) -> std::
     crate::socket_opts::set_tcp_ao_config(
         socket,
         key.peer,
+        key.prefix_len,
         &key.config,
         crate::socket_opts::TcpAoSocketRole::Listener,
     )
@@ -224,9 +272,10 @@ fn listener_tcp_ao_error(key: &TcpAoListenerKey, err: &std::io::Error) -> std::i
     std::io::Error::new(
         err.kind(),
         format!(
-            "failed to install TCP-AO listener key for peer {} \
+            "failed to install TCP-AO listener key for peer {}/{} \
              (send_id={}, recv_id={}, algorithm={}): {err}",
             key.peer,
+            key.prefix_len,
             key.config.send_id,
             key.config.recv_id,
             key.config.algorithm.linux_name()
@@ -252,12 +301,59 @@ mod tests {
         }
     }
 
+    fn tcp_ao_info(current_key: u8, pkt_good: u64) -> TcpAoInfoSnapshot {
+        TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: false,
+            ao_required: false,
+            accept_icmps: false,
+            current_key,
+            rnext_key: 0,
+            pkt_good,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        }
+    }
+
+    #[test]
+    fn prefix_mkt_matching_covers_v4_and_v6_without_cross_family_matches() {
+        let config = tcp_ao_config();
+        let v4 = TcpAoListenerKey {
+            peer: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            config: config.clone(),
+        };
+        let v6 = TcpAoListenerKey {
+            peer: "2001:db8::".parse().unwrap(),
+            prefix_len: 32,
+            config,
+        };
+        assert!(v4.covers("192.0.2.200".parse().unwrap()));
+        assert!(!v4.covers("192.0.3.1".parse().unwrap()));
+        assert!(v6.covers("2001:db8:ffff::1".parse().unwrap()));
+        assert!(!v6.covers("2001:db9::1".parse().unwrap()));
+        assert!(!v6.covers("192.0.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn protected_accept_requires_verified_packet_and_expected_current_key() {
+        assert!(accepted_tcp_ao_info_is_valid(&tcp_ao_info(7, 1), 7));
+        assert!(!accepted_tcp_ao_info_is_valid(&tcp_ao_info(8, 1), 7));
+        assert!(!accepted_tcp_ao_info_is_valid(&tcp_ao_info(7, 0), 7));
+        let mut missing = tcp_ao_info(7, 1);
+        missing.has_current_key = false;
+        assert!(!accepted_tcp_ao_info_is_valid(&missing, 7));
+    }
+
     #[tokio::test]
     async fn bind_socket2_listener_installs_tcp_ao_keys_before_listen() {
         let installed = RefCell::new(Vec::new());
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
+                prefix_len: 32,
                 config: tcp_ao_config(),
             }],
         };
@@ -283,6 +379,7 @@ mod tests {
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
+                prefix_len: 32,
                 config: tcp_ao_config(),
             }],
         };

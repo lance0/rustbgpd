@@ -645,6 +645,7 @@ async fn create_and_connect(
         crate::socket_opts::set_tcp_ao_config(
             &socket,
             config.remote_addr.ip(),
+            if config.remote_addr.is_ipv4() { 32 } else { 128 },
             tcp_ao,
             crate::socket_opts::TcpAoSocketRole::ActiveOpen,
         )

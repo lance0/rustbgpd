@@ -56,7 +56,10 @@ use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
-use rustbgpd_transport::{BgpListener, ListenerSocketOptions, TcpAoListenerKey};
+use rustbgpd_transport::{
+    BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
+    TcpAoListenerKey,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -602,7 +605,32 @@ fn tcp_ao_listener_key_for_neighbor(
     }
     Some(TcpAoListenerKey {
         peer,
+        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
         config: tcp_ao.clone(),
+    })
+}
+
+fn tcp_ao_listener_key_for_dynamic_range(
+    listen_addr: SocketAddr,
+    range: &config::DynamicNeighborConfig,
+) -> Option<TcpAoListenerKey> {
+    let tcp_ao = range.tcp_ao.as_ref()?;
+    let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
+    if listen_addr.is_ipv4() != peer.is_ipv4() {
+        return None;
+    }
+    Some(TcpAoListenerKey {
+        peer,
+        prefix_len,
+        config: TransportTcpAoConfig {
+            key: tcp_ao.key.clone(),
+            send_id: tcp_ao.send_id,
+            recv_id: tcp_ao.recv_id,
+            algorithm: TcpAoAlgorithm::from_linux_name(&tcp_ao.algorithm)
+                .expect("validated in Config::load"),
+            preferred: tcp_ao.preferred,
+            deprecated: tcp_ao.deprecated,
+        },
     })
 }
 
@@ -2813,6 +2841,12 @@ async fn run<T>(
         tcp_ao_keys: peer_configs
             .iter()
             .filter_map(|neighbor| tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
+            .chain(
+                config
+                    .dynamic_neighbors
+                    .iter()
+                    .filter_map(|range| tcp_ao_listener_key_for_dynamic_range(listen_addr, range)),
+            )
             .collect(),
     };
 

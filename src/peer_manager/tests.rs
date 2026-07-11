@@ -241,6 +241,7 @@ fn make_dynamic_manager_config() -> Config {
             peer_group: "ix-members".to_string(),
             remote_asn: 0,
             description: Some("ix-auto".to_string()),
+            tcp_ao: None,
         }],
         rpki: None,
         bmp: None,
@@ -334,6 +335,33 @@ fn add_dynamic_range_rejects_unknown_peer_group() {
     );
 }
 
+fn test_tcp_ao() -> crate::config::TcpAoConfig {
+    crate::config::TcpAoConfig {
+        key: "secret".to_string(),
+        send_id: 1,
+        recv_id: 1,
+        algorithm: "hmac(sha256)".to_string(),
+        preferred: false,
+        deprecated: false,
+    }
+}
+
+#[test]
+fn runtime_dynamic_crud_rejects_startup_pinned_tcp_ao_ranges_and_overlaps() {
+    let mut mgr = dynamic_test_manager();
+    mgr.current_config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao());
+
+    let add_err = mgr
+        .add_dynamic_range("127.0.1.0/24".into(), "ix-members".into(), 0, None)
+        .expect_err("runtime add overlapping protected prefix must fail");
+    assert!(add_err.to_string().contains("startup-pinned TCP-AO"));
+
+    let delete_err = mgr
+        .delete_dynamic_range("127.0.0.0/8")
+        .expect_err("runtime delete of protected prefix must fail");
+    assert!(delete_err.to_string().contains("startup-pinned"));
+}
+
 #[test]
 fn delete_dynamic_range_removes_and_stops_future_match() {
     let mut mgr = dynamic_test_manager();
@@ -385,6 +413,7 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
         peer_group: "ix-members".to_string(),
         remote_asn: 65010,
         description: Some("reload range".to_string()),
+        tcp_ao: None,
     }];
 
     let manager = PeerManager::new_with_config(
@@ -437,6 +466,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
         peer_group: "ix-members".to_string(),
         remote_asn: 65020,
         description: Some("transaction range".to_string()),
+        tcp_ao: None,
     }];
     let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
 
@@ -494,6 +524,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
         peer_group: "ix-members".to_string(),
         remote_asn: 0,
         description: Some("candidate-only".to_string()),
+        tcp_ao: None,
     }];
     let candidate_toml = toml::to_string_pretty(&candidate).unwrap();
 
@@ -606,6 +637,7 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         peer_group: "ix-members".to_string(),
         remote_asn: 65030,
         description: Some("transaction range".to_string()),
+        tcp_ao: None,
     }];
     let candidate_toml = toml::to_string_pretty(&replacement).unwrap();
 
@@ -1548,6 +1580,7 @@ async fn rollback_reap_keeps_dynamic_peer_for_host_bit_range_prefix() {
         peer_group: "ix-members".to_string(),
         remote_asn: 0,
         description: Some("host-bit range".to_string()),
+        tcp_ao: None,
     }];
     mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&config);
     assert_eq!(
@@ -8468,12 +8501,14 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
             peer_group: "ix-members".to_string(),
             remote_asn: 0,
             description: Some("wide".to_string()),
+            tcp_ao: None,
         },
         crate::config::DynamicNeighborConfig {
             prefix: "127.0.0.9/24".to_string(),
             peer_group: "narrow-members".to_string(),
             remote_asn: 0,
             description: Some("narrow".to_string()),
+            tcp_ao: None,
         },
     ];
     let mut mgr = PeerManager::new_with_config(
@@ -8531,6 +8566,7 @@ async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
         peer_group: "ix-members".to_string(),
         remote_asn: 0,
         description: Some("ll-auto".to_string()),
+        tcp_ao: None,
     }];
     let mut mgr = PeerManager::new_with_config(
         rx,

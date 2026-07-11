@@ -5409,6 +5409,104 @@ description = "IXP auto-accept"
     assert_eq!(config.dynamic_neighbors[0].remote_asn, 0);
 }
 
+fn dynamic_tcp_ao_toml(ranges_and_neighbors: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+{ranges_and_neighbors}
+"#
+    )
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_parses_directly_and_redacts_debug() {
+    let config = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "dynamic-secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)" }
+"#,
+    ))
+    .unwrap();
+    let tcp_ao = config.dynamic_neighbors[0].tcp_ao.as_ref().unwrap();
+    assert_eq!(tcp_ao.send_id, 7);
+    assert_eq!(tcp_ao.recv_id, 9);
+    let rendered = format!("{tcp_ao:?}");
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains("dynamic-secret"));
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_overlapping_dynamic_auth_boundaries() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.128/25"
+peer_group = "ix-members"
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("protected ranges must be disjoint")
+    );
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_static_peer_inside_prefix() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "2001:db8::/32"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "2001:db8::42"
+remote_asn = 65002
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("static and dynamic authentication boundaries must be disjoint")
+    );
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_peer_group_md5_inheritance() {
+    let mut source = dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#,
+    );
+    source = source.replace(
+        "hold_time = 90",
+        "hold_time = 90\nmd5_password = \"legacy\"",
+    );
+    let err = parse(&source).unwrap_err();
+    assert!(err.to_string().contains("never inherited"));
+}
+
 #[test]
 fn dynamic_neighbor_invalid_prefix_rejected() {
     let toml = r#"

@@ -279,6 +279,10 @@ pub struct DynamicNeighborConfig {
     /// Description applied to dynamic peers from this range.
     #[serde(default)]
     pub description: Option<String>,
+    /// TCP-AO key installed as a prefix MKT on the passive listener at startup.
+    /// Dynamic ranges never inherit authentication from their peer group.
+    #[serde(default)]
+    pub tcp_ao: Option<TcpAoConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -493,6 +493,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         peer_group: peer_group.clone(),
                         remote_asn: *remote_asn,
                         description: description.clone(),
+                        tcp_ao: None,
                     });
             }
         }

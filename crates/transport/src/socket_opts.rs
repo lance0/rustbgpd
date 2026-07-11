@@ -232,23 +232,21 @@ const TCP_AO_INFO_ACCEPT_ICMPS: u32 = 1 << 4;
 pub(crate) fn set_tcp_ao_config(
     socket: &Socket,
     peer: IpAddr,
+    prefix_len: u8,
     config: &TcpAoConfig,
     role: TcpAoSocketRole,
 ) -> io::Result<()> {
-    let key = tcp_ao_key_from_config(peer, config, role);
+    let key = tcp_ao_key_from_config(peer, prefix_len, config, role);
     set_tcp_ao_key(socket, &key)
 }
 
 #[cfg(target_os = "linux")]
 fn tcp_ao_key_from_config(
     peer: IpAddr,
+    prefix_len: u8,
     config: &TcpAoConfig,
     role: TcpAoSocketRole,
 ) -> TcpAoKey<'_> {
-    let prefix_len = match peer {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
     TcpAoKey {
         peer,
         scope_id: 0,
@@ -268,6 +266,7 @@ fn tcp_ao_key_from_config(
 pub(crate) fn set_tcp_ao_config(
     _socket: &Socket,
     _peer: std::net::IpAddr,
+    _prefix_len: u8,
     _config: &crate::config::TcpAoConfig,
     _role: TcpAoSocketRole,
 ) -> io::Result<()> {
@@ -777,11 +776,12 @@ mod tests {
 
         let key = tcp_ao_key_from_config(
             IpAddr::from([198, 51, 100, 1]),
+            24,
             &config,
             TcpAoSocketRole::ActiveOpen,
         );
 
-        assert_eq!(key.prefix_len, 32);
+        assert_eq!(key.prefix_len, 24);
         assert_eq!(key.send_id, 10);
         assert_eq!(key.recv_id, 11);
         assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha1);
@@ -803,11 +803,12 @@ mod tests {
 
         let key = tcp_ao_key_from_config(
             "2001:db8::1".parse().unwrap(),
+            48,
             &config,
             TcpAoSocketRole::Listener,
         );
 
-        assert_eq!(key.prefix_len, 128);
+        assert_eq!(key.prefix_len, 48);
         assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha256);
         assert!(!key.set_current);
         assert!(!key.set_rnext);

@@ -182,6 +182,17 @@ impl PeerManager {
         }
 
         let key = crate::config::effective_prefix(addr, prefix_len);
+        if self.current_config.dynamic_neighbors.iter().any(|range| {
+            range.tcp_ao.is_some()
+                && crate::config::effective_prefix_str(&range.prefix)
+                    .is_some_and(|protected| dynamic_prefixes_intersect(key, protected))
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic range {}/{} overlaps a startup-pinned TCP-AO range; restart \
+                 rustbgpd with an updated configuration instead",
+                key.0, key.1
+            )));
+        }
         if self
             .dynamic_ranges
             .iter()
@@ -207,6 +218,7 @@ impl PeerManager {
                 peer_group,
                 remote_asn,
                 description,
+                tcp_ao: None,
             });
         Ok(())
     }
@@ -225,6 +237,16 @@ impl PeerManager {
         let (addr, prefix_len) =
             parse_dynamic_prefix(prefix).map_err(DynamicRangeError::Invalid)?;
         let key = crate::config::effective_prefix(addr, prefix_len);
+
+        if self.current_config.dynamic_neighbors.iter().any(|range| {
+            range.tcp_ao.is_some()
+                && crate::config::effective_prefix_str(&range.prefix) == Some(key)
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic TCP-AO range {}/{} is startup-pinned; restart rustbgpd to remove it",
+                key.0, key.1
+            )));
+        }
 
         // Snapshot the config entry being removed (owned) before mutating, so
         // rollback can restore the exact range. dynamic_ranges and
@@ -408,6 +430,12 @@ impl PeerManager {
             "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
         );
     }
+}
+
+fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
+    let min_len = left.1.min(right.1);
+    crate::config::effective_prefix(left.0, min_len).0
+        == crate::config::effective_prefix(right.0, min_len).0
 }
 
 #[cfg(test)]

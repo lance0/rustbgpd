@@ -792,6 +792,7 @@ impl Config {
 
         // Validate dynamic neighbor ranges
         let mut seen_prefixes = std::collections::HashSet::new();
+        let mut parsed_dynamic_prefixes = Vec::with_capacity(self.dynamic_neighbors.len());
         for (i, dn) in self.dynamic_neighbors.iter().enumerate() {
             // Prefix must parse as addr/len
             let parts: Vec<&str> = dn.prefix.split('/').collect();
@@ -855,6 +856,7 @@ impl Config {
                     ),
                 });
             }
+            parsed_dynamic_prefixes.push((key.0, key.1));
 
             // Peer group must exist
             let Some(group) = self.peer_groups.get(&dn.peer_group) else {
@@ -880,6 +882,63 @@ impl Config {
                         dn.peer_group
                     ),
                 });
+            }
+
+            if let Some(tcp_ao) = &dn.tcp_ao {
+                if group.md5_password.is_some() {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: tcp_ao is mutually exclusive with \
+                             md5_password on peer group {:?}; dynamic authentication is direct \
+                             and never inherited",
+                            dn.peer_group
+                        ),
+                    });
+                }
+                validate_tcp_ao_config(&dn.prefix, tcp_ao).map_err(|err| {
+                    ConfigError::InvalidDynamicNeighbor {
+                        reason: format!("dynamic_neighbors[{i}]: {err}"),
+                    }
+                })?;
+            }
+        }
+
+        // A prefix MKT creates an authentication boundary in the kernel. Until
+        // Linux precedence for overlapping MKTs is proven and modeled, every
+        // protected dynamic range must be disjoint from all other dynamic
+        // ranges and static peers. This prevents longest-prefix application
+        // matching from disagreeing with listener authentication.
+        for (i, protected) in self.dynamic_neighbors.iter().enumerate() {
+            if protected.tcp_ao.is_none() {
+                continue;
+            }
+            let protected_prefix = parsed_dynamic_prefixes[i];
+            for (j, other_prefix) in parsed_dynamic_prefixes.iter().copied().enumerate() {
+                if i != j && prefixes_intersect(protected_prefix, other_prefix) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: TCP-AO range {:?} overlaps \
+                             dynamic_neighbors[{j}] {:?}; protected ranges must be disjoint",
+                            protected.prefix, self.dynamic_neighbors[j].prefix
+                        ),
+                    });
+                }
+            }
+            for neighbor in &self.neighbors {
+                let Ok(address) = neighbor.address.parse::<IpAddr>() else {
+                    continue;
+                };
+                let host_prefix = (address, if address.is_ipv4() { 32 } else { 128 });
+                if prefixes_intersect(protected_prefix, host_prefix) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: TCP-AO range {:?} contains static \
+                             neighbor {:?}; static and dynamic authentication boundaries \
+                             must be disjoint",
+                            protected.prefix, neighbor.address
+                        ),
+                    });
+                }
             }
         }
 
@@ -959,6 +1018,11 @@ impl Config {
             effective.iter().any(|f| f == "linkstate")
         })
     }
+}
+
+fn prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
+    let min_len = left.1.min(right.1);
+    effective_prefix(left.0, min_len).0 == effective_prefix(right.0, min_len).0
 }
 
 impl Config {
