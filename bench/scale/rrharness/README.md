@@ -25,7 +25,9 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
 ## Backs
 
 - `docs/perf/rebaseline-2026-07.md` (ADR-0100 slice-0 manager-task phase table
-  and the memory pass).
+  and whole-process RSS snapshots). This harness reports process RSS from
+  `/proc` only; the per-component live-heap attribution table in that receipt
+  is produced by the separate dhat/bgperf2 pass, not this harness.
 - The 2026-07-10 re-profile that produced LAN-348.
 
 ## Build and run
