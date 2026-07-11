@@ -1521,7 +1521,7 @@ async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
 /// neighbor-set deny matches an ASN no test peer uses, so verdicts are
 /// unchanged, but `requires_peer_context` moves the peer off the
 /// grouped path — the grouped→per-peer membership transition.
-fn peer_context_permit_chain() -> PolicyChain {
+pub(super) fn peer_context_permit_chain() -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,

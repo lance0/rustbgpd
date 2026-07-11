@@ -1,9 +1,10 @@
-//! Deterministic differential fault corpus for update-group distribution.
+//! Parameterized fixed-scenario differential corpus for update groups.
 //!
-//! The small corpus runs in normal PR CI. The ignored extended corpus uses the
-//! same replayable schedules with a hard seed/operation cap; it is exercised by
-//! the weekly GitHub-hosted workflow, never by a live soak runner.
+//! The small corpus runs fixed schedules in normal PR CI. Seeds vary fixture
+//! identities, not operation ordering. The ignored extension sweeps those same
+//! schedules under hard parameter/operation caps on a weekly hosted runner.
 
+use std::collections::HashMap;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -11,8 +12,9 @@ use std::time::Duration;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Prefix, RtcNlri, Safi};
 
 use super::update_groups_oracle::{
-    Oracle, Streams, deny_prefix_chain, deny_prefixes_chain, fold, fold_vpn, ibgp_route, pfx,
-    rtc_default, vpn_nlri, vpn_route, vpn_rtc_sendable,
+    NormAnnounce, NormMsg, NormVpnAnnounce, Oracle, Streams, deny_prefix_chain,
+    deny_prefixes_chain, fold, fold_vpn, ibgp_route, peer_context_permit_chain, pfx, rtc_default,
+    vpn_nlri, vpn_route, vpn_rtc_sendable,
 };
 use crate::route::RtcRibRouteKey;
 
@@ -24,6 +26,7 @@ const DEFAULT_SEED_START: u64 = 0x3570_0000;
 const DEFAULT_SEED_COUNT: usize = 24;
 const DEFAULT_MAX_OPS: usize = 64;
 const SEED_COUNT_CAP: usize = 64;
+const MIN_MAX_OPS: usize = 18;
 const MAX_OPS_CAP: usize = 64;
 const SEED_START_ENV: &str = "RUSTBGPD_UPDATE_GROUP_SEED_START";
 const SEED_COUNT_ENV: &str = "RUSTBGPD_UPDATE_GROUP_SEED_COUNT";
@@ -71,9 +74,9 @@ fn parse_extended_config(get: impl Fn(&str) -> Option<String>) -> Result<Extende
             "{SEED_COUNT_ENV} must be in 1..={SEED_COUNT_CAP}, got {seed_count}"
         ));
     }
-    if !(1..=MAX_OPS_CAP).contains(&max_ops) {
+    if !(MIN_MAX_OPS..=MAX_OPS_CAP).contains(&max_ops) {
         return Err(format!(
-            "{MAX_OPS_ENV} must be in 1..={MAX_OPS_CAP}, got {max_ops}"
+            "{MAX_OPS_ENV} must be in {MIN_MAX_OPS}..={MAX_OPS_CAP}, got {max_ops}"
         ));
     }
     let last_offset = u64::try_from(seed_count - 1).expect("seed count is capped at 64");
@@ -104,6 +107,13 @@ enum PolicySpec {
     Permit,
     DenyOne(Ipv4Prefix),
     DenyMany(Vec<Ipv4Prefix>),
+    PeerContext,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MembershipExpectation {
+    SharedGroup,
+    PeerContextFallback,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +147,10 @@ enum Op {
     ReplacePolicy {
         peer: Ipv4Addr,
         policy: PolicySpec,
+    },
+    AssertMembership {
+        peer: Ipv4Addr,
+        expectation: MembershipExpectation,
     },
     RtcDefaultAnnounce {
         peer: Ipv4Addr,
@@ -203,7 +217,100 @@ fn policy(spec: &PolicySpec) -> Option<rustbgpd_policy::PolicyChain> {
         PolicySpec::Permit => None,
         PolicySpec::DenyOne(prefix) => Some(deny_prefix_chain(*prefix)),
         PolicySpec::DenyMany(prefixes) => Some(deny_prefixes_chain(prefixes)),
+        PolicySpec::PeerContext => Some(peer_context_permit_chain()),
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SemanticEffect {
+    Announce {
+        peer: IpAddr,
+        route: NormAnnounce,
+    },
+    Withdraw {
+        peer: IpAddr,
+        key: (Prefix, u32),
+    },
+    UnknownWithdrawBeforeTerminalRoute {
+        peer: IpAddr,
+        key: (Prefix, u32),
+    },
+    VpnAnnounce {
+        peer: IpAddr,
+        route: NormVpnAnnounce,
+    },
+    VpnWithdraw {
+        peer: IpAddr,
+        key: (String, u32),
+    },
+    UnknownVpnWithdrawBeforeTerminalRoute {
+        peer: IpAddr,
+        key: (String, u32),
+    },
+}
+
+fn semantic_effects(streams: &Streams) -> Vec<SemanticEffect> {
+    let terminal = fold(streams);
+    let terminal_vpn = fold_vpn(streams);
+    let mut effects = Vec::new();
+    for (peer, messages) in streams {
+        let mut state: HashMap<(Prefix, u32), NormAnnounce> = HashMap::new();
+        let mut vpn_state: HashMap<String, NormVpnAnnounce> = HashMap::new();
+        for message in messages {
+            for key in &message.withdraw {
+                if state.remove(key).is_some() {
+                    effects.push(SemanticEffect::Withdraw {
+                        peer: *peer,
+                        key: *key,
+                    });
+                } else if terminal
+                    .get(peer)
+                    .is_some_and(|routes| routes.contains_key(key))
+                {
+                    effects.push(SemanticEffect::UnknownWithdrawBeforeTerminalRoute {
+                        peer: *peer,
+                        key: *key,
+                    });
+                }
+            }
+            for route in &message.announce {
+                let key = (route.0, route.1);
+                if state.get(&key) != Some(route) {
+                    state.insert(key, route.clone());
+                    effects.push(SemanticEffect::Announce {
+                        peer: *peer,
+                        route: route.clone(),
+                    });
+                }
+            }
+            for key in &message.vpn_withdraw {
+                if vpn_state.remove(&key.0).is_some() {
+                    effects.push(SemanticEffect::VpnWithdraw {
+                        peer: *peer,
+                        key: key.clone(),
+                    });
+                } else if terminal_vpn
+                    .get(peer)
+                    .is_some_and(|routes| routes.contains_key(&key.0))
+                {
+                    effects.push(SemanticEffect::UnknownVpnWithdrawBeforeTerminalRoute {
+                        peer: *peer,
+                        key: key.clone(),
+                    });
+                }
+            }
+            for route in &message.vpn_announce {
+                if vpn_state.get(&route.0) != Some(route) {
+                    vpn_state.insert(route.0.clone(), route.clone());
+                    effects.push(SemanticEffect::VpnAnnounce {
+                        peer: *peer,
+                        route: route.clone(),
+                    });
+                }
+            }
+        }
+    }
+    effects
 }
 
 async fn apply_vpn_announce(oracle: &mut Oracle, peer: Ipv4Addr, generation: u64, id: u8) {
@@ -222,7 +329,30 @@ async fn apply_vpn_announce(oracle: &mut Oracle, peer: Ipv4Addr, generation: u64
         .await;
 }
 
-async fn apply(oracle: &mut Oracle, op: &Op) {
+async fn assert_membership(
+    oracle: &mut Oracle,
+    peer: Ipv4Addr,
+    expectation: MembershipExpectation,
+    force_ungrouped: bool,
+) {
+    let label = oracle.group_label(peer).await;
+    match expectation {
+        MembershipExpectation::SharedGroup if force_ungrouped => assert!(
+            !label.starts_with("group:"),
+            "forced oracle unexpectedly grouped {peer}: {label}"
+        ),
+        MembershipExpectation::SharedGroup => assert!(
+            label.starts_with("group:"),
+            "grouped path did not group {peer}: {label}"
+        ),
+        MembershipExpectation::PeerContextFallback => assert!(
+            !label.starts_with("group:") && (force_ungrouped || label == "policy_peer_context"),
+            "peer-context transition did not reach per-peer path for {peer}: {label}"
+        ),
+    }
+}
+
+async fn apply(oracle: &mut Oracle, op: &Op, force_ungrouped: bool) {
     match op {
         Op::PeerUp {
             peer,
@@ -283,6 +413,9 @@ async fn apply(oracle: &mut Oracle, op: &Op) {
         Op::ReplacePolicy { peer, policy: spec } => {
             oracle.replace_policy(*peer, policy(spec)).await;
         }
+        Op::AssertMembership { peer, expectation } => {
+            assert_membership(oracle, *peer, *expectation, force_ungrouped).await;
+        }
         Op::RtcDefaultAnnounce { peer, generation } => {
             oracle
                 .rtc_routes_full_generation(*peer, *generation, vec![rtc_default(*peer)], vec![])
@@ -327,7 +460,7 @@ async fn run_path(schedule: &Schedule, force_ungrouped: bool, max_ops: usize) ->
             "update-group replay: scenario={} seed={:#x} op={index} {op:?}",
             schedule.name, schedule.seed
         );
-        apply(&mut oracle, op).await;
+        apply(&mut oracle, op, force_ungrouped).await;
     }
     if !force_ungrouped {
         let left = oracle.group_label(LEFT).await;
@@ -412,12 +545,18 @@ async fn run_schedule(schedule: Schedule, max_ops: usize) {
             schedule.replay()
         ),
         ComparisonMode::SemanticFold => assert_eq!(
-            fold(&grouped),
-            fold(&ungrouped),
-            "folded advertised-state mismatch: {}",
+            semantic_effects(&grouped),
+            semantic_effects(&ungrouped),
+            "normalized semantic-effect mismatch: {}",
             schedule.replay()
         ),
     }
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "folded advertised-state mismatch: {}",
+        schedule.replay()
+    );
     assert_eq!(
         fold_vpn(&grouped),
         fold_vpn(&ungrouped),
@@ -452,6 +591,10 @@ fn saturation_schedule(seed: u64) -> Schedule {
                 generation: 2,
                 capacity: 1,
                 families: FamilySet::Unicast,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
             },
             Op::DrainOne(RIGHT),
             Op::Announce {
@@ -518,17 +661,41 @@ fn dirty_policy_schedule(seed: u64) -> Schedule {
                 prefix: second,
                 local_pref: 100,
             },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
+            },
             Op::ReplacePolicy {
                 peer: RIGHT,
                 policy: PolicySpec::DenyOne(first),
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
             },
             Op::ReplacePolicy {
                 peer: RIGHT,
                 policy: PolicySpec::DenyMany(vec![first, second]),
             },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
+            },
+            Op::ReplacePolicy {
+                peer: RIGHT,
+                policy: PolicySpec::PeerContext,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::PeerContextFallback,
+            },
             Op::ReplacePolicy {
                 peer: RIGHT,
                 policy: PolicySpec::Permit,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
             },
             Op::DrainOne(RIGHT),
             Op::AdvanceRetry,
@@ -626,6 +793,82 @@ fn schedules(seed: u64) -> [Schedule; 3] {
     ]
 }
 
+fn norm_announce(prefix: Ipv4Prefix, local_pref: u32) -> NormAnnounce {
+    let route = ibgp_route(prefix, SOURCE, local_pref, vec![]);
+    (
+        route.prefix,
+        route.path_id,
+        route.next_hop,
+        route.peer,
+        (*route.attributes).clone(),
+        None,
+    )
+}
+
+fn norm_message(announce: Vec<NormAnnounce>, withdraw: Vec<(Prefix, u32)>) -> NormMsg {
+    NormMsg {
+        announce,
+        withdraw,
+        end_of_rib: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
+    }
+}
+
+fn one_peer_stream(messages: Vec<NormMsg>) -> Streams {
+    [(IpAddr::V4(LEFT), messages)].into_iter().collect()
+}
+
+#[test]
+fn semantic_effects_reject_transient_announces_and_attribute_changes() {
+    let first = pfx(41, 0);
+    let extra = pfx(43, 0);
+    let baseline = one_peer_stream(vec![norm_message(vec![norm_announce(first, 100)], vec![])]);
+
+    let extra_transient = one_peer_stream(vec![
+        norm_message(vec![norm_announce(first, 100)], vec![]),
+        norm_message(vec![norm_announce(extra, 100)], vec![]),
+        norm_message(vec![], vec![(Prefix::V4(extra), 0)]),
+    ]);
+    assert_ne!(
+        semantic_effects(&baseline),
+        semantic_effects(&extra_transient)
+    );
+
+    let wrong_attributes = one_peer_stream(vec![
+        norm_message(vec![norm_announce(first, 100)], vec![]),
+        norm_message(vec![norm_announce(first, 200)], vec![]),
+        norm_message(vec![norm_announce(first, 100)], vec![]),
+    ]);
+    assert_ne!(
+        semantic_effects(&baseline),
+        semantic_effects(&wrong_attributes)
+    );
+}
+
+#[test]
+fn semantic_effects_allow_only_terminally_absent_unknown_withdraws() {
+    let prefix = pfx(45, 0);
+    let empty = one_peer_stream(vec![]);
+    let safe_over_withdraw =
+        one_peer_stream(vec![norm_message(vec![], vec![(Prefix::V4(prefix), 0)])]);
+    assert_eq!(
+        semantic_effects(&empty),
+        semantic_effects(&safe_over_withdraw)
+    );
+
+    let terminal_route =
+        one_peer_stream(vec![norm_message(vec![norm_announce(prefix, 100)], vec![])]);
+    let withdraw_before_terminal_route = one_peer_stream(vec![
+        norm_message(vec![], vec![(Prefix::V4(prefix), 0)]),
+        norm_message(vec![norm_announce(prefix, 100)], vec![]),
+    ]);
+    assert_ne!(
+        semantic_effects(&terminal_route),
+        semantic_effects(&withdraw_before_terminal_route)
+    );
+}
+
 #[tokio::test]
 async fn deterministic_fault_corpus() {
     tokio::time::pause();
@@ -638,6 +881,15 @@ async fn deterministic_fault_corpus() {
 
 #[test]
 fn extended_config_defaults_and_boundaries() {
+    let longest = schedules(DEFAULT_SEED_START)
+        .iter()
+        .map(|schedule| schedule.ops.len())
+        .max()
+        .unwrap();
+    assert_eq!(
+        MIN_MAX_OPS, longest,
+        "minimum cap must track longest schedule"
+    );
     assert_eq!(
         parse_extended_config(|_| None).unwrap(),
         ExtendedConfig {
@@ -649,7 +901,8 @@ fn extended_config_defaults_and_boundaries() {
 
     let get = |name: &str| match name {
         SEED_START_ENV => Some("0xffffffffffffffff".to_owned()),
-        SEED_COUNT_ENV | MAX_OPS_ENV => Some("1".to_owned()),
+        SEED_COUNT_ENV => Some("1".to_owned()),
+        MAX_OPS_ENV => Some(MIN_MAX_OPS.to_string()),
         _ => None,
     };
     assert_eq!(
@@ -657,7 +910,7 @@ fn extended_config_defaults_and_boundaries() {
         ExtendedConfig {
             seed_start: u64::MAX,
             seed_count: 1,
-            max_ops: 1,
+            max_ops: MIN_MAX_OPS,
         }
     );
 
@@ -669,8 +922,8 @@ fn extended_config_defaults_and_boundaries() {
         ),
         (SEED_COUNT_ENV, "0", "must be in 1..=64"),
         (SEED_COUNT_ENV, "65", "must be in 1..=64"),
-        (MAX_OPS_ENV, "0", "must be in 1..=64"),
-        (MAX_OPS_ENV, "65", "must be in 1..=64"),
+        (MAX_OPS_ENV, "17", "must be in 18..=64"),
+        (MAX_OPS_ENV, "65", "must be in 18..=64"),
     ] {
         let error = parse_extended_config(|key| (key == name).then(|| value.to_owned()))
             .expect_err("invalid boundary must fail");
