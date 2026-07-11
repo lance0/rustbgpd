@@ -812,9 +812,10 @@ pub enum RibUpdate {
     /// empty after a differential-oracle scenario reaches quiescence.
     #[cfg(test)]
     TestQueryOutboundHealth {
-        /// Response channel: dirty peers, forced peers, regroup baselines,
-        /// and pending extra-withdraw residue, respectively.
-        reply: oneshot::Sender<(usize, usize, usize, usize)>,
+        /// Response channel: dirty peers, forced peers, group-dirty members,
+        /// group tombstones, regroup baselines, and carried extra-withdraw
+        /// residue, respectively.
+        reply: oneshot::Sender<(usize, usize, usize, usize, usize, usize)>,
     },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters

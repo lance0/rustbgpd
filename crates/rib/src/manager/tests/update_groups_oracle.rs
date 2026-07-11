@@ -779,7 +779,7 @@ impl Oracle {
     /// Collect every message every peer has received so far, including
     /// those drained mid-scenario by `drain_one` and the invariant
     /// checker — the returned streams are the complete emission history.
-    pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize) {
+    pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize, usize, usize) {
         self.quiesce().await;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx

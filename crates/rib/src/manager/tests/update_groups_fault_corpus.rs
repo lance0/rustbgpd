@@ -241,7 +241,7 @@ async fn run_path(schedule: &Schedule, force_ungrouped: bool) -> Streams {
     let health = oracle.terminal_health().await;
     assert_eq!(
         health,
-        (0, 0, 0, 0),
+        (0, 0, 0, 0, 0, 0),
         "terminal dirty/force/regroup/residue health is not clean: {}",
         schedule.replay()
     );
