@@ -721,6 +721,14 @@ impl RibManager {
             )));
             return;
         }
+        // ORF is arbitrary per-peer outbound state and therefore a grouping
+        // disqualifier. Assert before installing the filter: inserting it
+        // first would make a later membership recompute hide an invalid
+        // pre-existing grouped registration.
+        debug_assert!(
+            self.grouped_member_of(peer).is_none(),
+            "an ORF-receive peer must never be registered in an update group"
+        );
         let family = (afi, safi);
         // The ORF message is itself a ROUTE-REFRESH (RFC 5291 §6) — lift the gate.
         if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
@@ -1259,6 +1267,16 @@ impl RibManager {
             // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
             // `force_outbound_peers`.
             let is_force = self.force_outbound_peers.contains(&peer);
+            // A grouped force-only resync intentionally re-announces the
+            // current group table and ignores pass tombstones/deltas. Its
+            // setters synchronously run an empty distribution pass, so it
+            // cannot meet a genuine best-change pass. A failed force send is
+            // also dirty and is valid here: dirty assembly includes the
+            // tombstones needed to heal subsequent churn.
+            debug_assert!(
+                member_of.is_none() || !is_force || is_dirty || best_changed.is_empty(),
+                "a grouped force-only resync cannot share a nonempty best-change pass"
+            );
             let resync = is_dirty || is_force;
             let effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                 let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
