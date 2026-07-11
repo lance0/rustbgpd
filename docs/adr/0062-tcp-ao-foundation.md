@@ -78,7 +78,7 @@ apply it would be a silent security footgun.
 ## Implementation Status
 
 The foundation decision above describes the first ADR-0062 slice. Subsequent
-slices have now shipped static-neighbor startup support:
+slices have now shipped static-neighbor and startup-only dynamic-range support:
 
 - `[[neighbors]].tcp_ao` is parsed and validated, mutually exclusive with TCP
   MD5, and redacted in config diffs.
@@ -99,7 +99,11 @@ slices have now shipped static-neighbor startup support:
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
   feature skip M43 with a warning instead of failing unrelated dataplane gates.
+- Direct `[[dynamic_neighbors]].tcp_ao` installs a prefix MKT before listen,
+  rejects overlapping authentication boundaries, fails closed when accepted
+  socket inspection is missing or inconsistent, and pins protected edits until
+  restart. Runtime range CRUD cannot mutate or overlap a protected range.
 
-Still deferred: dynamic-neighbor wildcard MKTs, runtime key rotation / deletion
-on an already-listening socket, multi-key rollover, and API/CLI exposure of
+Still deferred: runtime key rotation / deletion on an already-listening socket,
+multi-key rollover, peer-group inheritance, and API/CLI exposure of
 accepted-socket inspection results.

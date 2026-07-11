@@ -166,15 +166,20 @@ impl BgpListener {
                     pkt_dropped_icmp = info.pkt_dropped_icmp,
                     "TCP-AO accepted socket inspected"
                 );
-                if !accepted_tcp_ao_info_is_valid(&info, key.config.send_id) {
+                if !accepted_tcp_ao_info_is_valid(&info, key.config.send_id, key.config.recv_id) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
                         format!(
-                            "TCP-AO accepted socket state is inconsistent: expected current key {} and at least one verified packet, got has_current_key={}, current_key={}, pkt_good={}",
+                            "TCP-AO accepted socket state is inconsistent: expected current/rnext keys {}/{}, got has_current_key={}, current_key={}, has_rnext_key={}, rnext_key={}, pkt_bad={}, pkt_key_not_found={}, pkt_ao_required={}",
                             key.config.send_id,
+                            key.config.recv_id,
                             info.has_current_key,
                             info.current_key,
-                            info.pkt_good
+                            info.has_rnext_key,
+                            info.rnext_key,
+                            info.pkt_bad,
+                            info.pkt_key_not_found,
+                            info.pkt_ao_required
                         ),
                     ));
                 }
@@ -192,8 +197,18 @@ impl BgpListener {
     }
 }
 
-fn accepted_tcp_ao_info_is_valid(info: &TcpAoInfoSnapshot, expected_send_id: u8) -> bool {
-    info.has_current_key && info.current_key == expected_send_id && info.pkt_good > 0
+fn accepted_tcp_ao_info_is_valid(
+    info: &TcpAoInfoSnapshot,
+    expected_send_id: u8,
+    expected_recv_id: u8,
+) -> bool {
+    info.has_current_key
+        && info.current_key == expected_send_id
+        && info.has_rnext_key
+        && info.rnext_key == expected_recv_id
+        && info.pkt_bad == 0
+        && info.pkt_key_not_found == 0
+        && info.pkt_ao_required == 0
 }
 
 impl TcpAoListenerKey {
@@ -338,13 +353,19 @@ mod tests {
     }
 
     #[test]
-    fn protected_accept_requires_verified_packet_and_expected_current_key() {
-        assert!(accepted_tcp_ao_info_is_valid(&tcp_ao_info(7, 1), 7));
-        assert!(!accepted_tcp_ao_info_is_valid(&tcp_ao_info(8, 1), 7));
-        assert!(!accepted_tcp_ao_info_is_valid(&tcp_ao_info(7, 0), 7));
-        let mut missing = tcp_ao_info(7, 1);
-        missing.has_current_key = false;
-        assert!(!accepted_tcp_ao_info_is_valid(&missing, 7));
+    fn protected_accept_requires_expected_keys_and_clean_auth_counters() {
+        let mut valid = tcp_ao_info(7, 0);
+        valid.has_rnext_key = true;
+        valid.rnext_key = 9;
+        assert!(accepted_tcp_ao_info_is_valid(&valid, 7, 9));
+        assert!(!accepted_tcp_ao_info_is_valid(&valid, 8, 9));
+        assert!(!accepted_tcp_ao_info_is_valid(&valid, 7, 8));
+        let mut bad = valid;
+        bad.pkt_bad = 1;
+        assert!(!accepted_tcp_ao_info_is_valid(&bad, 7, 9));
+        let mut missing = valid;
+        missing.pkt_key_not_found = 1;
+        assert!(!accepted_tcp_ao_info_is_valid(&missing, 7, 9));
     }
 
     #[tokio::test]
@@ -402,5 +423,100 @@ mod tests {
             vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]
         );
         tokio::task::yield_now().await;
+    }
+
+    /// Bounded privileged/kernel receipt for GitHub #158. Run on a Linux host
+    /// with `CONFIG_TCP_AO=y`:
+    /// `cargo test -p rustbgpd-transport dynamic_prefix_tcp_ao_kernel_receipt -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
+    async fn dynamic_prefix_tcp_ao_kernel_receipt() {
+        use std::time::Duration;
+
+        fn connect_from(
+            source: Ipv4Addr,
+            destination: SocketAddr,
+            tcp_ao: Option<&TcpAoConfig>,
+        ) -> std::io::Result<Socket> {
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            socket.bind(&SockAddr::from(SocketAddr::new(source.into(), 0)))?;
+            if let Some(config) = tcp_ao {
+                crate::socket_opts::set_tcp_ao_config(
+                    &socket,
+                    destination.ip(),
+                    32,
+                    config,
+                    crate::socket_opts::TcpAoSocketRole::ActiveOpen,
+                )?;
+            }
+            socket.connect_timeout(&SockAddr::from(destination), Duration::from_secs(2))?;
+            Ok(socket)
+        }
+
+        let config = tcp_ao_config();
+        let (accept_tx, mut accept_rx) = mpsc::channel(4);
+        let listener = BgpListener::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            accept_tx,
+            ListenerSocketOptions {
+                tcp_ao_keys: vec![TcpAoListenerKey {
+                    peer: "127.0.0.0".parse().unwrap(),
+                    prefix_len: 24,
+                    config: config.clone(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let destination = listener.local_addr().unwrap();
+        let task = tokio::spawn(listener.run());
+
+        let signed_config = config.clone();
+        let signed = tokio::task::spawn_blocking(move || {
+            connect_from(
+                "127.0.0.2".parse().unwrap(),
+                destination,
+                Some(&signed_config),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            accepted.peer_addr.ip(),
+            "127.0.0.2".parse::<IpAddr>().unwrap()
+        );
+        assert!(accepted.tcp_ao_info.is_some());
+
+        let protected_unsigned = tokio::task::spawn_blocking(move || {
+            connect_from("127.0.0.3".parse().unwrap(), destination, None)
+        })
+        .await
+        .unwrap();
+        assert!(protected_unsigned.is_err());
+
+        let unprotected = tokio::task::spawn_blocking(move || {
+            connect_from("127.0.1.2".parse().unwrap(), destination, None)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            accepted.peer_addr.ip(),
+            "127.0.1.2".parse::<IpAddr>().unwrap()
+        );
+        assert!(accepted.tcp_ao_info.is_none());
+
+        drop((signed, unprotected));
+        task.abort();
     }
 }

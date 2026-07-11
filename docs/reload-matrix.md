@@ -126,8 +126,8 @@ reload).
 Peer-group fields mirror `[[neighbors]]` minus the identity triple
 (`address`, `interface`, `remote_asn`) and TCP-AO. Inheritance is resolved at
 each reconcile. Neighbor-level policy fields override inherited peer-group
-policy fields. TCP-AO remains a static-neighbor-only field because
-dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
+policy fields. TCP-AO is never inherited: static neighbors and dynamic ranges
+configure their startup key directly.
 
 | Field | Class | Notes |
 |---|---|---|
@@ -173,12 +173,18 @@ started with `--config`. Runtime CRUD and SIGHUP reload share a coordinator
 lock, held through the persistence acknowledgement, so reload sees either the
 pre-mutation TOML or the committed post-mutation TOML.
 
+The exception is direct `tcp_ao` on a dynamic range. Prefix MKTs are installed
+before the listener enters `listen(2)`, so adding, removing, moving, or rotating
+a protected range is restart-required and remains pinned to the startup
+snapshot. Disjoint unprotected range edits can still reload normally.
+
 | Field | Class | Notes |
 |---|---|---|
 | `prefix` | reload-applied | Consulted on every inbound TCP accept. |
 | `peer_group` | reload-applied | Inheritance resolves when a passive session promotes to a managed peer. |
 | `remote_asn` | reload-applied | Validated against the OPEN's `my_as` at promotion. |
 | `description` | reload-applied | Metadata. |
+| `tcp_ao` | restart-required | Direct prefix MKT installed before listen; protected range/auth edits are pinned until restart. |
 
 ## `[global]`
 

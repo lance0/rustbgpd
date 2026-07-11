@@ -447,6 +447,18 @@
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "tcp_ao": {
+          "description": "TCP-AO key installed as a prefix MKT on the passive listener at startup.\nDynamic ranges never inherit authentication from their peer group.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TcpAoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,

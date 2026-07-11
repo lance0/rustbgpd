@@ -238,11 +238,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 `tcp_ao_support` is a read-only Linux capability probe for RFC 5925 TCP-AO. It
 reports whether the host kernel accepts the TCP-AO socket primitive that
-rustbgpd uses for static-neighbor startup key installation. If a static
-`[[neighbors]].tcp_ao` key is configured on a host where the primitive fails,
+rustbgpd uses for static-neighbor and dynamic-prefix startup key installation.
+If a `tcp_ao` key is configured on a host where the primitive fails,
 listener setup aborts startup, and active-open setup rejects that connect
-attempt without falling back to unauthenticated TCP. Runtime key rotation and
-dynamic neighbor wildcard-MKT support are not exposed through the API yet.
+attempt without falling back to unauthenticated TCP. Dynamic-range keys are
+config-file-only: runtime range CRUD rejects protected ranges and overlaps.
+Runtime key rotation is not exposed.
 
 ---
 

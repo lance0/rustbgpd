@@ -59,8 +59,8 @@ full gate ladder.
 
 ## Transport and session features
 
-- TCP-AO supports static-neighbor startup keys on Linux. Dynamic-neighbor
-  TCP-AO, runtime key rotation, and multi-key rollover remain follow-up work.
+- TCP-AO supports static-neighbor and direct dynamic-prefix startup keys on
+  Linux. Runtime key rotation and multi-key rollover remain follow-up work.
 - TCP MD5 and GTSM are supported.
 - BFD supports IPv4/IPv6 global-address single-hop asynchronous sessions for
   static neighbors. Multihop, echo, demand mode, authentication,
