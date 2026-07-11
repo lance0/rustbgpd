@@ -1,5 +1,6 @@
 //! BGP inbound TCP listener.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::config::TcpAoConfig;
@@ -46,7 +47,88 @@ pub struct ListenerSocketOptions {
 pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
-    tcp_ao_keys: Vec<TcpAoListenerKey>,
+    tcp_ao_keys: TcpAoListenerKeyIndex,
+}
+
+/// Immutable, family-split prefix-length index for listener MKTs.
+///
+/// Lookup performs at most 33 IPv4 or 129 IPv6 hash probes regardless of the
+/// configured key count. When validated overlapping ranges are present, the
+/// lowest original index wins, preserving the previous linear-scan semantics.
+struct TcpAoListenerKeyIndex {
+    keys: Vec<TcpAoListenerKey>,
+    v4: Vec<HashMap<u32, usize>>,
+    v6: Vec<HashMap<u128, usize>>,
+}
+
+impl TcpAoListenerKeyIndex {
+    fn new(keys: Vec<TcpAoListenerKey>) -> Self {
+        let mut index = Self {
+            v4: (0..=32).map(|_| HashMap::new()).collect(),
+            v6: (0..=128).map(|_| HashMap::new()).collect(),
+            keys,
+        };
+        for (key_index, key) in index.keys.iter().enumerate() {
+            match key.peer {
+                IpAddr::V4(addr) if key.prefix_len <= 32 => {
+                    index.v4[usize::from(key.prefix_len)]
+                        .entry(mask_v4(addr.into(), key.prefix_len))
+                        .or_insert(key_index);
+                }
+                IpAddr::V6(addr) if key.prefix_len <= 128 => {
+                    index.v6[usize::from(key.prefix_len)]
+                        .entry(mask_v6(addr.into(), key.prefix_len))
+                        .or_insert(key_index);
+                }
+                _ => {}
+            }
+        }
+        index
+    }
+
+    fn find(&self, addr: IpAddr) -> Option<&TcpAoListenerKey> {
+        let key_index = match addr {
+            IpAddr::V4(addr) => self
+                .v4
+                .iter()
+                .enumerate()
+                .filter_map(|(prefix_len, bucket)| {
+                    bucket.get(&mask_v4(
+                        addr.into(),
+                        u8::try_from(prefix_len).expect("IPv4 index is bounded to 32"),
+                    ))
+                })
+                .min(),
+            IpAddr::V6(addr) => self
+                .v6
+                .iter()
+                .enumerate()
+                .filter_map(|(prefix_len, bucket)| {
+                    bucket.get(&mask_v6(
+                        addr.into(),
+                        u8::try_from(prefix_len).expect("IPv6 index is bounded to 128"),
+                    ))
+                })
+                .min(),
+        }?;
+        self.keys.get(*key_index)
+    }
+}
+
+fn mask_v4(addr: u32, prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else {
+        addr & (u32::MAX << (32 - prefix_len))
+    }
+}
+
+fn mask_v6(addr: u128, prefix_len: u8) -> u128 {
+    if prefix_len == 0 {
+        0
+    } else {
+        addr & (u128::MAX << (128 - prefix_len))
+    }
 }
 
 impl BgpListener {
@@ -81,7 +163,6 @@ impl BgpListener {
         options: ListenerSocketOptions,
     ) -> std::io::Result<Self> {
         let tcp_ao_keys = options.tcp_ao_keys.len();
-        let installed_tcp_ao_keys = options.tcp_ao_keys.clone();
         let listener = bind_socket2_listener(addr, &options)?;
         let bound_addr = listener.local_addr().unwrap_or(addr);
         info!(
@@ -93,7 +174,7 @@ impl BgpListener {
         Ok(Self {
             listener,
             accept_tx,
-            tcp_ao_keys: installed_tcp_ao_keys,
+            tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
         })
     }
 
@@ -145,7 +226,7 @@ impl BgpListener {
         stream: &TcpStream,
         peer_ip: IpAddr,
     ) -> std::io::Result<Option<TcpAoInfoSnapshot>> {
-        let Some(key) = self.tcp_ao_keys.iter().find(|key| key.covers(peer_ip)) else {
+        let Some(key) = self.tcp_ao_keys.find(peer_ip) else {
             return Ok(None);
         };
 
@@ -185,14 +266,7 @@ impl BgpListener {
                 }
                 Ok(Some(info))
             }
-            Err(err) => {
-                warn!(
-                    peer = %peer_ip,
-                    error = %err,
-                    "failed to inspect TCP-AO accepted socket"
-                );
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 }
@@ -211,24 +285,15 @@ fn accepted_tcp_ao_info_is_valid(
         && info.pkt_ao_required == 0
 }
 
+#[cfg(test)]
 impl TcpAoListenerKey {
     fn covers(&self, addr: IpAddr) -> bool {
         match (self.peer, addr) {
             (IpAddr::V4(network), IpAddr::V4(addr)) if self.prefix_len <= 32 => {
-                let mask = if self.prefix_len == 0 {
-                    0
-                } else {
-                    u32::MAX << (32 - self.prefix_len)
-                };
-                u32::from(network) & mask == u32::from(addr) & mask
+                mask_v4(network.into(), self.prefix_len) == mask_v4(addr.into(), self.prefix_len)
             }
             (IpAddr::V6(network), IpAddr::V6(addr)) if self.prefix_len <= 128 => {
-                let mask = if self.prefix_len == 0 {
-                    0
-                } else {
-                    u128::MAX << (128 - self.prefix_len)
-                };
-                u128::from(network) & mask == u128::from(addr) & mask
+                mask_v6(network.into(), self.prefix_len) == mask_v6(addr.into(), self.prefix_len)
             }
             _ => false,
         }
@@ -350,6 +415,78 @@ mod tests {
         assert!(v6.covers("2001:db8:ffff::1".parse().unwrap()));
         assert!(!v6.covers("2001:db9::1".parse().unwrap()));
         assert!(!v6.covers("192.0.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn listener_key_index_matches_linear_lookup_for_exact_prefix_miss_and_families() {
+        let config = tcp_ao_config();
+        let keys = vec![
+            TcpAoListenerKey {
+                peer: "192.0.2.9".parse().unwrap(),
+                prefix_len: 32,
+                config: config.clone(),
+            },
+            TcpAoListenerKey {
+                peer: "198.51.100.0".parse().unwrap(),
+                prefix_len: 24,
+                config: config.clone(),
+            },
+            TcpAoListenerKey {
+                peer: "2001:db8:1::".parse().unwrap(),
+                prefix_len: 48,
+                config,
+            },
+        ];
+        let probes = [
+            "192.0.2.9",
+            "192.0.2.10",
+            "198.51.100.254",
+            "198.51.101.1",
+            "2001:db8:1::1234",
+            "2001:db8:2::1",
+        ];
+        let index = TcpAoListenerKeyIndex::new(keys.clone());
+
+        for probe in probes.map(|probe| probe.parse::<IpAddr>().unwrap()) {
+            let linear = keys.iter().position(|key| key.covers(probe));
+            let indexed = index
+                .find(probe)
+                .and_then(|found| index.keys.iter().position(|key| std::ptr::eq(key, found)));
+            assert_eq!(indexed, linear, "{probe}");
+        }
+    }
+
+    #[test]
+    fn listener_key_index_preserves_first_match_across_many_keys() {
+        let config = tcp_ao_config();
+        let mut keys = vec![TcpAoListenerKey {
+            peer: "10.0.0.0".parse().unwrap(),
+            prefix_len: 8,
+            config: config.clone(),
+        }];
+        keys.extend((0_u32..5_000).map(|offset| TcpAoListenerKey {
+            peer: IpAddr::V4(Ipv4Addr::from(
+                u32::from(Ipv4Addr::new(10, 0, 0, 0)) + offset,
+            )),
+            prefix_len: 32,
+            config: config.clone(),
+        }));
+        keys.push(TcpAoListenerKey {
+            peer: "2001:db8::".parse().unwrap(),
+            prefix_len: 32,
+            config,
+        });
+        let index = TcpAoListenerKeyIndex::new(keys.clone());
+
+        for probe in ["10.0.0.0", "10.0.19.135", "10.255.255.255", "2001:db8::5"] {
+            let probe = probe.parse::<IpAddr>().unwrap();
+            let linear = keys.iter().position(|key| key.covers(probe));
+            let indexed = index
+                .find(probe)
+                .and_then(|found| index.keys.iter().position(|key| std::ptr::eq(key, found)));
+            assert_eq!(indexed, linear, "{probe}");
+        }
+        assert!(index.find("203.0.113.1".parse().unwrap()).is_none());
     }
 
     #[test]
