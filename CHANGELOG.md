@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-07-11
+
 ### Added
 
 - **Perf-receipt harnesses committed in-repo (`bench/scale/`).** The two
@@ -594,6 +596,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   both corpora now report full term coverage. (LAN-342)
 
 ### Changed
+- **`rustbgpd-wire` 0.14.0 → 0.14.1** (non-breaking): adds
+  `AsPath::asns()` (a borrowing ASN iterator) and `encode_with_limit()`
+  on `NotificationMessage`/`RouteRefreshMessage` plus the free
+  `encode_message_with_limit()` for RFC 8654 extended-size encoding.
+  Purely additive — no existing item changed or removed, so `^0.14`
+  consumers upgrade without edits.
 - **Per-peer `bgp_rib_attr_intern_size{peer}` gauge replaced by
   `bgp_rib_attr_intern_global_size`** (LAN-336): the per-peer intern
   tables it measured no longer exist. The GR-restart/hot-reload/
