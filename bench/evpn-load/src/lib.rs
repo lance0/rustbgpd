@@ -47,6 +47,8 @@ pub enum PeerError {
     Notification { code: String, subcode: u8 },
     #[error("send channel closed")]
     SendChannelClosed,
+    #[error("hold time must be 0 (disabled) or at least 3 seconds, got {0}")]
+    InvalidHoldTime(u16),
 }
 
 /// Peer session configuration.
@@ -132,6 +134,7 @@ pub struct PeerHandle {
 /// KEEPALIVE fails.
 #[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
 pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
+    validate_hold_time(cfg.hold_time)?;
     let listener = TcpListener::bind(cfg.listen).await?;
     tracing::info!(listen = %cfg.listen, "evpn-load peer listening for BGP session");
     let (mut stream, remote) = listener.accept().await?;
@@ -164,35 +167,55 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
     let (mut reader, mut writer) = stream.into_split();
 
     let hold = cfg.hold_time;
-    let ka_interval = Duration::from_secs(u64::from(hold) / 3);
+    let ka_interval = keepalive_interval(hold);
 
     // Writer task: pulls from tx, writes to socket, injects periodic KEEPALIVE.
     tokio::spawn(async move {
-        let mut ka_tick = tokio::time::interval(ka_interval);
-        ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ka_tick.tick().await; // fire immediately, then cadence
-        loop {
-            tokio::select! {
-                Some(msg) = tx_rx.recv() => {
-                    match encode_message(&msg) {
-                        Ok(bytes) => {
-                            if writer.write_all(&bytes).await.is_err() {
+        if let Some(interval) = ka_interval {
+            let mut ka_tick = tokio::time::interval(interval);
+            ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ka_tick.tick().await; // fire immediately, then cadence
+            loop {
+                tokio::select! {
+                    msg = tx_rx.recv() => {
+                        // `None` means every sender dropped (run finished). Bind
+                        // the whole Option and exit on close: with the always-armed
+                        // keepalive tick, a `Some(msg) =` pattern arm would just be
+                        // disabled on close and `else` never reached, so the task
+                        // would send KEEPALIVEs forever after the run ends.
+                        let Some(msg) = msg else { return };
+                        match encode_message(&msg) {
+                            Ok(bytes) => {
+                                if writer.write_all(&bytes).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "encode failed in writer task");
                                 return;
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(?e, "encode failed in writer task");
-                            return;
+                    }
+                    _ = ka_tick.tick() => {
+                        if let Ok(bytes) = encode_message(&Message::Keepalive)
+                            && writer.write_all(&bytes).await.is_err() {
+                                return;
                         }
                     }
                 }
-                _ = ka_tick.tick() => {
-                    if let Ok(bytes) = encode_message(&Message::Keepalive)
-                        && writer.write_all(&bytes).await.is_err() {
-                            return;
+            }
+        } else {
+            while let Some(msg) = tx_rx.recv().await {
+                let bytes = match encode_message(&msg) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::error!(?e, "encode failed in writer task");
+                        return;
                     }
+                };
+                if writer.write_all(&bytes).await.is_err() {
+                    return;
                 }
-                else => return,
             }
         }
     });
@@ -277,6 +300,22 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
         rx: rx_out,
         established_at,
     })
+}
+
+fn keepalive_interval(hold_time: u16) -> Option<Duration> {
+    if hold_time == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(u64::from(hold_time) / 3))
+    }
+}
+
+fn validate_hold_time(hold_time: u16) -> Result<(), PeerError> {
+    if hold_time == 0 || hold_time >= 3 {
+        Ok(())
+    } else {
+        Err(PeerError::InvalidHoldTime(hold_time))
+    }
 }
 
 fn build_open(cfg: &PeerConfig) -> OpenMessage {
@@ -393,5 +432,26 @@ mod tests {
         let cfg = PeerConfig::evpn_only(addr, 65000, Ipv4Addr::new(10, 0, 0, 2));
         assert_eq!(cfg.hold_time, 90);
         assert_eq!(cfg.families, vec![(Afi::L2Vpn, Safi::Evpn)]);
+    }
+
+    #[test]
+    fn hold_zero_disables_periodic_keepalives() {
+        assert_eq!(keepalive_interval(0), None);
+        assert_eq!(keepalive_interval(3), Some(Duration::from_secs(1)));
+        assert_eq!(keepalive_interval(180), Some(Duration::from_mins(1)));
+    }
+
+    #[test]
+    fn rejects_hold_times_without_a_safe_keepalive_interval() {
+        assert!(validate_hold_time(0).is_ok());
+        assert!(matches!(
+            validate_hold_time(1),
+            Err(PeerError::InvalidHoldTime(1))
+        ));
+        assert!(matches!(
+            validate_hold_time(2),
+            Err(PeerError::InvalidHoldTime(2))
+        ));
+        assert!(validate_hold_time(3).is_ok());
     }
 }

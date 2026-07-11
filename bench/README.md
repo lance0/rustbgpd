@@ -17,6 +17,28 @@ RR benchmarking and the soak gates. It is not a BGP implementation and
 not an operator tool; see the crate docs in `evpn-load/src/lib.rs` for
 scope.
 
+The tester validates the workload before listening for BGP. `--batch` must
+be non-zero, and an enabled churn phase requires both a non-zero `--count`
+and `--churn-rate`. A zero count remains useful for a session-only peer, and
+`--rate 0` retains its historical meaning of unlimited initial injection.
+`--hold-time 0` disables both the hold timer and periodic keepalives; non-zero
+values must be at least 3 seconds so the hold/3 keepalive cadence is valid. The
+VNI must fit its 24-bit wire field, and MAC/IP workloads are limited to the
+16,777,216 unique synthetic MAC addresses. EAD-per-EVI workloads do not have
+that MAC-space limit. The largest initial advertisement and active-churn
+withdrawal chunks are encoded before bind and rejected if they exceed the
+standard 4096-byte BGP message limit.
+
+Both injection and churn pacing use a cumulative route-event budget rather
+than rounding to whole batches per second. Each chunk waits for its cumulative
+budget before it is sent, and the effective chunk size is capped by the rate so
+a low configured rate cannot escape as an initial batch burst. Churn counts
+each withdrawal and re-advertisement as one event, so `--churn-rate 1000` means
+1000 total route events per second regardless of `--batch` and partial chunks
+at the end of the route set. A pair scheduled after the churn-duration deadline
+is not emitted. The M32b/M33 route-type, count, rate, batch, and churn arguments
+are otherwise unchanged.
+
 ## Criterion compare
 
 `compare-criterion.sh` runs the same Criterion bench target at two git refs,

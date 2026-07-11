@@ -19,11 +19,12 @@ use clap::{Parser, ValueEnum};
 use rustbgpd_evpn_load::{PeerConfig, establish, synth_esi, synth_mac, v4_next_hop};
 use rustbgpd_wire::attribute::{AsPath, MpReachNlri, Origin, PathAttribute};
 use rustbgpd_wire::capability::{Afi, Safi};
+use rustbgpd_wire::constants::MAX_MESSAGE_LEN;
 use rustbgpd_wire::evpn::{
     EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEvi, EvpnMacIp, EvpnRoute, MacAddress,
     MplsLabel, RouteDistinguisher,
 };
-use rustbgpd_wire::message::Message;
+use rustbgpd_wire::message::{Message, encode_message};
 use rustbgpd_wire::update::UpdateMessage;
 
 /// Which RFC 7432 route type the tester originates.
@@ -129,6 +130,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    validate_workload(&args)?;
+    let rd = make_rd(args.router_id);
+    let route_params = RouteParams {
+        vni: args.vni,
+        ethernet_tag: args.ethernet_tag,
+        router_id: args.router_id,
+        rd,
+        route_type: args.route_type,
+    };
+    preflight_workload(&args, route_params)?;
     tracing::info!(
         listen = %args.listen,
         local_as = args.local_as,
@@ -174,15 +185,6 @@ async fn main() -> anyhow::Result<()> {
     // Build shared attribute set — identical across all routes except for
     // the NLRI payload itself. That keeps per-route CPU to a minimum on
     // the generator side so the RR's scale is what we measure.
-    let rd = make_rd(args.router_id);
-    let route_params = RouteParams {
-        vni: args.vni,
-        ethernet_tag: args.ethernet_tag,
-        router_id: args.router_id,
-        rd,
-        route_type: args.route_type,
-    };
-
     inject_phase(
         &handle.tx,
         PhaseParams {
@@ -222,6 +224,83 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::time::sleep(Duration::from_secs(args.linger_sec)).await;
+    Ok(())
+}
+
+fn validate_workload(args: &Args) -> anyhow::Result<()> {
+    anyhow::ensure!(args.batch > 0, "--batch must be greater than zero");
+    anyhow::ensure!(
+        args.vni <= 0x00ff_ffff,
+        "--vni must fit the 24-bit MPLS label field (maximum 16777215)"
+    );
+    if args.route_type == RouteType::MacIp {
+        anyhow::ensure!(
+            args.count <= 0x0100_0000,
+            "--count exceeds the 16777216 unique MAC addresses available to --route-type mac-ip"
+        );
+    }
+    anyhow::ensure!(
+        args.hold_time == 0 || args.hold_time >= 3,
+        "--hold-time must be 0 (disabled) or at least 3 seconds"
+    );
+    if args.churn_duration_sec > 0 {
+        anyhow::ensure!(
+            args.count > 0,
+            "--count must be greater than zero when churn is enabled"
+        );
+        anyhow::ensure!(
+            args.churn_rate > 0,
+            "--churn-rate must be greater than zero when churn is enabled"
+        );
+    }
+    Ok(())
+}
+
+fn preflight_workload(args: &Args, route_params: RouteParams) -> anyhow::Result<()> {
+    if args.count == 0 {
+        return Ok(());
+    }
+
+    let inject_chunk = effective_chunk_size(args.batch, args.rate, 1).min(args.count);
+    let churn_chunk = (args.churn_duration_sec > 0)
+        .then(|| effective_chunk_size(args.batch, args.churn_rate, 2).min(args.count));
+    let advertised_chunk = churn_chunk.map_or(inject_chunk, |chunk| chunk.max(inject_chunk));
+    validate_encoded_chunk(advertised_chunk, route_params, false, "advertisement")?;
+
+    if let Some(churn_chunk) = churn_chunk {
+        validate_encoded_chunk(churn_chunk, route_params, true, "churn withdrawal")?;
+    }
+    Ok(())
+}
+
+fn validate_encoded_chunk(
+    chunk_count: u32,
+    route_params: RouteParams,
+    withdraw: bool,
+    phase: &str,
+) -> anyhow::Result<()> {
+    let mut routes = Vec::new();
+    for index in 0..chunk_count {
+        routes.push(build_route(index, route_params));
+        let message = if withdraw {
+            build_update(vec![], routes.clone(), route_params)
+        } else {
+            build_update(routes.clone(), vec![], route_params)
+        };
+        let encoded_len = encode_message(&message)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "{phase} chunk configured for {chunk_count} routes exceeds the standard 4096-byte BGP message limit at route {}: {error}; reduce --batch or the phase rate",
+                    routes.len()
+                )
+            })?
+            .len();
+        anyhow::ensure!(
+            encoded_len <= usize::from(MAX_MESSAGE_LEN),
+            "{phase} chunk configured for {chunk_count} routes exceeds the standard 4096-byte BGP message limit at route {} ({encoded_len} bytes); reduce --batch or the phase rate",
+            routes.len()
+        );
+    }
     Ok(())
 }
 
@@ -267,6 +346,23 @@ fn build_ead_per_evi(
         ethernet_tag: EthernetTagId(tag),
         label: MplsLabel::new(vni),
     })
+}
+
+fn build_route(index: u32, route_params: RouteParams) -> EvpnRoute {
+    match route_params.route_type {
+        RouteType::MacIp => build_type2(
+            index,
+            route_params.rd,
+            route_params.ethernet_tag,
+            route_params.vni,
+        ),
+        RouteType::EadPerEvi => build_ead_per_evi(
+            index,
+            route_params.rd,
+            route_params.ethernet_tag,
+            route_params.vni,
+        ),
+    }
 }
 
 fn build_update(
@@ -328,56 +424,28 @@ async fn inject_phase(
     is_withdraw: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
-    let batch_per_sec = if phase_params.rate == 0 {
-        u32::MAX
-    } else {
-        phase_params.rate / phase_params.batch.max(1)
-    };
-    let mut sent = 0u32;
+    let mut sent = 0u64;
     let mut idx = 0u32;
-    let mut next_tick = Instant::now();
-    let tick = if batch_per_sec == 0 {
-        Duration::from_millis(1)
-    } else {
-        Duration::from_millis(1000 / u64::from(batch_per_sec.max(1)))
-    };
+    let chunk_size = effective_chunk_size(phase_params.batch, phase_params.rate, 1);
 
     while idx < phase_params.count {
-        let end = (idx + phase_params.batch).min(phase_params.count);
-        let chunk: Vec<EvpnRoute> = (idx..end)
-            .map(|i| match route_params.route_type {
-                RouteType::MacIp => build_type2(
-                    i,
-                    route_params.rd,
-                    route_params.ethernet_tag,
-                    route_params.vni,
-                ),
-                RouteType::EadPerEvi => build_ead_per_evi(
-                    i,
-                    route_params.rd,
-                    route_params.ethernet_tag,
-                    route_params.vni,
-                ),
-            })
-            .collect();
+        let end = chunk_end(idx, phase_params.count, chunk_size);
+        let chunk: Vec<EvpnRoute> = (idx..end).map(|i| build_route(i, route_params)).collect();
         let msg = if is_withdraw {
             build_update(vec![], chunk, route_params)
         } else {
             build_update(chunk, vec![], route_params)
         };
+
+        sent += u64::from(end - idx);
+        if phase_params.rate > 0 {
+            let send_at = start + pacing_offset(sent, phase_params.rate);
+            tokio::time::sleep_until(send_at.into()).await;
+        }
         if tx.send(msg).await.is_err() {
             anyhow::bail!("send channel closed before inject complete");
         }
-        sent += end - idx;
         idx = end;
-
-        if phase_params.rate > 0 {
-            next_tick += tick;
-            let now = Instant::now();
-            if next_tick > now {
-                tokio::time::sleep(next_tick - now).await;
-            }
-        }
     }
     tracing::info!(
         sent,
@@ -393,50 +461,240 @@ async fn run_churn(
     route_params: RouteParams,
     total: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + total;
-    // `rate` is route-events per second. Each tick of this loop emits
-    // 2 * batch events (one withdraw + one re-advertise of the same chunk),
-    // so the per-tick budget is `rate / (2 * batch)` ticks per second.
-    // Without the factor of 2 the effective churn rate is doubled — the
-    // RR sees 2x what the operator configured, which is fine for the
-    // M33 reflection-throughput shape but misleading in the report.
-    let ops_per_tick = u64::from(phase_params.batch.max(1)) * 2;
-    let ticks_per_sec = u64::from(phase_params.rate.max(1)) / ops_per_tick;
-    let tick = Duration::from_millis(1000 / ticks_per_sec.max(1));
+    anyhow::ensure!(phase_params.count > 0, "cannot churn a zero-route workload");
+    anyhow::ensure!(phase_params.batch > 0, "churn batch must be non-zero");
+    anyhow::ensure!(phase_params.rate > 0, "churn rate must be non-zero");
+    let start_time = Instant::now();
+    let deadline = start_time + total;
     let mut idx = 0u32;
+    let mut emitted_events = 0u64;
+    let chunk_size = effective_chunk_size(phase_params.batch, phase_params.rate, 2);
 
-    while Instant::now() < deadline {
+    loop {
         let start = idx % phase_params.count;
-        let end = (start + phase_params.batch).min(phase_params.count);
-        let chunk: Vec<EvpnRoute> = (start..end)
-            .map(|i| match route_params.route_type {
-                RouteType::MacIp => build_type2(
-                    i,
-                    route_params.rd,
-                    route_params.ethernet_tag,
-                    route_params.vni,
-                ),
-                RouteType::EadPerEvi => build_ead_per_evi(
-                    i,
-                    route_params.rd,
-                    route_params.ethernet_tag,
-                    route_params.vni,
-                ),
-            })
-            .collect();
+        let end = chunk_end(start, phase_params.count, chunk_size);
+        let chunk: Vec<EvpnRoute> = (start..end).map(|i| build_route(i, route_params)).collect();
+        let next_event_count = emitted_events + u64::from(end - start) * 2;
+        if !scheduled_within_deadline(next_event_count, phase_params.rate, total) {
+            break;
+        }
+        let send_at = start_time + pacing_offset(next_event_count, phase_params.rate);
+        debug_assert!(send_at <= deadline);
+        tokio::time::sleep_until(send_at.into()).await;
         // Withdraw + re-advertise as two UPDATEs back-to-back.
         let withdraw = build_update(vec![], chunk.clone(), route_params);
         let advertise = build_update(chunk, vec![], route_params);
         if tx.send(withdraw).await.is_err() || tx.send(advertise).await.is_err() {
             anyhow::bail!("send channel closed during churn");
         }
+        emitted_events = next_event_count;
         idx = end;
-        tokio::time::sleep(tick).await;
     }
     Ok(())
+}
+
+fn pacing_offset(events: u64, rate: u32) -> Duration {
+    if rate == 0 {
+        return Duration::ZERO;
+    }
+    let numerator = u128::from(events) * 1_000_000_000;
+    let denominator = u128::from(rate);
+    let nanos = numerator.div_ceil(denominator).min(u128::from(u64::MAX));
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+fn effective_chunk_size(batch: u32, rate: u32, events_per_route: u32) -> u32 {
+    if rate == 0 {
+        batch
+    } else {
+        batch.min((rate / events_per_route).max(1))
+    }
+}
+
+fn chunk_end(start: u32, count: u32, chunk_size: u32) -> u32 {
+    start.saturating_add(chunk_size).min(count)
+}
+
+fn scheduled_within_deadline(events: u64, rate: u32, total: Duration) -> bool {
+    pacing_offset(events, rate) <= total
 }
 
 #[allow(dead_code)]
 fn _unused_ipaddr() -> IpAddr {
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> Args {
+        Args {
+            listen: "127.0.0.1:1179".parse().unwrap(),
+            local_as: 65_000,
+            router_id: Ipv4Addr::new(192, 0, 2, 1),
+            count: 10_000,
+            rate: 1_000,
+            batch: 40,
+            vni: 100,
+            ethernet_tag: 0,
+            churn_duration_sec: 0,
+            churn_rate: 1_000,
+            linger_sec: 30,
+            hold_time: 180,
+            route_type: RouteType::MacIp,
+        }
+    }
+
+    fn route_params(route_type: RouteType) -> RouteParams {
+        let router_id = Ipv4Addr::new(192, 0, 2, 1);
+        RouteParams {
+            vni: 100,
+            ethernet_tag: 0,
+            router_id,
+            rd: make_rd(router_id),
+            route_type,
+        }
+    }
+
+    #[test]
+    fn validates_session_only_and_unlimited_injection_modes() {
+        let mut input = args();
+        input.count = 0;
+        input.rate = 0;
+        input.hold_time = 0;
+        assert!(validate_workload(&input).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_workload_shapes_before_session_setup() {
+        let mut input = args();
+        input.batch = 0;
+        assert_eq!(
+            validate_workload(&input).unwrap_err().to_string(),
+            "--batch must be greater than zero"
+        );
+
+        input = args();
+        input.hold_time = 2;
+        assert!(validate_workload(&input).is_err());
+
+        input = args();
+        input.count = 0;
+        input.churn_duration_sec = 1;
+        assert!(validate_workload(&input).is_err());
+
+        input = args();
+        input.churn_duration_sec = 1;
+        input.churn_rate = 0;
+        assert!(validate_workload(&input).is_err());
+    }
+
+    #[test]
+    fn validates_vni_boundaries() {
+        let mut input = args();
+        input.vni = 0;
+        assert!(validate_workload(&input).is_ok());
+        input.vni = 0x00ff_ffff;
+        assert!(validate_workload(&input).is_ok());
+        input.vni = 0x0100_0000;
+        assert!(validate_workload(&input).is_err());
+    }
+
+    #[test]
+    fn mac_ip_count_is_bounded_by_unique_mac_space() {
+        let mut input = args();
+        input.count = 0x0100_0000;
+        assert!(validate_workload(&input).is_ok());
+        input.count = 0x0100_0001;
+        assert!(validate_workload(&input).is_err());
+
+        input.route_type = RouteType::EadPerEvi;
+        input.count = u32::MAX;
+        assert!(validate_workload(&input).is_ok());
+    }
+
+    #[test]
+    fn encoded_chunk_preflight_accepts_defaults_and_rejects_oversize() {
+        let input = args();
+        assert!(preflight_workload(&input, route_params(RouteType::MacIp)).is_ok());
+        assert!(preflight_workload(&input, route_params(RouteType::EadPerEvi)).is_ok());
+
+        let mut oversized = args();
+        oversized.count = 1_000;
+        oversized.batch = 1_000;
+        oversized.rate = 0;
+        let error = preflight_workload(&oversized, route_params(RouteType::MacIp))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("advertisement chunk configured for 1000 routes"));
+        assert!(error.contains("4096-byte BGP message limit"));
+    }
+
+    #[test]
+    fn encoded_chunk_preflight_checks_active_churn_withdrawals() {
+        let mut input = args();
+        input.churn_duration_sec = 1;
+        assert!(preflight_workload(&input, route_params(RouteType::MacIp)).is_ok());
+
+        let error = validate_encoded_chunk(
+            1_000,
+            route_params(RouteType::MacIp),
+            true,
+            "churn withdrawal",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("churn withdrawal chunk configured for 1000 routes"));
+    }
+
+    #[test]
+    fn zero_count_skips_encoded_chunk_preflight() {
+        let mut input = args();
+        input.count = 0;
+        input.batch = u32::MAX;
+        assert!(preflight_workload(&input, route_params(RouteType::MacIp)).is_ok());
+    }
+
+    #[test]
+    fn chunk_end_handles_partial_and_u32_boundary_chunks() {
+        assert_eq!(chunk_end(80, 100, 40), 100);
+        assert_eq!(chunk_end(40, 100, 40), 80);
+        assert_eq!(chunk_end(u32::MAX - 5, u32::MAX, 40), u32::MAX);
+        assert_eq!(chunk_end(0, u32::MAX, u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn pacing_uses_the_cumulative_event_budget() {
+        assert_eq!(pacing_offset(0, 1_000), Duration::ZERO);
+        assert_eq!(pacing_offset(40, 1_000), Duration::from_millis(40));
+        assert_eq!(pacing_offset(80, 1_000), Duration::from_millis(80));
+        assert_eq!(pacing_offset(100, 25), Duration::from_secs(4));
+        assert_eq!(pacing_offset(1, 3), Duration::from_nanos(333_333_334));
+        assert_eq!(pacing_offset(2, 3), Duration::from_nanos(666_666_667));
+        assert_eq!(pacing_offset(3, 3), Duration::from_secs(1));
+        assert_eq!(pacing_offset(40, 100_000), Duration::from_micros(400));
+    }
+
+    #[test]
+    fn zero_rate_has_no_pacing_delay() {
+        assert_eq!(pacing_offset(u64::MAX, 0), Duration::ZERO);
+    }
+
+    #[test]
+    fn effective_chunks_prevent_low_rate_bursts() {
+        assert_eq!(effective_chunk_size(40, 10, 1), 10);
+        assert_eq!(effective_chunk_size(40, 1, 1), 1);
+        assert_eq!(effective_chunk_size(40, 1_000, 1), 40);
+        assert_eq!(effective_chunk_size(40, 10, 2), 5);
+        assert_eq!(effective_chunk_size(40, 1, 2), 1);
+        assert_eq!(effective_chunk_size(40, 0, 1), 40);
+    }
+
+    #[test]
+    fn churn_suppresses_pairs_beyond_the_total_deadline() {
+        assert!(scheduled_within_deadline(2, 2, Duration::from_secs(1)));
+        assert!(!scheduled_within_deadline(4, 2, Duration::from_secs(1)));
+        assert!(scheduled_within_deadline(1, 0, Duration::ZERO));
+    }
 }
