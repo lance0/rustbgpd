@@ -14,13 +14,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN load generation validates unsafe workloads and honors exact event
   budgets.** The development-only `evpn-tester` now rejects zero-sized batches,
   zero-route or zero-rate churn, and hold times of 1-2 seconds before opening a
-  session. Hold time zero correctly disables both periodic keepalives and the
-  receive timer instead of constructing a zero-duration Tokio interval. Initial
-  injection and withdraw/re-advertise churn now pace against cumulative route
-  events, avoiding integer batch-rate rounding and preserving configured rates
-  when a batch is larger than the per-second budget or a route-set chunk is
-  partial. Session-only `--count 0` and unlimited injection with `--rate 0`
-  remain supported. (LAN-84)
+  session. It also rejects out-of-range 24-bit VNIs, MAC/IP counts that would
+  reuse the synthetic MAC space, and initial/churn chunks that do not encode
+  within a standard 4096-byte BGP message. Hold time zero correctly disables
+  both periodic keepalives and the receive timer instead of constructing a
+  zero-duration Tokio interval. Initial injection and withdraw/re-advertise
+  churn now wait before sending against cumulative route events, avoiding both
+  an initial low-rate burst and integer batch-rate rounding. Configured rates
+  hold when a batch exceeds the per-second budget or a route-set chunk is
+  partial, and churn does not emit a pair scheduled beyond its duration.
+  Session-only `--count 0` and unlimited injection with `--rate 0` remain
+  supported. (LAN-84)
 
 - **Peer-supplied `LOCAL_PREF` is ignored on eBGP ingress.** Per RFC 4271,
   external peers can no longer influence import policy, explain output,
