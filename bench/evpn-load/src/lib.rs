@@ -177,7 +177,13 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
             ka_tick.tick().await; // fire immediately, then cadence
             loop {
                 tokio::select! {
-                    Some(msg) = tx_rx.recv() => {
+                    msg = tx_rx.recv() => {
+                        // `None` means every sender dropped (run finished). Bind
+                        // the whole Option and exit on close: with the always-armed
+                        // keepalive tick, a `Some(msg) =` pattern arm would just be
+                        // disabled on close and `else` never reached, so the task
+                        // would send KEEPALIVEs forever after the run ends.
+                        let Some(msg) = msg else { return };
                         match encode_message(&msg) {
                             Ok(bytes) => {
                                 if writer.write_all(&bytes).await.is_err() {
@@ -196,7 +202,6 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
                                 return;
                         }
                     }
-                    else => return,
                 }
             }
         } else {
