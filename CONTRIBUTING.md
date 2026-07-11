@@ -33,9 +33,9 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 
 ### Replaying update-group faults
 
-The PR-sized deterministic corpus compares the grouped manager path with the
-forced-per-peer oracle under bounded channel saturation, dirty policy regroup,
-stale session generations, and RT-Constrain membership churn:
+The PR-sized parameterized fixed-scenario corpus compares the grouped manager
+path with the forced-per-peer oracle under bounded channel saturation, dirty
+policy regroup, stale session generations, and RT-Constrain membership churn:
 
 ```bash
 cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
@@ -49,8 +49,9 @@ GitHub-hosted workflow:
 cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
 ```
 
-The defaults are seed start `0x35700000`, 24 seeds, and at most 64 operations
-per schedule. Replay one failing seed with:
+Seeds vary valid fixture identities; they do not randomize operation ordering
+or scenario length. The defaults are seed start `0x35700000`, 24 fixture sets,
+and at most 64 operations per schedule. Replay one failing fixture set with:
 
 ```bash
 RUSTBGPD_UPDATE_GROUP_SEED_START=0x35700007 \
@@ -59,10 +60,11 @@ RUSTBGPD_UPDATE_GROUP_MAX_OPS=64 \
 cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
 ```
 
-`RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must also
-be `1..=64`. Invalid values and overflowing seed ranges fail before a manager
-starts. The corpus uses virtual time and hard caps; it is not a replacement for
-a live or multi-day soak.
+`RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must be
+`18..=64`, where 18 is the longest fixed schedule and is test-ratcheted when a
+schedule changes. Invalid values and overflowing seed ranges fail before a
+manager starts. The corpus uses virtual time and hard caps; it is not a
+replacement for a live or multi-day soak.
 
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any

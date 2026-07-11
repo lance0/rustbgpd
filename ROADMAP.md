@@ -237,7 +237,8 @@ new AFI/SAFI and EVPN dataplane expansion.
   deterministic foundation is shipped: grouped and forced-per-peer output are
   compared under channel saturation/virtual retry, dirty policy swaps and
   repeated regrouping, stale session generations, and RTC membership churn,
-  with a fixed PR corpus plus a hard-capped weekly 24-seed extension. Remaining:
+  with fixed PR schedules plus a hard-capped weekly 24-fixture parameter sweep.
+  Seeds vary identities, not operation ordering or scenario length. Remaining:
   automated failure minimization, a broader fault matrix, restart/persistence,
   growth measurement, and long-running folded-state comparison (LAN-18) rather
   than relying only on bounded convergence receipts.
