@@ -395,6 +395,58 @@ async fn inbound_update_emits_bmp_route_monitoring() {
         other => panic!("expected BMP RouteMonitoring, got {other:?}"),
     }
 }
+
+/// RFC 4271 §5.1.5 requires a received eBGP `LOCAL_PREF` to be ignored,
+/// while RFC 7854 pre-policy BMP reports the unprocessed wire UPDATE. Pin
+/// both sides of that boundary together: the RIB route loses the attribute,
+/// but BMP retains the byte-exact PDU that carried it.
+#[tokio::test]
+async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
+    let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(500),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
+    session.read_buf.buf.extend_from_slice(&encoded);
+    session.process_read_buffer().await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(
+        announced[0].local_pref_attr(),
+        None,
+        "peer-supplied eBGP LOCAL_PREF must not reach the RIB"
+    );
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::RouteMonitoring { update_pdu, .. } => {
+            assert_eq!(
+                update_pdu.as_ref(),
+                encoded.as_ref(),
+                "pre-policy BMP must preserve the original wire LOCAL_PREF"
+            );
+        }
+        other => panic!("expected BMP RouteMonitoring, got {other:?}"),
+    }
+}
 /// Inbound EVPN UPDATE → BMP `RouteMonitoring` with byte-equal `update_pdu`.
 ///
 /// The BMP emit site at `crates/transport/src/session/io.rs` has no AFI/SAFI
@@ -3585,6 +3637,178 @@ async fn no_modification_update_shares_attribute_arc_across_nlri() {
         "two NLRI from one no-modification UPDATE must share one attribute Arc"
     );
 }
+
+/// `LOCAL_PREF` remains meaningful on iBGP. The eBGP normalization must be
+/// session-type-specific rather than removing the attribute unconditionally.
+#[tokio::test]
+async fn ibgp_local_pref_is_preserved() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.negotiated = Some(negotiated_session(65001, false));
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(500),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced[0].local_pref_attr(), Some(500));
+}
+
+/// Ignoring a wire-supplied eBGP value happens before import policy and
+/// explain caching, but a policy-set value is local intent and must survive.
+#[tokio::test]
+async fn ebgp_import_policy_sees_default_local_pref_and_can_set_it() {
+    use super::import_decision_cache::{ImportDecisionKey, LookupResult};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![
+            PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: Some(500),
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications::default(),
+            },
+            PolicyStatement {
+                prefix: Some(Prefix::V4(prefix)),
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications {
+                    set_local_pref: Some(200),
+                    ..RouteModifications::default()
+                },
+            },
+        ],
+        default_action: PolicyAction::Deny,
+    }])));
+    session.negotiated = Some(negotiated_session(65002, false));
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(500),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected policy-set route; peer LOCAL_PREF must not match the deny term");
+    };
+    assert_eq!(announced[0].local_pref_attr(), Some(200));
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&key, session.import_policy_generation)
+    {
+        LookupResult::Hit(decision) => {
+            assert_eq!(decision.policy_context.local_pref, None);
+            assert_eq!(decision.modifications.set_local_pref, Some(200));
+        }
+        other => panic!("expected cached permit decision, got {other:?}"),
+    }
+}
+
+/// The normalized attribute vector is shared by body and MP families. Exercise
+/// the MP-unicast branch explicitly so eBGP stripping cannot regress into an
+/// IPv4-body-only fix.
+#[tokio::test]
+async fn ebgp_local_pref_is_ignored_for_ipv6_mp_reach() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::LocalPref(500),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(prefix),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected IPv6 RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V6(prefix));
+    assert_eq!(announced[0].local_pref_attr(), None);
+}
 #[tokio::test]
 async fn modified_policy_update_owns_distinct_arc_per_nlri() {
     // Two IPv4 NLRI in one UPDATE, import policy adds a community → both
@@ -5575,7 +5799,8 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     );
     session.process_update(update).await;
     // Permit: attributed to statement 1 of "edge-import", with the
-    // prefix condition and the local_pref transition rendered.
+    // prefix condition and the policy-local transition rendered from the
+    // implicit default 100. The wire LOCAL_PREF 150 is ignored on eBGP.
     let reply = explain_for(&mut session, permitted_prefix).await;
     assert_eq!(reply.matches.len(), 1);
     let steps = &reply.matches[0].statements;
@@ -5597,7 +5822,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
             "next_hop 10.0.0.2",
         ]
     );
-    assert_eq!(steps[0].modifications, vec!["local_pref 150 -> 200"]);
+    assert_eq!(steps[0].modifications, vec!["local_pref 100 -> 200"]);
     // Deny: attributed to statement 0 — the reject fast-path is
     // explainable even though the route never reached RIB.
     let reply = explain_for(&mut session, denied_prefix).await;

@@ -1106,16 +1106,26 @@ impl PeerSession {
             self.drive_fsm(Event::UpdateReceived).await;
             return;
         }
-        // Filter attributes: strip MP_REACH/MP_UNREACH before storing on routes
-        // (they are per-UPDATE framing, not per-route attributes)
+        // Normalize the attributes that policy and the RIB are allowed to
+        // observe. MP_REACH/MP_UNREACH are per-UPDATE framing, not per-route
+        // attributes. RFC 4271 §5.1.5 also requires a LOCAL_PREF received
+        // from an external peer to be ignored (rustbgpd has no confederation
+        // exception), so strip it before policy context, explain caching, and
+        // every family-specific stored-route path. Import policy may still add
+        // a locally configured LOCAL_PREF via `materialize_attrs` below.
+        //
+        // The pre-policy BMP tap deliberately retains the original wire
+        // attribute: `process_read_buffer` emits its byte-exact raw UPDATE
+        // before calling `process_update`, matching RFC 7854's unprocessed
+        // Adj-RIB-In view.
         let route_attrs: Vec<PathAttribute> = parsed
             .attributes
             .iter()
             .filter(|a| {
-                !matches!(
+                !(matches!(
                     a,
                     PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
-                )
+                ) || is_ebgp && matches!(a, PathAttribute::LocalPref(_)))
             })
             .cloned()
             .collect();
