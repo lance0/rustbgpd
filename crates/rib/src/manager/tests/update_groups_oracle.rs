@@ -69,7 +69,7 @@ pub(super) fn pfx(a: u8, b: u8) -> Ipv4Prefix {
 /// A `VPNv4` NLRI fixture: RD 65000:n, inner prefix 10.210.n.0/24, one
 /// BOS label. The label is route *data* (not key), so a relabel of the
 /// same `n` is the ADR-0077 same-peer-relabel re-advertise case.
-fn vpn_nlri(n: u8, label: u32) -> VpnNlri {
+pub(super) fn vpn_nlri(n: u8, label: u32) -> VpnNlri {
     VpnNlri {
         labels: vec![MplsLabelEntry::try_new(label, 0, true).unwrap()],
         route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, n]),
@@ -86,7 +86,7 @@ fn vpn_key(n: u8, label: u32) -> VpnRibRouteKey {
 
 /// An iBGP-learned VPN route fixture; `LOCAL_PREF` ranks it in the VPN
 /// selection chain, extended communities (RTs) ride along when given.
-fn vpn_route(
+pub(super) fn vpn_route(
     nlri: VpnNlri,
     src: Ipv4Addr,
     local_pref: u32,
@@ -349,10 +349,10 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
 
 /// VPN counterpart of [`fold`]: final advertised VPN state per peer,
 /// keyed by RD+prefix identity (`path_id` 0 only in these scenarios).
-type FoldedVpnState =
+pub(super) type FoldedVpnState =
     BTreeMap<IpAddr, HashMap<String, (String, IpAddr, IpAddr, Vec<PathAttribute>)>>;
 
-fn fold_vpn(streams: &Streams) -> FoldedVpnState {
+pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
     let mut state = FoldedVpnState::new();
     for (peer, msgs) in streams {
         let table = state.entry(*peer).or_default();
@@ -536,10 +536,21 @@ impl Oracle {
         announce: Vec<VpnRibRoute>,
         withdraw: Vec<VpnRibRouteKey>,
     ) {
+        self.vpn_routes_generation(from, SESSION, announce, withdraw)
+            .await;
+    }
+
+    pub(super) async fn vpn_routes_generation(
+        &mut self,
+        from: Ipv4Addr,
+        session_id: u64,
+        announce: Vec<VpnRibRoute>,
+        withdraw: Vec<VpnRibRouteKey>,
+    ) {
         self.tx
             .send(RibUpdate::VpnRoutesReceived {
                 peer: IpAddr::V4(from),
-                session_id: SESSION,
+                session_id,
                 announced: announce,
                 withdrawn: withdraw,
             })
