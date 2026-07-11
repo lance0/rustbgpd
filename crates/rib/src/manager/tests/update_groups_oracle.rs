@@ -766,6 +766,13 @@ impl Oracle {
         update
     }
 
+    /// Drain every currently available message without waiting for a send.
+    /// Fault schedules use this after a virtual-time retry because a correct
+    /// no-op resync is also allowed to emit nothing.
+    pub(super) fn drain_available(&mut self) {
+        self.drain_collected();
+    }
+
     /// Collect every message every peer has received so far, including
     /// those drained mid-scenario by `drain_one` and the invariant
     /// checker — the returned streams are the complete emission history.

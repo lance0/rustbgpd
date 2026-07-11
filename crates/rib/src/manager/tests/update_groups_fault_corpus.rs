@@ -77,6 +77,7 @@ enum Op {
         generation: u64,
     },
     DrainOne(Ipv4Addr),
+    DrainAvailable,
     AdvanceRetry,
     Quiesce,
 }
@@ -202,6 +203,7 @@ async fn apply(oracle: &mut Oracle, op: &Op) {
         Op::DrainOne(peer) => {
             let _ = oracle.drain_one(*peer).await;
         }
+        Op::DrainAvailable => oracle.drain_available(),
         Op::AdvanceRetry => {
             tokio::time::advance(Duration::from_secs(2)).await;
             oracle.quiesce().await;
@@ -334,7 +336,7 @@ fn saturation_schedule(seed: u64) -> Schedule {
             },
             Op::DrainOne(RIGHT),
             Op::AdvanceRetry,
-            Op::DrainOne(RIGHT),
+            Op::DrainAvailable,
         ],
     }
 }
@@ -392,7 +394,7 @@ fn dirty_policy_schedule(seed: u64) -> Schedule {
             },
             Op::DrainOne(RIGHT),
             Op::AdvanceRetry,
-            Op::DrainOne(RIGHT),
+            Op::DrainAvailable,
         ],
     }
 }
