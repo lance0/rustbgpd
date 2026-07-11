@@ -1797,6 +1797,7 @@ fn halt_partial(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4647,6 +4648,80 @@ peer_group = "dynamic"
             1
         );
         assert_eq!(candidate.dynamic_neighbors, current.dynamic_neighbors);
+    }
+
+    #[test]
+    fn dynamic_tcp_ao_pin_count_reports_only_affected_ranges() {
+        let config = |ranges: &[(&str, &str)]| {
+            let ranges = ranges.iter().fold(String::new(), |mut output, (prefix, key)| {
+                write!(
+                    output,
+                    "[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"dynamic\"\ntcp_ao = {{ key = \"{key}\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }}\n"
+                )
+                .expect("writing to a String cannot fail");
+                output
+            });
+            format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n[peer_groups.dynamic]\nhold_time = 90\n{ranges}"
+            )
+        };
+        let load = |ranges: &[(&str, &str)]| {
+            config::Config::load_toml_with_diagnostics(&config(ranges), "test").unwrap()
+        };
+        let current = load(&[
+            ("192.0.2.0/24", "one"),
+            ("198.51.100.0/24", "two"),
+            ("203.0.113.0/24", "three"),
+        ]);
+
+        for (label, ranges, expected) in [
+            (
+                "reorder",
+                vec![
+                    ("203.0.113.0/24", "three"),
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                ],
+                0,
+            ),
+            (
+                "rotate subset",
+                vec![
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "changed"),
+                    ("203.0.113.0/24", "three"),
+                ],
+                1,
+            ),
+            (
+                "remove",
+                vec![("192.0.2.0/24", "one"), ("198.51.100.0/24", "two")],
+                1,
+            ),
+            (
+                "add",
+                vec![
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                    ("203.0.113.0/24", "three"),
+                    ("10.0.0.0/24", "four"),
+                ],
+                1,
+            ),
+        ] {
+            let mut candidate = load(&ranges);
+            assert_eq!(
+                config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+                expected,
+                "{label}"
+            );
+            if expected > 0 {
+                assert_eq!(
+                    candidate.dynamic_neighbors, current.dynamic_neighbors,
+                    "{label}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

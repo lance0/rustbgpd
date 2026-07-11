@@ -4308,15 +4308,42 @@ fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool 
 }
 
 fn dynamic_neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
-    let protected = |config: &Config| {
-        config
-            .dynamic_neighbors
-            .iter()
-            .filter(|range| range.tcp_ao.is_some())
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    protected(old) != protected(new)
+    !protected_dynamic_ranges_equal(old, new)
+}
+
+fn protected_dynamic_ranges_equal(old: &Config, new: &Config) -> bool {
+    let mut old_protected: Vec<_> = old
+        .dynamic_neighbors
+        .iter()
+        .filter(|range| range.tcp_ao.is_some())
+        .collect();
+    let mut new_protected: Vec<_> = new
+        .dynamic_neighbors
+        .iter()
+        .filter(|range| range.tcp_ao.is_some())
+        .collect();
+    old_protected.sort_unstable_by(|left, right| protected_dynamic_range_cmp(left, right));
+    new_protected.sort_unstable_by(|left, right| protected_dynamic_range_cmp(left, right));
+    old_protected == new_protected
+}
+
+fn protected_dynamic_range_cmp(
+    left: &DynamicNeighborConfig,
+    right: &DynamicNeighborConfig,
+) -> std::cmp::Ordering {
+    let left_ao = left.tcp_ao.as_ref().expect("protected range");
+    let right_ao = right.tcp_ao.as_ref().expect("protected range");
+    left.prefix
+        .cmp(&right.prefix)
+        .then_with(|| left.peer_group.cmp(&right.peer_group))
+        .then_with(|| left.remote_asn.cmp(&right.remote_asn))
+        .then_with(|| left.description.cmp(&right.description))
+        .then_with(|| left_ao.key.cmp(&right_ao.key))
+        .then_with(|| left_ao.send_id.cmp(&right_ao.send_id))
+        .then_with(|| left_ao.recv_id.cmp(&right_ao.recv_id))
+        .then_with(|| left_ao.algorithm.cmp(&right_ao.algorithm))
+        .then_with(|| left_ao.preferred.cmp(&right_ao.preferred))
+        .then_with(|| left_ao.deprecated.cmp(&right_ao.deprecated))
 }
 
 /// Pin dynamic TCP-AO listener state to the startup snapshot while preserving
@@ -4334,9 +4361,29 @@ pub(crate) fn pin_dynamic_tcp_ao_startup_only(new_config: &mut Config, current: 
         .filter(|range| range.tcp_ao.is_some())
         .cloned()
         .collect();
-    if current_protected == new_protected {
+    if protected_dynamic_ranges_equal(current, new_config) {
         return 0;
     }
+
+    let mut current_by_prefix = BTreeMap::new();
+    for range in &current_protected {
+        if let Some(prefix) = effective_prefix_str(&range.prefix) {
+            current_by_prefix.insert(prefix, range);
+        }
+    }
+    let mut new_by_prefix = BTreeMap::new();
+    for range in &new_protected {
+        if let Some(prefix) = effective_prefix_str(&range.prefix) {
+            new_by_prefix.insert(prefix, range);
+        }
+    }
+    let affected_ranges = current_by_prefix
+        .keys()
+        .chain(new_by_prefix.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|prefix| current_by_prefix.get(prefix) != new_by_prefix.get(prefix))
+        .count();
 
     let current_prefixes: Vec<_> = current_protected
         .iter()
@@ -4381,7 +4428,7 @@ pub(crate) fn pin_dynamic_tcp_ao_startup_only(new_config: &mut Config, current: 
             );
         }
     }
-    new_protected.len().max(current_prefixes.len())
+    affected_ranges
 }
 
 fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {

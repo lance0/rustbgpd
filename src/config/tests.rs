@@ -9363,6 +9363,26 @@ fn transaction_v1_allows_disjoint_unprotected_dynamic_edit_beside_tcp_ao_range()
 }
 
 #[test]
+fn protected_dynamic_range_reorder_is_not_a_tcp_ao_restart_change() {
+    let first = dynamic_tcp_ao_transaction_config(
+        Some(("192.0.2.0/24", "first-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"198.51.100.0/24\"\npeer_group = \"dynamic\"\ntcp_ao = { key = \"second-secret\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
+    );
+    let second = dynamic_tcp_ao_transaction_config(
+        Some(("198.51.100.0/24", "second-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"dynamic\"\ntcp_ao = { key = \"first-secret\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
+    );
+
+    let diff = diff_config(&first, &second);
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(class.supported_sections, vec!["[[dynamic_neighbors]]"]);
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
 fn mixed_dynamic_tcp_ao_and_disjoint_unprotected_diff_reports_both_portions() {
     let old = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "old-secret")), "");
     let new = dynamic_tcp_ao_transaction_config(
