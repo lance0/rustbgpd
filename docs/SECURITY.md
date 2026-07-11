@@ -180,8 +180,8 @@ These protect BGP transport sessions, not the gRPC management surface.
 
 TCP-AO (RFC 5925) is the intended successor to TCP MD5. rustbgpd now has
 an internal Linux socket primitive and capability probe for TCP-AO
-(ADR-0062), plus static-neighbor `tcp_ao` TOML parsing/validation and startup
-runtime installation. Outbound active-open sockets install the key before
+(ADR-0062), plus static-neighbor and direct dynamic-range `tcp_ao` TOML
+parsing/validation and startup runtime installation. Outbound active-open sockets install the key before
 `connect()`, and the passive BGP listener installs configured peer keys before
 `listen()`. Listener key-install failures abort startup rather than running a
 partially protected listener; active-open key-install failures fail the
@@ -194,8 +194,13 @@ the route and does not re-establish within the fail-closed window. The
 hosted `kernel-dataplane` workflow includes M43, and the current hosted
 runner advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
 warning-only skip guard for future runner kernels without TCP-AO support.
-Dynamic-neighbor TCP-AO, runtime key rotation, multi-key rollover, and public
-API/CLI/metrics exposure of accepted-socket inspection remain deferred.
+Dynamic prefix MKTs are installed before `listen()` without setting the
+listener-wide `ao_required` bit. Protected accepted sockets are discarded unless
+`TCP_AO_INFO` confirms the expected current/RNext IDs and clean authentication
+counters. Protected
+ranges must be disjoint from all other ranges and static peers; reload and
+runtime CRUD cannot mutate them. Runtime key rotation, multi-key rollover, and
+public API/CLI/metrics exposure of accepted-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -308,8 +313,8 @@ the roadmap:
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics
   to detect or constrain accepted-client abuse in v1.
-- TCP-AO currently supports static-neighbor startup keys only; dynamic
-  neighbors, live key rotation, and multi-key rollover remain follow-up work.
+- TCP-AO supports static-neighbor and direct dynamic-prefix startup keys; live
+  key rotation and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
   Linux with `CONFIG_TCP_AO=y`.
 - Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)

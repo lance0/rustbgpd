@@ -562,7 +562,8 @@ remote_asn = 65101
 families = ["ipv4_unicast"]
 ```
 
-TCP-AO (RFC 5925) `tcp_ao` is accepted for static `[[neighbors]]` only. On
+TCP-AO (RFC 5925) `tcp_ao` is accepted directly on static `[[neighbors]]` and
+on `[[dynamic_neighbors]]` ranges. On
 Linux, rustbgpd installs the configured key on outbound active-open sockets
 before `connect()` and on the passive BGP listener before `listen()` when the
 peer address family matches the configured listener socket. If a configured
@@ -590,8 +591,8 @@ restart. Runtime deletion of a configured TCP-AO neighbor is also rejected
 until listener MKT deletion / key rotation support lands.
 
 `tcp_ao` is mutually exclusive with `md5_password`, including an inherited
-peer-group MD5 password. It is not available in `[peer_groups.*]` because
-dynamic-neighbor TCP-AO needs a separate wildcard-MKT design. Example:
+peer-group MD5 password. It is not available in `[peer_groups.*]`; dynamic
+ranges configure their prefix MKT directly. Example:
 
 ```toml
 [[neighbors]]
@@ -792,8 +793,8 @@ Peer-group fields mirror inheritable neighbor settings: timers, families,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, private-AS handling, MD5/GTSM,
 `local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
-chains. TCP-AO is intentionally not inherited through peer groups because
-dynamic-neighbor TCP-AO needs a separate wildcard-MKT design.
+chains. TCP-AO is intentionally not inherited through peer groups; static
+neighbors and dynamic ranges configure their startup key directly.
 
 ```toml
 # IPv4 peer with dual-stack
@@ -848,6 +849,7 @@ Dynamic peers:
 | `peer_group`  | string | yes      | --      | Peer group whose settings dynamic peers inherit |
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
+| `tcp_ao`      | table  | no       | --      | Direct TCP-AO prefix MKT; Linux startup-only and restart-required |
 
 When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the
@@ -875,6 +877,7 @@ prefix = "10.0.0.0/24"
 peer_group = "ix-members"
 remote_asn = 0
 description = "IXP auto-accept"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
 
 [[dynamic_neighbors]]
 prefix = "2001:db8::/32"
@@ -889,6 +892,8 @@ Validation rules:
 - two ranges covering the **identical** effective prefix (same masked network
   and length) are rejected; overlapping ranges of *different* lengths are
   allowed and resolve by longest-prefix-match at accept time
+- a TCP-AO-protected range must be disjoint from every other dynamic range and
+  static neighbor, and its peer group must not configure MD5
 
 ### Runtime management (gRPC / `rbgp`)
 
@@ -917,6 +922,8 @@ rbgp dynamic-neighbor delete 10.0.0.0/24
   or a duplicate effective prefix. Delete matches by effective prefix, so a
   host-bit variant of the same network (e.g. `10.0.0.7/24`) removes the
   `10.0.0.0/24` range.
+- Protected ranges cannot be added or deleted through runtime CRUD. Adds that
+  overlap a protected range are also rejected; edit TOML and restart instead.
 
 Operational note:
 

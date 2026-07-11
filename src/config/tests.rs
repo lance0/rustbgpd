@@ -5409,6 +5409,104 @@ description = "IXP auto-accept"
     assert_eq!(config.dynamic_neighbors[0].remote_asn, 0);
 }
 
+fn dynamic_tcp_ao_toml(ranges_and_neighbors: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+{ranges_and_neighbors}
+"#
+    )
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_parses_directly_and_redacts_debug() {
+    let config = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "dynamic-secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)" }
+"#,
+    ))
+    .unwrap();
+    let tcp_ao = config.dynamic_neighbors[0].tcp_ao.as_ref().unwrap();
+    assert_eq!(tcp_ao.send_id, 7);
+    assert_eq!(tcp_ao.recv_id, 9);
+    let rendered = format!("{tcp_ao:?}");
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains("dynamic-secret"));
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_overlapping_dynamic_auth_boundaries() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.128/25"
+peer_group = "ix-members"
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("protected ranges must be disjoint")
+    );
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_static_peer_inside_prefix() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "2001:db8::/32"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "2001:db8::42"
+remote_asn = 65002
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("static and dynamic authentication boundaries must be disjoint")
+    );
+}
+
+#[test]
+fn dynamic_neighbor_tcp_ao_rejects_peer_group_md5_inheritance() {
+    let mut source = dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+"#,
+    );
+    source = source.replace(
+        "hold_time = 90",
+        "hold_time = 90\nmd5_password = \"legacy\"",
+    );
+    let err = parse(&source).unwrap_err();
+    assert!(err.to_string().contains("never inherited"));
+}
+
 #[test]
 fn dynamic_neighbor_invalid_prefix_rejected() {
     let toml = r#"
@@ -9198,6 +9296,137 @@ metric = 200
         class
             .restart_required_sections
             .contains(&"[[fib_tables]] startup-from-empty".to_string())
+    );
+}
+
+fn dynamic_tcp_ao_transaction_config(protected: Option<(&str, &str)>, extra: &str) -> Config {
+    let protected = protected.map_or_else(String::new, |(prefix, key)| {
+        format!(
+            "[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"dynamic\"\ntcp_ao = {{ key = \"{key}\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }}\n"
+        )
+    });
+    parse(&format!(
+        "{}\n[peer_groups.dynamic]\nhold_time = 90\n{protected}{extra}",
+        valid_toml()
+    ))
+    .unwrap()
+}
+
+#[test]
+fn transaction_v1_rejects_dynamic_tcp_ao_add_remove_rotate_and_move() {
+    let absent = dynamic_tcp_ao_transaction_config(None, "");
+    let original = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "old-secret")), "");
+    let rotated = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "new-secret")), "");
+    let moved = dynamic_tcp_ao_transaction_config(Some(("192.0.3.0/24", "old-secret")), "");
+
+    for (label, old, new) in [
+        ("add", &absent, &original),
+        ("remove", &original, &absent),
+        ("rotate", &original, &rotated),
+        ("move", &original, &moved),
+    ] {
+        let diff = diff_config(old, new);
+        let class = classify_config_transaction_v1(&diff);
+        assert!(diff.dynamic_neighbor_tcp_ao_changed, "{label}");
+        assert!(!diff.has_reload_applied_changes(), "{label}");
+        assert!(!class.is_committable(), "{label}");
+        assert!(class.supported_sections.is_empty(), "{label}: {class:?}");
+        assert_eq!(
+            class.restart_required_sections,
+            vec!["[[dynamic_neighbors]].tcp_ao"],
+            "{label}"
+        );
+        let json = config_diff_json_value(&diff);
+        assert_eq!(json["reload_applied"]["dynamic_neighbors_changed"], false);
+        assert_eq!(
+            json["restart_required"]["dynamic_neighbor_tcp_ao_changed"],
+            true
+        );
+    }
+}
+
+#[test]
+fn transaction_v1_allows_disjoint_unprotected_dynamic_edit_beside_tcp_ao_range() {
+    let old = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "secret")), "");
+    let new = dynamic_tcp_ao_transaction_config(
+        Some(("192.0.2.0/24", "secret")),
+        "[[dynamic_neighbors]]\nprefix = \"198.51.100.0/24\"\npeer_group = \"dynamic\"\n",
+    );
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.has_reload_applied_changes());
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(class.supported_sections, vec!["[[dynamic_neighbors]]"]);
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn protected_dynamic_range_reorder_is_not_a_tcp_ao_restart_change() {
+    let first = dynamic_tcp_ao_transaction_config(
+        Some(("192.0.2.0/24", "first-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"198.51.100.0/24\"\npeer_group = \"dynamic\"\ntcp_ao = { key = \"second-secret\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
+    );
+    let second = dynamic_tcp_ao_transaction_config(
+        Some(("198.51.100.0/24", "second-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"dynamic\"\ntcp_ao = { key = \"first-secret\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
+    );
+
+    let diff = diff_config(&first, &second);
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(class.supported_sections, vec!["[[dynamic_neighbors]]"]);
+    assert!(class.restart_required_sections.is_empty());
+}
+
+#[test]
+fn protected_dynamic_range_effective_prefix_identity_avoids_restart_change() {
+    let canonical = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "secret")), "");
+    let host_bits = dynamic_tcp_ao_transaction_config(Some(("192.0.2.1/24", "secret")), "");
+
+    let diff = diff_config(&canonical, &host_bits);
+    assert!(!diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+}
+
+#[test]
+fn mixed_dynamic_tcp_ao_and_disjoint_unprotected_diff_reports_both_portions() {
+    let old = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "old-secret")), "");
+    let new = dynamic_tcp_ao_transaction_config(
+        Some(("192.0.2.0/24", "new-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"198.51.100.0/24\"\npeer_group = \"dynamic\"\n",
+    );
+    let diff = diff_config(&old, &new);
+    let json = config_diff_json_value(&diff);
+    let text = format_config_diff(&diff);
+
+    assert!(diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert_eq!(
+        json["restart_required"]["dynamic_neighbor_tcp_ao_changed"],
+        true
+    );
+    assert_eq!(json["reload_applied"]["dynamic_neighbors_changed"], true);
+    assert!(
+        text.contains("[[dynamic_neighbors]] matcher rebuilt"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[[dynamic_neighbors]].tcp_ao changed"),
+        "{text}"
+    );
+
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable());
+    assert!(class.supported_sections.is_empty(), "{class:?}");
+    assert_eq!(
+        class.restart_required_sections,
+        vec!["[[dynamic_neighbors]].tcp_ao"]
     );
 }
 
@@ -13052,6 +13281,14 @@ log_format = "json"
 [peer_groups.md5-group]
 md5_password = "group-hunter2-seed"
 
+[peer_groups.dynamic]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "dynamic"
+tcp_ao = { key = "dynamic-hunter2-seed", send_id = 3, recv_id = 4, algorithm = "hmac(sha256)" }
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
@@ -13142,6 +13379,10 @@ fn redacted_placeholder_fails_validation_loudly() {
         (
             "peer group md5",
             "[peer_groups.g]\nmd5_password = \"<redacted>\"\n",
+        ),
+        (
+            "dynamic tcp_ao key",
+            "[peer_groups.g]\nhold_time = 90\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"g\"\ntcp_ao = { key = \"<redacted>\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
         ),
     ] {
         let toml_str = format!(

@@ -667,6 +667,16 @@ pub(crate) async fn reload_config(
         );
     }
 
+    let pinned_dynamic_tcp_ao = config::pin_dynamic_tcp_ao_startup_only(&mut new_config, current);
+    if pinned_dynamic_tcp_ao > 0 {
+        error!(
+            ranges = pinned_dynamic_tcp_ao,
+            "[[dynamic_neighbors]].tcp_ao differs from the live listener prefix MKTs: \
+             protected ranges and overlapping replacements remain pinned to the startup \
+             snapshot. Restart rustbgpd to add, remove, move, or rotate a dynamic TCP-AO key."
+        );
+    }
+
     if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
         error!(
             "BFD config differs from the live session set: the ADR-0067 BFD actor \
@@ -1787,6 +1797,7 @@ fn halt_partial(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4550,6 +4561,178 @@ hold_time = 90
             "new-secret",
             "desired TOML must preserve the operator's edit for restart"
         );
+    }
+
+    #[test]
+    fn reload_pins_dynamic_tcp_ao_range_and_allows_disjoint_unprotected_edit() {
+        let base = |key: &str, extra: &str| {
+            format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "dynamic"
+tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
+{extra}
+"#
+            )
+        };
+        let current = config::Config::load_toml_with_diagnostics(&base("old", ""), "old").unwrap();
+        let mut candidate = config::Config::load_toml_with_diagnostics(
+            &base(
+                "new",
+                "[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"dynamic\"",
+            ),
+            "new",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+            1
+        );
+        assert_eq!(candidate.dynamic_neighbors.len(), 2);
+        let protected = candidate
+            .dynamic_neighbors
+            .iter()
+            .find(|range| range.tcp_ao.is_some())
+            .unwrap();
+        assert_eq!(protected.tcp_ao.as_ref().unwrap().key, "old");
+        assert!(
+            candidate
+                .dynamic_neighbors
+                .iter()
+                .any(|range| range.prefix == "192.0.2.0/24")
+        );
+    }
+
+    #[test]
+    fn reload_pins_dynamic_tcp_ao_range_without_reordering_unchanged_ranges() {
+        let config = |key: &str| {
+            format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "dynamic"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "dynamic"
+tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
+[[dynamic_neighbors]]
+prefix = "198.51.100.0/24"
+peer_group = "dynamic"
+"#
+            )
+        };
+        let current = config::Config::load_toml_with_diagnostics(&config("old"), "old").unwrap();
+        let mut candidate =
+            config::Config::load_toml_with_diagnostics(&config("new"), "new").unwrap();
+
+        assert_eq!(
+            config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+            1
+        );
+        assert_eq!(candidate.dynamic_neighbors, current.dynamic_neighbors);
+    }
+
+    #[test]
+    fn dynamic_tcp_ao_pin_count_reports_only_affected_ranges() {
+        let config = |ranges: &[(&str, &str)]| {
+            let ranges = ranges.iter().fold(String::new(), |mut output, (prefix, key)| {
+                write!(
+                    output,
+                    "[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"dynamic\"\ntcp_ao = {{ key = \"{key}\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }}\n"
+                )
+                .expect("writing to a String cannot fail");
+                output
+            });
+            format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n[peer_groups.dynamic]\nhold_time = 90\n{ranges}"
+            )
+        };
+        let load = |ranges: &[(&str, &str)]| {
+            config::Config::load_toml_with_diagnostics(&config(ranges), "test").unwrap()
+        };
+        let current = load(&[
+            ("192.0.2.0/24", "one"),
+            ("198.51.100.0/24", "two"),
+            ("203.0.113.0/24", "three"),
+        ]);
+
+        for (label, ranges, expected) in [
+            (
+                "equivalent host bits",
+                vec![
+                    ("192.0.2.1/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                    ("203.0.113.0/24", "three"),
+                ],
+                0,
+            ),
+            (
+                "reorder",
+                vec![
+                    ("203.0.113.0/24", "three"),
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                ],
+                0,
+            ),
+            (
+                "rotate subset",
+                vec![
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "changed"),
+                    ("203.0.113.0/24", "three"),
+                ],
+                1,
+            ),
+            (
+                "remove",
+                vec![("192.0.2.0/24", "one"), ("198.51.100.0/24", "two")],
+                1,
+            ),
+            (
+                "add",
+                vec![
+                    ("192.0.2.0/24", "one"),
+                    ("198.51.100.0/24", "two"),
+                    ("203.0.113.0/24", "three"),
+                    ("10.0.0.0/24", "four"),
+                ],
+                1,
+            ),
+        ] {
+            let mut candidate = load(&ranges);
+            assert_eq!(
+                config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+                expected,
+                "{label}"
+            );
+            if expected > 0 {
+                assert_eq!(
+                    candidate.dynamic_neighbors, current.dynamic_neighbors,
+                    "{label}"
+                );
+            } else if label == "equivalent host bits" {
+                assert_eq!(candidate.dynamic_neighbors[0].prefix, "192.0.2.1/24");
+            }
+        }
     }
 
     #[tokio::test]

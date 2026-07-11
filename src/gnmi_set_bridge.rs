@@ -434,6 +434,7 @@ fn empty_dynamic_neighbor(prefix: &str) -> DynamicNeighborConfig {
         peer_group: String::new(),
         remote_asn: 0,
         description: None,
+        tcp_ao: None,
     }
 }
 
@@ -1449,6 +1450,7 @@ description = "old"
             peer_group: "old".to_string(),
             remote_asn: 65010,
             description: Some("existing".to_string()),
+            tcp_ao: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1475,6 +1477,7 @@ description = "old"
             peer_group: "ix-members".to_string(),
             remote_asn: 0,
             description: None,
+            tcp_ao: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1515,6 +1518,7 @@ description = "old"
             peer_group: "old".to_string(),
             remote_asn: 65010,
             description: Some("existing".to_string()),
+            tcp_ao: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1542,6 +1546,7 @@ description = "old"
             peer_group: "ix-members".to_string(),
             remote_asn: 0,
             description: None,
+            tcp_ao: None,
         });
 
         let candidate = apply_transaction_to_config(

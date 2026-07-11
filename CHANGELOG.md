@@ -85,6 +85,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon-side scenario generator is committed at
   `bench/scale/reloadstall/gen-scenario.py`.
 
+### Added
+
+- **Dynamic-neighbor TCP-AO can protect a whole inbound prefix at startup.**
+  Direct `[[dynamic_neighbors]].tcp_ao` installs IPv4 or IPv6 prefix MKTs before
+  the BGP listener enters `listen(2)` without enabling listener-wide
+  `ao_required`. Configuration rejects overlapping dynamic/static authentication
+  boundaries and inherited MD5; protected accepts fail closed unless
+  `TCP_AO_INFO` confirms the expected key IDs and clean authentication counters. SIGHUP pins
+  protected range/key edits to the startup snapshot, and runtime CRUD rejects
+  protected ranges and overlaps. Runtime rotation remains deferred. (#158)
+
 ## [0.51.0] — 2026-07-11
 
 ### Added
