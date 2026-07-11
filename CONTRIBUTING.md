@@ -49,8 +49,20 @@ GitHub-hosted workflow:
 cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
 ```
 
-The extended corpus uses virtual time and fixed operation caps; it is not a
-replacement for a live or multi-day soak.
+The defaults are seed start `0x35700000`, 24 seeds, and at most 64 operations
+per schedule. Replay one failing seed with:
+
+```bash
+RUSTBGPD_UPDATE_GROUP_SEED_START=0x35700007 \
+RUSTBGPD_UPDATE_GROUP_SEED_COUNT=1 \
+RUSTBGPD_UPDATE_GROUP_MAX_OPS=64 \
+cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
+```
+
+`RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must also
+be `1..=64`. Invalid values and overflowing seed ranges fail before a manager
+starts. The corpus uses virtual time and hard caps; it is not a replacement for
+a live or multi-day soak.
 
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any

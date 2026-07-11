@@ -55,7 +55,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session generations, and RT-Constrain membership churn. Every path must emit
   non-empty traffic, deliver a terminal sentinel, finish its manager task, and
   clear dirty/force/regroup/residue state. A hard-capped 24-seed extension runs
-  weekly and by manual dispatch on GitHub-hosted runners. (LAN-357)
+  weekly and by manual dispatch on GitHub-hosted runners; validated seed-start,
+  seed-count, and max-operation controls replay an individual failure without
+  allowing an unbounded run. (LAN-357)
 
 - **Reload UPDATE-stall receipt re-run and re-validated.**
   `docs/perf/reload-stall-2026-07.md` replaces the July run that was withdrawn
