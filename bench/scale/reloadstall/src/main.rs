@@ -66,6 +66,8 @@ struct Obs {
     expected_community: AtomicU32,
     /// Unique base prefixes observed with `expected_community`.
     generation: Mutex<GenerationProgress>,
+    /// One outstanding ROUTE-REFRESH reply at a time (see the reader).
+    refresh_pending: AtomicBool,
 }
 
 #[derive(Default)]
@@ -116,6 +118,9 @@ struct Ctx {
     per_peer: u32,
     daemon: SocketAddr,
     obs: Vec<Obs>,
+    /// Daemon UPDATEs the stub failed to decode — a daemon defect that
+    /// invalidates the run (see the reader and the exit check in `main`).
+    parse_errors: AtomicU64,
 }
 
 fn now_us(ctx: &Ctx) -> u64 {
@@ -393,14 +398,25 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 };
                 match msg {
                     Message::Update(u) => {
-                        let ann = rustbgpd_wire::nlri::decode_nlri(&u.nlri).unwrap_or_default();
-                        let wd_n = rustbgpd_wire::nlri::decode_nlri(&u.withdrawn_routes)
-                            .map(|v| v.len())
-                            .unwrap_or(0);
+                        // Parse the wire UPDATE once: NLRI, withdrawals, and
+                        // attributes all come from the same decode (the earlier
+                        // code decoded the NLRI twice, then re-parsed the whole
+                        // UPDATE). A decode failure is a daemon defect, so count
+                        // it and fail the run rather than silently skipping the
+                        // UPDATE — a silent skip looks exactly like the daemon
+                        // under-delivery this harness measures.
+                        let parsed = match u.parse(true, false, &[]) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("stub {i} decode error on daemon UPDATE: {e}");
+                                rctx.parse_errors.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        };
                         let mut base = 0u32;
-                        let mut other = u32::try_from(wd_n).unwrap_or(0);
-                        for p in &ann {
-                            let first = p.addr.octets()[0];
+                        let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
+                        for e in &parsed.announced {
+                            let first = e.prefix.addr.octets()[0];
                             if (20..30).contains(&first) {
                                 base += 1;
                             } else {
@@ -410,34 +426,30 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
                         if base > 0 {
-                            let communities = u
-                                .parse(true, false, &[])
-                                .ok()
-                                .and_then(|parsed| {
-                                    parsed.attributes.into_iter().find_map(|attribute| {
-                                        if let PathAttribute::Communities(communities) = attribute {
-                                            Some(communities)
-                                        } else {
-                                            None
-                                        }
-                                    })
+                            // Borrow the communities out of the single parse;
+                            // clone once only to store the last-seen sample.
+                            let communities: &[u32] = parsed
+                                .attributes
+                                .iter()
+                                .find_map(|attribute| match attribute {
+                                    PathAttribute::Communities(c) => Some(c.as_slice()),
+                                    _ => None,
                                 })
-                                .unwrap_or_default();
-                            *ob.last_comms.lock().unwrap() = communities.clone();
+                                .unwrap_or(&[]);
+                            *ob.last_comms.lock().unwrap() = communities.to_vec();
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
                             if expected != 0 && communities.contains(&expected) {
                                 let total_prefixes = rctx.n_peers * rctx.per_peer;
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
-                                    observe_generation(
-                                        &mut generation,
-                                        expected,
-                                        &communities,
-                                        &ann,
-                                        total_prefixes,
-                                        t_us,
-                                    );
+                                    for e in &parsed.announced {
+                                        if let Some(index) =
+                                            base_prefix_index(e.prefix, total_prefixes)
+                                        {
+                                            generation.observe(index, t_us);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -450,12 +462,30 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         });
                     }
                     Message::RouteRefresh(_) => {
-                        let slice = own_slice(&rctx, i);
-                        for m in announce_msgs(i, &slice) {
-                            if tx_for_reader.send(m).await.is_err() {
-                                return;
-                            }
+                        // Answer off-thread so the reader never blocks on a full
+                        // writer channel while the daemon floods us. Bound it to
+                        // one outstanding response per peer: a refresh storm must
+                        // not spawn overlapping full-slice floods that duplicate
+                        // announcements and skew the measurement.
+                        if rctx.obs[i as usize]
+                            .refresh_pending
+                            .swap(true, Ordering::AcqRel)
+                        {
+                            continue;
                         }
+                        let tx = tx_for_reader.clone();
+                        let rc = Arc::clone(&rctx);
+                        tokio::spawn(async move {
+                            let slice = own_slice(&rc, i);
+                            for m in announce_msgs(i, &slice) {
+                                if tx.send(m).await.is_err() {
+                                    break;
+                                }
+                            }
+                            rc.obs[i as usize]
+                                .refresh_pending
+                                .store(false, Ordering::Release);
+                        });
                     }
                     _ => {}
                 }
@@ -572,8 +602,10 @@ fn main() {
                     last_comms: Mutex::new(Vec::new()),
                     expected_community: AtomicU32::new(0),
                     generation: Mutex::new(GenerationProgress::default()),
+                    refresh_pending: AtomicBool::new(false),
                 })
                 .collect(),
+            parse_errors: AtomicU64::new(0),
         });
         println!("# reloadstall peers={n_peers} prefixes={total} per_peer={per_peer} pid={pid}");
 
@@ -702,11 +734,19 @@ fn main() {
             }
             // Wait for every observer to receive the full re-advertisement.
             let deadline = Instant::now() + Duration::from_secs(900);
+            let mut ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let done = (0..n_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
+                }
+                ticks += 1;
+                if ticks % 20 == 0 {
+                    let sat = (0..n_peers as usize)
+                        .filter(|&i| completion_us(&ctx, i).is_some())
+                        .count();
+                    eprintln!("reload {r} progress: complete={sat}/{n_peers}");
                 }
                 if Instant::now() > deadline {
                     println!("reload {r} TIMEOUT waiting for re-advertisement");
@@ -751,6 +791,13 @@ fn main() {
         }
 
         println!("done rss_mib={}", rss_mib(pid));
+        let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+        if parse_errors > 0 {
+            eprintln!(
+                "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
+            );
+            std::process::exit(1);
+        }
         std::process::exit(0);
     });
 }
