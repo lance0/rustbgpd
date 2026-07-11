@@ -9,6 +9,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Outbound IPv4-unicast UPDATEs are split by encoded message size.** A
+  same-attribute Adj-RIB-Out group larger than one BGP message (≈1000 /24s
+  ≈ 4114 bytes against the 4096-byte limit) was built as a single UPDATE; the
+  transport rejected it with `MessageTooLong`, logged, and abandoned the rest
+  of the batch — but never reported that partial delivery back across the
+  RIB/session boundary, so the RIB kept believing the whole group was
+  advertised. Affected peers were left silently under-advertised with no
+  dirty-resync recovery (surfaced most sharply after a changed-policy reload,
+  where every route is re-advertised at once). All four IPv4-unicast paths
+  (body/MP_REACH announcement and body/MP_UNREACH withdrawal) now chunk to the
+  negotiated maximum message size, filling Extended Messages when negotiated. A
+  lone entry that still cannot fit tears the session down so Adj-RIB-Out is
+  rebuilt on reconnect, rather than falsely reporting the route advertised.
+
+### Changed
+
+- **Reload UPDATE-stall receipt re-run and re-validated.**
+  `docs/perf/reload-stall-2026-07.md` replaces the July run that was withdrawn
+  as not-acceptance evidence. The corrected harness counts unique re-advertised
+  prefixes carrying the new policy community (no duplicate over-count), and the
+  run is on the outbound size-chunking fix above. The numbers land where the
+  withdrawn run did — stall p50 0.76 s (0.82 s worst case), full
+  re-advertisement ~155 s p50 / ~308 s wall (~0.44 s/peer) at 700 clients ×
+  400,400 routes — but are now trustworthy: every one of the 700 clients
+  verifiably received the full re-advertised table under the new policy. The
+  daemon-side scenario generator is committed at
+  `bench/scale/reloadstall/gen-scenario.py`.
+
 ## [0.51.0] — 2026-07-11
 
 ### Added
