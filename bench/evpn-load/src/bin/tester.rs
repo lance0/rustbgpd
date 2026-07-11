@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    validate_workload(&args)?;
     tracing::info!(
         listen = %args.listen,
         local_as = args.local_as,
@@ -222,6 +223,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::time::sleep(Duration::from_secs(args.linger_sec)).await;
+    Ok(())
+}
+
+fn validate_workload(args: &Args) -> anyhow::Result<()> {
+    anyhow::ensure!(args.batch > 0, "--batch must be greater than zero");
+    anyhow::ensure!(
+        args.hold_time == 0 || args.hold_time >= 3,
+        "--hold-time must be 0 (disabled) or at least 3 seconds"
+    );
+    if args.churn_duration_sec > 0 {
+        anyhow::ensure!(
+            args.count > 0,
+            "--count must be greater than zero when churn is enabled"
+        );
+        anyhow::ensure!(
+            args.churn_rate > 0,
+            "--churn-rate must be greater than zero when churn is enabled"
+        );
+    }
     Ok(())
 }
 
@@ -343,7 +363,9 @@ async fn inject_phase(
     };
 
     while idx < phase_params.count {
-        let end = (idx + phase_params.batch).min(phase_params.count);
+        let end = idx
+            .saturating_add(phase_params.batch)
+            .min(phase_params.count);
         let chunk: Vec<EvpnRoute> = (idx..end)
             .map(|i| match route_params.route_type {
                 RouteType::MacIp => build_type2(
@@ -393,6 +415,9 @@ async fn run_churn(
     route_params: RouteParams,
     total: Duration,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(phase_params.count > 0, "cannot churn a zero-route workload");
+    anyhow::ensure!(phase_params.batch > 0, "churn batch must be non-zero");
+    anyhow::ensure!(phase_params.rate > 0, "churn rate must be non-zero");
     let deadline = Instant::now() + total;
     // `rate` is route-events per second. Each tick of this loop emits
     // 2 * batch events (one withdraw + one re-advertise of the same chunk),
@@ -407,7 +432,9 @@ async fn run_churn(
 
     while Instant::now() < deadline {
         let start = idx % phase_params.count;
-        let end = (start + phase_params.batch).min(phase_params.count);
+        let end = start
+            .saturating_add(phase_params.batch)
+            .min(phase_params.count);
         let chunk: Vec<EvpnRoute> = (start..end)
             .map(|i| match route_params.route_type {
                 RouteType::MacIp => build_type2(
@@ -439,4 +466,60 @@ async fn run_churn(
 #[allow(dead_code)]
 fn _unused_ipaddr() -> IpAddr {
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> Args {
+        Args {
+            listen: "127.0.0.1:1179".parse().unwrap(),
+            local_as: 65_000,
+            router_id: Ipv4Addr::new(192, 0, 2, 1),
+            count: 10_000,
+            rate: 1_000,
+            batch: 40,
+            vni: 100,
+            ethernet_tag: 0,
+            churn_duration_sec: 0,
+            churn_rate: 1_000,
+            linger_sec: 30,
+            hold_time: 180,
+            route_type: RouteType::MacIp,
+        }
+    }
+
+    #[test]
+    fn validates_session_only_and_unlimited_injection_modes() {
+        let mut input = args();
+        input.count = 0;
+        input.rate = 0;
+        input.hold_time = 0;
+        assert!(validate_workload(&input).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_workload_shapes_before_session_setup() {
+        let mut input = args();
+        input.batch = 0;
+        assert_eq!(
+            validate_workload(&input).unwrap_err().to_string(),
+            "--batch must be greater than zero"
+        );
+
+        input = args();
+        input.hold_time = 2;
+        assert!(validate_workload(&input).is_err());
+
+        input = args();
+        input.count = 0;
+        input.churn_duration_sec = 1;
+        assert!(validate_workload(&input).is_err());
+
+        input = args();
+        input.churn_duration_sec = 1;
+        input.churn_rate = 0;
+        assert!(validate_workload(&input).is_err());
+    }
 }
