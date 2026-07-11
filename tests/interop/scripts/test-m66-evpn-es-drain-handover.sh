@@ -258,7 +258,7 @@ ping_burst_ok "baseline ping burst hr -> CE (via $PE1_IP)"
 log "[phase 3] observer principal must be denied the drain RPC"
 observer_out=$(pe_ctl_observer "$PE1" evpn es drain "$ESI" 2>&1) && observer_rc=0 || observer_rc=$?
 if [ "$observer_rc" -ne 0 ] \
-    && printf '%s' "$observer_out" | grep -qi "does not have permission" \
+    && printf '%s' "$observer_out" | grep -qi "permission denied" \
     && printf '%s' "$observer_out" | grep -q "operator_only"; then
     ok "observer drain denied: PermissionDenied, operator_only tier surfaced (exit $observer_rc)"
 else

@@ -157,8 +157,10 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
         }
         Op::PromoteLlgr { peer } => {
             if let Some(rib) = manager.ribs.get_mut(&peer_addr(*peer)) {
-                let affected: HashSet<Prefix> =
-                    rib.promote_to_llgr_stale(FAMILY).into_iter().collect();
+                let affected: HashSet<Prefix> = rib
+                    .promote_to_llgr_stale(FAMILY, &mut crate::attr_intern::AttrInternTable::new())
+                    .into_iter()
+                    .collect();
                 manager.recompute_best(&affected);
             }
         }
