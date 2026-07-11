@@ -4185,6 +4185,36 @@ fn fn_declaration_diagnostics() {
     assert!(rendered.contains("apply"), "{rendered}");
 }
 
+/// A duplicate `fn` whose bodies call a shared function must not
+/// underflow the cost-pass Kahn accounting. The duplicate name is
+/// diagnosed, but the cost pass still runs: `edges`/`defs` key by name
+/// (one entry), so seeding `pending`/`dependents` per `file.fns` entry
+/// would push the reverse-edge twice while `pending` counted once, and
+/// the shared callee's completion would decrement past zero.
+#[test]
+fn duplicate_fn_calling_shared_does_not_underflow() {
+    let (_, rendered) = diagnostics_of(
+        "fn base(x: u32) -> u32 { x + 1 }
+         fn dup(x: u32) -> u32 { base(x) }
+         fn dup(x: u32) -> u32 { base(x) }
+         policy p { term t { if dup(route.med) >= 1 { reject } accept } }",
+    );
+    assert!(rendered.contains("duplicate fn `dup`"), "{rendered}");
+}
+
+/// The apply-bounds pass has the same Kahn shape over policies: a
+/// duplicate `policy` that applies a shared policy must not underflow
+/// it either (mirror of `duplicate_fn_calling_shared_does_not_underflow`).
+#[test]
+fn duplicate_policy_applying_shared_does_not_underflow() {
+    let (_, rendered) = diagnostics_of(
+        "policy base { term t { reject } }
+         policy dup { term t { if apply(base) { reject } accept } }
+         policy dup { term t { if apply(base) { reject } accept } }",
+    );
+    assert!(rendered.contains("duplicate policy `dup`"), "{rendered}");
+}
+
 /// Functions get their own namespace: a set and a policy may share a
 /// function's name — every reference position is disjoint.
 #[test]

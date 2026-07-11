@@ -490,8 +490,17 @@ impl<'a> Checker<'a> {
         let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut pending: HashMap<&str, usize> = HashMap::new();
         let mut ready: VecDeque<&str> = VecDeque::new();
+        // Seed each name once. A duplicate `fn` is diagnosed elsewhere but
+        // the cost pass still runs; `edges`/`defs` key by name (last def
+        // wins), so seeding per `file.fns` entry would push a reverse-edge
+        // for every duplicate while `pending.insert` kept only one count —
+        // and the decrement below would then underflow.
+        let mut seeded: HashSet<&str> = HashSet::new();
         for def in &file.fns {
             let name = def.name.node.as_str();
+            if !seeded.insert(name) {
+                continue;
+            }
             let known: Vec<&str> = edges[name]
                 .iter()
                 .map(|&(target, _)| target)
@@ -1944,8 +1953,17 @@ impl<'a> Checker<'a> {
         let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut pending: HashMap<&str, usize> = HashMap::new();
         let mut ready: VecDeque<&str> = VecDeque::new();
+        // Seed each name once — a duplicate `policy` is diagnosed
+        // elsewhere but this pass still runs, and `edges`/`defs` key by
+        // name; seeding per `file.policies` entry would push a duplicate
+        // reverse-edge while `pending.insert` kept one count, underflowing
+        // the decrement below (mirrors the `check_fns` guard).
+        let mut seeded: HashSet<&str> = HashSet::new();
         for policy in &file.policies {
             let name = policy.name.node.as_str();
+            if !seeded.insert(name) {
+                continue;
+            }
             let known: Vec<&str> = edges[name]
                 .iter()
                 .map(|&(target, _)| target)
