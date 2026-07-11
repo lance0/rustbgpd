@@ -348,19 +348,8 @@ async fn inject_phase(
     is_withdraw: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
-    let batch_per_sec = if phase_params.rate == 0 {
-        u32::MAX
-    } else {
-        phase_params.rate / phase_params.batch.max(1)
-    };
     let mut sent = 0u32;
     let mut idx = 0u32;
-    let mut next_tick = Instant::now();
-    let tick = if batch_per_sec == 0 {
-        Duration::from_millis(1)
-    } else {
-        Duration::from_millis(1000 / u64::from(batch_per_sec.max(1)))
-    };
 
     while idx < phase_params.count {
         let end = idx
@@ -394,7 +383,7 @@ async fn inject_phase(
         idx = end;
 
         if phase_params.rate > 0 {
-            next_tick += tick;
+            let next_tick = start + pacing_offset(u64::from(sent), phase_params.rate);
             let now = Instant::now();
             if next_tick > now {
                 tokio::time::sleep(next_tick - now).await;
@@ -418,17 +407,10 @@ async fn run_churn(
     anyhow::ensure!(phase_params.count > 0, "cannot churn a zero-route workload");
     anyhow::ensure!(phase_params.batch > 0, "churn batch must be non-zero");
     anyhow::ensure!(phase_params.rate > 0, "churn rate must be non-zero");
-    let deadline = Instant::now() + total;
-    // `rate` is route-events per second. Each tick of this loop emits
-    // 2 * batch events (one withdraw + one re-advertise of the same chunk),
-    // so the per-tick budget is `rate / (2 * batch)` ticks per second.
-    // Without the factor of 2 the effective churn rate is doubled — the
-    // RR sees 2x what the operator configured, which is fine for the
-    // M33 reflection-throughput shape but misleading in the report.
-    let ops_per_tick = u64::from(phase_params.batch.max(1)) * 2;
-    let ticks_per_sec = u64::from(phase_params.rate.max(1)) / ops_per_tick;
-    let tick = Duration::from_millis(1000 / ticks_per_sec.max(1));
+    let start_time = Instant::now();
+    let deadline = start_time + total;
     let mut idx = 0u32;
+    let mut emitted_events = 0u64;
 
     while Instant::now() < deadline {
         let start = idx % phase_params.count;
@@ -457,10 +439,22 @@ async fn run_churn(
         if tx.send(withdraw).await.is_err() || tx.send(advertise).await.is_err() {
             anyhow::bail!("send channel closed during churn");
         }
+        emitted_events += u64::from(end - start) * 2;
         idx = end;
-        tokio::time::sleep(tick).await;
+        let next_tick = start_time + pacing_offset(emitted_events, phase_params.rate);
+        let now = Instant::now();
+        if next_tick > now {
+            tokio::time::sleep(next_tick - now).await;
+        }
     }
     Ok(())
+}
+
+fn pacing_offset(events: u64, rate: u32) -> Duration {
+    if rate == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos(events.saturating_mul(1_000_000_000) / u64::from(rate))
 }
 
 #[allow(dead_code)]
@@ -521,5 +515,18 @@ mod tests {
         input.churn_duration_sec = 1;
         input.churn_rate = 0;
         assert!(validate_workload(&input).is_err());
+    }
+
+    #[test]
+    fn pacing_uses_the_cumulative_event_budget() {
+        assert_eq!(pacing_offset(0, 1_000), Duration::ZERO);
+        assert_eq!(pacing_offset(40, 1_000), Duration::from_millis(40));
+        assert_eq!(pacing_offset(80, 1_000), Duration::from_millis(80));
+        assert_eq!(pacing_offset(100, 25), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn zero_rate_has_no_pacing_delay() {
+        assert_eq!(pacing_offset(u64::MAX, 0), Duration::ZERO);
     }
 }
