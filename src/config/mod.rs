@@ -2252,6 +2252,9 @@ pub struct ConfigDiff {
     /// new. Reload-applied by replacing the peer-manager config snapshot and
     /// rebuilding the live longest-prefix matcher.
     pub dynamic_neighbors_changed: bool,
+    /// The portion of a dynamic-neighbor edit that remains after startup-only
+    /// TCP-AO ranges are pinned back to the live listener snapshot.
+    pub dynamic_neighbors_reload_applied_changed: bool,
     /// The startup-pinned dynamic TCP-AO protected range set changed. Any
     /// add/remove/move, protected-row edit, or key-material rotation requires
     /// a daemon restart before the listener and matcher can advance together.
@@ -2461,7 +2464,7 @@ impl ConfigDiff {
             || self.policy.rpol_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
-            || (self.dynamic_neighbors_changed && !self.dynamic_neighbor_tcp_ao_changed)
+            || self.dynamic_neighbors_reload_applied_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
     }
@@ -3150,7 +3153,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "rpol_changed": diff.policy.rpol_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
-            "dynamic_neighbors_changed": diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed,
+            "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
@@ -3359,7 +3362,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
-        if diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed {
+        if diff.dynamic_neighbors_reload_applied_changed {
             let _ = writeln!(
                 out,
                 "  {} [[dynamic_neighbors]] matcher rebuilt",
@@ -3455,6 +3458,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
     let dynamic_neighbor_tcp_ao_changed =
         dynamic_neighbor_tcp_ao_restart_required_changed(old, new);
+    let mut dynamic_reload_new = new.clone();
+    pin_dynamic_tcp_ao_startup_only(&mut dynamic_reload_new, old);
+    let dynamic_neighbors_reload_applied_changed =
+        old.dynamic_neighbors != dynamic_reload_new.dynamic_neighbors;
     let bfd_changed = bfd_restart_required_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
@@ -3547,6 +3554,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,
+        dynamic_neighbors_reload_applied_changed,
         dynamic_neighbor_tcp_ao_changed,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
@@ -4309,6 +4317,47 @@ fn dynamic_neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) 
             .collect::<Vec<_>>()
     };
     protected(old) != protected(new)
+}
+
+/// Pin dynamic TCP-AO listener state to the startup snapshot while preserving
+/// disjoint unprotected range edits that the live matcher can safely apply.
+pub(crate) fn pin_dynamic_tcp_ao_startup_only(new_config: &mut Config, current: &Config) -> usize {
+    let current_protected: Vec<_> = current
+        .dynamic_neighbors
+        .iter()
+        .filter(|range| range.tcp_ao.is_some())
+        .cloned()
+        .collect();
+    let new_protected: Vec<_> = new_config
+        .dynamic_neighbors
+        .iter()
+        .filter(|range| range.tcp_ao.is_some())
+        .cloned()
+        .collect();
+    if current_protected == new_protected {
+        return 0;
+    }
+
+    let current_prefixes: Vec<_> = current_protected
+        .iter()
+        .filter_map(|range| effective_prefix_str(&range.prefix))
+        .collect();
+    new_config.dynamic_neighbors.retain(|range| {
+        let Some(prefix) = effective_prefix_str(&range.prefix) else {
+            return true;
+        };
+        !current_prefixes
+            .iter()
+            .any(|protected| dynamic_prefixes_intersect(prefix, *protected))
+            && range.tcp_ao.is_none()
+    });
+    new_config.dynamic_neighbors.extend(current_protected);
+    new_protected.len().max(current_prefixes.len())
+}
+
+fn dynamic_prefixes_intersect(left: (IpAddr, u8), right: (IpAddr, u8)) -> bool {
+    let min_len = left.1.min(right.1);
+    effective_prefix(left.0, min_len).0 == effective_prefix(right.0, min_len).0
 }
 
 /// Pin TCP-AO runtime state to the live startup snapshot.

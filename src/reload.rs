@@ -667,7 +667,7 @@ pub(crate) async fn reload_config(
         );
     }
 
-    let pinned_dynamic_tcp_ao = pin_dynamic_tcp_ao_startup_only(&mut new_config, current);
+    let pinned_dynamic_tcp_ao = config::pin_dynamic_tcp_ao_startup_only(&mut new_config, current);
     if pinned_dynamic_tcp_ao > 0 {
         error!(
             ranges = pinned_dynamic_tcp_ao,
@@ -1763,48 +1763,6 @@ pub(crate) async fn reload_config(
 
     info!("config reload complete");
     Some(ReloadedConfig::new(working_config, desired_config))
-}
-
-fn pin_dynamic_tcp_ao_startup_only(
-    new_config: &mut config::Config,
-    current: &config::Config,
-) -> usize {
-    let current_protected: Vec<_> = current
-        .dynamic_neighbors
-        .iter()
-        .filter(|range| range.tcp_ao.is_some())
-        .cloned()
-        .collect();
-    let new_protected: Vec<_> = new_config
-        .dynamic_neighbors
-        .iter()
-        .filter(|range| range.tcp_ao.is_some())
-        .cloned()
-        .collect();
-    if current_protected == new_protected {
-        return 0;
-    }
-
-    let current_prefixes: Vec<_> = current_protected
-        .iter()
-        .filter_map(|range| config::effective_prefix_str(&range.prefix))
-        .collect();
-    new_config.dynamic_neighbors.retain(|range| {
-        let Some(prefix) = config::effective_prefix_str(&range.prefix) else {
-            return true;
-        };
-        !current_prefixes
-            .iter()
-            .any(|protected| reload_prefixes_intersect(prefix, *protected))
-            && range.tcp_ao.is_none()
-    });
-    new_config.dynamic_neighbors.extend(current_protected);
-    new_protected.len().max(current_prefixes.len())
-}
-
-fn reload_prefixes_intersect(left: (std::net::IpAddr, u8), right: (std::net::IpAddr, u8)) -> bool {
-    let min_len = left.1.min(right.1);
-    config::effective_prefix(left.0, min_len).0 == config::effective_prefix(right.0, min_len).0
 }
 
 /// Halt a SIGHUP reload at the first failed step. Logs the failure
@@ -4635,7 +4593,10 @@ tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" 
         )
         .unwrap();
 
-        assert_eq!(pin_dynamic_tcp_ao_startup_only(&mut candidate, &current), 1);
+        assert_eq!(
+            config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
+            1
+        );
         assert_eq!(candidate.dynamic_neighbors.len(), 2);
         let protected = candidate
             .dynamic_neighbors

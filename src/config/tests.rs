@@ -9363,6 +9363,44 @@ fn transaction_v1_allows_disjoint_unprotected_dynamic_edit_beside_tcp_ao_range()
 }
 
 #[test]
+fn mixed_dynamic_tcp_ao_and_disjoint_unprotected_diff_reports_both_portions() {
+    let old = dynamic_tcp_ao_transaction_config(Some(("192.0.2.0/24", "old-secret")), "");
+    let new = dynamic_tcp_ao_transaction_config(
+        Some(("192.0.2.0/24", "new-secret")),
+        "[[dynamic_neighbors]]\nprefix = \"198.51.100.0/24\"\npeer_group = \"dynamic\"\n",
+    );
+    let diff = diff_config(&old, &new);
+    let json = config_diff_json_value(&diff);
+    let text = format_config_diff(&diff);
+
+    assert!(diff.dynamic_neighbor_tcp_ao_changed);
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert_eq!(
+        json["restart_required"]["dynamic_neighbor_tcp_ao_changed"],
+        true
+    );
+    assert_eq!(json["reload_applied"]["dynamic_neighbors_changed"], true);
+    assert!(
+        text.contains("[[dynamic_neighbors]] matcher rebuilt"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[[dynamic_neighbors]].tcp_ao changed"),
+        "{text}"
+    );
+
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable());
+    assert!(class.supported_sections.is_empty(), "{class:?}");
+    assert_eq!(
+        class.restart_required_sections,
+        vec!["[[dynamic_neighbors]].tcp_ao"]
+    );
+}
+
+#[test]
 fn runtime_snapshot_token_is_stable_and_changes_with_config() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();
