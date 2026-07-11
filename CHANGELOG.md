@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Peer-supplied `LOCAL_PREF` is ignored on eBGP ingress.** Per RFC 4271,
+  external peers can no longer influence import policy, explain output,
+  Adj-RIB-In storage, or best-path selection by sending `LOCAL_PREF`. iBGP
+  values remain effective, import policy may still set a local value, and the
+  byte-exact pre-policy BMP view continues to expose the original wire UPDATE.
+
 - **Outbound IPv4-unicast UPDATEs are split by encoded message size.** A
   same-attribute Adj-RIB-Out group larger than one BGP message (≈1000 /24s
   ≈ 4114 bytes against the 4096-byte limit) was built as a single UPDATE; the
