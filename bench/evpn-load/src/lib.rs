@@ -47,6 +47,8 @@ pub enum PeerError {
     Notification { code: String, subcode: u8 },
     #[error("send channel closed")]
     SendChannelClosed,
+    #[error("hold time must be 0 (disabled) or at least 3 seconds, got {0}")]
+    InvalidHoldTime(u16),
 }
 
 /// Peer session configuration.
@@ -132,6 +134,7 @@ pub struct PeerHandle {
 /// KEEPALIVE fails.
 #[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
 pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
+    validate_hold_time(cfg.hold_time)?;
     let listener = TcpListener::bind(cfg.listen).await?;
     tracing::info!(listen = %cfg.listen, "evpn-load peer listening for BGP session");
     let (mut stream, remote) = listener.accept().await?;
@@ -302,6 +305,14 @@ fn keepalive_interval(hold_time: u16) -> Option<Duration> {
     }
 }
 
+fn validate_hold_time(hold_time: u16) -> Result<(), PeerError> {
+    if hold_time == 0 || hold_time >= 3 {
+        Ok(())
+    } else {
+        Err(PeerError::InvalidHoldTime(hold_time))
+    }
+}
+
 fn build_open(cfg: &PeerConfig) -> OpenMessage {
     let mut caps: Vec<Capability> = cfg
         .families
@@ -423,5 +434,19 @@ mod tests {
         assert_eq!(keepalive_interval(0), None);
         assert_eq!(keepalive_interval(3), Some(Duration::from_secs(1)));
         assert_eq!(keepalive_interval(180), Some(Duration::from_mins(1)));
+    }
+
+    #[test]
+    fn rejects_hold_times_without_a_safe_keepalive_interval() {
+        assert!(validate_hold_time(0).is_ok());
+        assert!(matches!(
+            validate_hold_time(1),
+            Err(PeerError::InvalidHoldTime(1))
+        ));
+        assert!(matches!(
+            validate_hold_time(2),
+            Err(PeerError::InvalidHoldTime(2))
+        ));
+        assert!(validate_hold_time(3).is_ok());
     }
 }
