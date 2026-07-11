@@ -2800,6 +2800,16 @@ impl RibManager {
     /// machinery yields the RFC 4684 minimal update set, no session
     /// reset). An unchanged membership is a strict no-op.
     fn set_rt_membership(&mut self, peer: IpAddr, membership: Option<RtcMembership>) {
+        // Removing Φ is valid only before outbound registration (a new
+        // session that did not negotiate RTC) or after deregistration during
+        // teardown. On a live registration it would silently change the peer
+        // from RT-filtered to unfiltered without a corrective VPN emission.
+        // Keep this before the equality early-return so an already-absent
+        // entry cannot conceal an invalid live call.
+        debug_assert!(
+            membership.is_some() || !self.outbound_peers.contains_key(&peer),
+            "RT membership may be cleared only before outbound registration or after deregistration"
+        );
         // Capture BEFORE the write (design §2.3): under the invariant
         // adv(m) = Φ-filtered group table, `old` is the true prior
         // advertised state.
@@ -2909,7 +2919,12 @@ impl RibManager {
         if bound.is_empty() {
             return;
         }
-        self.dirty_peers.extend(bound);
+        // Preserve the single dirty-marking seam: ORR currently disqualifies
+        // grouping, but routing through the helper also marks group state if
+        // that eligibility rule changes later.
+        for peer in bound {
+            self.mark_outbound_dirty(peer);
+        }
         self.distribute_changes(&HashSet::new(), &HashSet::new());
     }
 

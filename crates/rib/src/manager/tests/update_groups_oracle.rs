@@ -824,6 +824,13 @@ async fn oracle_streams_identical_across_rr_mix() {
 
         // GShut-style forced re-emission (RefreshPeerOutbound).
         o.refresh_outbound(D).await;
+
+        // A genuine best change immediately after the acknowledged force
+        // proves the force-only pass was consumed synchronously. Grouped
+        // force assembly deliberately ignores pass deltas; allowing the flag
+        // to leak into this pass would violate that invariant (LAN-345).
+        o.routes(A, vec![ibgp_route(pfx(2, 0), A, 175, vec![])], vec![])
+            .await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
     assert_eq!(
@@ -892,6 +899,57 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
         c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
         "the update lost to the full channel must be recovered by the resync"
     );
+}
+
+/// A failed forced refresh is retained for retry and marks the peer dirty.
+/// Genuine churn can arrive before that retry, so this deliberately exercises
+/// the allowed `force && dirty && !best_changed.is_empty()` state: dirty group
+/// assembly must include the pass tombstones while force still replays the
+/// current table.
+#[tokio::test]
+async fn oracle_failed_force_then_churn_converges_to_identical_state() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        o.peer_up(C, false, true, None, 1).await;
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // The standing p1 announce fills C's only queue slot.
+        o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        // Forced replay fails against the full channel, retaining force and
+        // marking C dirty for the timer retry.
+        o.refresh_outbound(C).await;
+        // Before retry, p1 is withdrawn and p2 becomes best. This is the
+        // nonempty best-change pass that force-only assembly may never see,
+        // but force+dirty must heal.
+        o.routes(
+            A,
+            vec![ibgp_route(pfx(2, 0), A, 100, vec![])],
+            vec![pfx(1, 0)],
+        )
+        .await;
+
+        let first = o.drain_one(C).await;
+        assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "failed force plus churn must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(!c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
+    assert!(c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)));
 }
 
 /// A source-flip member-scoped withdraw lost to a full channel: the

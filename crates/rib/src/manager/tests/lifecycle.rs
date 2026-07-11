@@ -1517,16 +1517,24 @@ async fn stale_orf_update_from_superseded_session_is_discarded() {
     let handle = tokio::spawn(manager.run());
 
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let orf_peer_up = |session_id, outbound_tx| {
+        let mut update = session_peer_up(peer, session_id, outbound_tx, ipv4_sendable());
+        let RibUpdate::PeerUp {
+            negotiated_orf_recv,
+            ..
+        } = &mut update
+        else {
+            unreachable!("session_peer_up always constructs PeerUp")
+        };
+        *negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+        update
+    };
 
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
-    tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
-        .await
-        .unwrap();
+    tx.send(orf_peer_up(1, loser_tx)).await.unwrap();
     drain_eor(&mut loser_rx).await;
     let (winner_tx, mut winner_rx) = mpsc::channel(8);
-    tx.send(session_peer_up(peer, 2, winner_tx, ipv4_sendable()))
-        .await
-        .unwrap();
+    tx.send(orf_peer_up(2, winner_tx)).await.unwrap();
     drain_eor(&mut winner_rx).await;
 
     let entry = AddressPrefixOrf {
