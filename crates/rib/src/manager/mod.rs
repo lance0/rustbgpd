@@ -1193,6 +1193,27 @@ impl RibManager {
             RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
                 self.handle_test_query_vpn_advertised(peer, reply);
             }
+            #[cfg(test)]
+            RibUpdate::TestQueryOutboundHealth { reply } => {
+                let group_dirty = self
+                    .group_ribs
+                    .values()
+                    .map(|group| group.dirty_members.len())
+                    .sum();
+                let group_tombstones = self
+                    .group_ribs
+                    .values()
+                    .map(|group| group.tombstones.len() + group.vpn_tombstones.len())
+                    .sum();
+                let _ = reply.send((
+                    self.dirty_peers.len(),
+                    self.force_outbound_peers.len(),
+                    group_dirty,
+                    group_tombstones,
+                    self.pending_regroup_baseline.len(),
+                    self.pending_extra_withdraws.len(),
+                ));
+            }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }

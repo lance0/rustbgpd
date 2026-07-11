@@ -31,6 +31,41 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+### Replaying update-group faults
+
+The PR-sized parameterized fixed-scenario corpus compares the grouped manager
+path with the forced-per-peer oracle under bounded channel saturation, dirty
+policy regroup, stale session generations, and RT-Constrain membership churn:
+
+```bash
+cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
+```
+
+Failure output includes the scenario name, seed, comparison mode, and ordered
+operation log. To run the hard-capped 24-seed corpus used by the weekly
+GitHub-hosted workflow:
+
+```bash
+cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
+```
+
+Seeds vary valid fixture identities; they do not randomize operation ordering
+or scenario length. The defaults are seed start `0x35700000`, 24 fixture sets,
+and at most 64 operations per schedule. Replay one failing fixture set with:
+
+```bash
+RUSTBGPD_UPDATE_GROUP_SEED_START=0x35700007 \
+RUSTBGPD_UPDATE_GROUP_SEED_COUNT=1 \
+RUSTBGPD_UPDATE_GROUP_MAX_OPS=64 \
+cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
+```
+
+`RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must be
+`18..=64`, where 18 is the longest fixed schedule and is test-ratcheted when a
+schedule changes. Invalid values and overflowing seed ranges fail before a
+manager starts. The corpus uses virtual time and hard caps; it is not a
+replacement for a live or multi-day soak.
+
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any
 `#[allow(clippy::...)]` or `#[expect(clippy::...)]` in a ratcheted path must
