@@ -26,7 +26,7 @@ interning #826, and the update-group resync fixes #822/#823).
 | **UPDATE stall** (worst per-observer delivery gap spanning a reload, median of 4 reloads, p50 across 700 observers) | **0.76 s** |
 | UPDATE stall, worst single observer in any reload | **0.82 s** |
 | Expected inter-UPDATE gap from churn alone (control window, p50 / max) | 19 ms / 42 ms |
-| Session flaps / holds missed across all reloads | 0 (700/700 Established throughout) |
+| Session flaps / holds missed across all reloads | 0 (each peer reached Established once; daemon logged 0 NOTIFICATIONs and 0 hold-timer expiries) |
 | Full new-policy re-advertisement, per-observer completion (median reload, p50 / max) | 155 s / 309 s |
 | Reload wall time (SIGHUP → `config reload complete`, median of 4) | **308 s** (~0.44 s/peer) |
 | Concurrent `rbgp health` query latency (baseline → during reload, p50) | 6 ms → **207 ms** (max 232 ms) |
@@ -228,6 +228,15 @@ deliberately not part of this receipt.
 - All 700 members share global chains and one update group. Fleets
   with per-peer-context chains (update-group disqualifiers) ride the
   per-peer fallback and would see strictly worse reload behavior.
+- **Session continuity is cross-checked daemon-side, not just at the
+  stub.** The harness's own "session up" flag is a TCP-reader signal, not
+  a BGP FSM state, so the flap claim is taken from the daemon log: each of
+  the 700 peers logged exactly one transition to Established (no
+  re-establishment), with zero NOTIFICATIONs and zero hold-timer
+  expiries. The frequent `connect`/`active` transitions in the log are the
+  daemon's own active-open retries to the unreachable stub port 179
+  (RFC 6286 collision resolution keeps the inbound session), not the
+  established sessions flapping.
 - **RSS did not cleanly plateau.** It grew 815 → 1107 → 1181 → 1209 →
   1303 MiB across the four cycles (+292 / +74 / +28 / **+94**). Cycle 4
   grew more than cycle 3, so this is not a settled plateau; consistent
