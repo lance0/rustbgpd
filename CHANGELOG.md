@@ -46,6 +46,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lone entry that still cannot fit tears the session down so Adj-RIB-Out is
   rebuilt on reconnect, rather than falsely reporting the route advertised.
 
+- **rpol cost passes guard against duplicate-name underflow.** The LAN-304
+  function-cost Kahn pass and the LAN-290 apply-bounds pass seed their
+  `pending`/`dependents` accounting by iterating `file.fns` / `file.policies`,
+  which holds every duplicate AST definition, while the `edges`/`defs` maps
+  they consume key by name and collapse duplicates to one entry. The reverse
+  edge was pushed once per duplicate while `pending.insert` kept only the last
+  count, so completing a shared callee or apply-target decremented a dependent's
+  pending count past zero — panicking in debug/fuzz builds and wrapping silently
+  in release. Names are now seeded at most once in both passes so the Kahn
+  counts stay consistent. Regression tests cover both the fn and policy passes;
+  found by the nightly `rpol_compile` fuzz target.
+
 ### Changed
 
 - **Update-group correctness now has a parameterized fixed-scenario
