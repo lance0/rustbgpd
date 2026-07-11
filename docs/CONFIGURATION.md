@@ -356,11 +356,12 @@ rejected at `Config::load`. There is no "TLS-without-mTLS" half-mode by
 design. When enabled, the daemon presents the server certificate, requires
 every client to present a certificate signed by `tls_client_ca_file`, and
 rejects unverified clients at the TLS layer before any gRPC handler runs.
-PEM material is pre-flight-validated at config load and `--check` time so a
-successful `--check` rules out cert-rotation surprises at startup. Listener
-config (including any TLS field) is **restart-required** — SIGHUP reload
-pins the runtime listener back to the live values and surfaces the drift
-in `rustbgpd --diff` until the daemon is restarted.
+PEM material is pre-flight-validated at config load and `--check` time. SIGHUP
+re-reads the bytes behind the three unchanged paths, validates the complete
+server identity and client CA for every listener, then atomically publishes one
+process-wide credential generation. A malformed or partial rotation leaves the
+last-known-good generation active. Changing a path or TLS/auth mode remains
+**restart-required** and stays visible as drift until restart.
 
 Native gNMI / OpenConfig telemetry (`gnmi.gNMI`) is registered on TCP only when
 this native mTLS config is present. Plaintext or bearer-token-only TCP listeners
@@ -390,11 +391,11 @@ cap is the stricter of the two, so `access_mode = "read_only"` cannot be
 weakened by `max_tier = "operator_only"`.
 
 **Token file lifecycle:** When `token_file` is configured, the file must exist
-and contain a non-empty token at daemon startup. The token is read once during
-config validation and kept in memory for the daemon's lifetime. Token rotation
-requires a daemon restart. In orchestrated environments where secrets are
-mounted after config files, ensure the token file is available before starting
-the daemon.
+and contain a non-empty token at daemon startup. SIGHUP re-reads the bytes behind
+the unchanged path as part of the all-listener credential generation. New RPCs
+on existing HTTP/2 connections use the new token; already-admitted streaming
+RPCs continue. Invalid or missing material rejects the whole credential reload.
+Changing the path or enabling/disabling token auth remains restart-required.
 
 **ADR-0064 audit principals:** `principal` gives the audit-only
 `grpc_authz` log line a stable operator-controlled identity. On UDS listeners

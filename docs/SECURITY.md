@@ -94,11 +94,11 @@ Preferred posture:
 - Even with mTLS in place, treat the API as privileged. Read-only RPCs still
   reveal peer topology, route state, and policy results.
 
-> **Listener config is restart-required.** Adding, removing, or
-> rotating `tls_cert_file` / `tls_key_file` / `tls_client_ca_file`
-> takes effect only on a daemon restart, not on SIGHUP. SIGHUP
-> reload pins the runtime listener config back to the live values
-> and surfaces the drift in `rustbgpd --diff` until restart.
+> **Listener shape is restart-required; credential bytes rotate live.** SIGHUP
+> atomically reloads token and mTLS material behind unchanged configured paths.
+> Existing TLS connections and admitted streams continue; new TLS connections
+> and new bearer-authenticated RPCs use the new generation. Path, listener,
+> auth-mode, principal, role, and access changes still require restart.
 
 ### Direct TCP on a non-loopback address
 
@@ -312,4 +312,7 @@ the roadmap:
   neighbors, live key rotation, and multi-key rollover remain follow-up work.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
   Linux with `CONFIG_TCP_AO=y`.
-- Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)
+- gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
+  all-listener generation. Alert on
+  `bgp_grpc_credential_reloads_total{outcome="failure"}`; failures retain the
+  last-known-good generation and logs never include secret bytes.

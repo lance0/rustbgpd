@@ -221,7 +221,8 @@ rebind on reload.
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required | Listener address. |
-| `tls.*` (mTLS material) | restart-required | All TLS/mTLS fields pinned. |
+| credential bytes behind unchanged token/TLS paths | reload-applied | Staged for all listeners, then one atomic generation; existing connections/streams survive. |
+| token/TLS paths or auth mode | restart-required | Listener shape and configured paths remain pinned. |
 | `path` (`grpc_uds`) | restart-required | UDS path bound at startup. |
 | `mode` (`grpc_uds`) | restart-required | Permissions set at bind time. |
 
