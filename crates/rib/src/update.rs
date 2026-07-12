@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
     clippy::struct_excessive_bools,
     reason = "mirrors the independent runtime update-group predicates"
 )]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateGroupClassifierInput {
     pub policy_fingerprint: Option<String>,
     pub policy_provenance: Option<String>,
@@ -35,7 +35,7 @@ pub struct UpdateGroupClassifierInput {
     clippy::struct_excessive_bools,
     reason = "mirrors the independent fields of the runtime GroupKey"
 )]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateGroupFingerprint {
     pub policy_fingerprint: Option<String>,
     pub target_is_ebgp: bool,
@@ -49,7 +49,7 @@ pub struct UpdateGroupFingerprint {
 }
 
 /// Stable classifier result shared by live registration and config planning.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UpdateGroupClassification {
     Groupable(UpdateGroupFingerprint),
     PolicyPeerContext,
@@ -107,7 +107,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
 }
 
 /// One established peer in the side-effect-free planner snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct UpdateGroupPeerSnapshot {
     pub peer: IpAddr,
     pub input: UpdateGroupClassifierInput,
@@ -115,7 +115,7 @@ pub struct UpdateGroupPeerSnapshot {
     pub runtime_membership: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub struct UpdateGroupSnapshot {
     pub peers: Vec<UpdateGroupPeerSnapshot>,
 }

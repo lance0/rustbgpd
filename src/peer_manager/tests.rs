@@ -125,7 +125,7 @@ fn test_peer_manager() -> PeerManager {
 }
 
 #[tokio::test]
-async fn config_apply_replan_rejects_intervening_live_session_snapshot() {
+async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
     let config = load_test_config(
         r#"
 [global]
@@ -202,7 +202,10 @@ log_format = "json"
     });
     let planned = mgr.plan_config_transaction(&candidate, None).await.unwrap();
     let error = mgr
-        .plan_config_transaction(&candidate, Some(&planned.runtime_snapshot_token))
+        .plan_config_transaction(
+            "this is not valid TOML =",
+            Some(&planned.runtime_snapshot_token),
+        )
         .await
         .unwrap_err();
     assert!(matches!(

@@ -14,7 +14,7 @@ pub mod authz;
 pub mod authz_principal;
 pub mod authz_runtime;
 pub mod bfd_service;
-pub mod config_service;
+mod config_service;
 mod connect_info;
 mod control_service;
 pub mod credentials;
@@ -36,6 +36,7 @@ pub mod server;
 #[cfg(test)]
 mod test_support;
 
+pub use config_service::update_group_impact_to_proto;
 pub use evpn_service::EvpnService;
 
 /// Public-facing alias for the proto-encoding helpers used by the

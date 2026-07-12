@@ -1,16 +1,49 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
     PlannedGroupability, RibUpdate, UpdateGroupClassification, UpdateGroupClassifierInput,
     UpdateGroupFamilyImpact, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
-    UpdateGroupPeerSnapshot, classify_update_group,
+    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
 };
 use tokio::sync::oneshot;
 
 use super::{PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::{Config, ResolvedNeighbor};
+
+/// Fixed-width, allocation-free identity for a canonical RIB snapshot.
+///
+/// Snapshot tokens are process-local, so this hash only needs to remain stable
+/// for one daemon lifetime. FNV-1a gives `Hash` a deterministic byte sink; the
+/// result is subsequently protected by the peer manager's keyed token hash.
+struct SnapshotIdentityHasher(u64);
+
+impl Default for SnapshotIdentityHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Hasher for SnapshotIdentityHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+pub(super) fn snapshot_identity(snapshot: &UpdateGroupSnapshot) -> [u8; 8] {
+    let mut hasher = SnapshotIdentityHasher::default();
+    snapshot.hash(&mut hasher);
+    hasher.finish().to_be_bytes()
+}
 
 fn by_peer(config: &Config) -> Result<BTreeMap<IpAddr, ResolvedNeighbor>, String> {
     config
@@ -171,25 +204,27 @@ fn capacity_class(
 }
 
 impl PeerManager {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keeps snapshot classification, canonical IDs, and rollup in one auditable pure planning pass"
-    )]
-    pub(super) async fn plan_update_group_impact(
-        &self,
-        candidate: &Config,
-    ) -> Result<(UpdateGroupImpactPlan, String), String> {
+    pub(super) async fn query_update_group_snapshot(&self) -> Result<UpdateGroupSnapshot, String> {
         let (reply, recv) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryUpdateGroupSnapshot { reply })
             .await
             .map_err(|_| "RIB unavailable while planning update-group impact".to_string())?;
-        let snapshot = tokio::time::timeout(RIB_REPLY_TIMEOUT, recv)
+        tokio::time::timeout(RIB_REPLY_TIMEOUT, recv)
             .await
             .map_err(|_| "RIB update-group snapshot timed out".to_string())?
-            .map_err(|_| "RIB dropped update-group snapshot reply".to_string())?;
-        let snapshot_identity = format!("{snapshot:?}");
+            .map_err(|_| "RIB dropped update-group snapshot reply".to_string())
+    }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps snapshot classification, canonical IDs, and rollup in one auditable pure planning pass"
+    )]
+    pub(super) fn plan_update_group_impact(
+        &self,
+        candidate: &Config,
+        snapshot: UpdateGroupSnapshot,
+    ) -> Result<UpdateGroupImpactPlan, String> {
         let current = by_peer(&self.current_config)?;
         let candidate = by_peer(candidate)?;
         let live = snapshot
@@ -328,22 +363,57 @@ impl PeerManager {
             candidate_private.len(),
             rollup.indeterminate,
         );
-        Ok((
-            UpdateGroupImpactPlan {
-                schema_version: 1,
-                entries,
-                rollup,
-                capacity_class: capacity_class.to_string(),
-                capacity_basis: capacity_basis.to_string(),
-            },
-            snapshot_identity,
-        ))
+        Ok(UpdateGroupImpactPlan {
+            schema_version: 1,
+            entries,
+            rollup,
+            capacity_class: capacity_class.to_string(),
+            capacity_basis: capacity_basis.to_string(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_fixture() -> UpdateGroupSnapshot {
+        let input = UpdateGroupClassifierInput {
+            policy_fingerprint: Some("policy-a".to_string()),
+            policy_provenance: Some("toml_compiled_ir".to_string()),
+            policy_requires_peer_context: false,
+            target_is_ebgp: true,
+            target_is_rr_client: false,
+            sendable_families: vec![(1, 1)],
+            llgr_families: vec![],
+            add_path_send: false,
+            per_client_best: false,
+            orr_vantage: None,
+            orf_installed: false,
+        };
+        UpdateGroupSnapshot {
+            peers: vec![UpdateGroupPeerSnapshot {
+                peer: "192.0.2.1".parse().unwrap(),
+                classification: classify_update_group(input.clone()),
+                input,
+                runtime_membership: "group:1".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn snapshot_identity_is_fixed_width_deterministic_and_state_sensitive() {
+        let snapshot = snapshot_fixture();
+        assert_eq!(snapshot_identity(&snapshot).len(), 8);
+        assert_eq!(snapshot_identity(&snapshot), snapshot_identity(&snapshot));
+
+        let mut changed = snapshot;
+        changed.peers[0].runtime_membership = "private:orf_installed".to_string();
+        assert_ne!(
+            snapshot_identity(&changed),
+            snapshot_identity(&snapshot_fixture())
+        );
+    }
 
     #[test]
     fn transitions_keep_resync_and_indeterminate_distinct() {

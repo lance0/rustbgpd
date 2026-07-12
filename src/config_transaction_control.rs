@@ -1239,11 +1239,9 @@ async fn apply_config_transaction_locked(
                 committed_sections: Vec::new(),
                 human_text: "No changes.\n".to_string(),
                 confirmation: None,
-                update_group_impact: Some(
-                    rustbgpd_api::config_service::update_group_impact_to_proto(
-                        plan.update_group_impact,
-                    ),
-                ),
+                update_group_impact: Some(rustbgpd_api::update_group_impact_to_proto(
+                    plan.update_group_impact,
+                )),
             });
         }
         RuntimeConfigTransactionStatus::Rejected => {
@@ -1268,8 +1266,7 @@ async fn apply_config_transaction_locked(
     // Post-commit token comes from the plan (computed under the peer-manager's
     // key); the apply path can't recompute a key-consistent token itself.
     let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
-    let update_group_impact =
-        rustbgpd_api::config_service::update_group_impact_to_proto(plan.update_group_impact);
+    let update_group_impact = rustbgpd_api::update_group_impact_to_proto(plan.update_group_impact);
     let committed_candidate_toml = request.candidate_toml.clone();
     let mut response = commit_apply_family(
         deps,

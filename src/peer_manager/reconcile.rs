@@ -134,16 +134,18 @@ impl PeerManager {
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
-        let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
-        let (update_group_impact, live_snapshot_identity) = self
-            .plan_update_group_impact(&candidate)
+        // Query once and retain the exact snapshot used for both optimistic
+        // concurrency and impact planning. This lets stale callers fail before
+        // candidate parsing and the per-peer planning pass without introducing
+        // a second RIB query or a check/use race.
+        let live_snapshot = self
+            .query_update_group_snapshot()
             .await
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
+        let live_snapshot_identity = super::update_group_plan::snapshot_identity(&live_snapshot);
         let runtime_snapshot_token = self
             .snapshot_key
-            .token_with_context(&self.current_config, live_snapshot_identity.as_bytes())
+            .token_with_context(&self.current_config, &live_snapshot_identity)
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
             && expected != runtime_snapshot_token
@@ -153,6 +155,12 @@ impl PeerManager {
                 current: runtime_snapshot_token,
             });
         }
+        let candidate =
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
+                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let update_group_impact = self
+            .plan_update_group_impact(&candidate, live_snapshot)
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         // Token the resulting live config would carry once this candidate is
         // committed. The apply path returns it so a client can chain a follow-up
         // apply without re-planning; computing it here keeps every token under
@@ -161,7 +169,7 @@ impl PeerManager {
         // the one staged family (FIB), which the candidate already reflects.
         let post_commit_runtime_snapshot_token = self
             .snapshot_key
-            .token_with_context(&candidate, live_snapshot_identity.as_bytes())
+            .token_with_context(&candidate, &live_snapshot_identity)
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
         let classification = crate::config::classify_config_transaction_v1(&diff);
