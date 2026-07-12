@@ -144,7 +144,7 @@ pub(crate) struct PeerSession {
     reconnect_timer: Option<Pin<Box<Sleep>>>,
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
     /// so control commands remain responsive during connection establishment.
-    connect_task: Option<JoinHandle<std::io::Result<TcpStream>>>,
+    connect_task: Option<ConnectTask>,
     /// Receiver for outbound route updates from the RIB manager.
     outbound_rx: mpsc::Receiver<OutboundRouteUpdate>,
     /// Sender clone held to give to RIB manager on `PeerUp`.
@@ -258,6 +258,8 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
+    /// Connection-time TCP-AO inspection for the currently owned stream.
+    tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
     /// RFC 8538: only preserves routes when Notification GR was negotiated.
     notification_teardown: bool,
@@ -551,6 +553,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            tcp_ao_info: None,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -582,6 +585,7 @@ impl PeerSession {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
+        tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -662,6 +666,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            tcp_ao_info,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -1113,7 +1118,7 @@ impl PeerSession {
                 result = io::poll_connect(connect_task), if connect_task.is_some() => {
                     self.connect_task = None;
                     match result {
-                        Ok(Ok(stream)) => {
+                        Ok(Ok((stream, tcp_ao_info))) => {
                             info!(peer = %self.peer_label, "TCP connected");
                             // Split the stream and spawn the writer task.
                             // Read half stays here for the read_tcp arm; the
@@ -1129,6 +1134,7 @@ impl PeerSession {
                                 send_hold_duration(&self.config),
                             );
                             self.read_half = Some(rh);
+                            self.tcp_ao_info = tcp_ao_info;
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);
@@ -1138,10 +1144,12 @@ impl PeerSession {
                         }
                         Ok(Err(e)) => {
                             debug!(peer = %self.peer_label, error = %e, "TCP connect failed");
+                            self.record_connect_failure(&e);
                             self.drive_fsm(Event::TcpConnectionFails).await;
                         }
                         Err(e) => {
                             debug!(peer = %self.peer_label, error = %e, "TCP connect task failed");
+                            self.record_connect_failure(&e);
                             self.drive_fsm(Event::TcpConnectionFails).await;
                         }
                     }
@@ -1195,3 +1203,5 @@ impl PeerSession {
 
 #[cfg(test)]
 mod tests;
+pub(super) type ConnectResult = std::io::Result<(TcpStream, Option<crate::TcpAoInfoSnapshot>)>;
+pub(super) type ConnectTask = JoinHandle<ConnectResult>;

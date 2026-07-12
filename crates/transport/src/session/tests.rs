@@ -985,6 +985,19 @@ async fn bmp_peer_down_survives_full_channel() {
 async fn tcp_disconnect_clears_bmp_repair_latch() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(negotiated_session(65002, false));
+    session.tcp_ao_info = Some(crate::TcpAoInfoSnapshot {
+        has_current_key: true,
+        has_rnext_key: true,
+        ao_required: true,
+        accept_icmps: false,
+        current_key: 7,
+        rnext_key: 9,
+        pkt_good: 12,
+        pkt_bad: 0,
+        pkt_key_not_found: 0,
+        pkt_ao_required: 0,
+        pkt_dropped_icmp: 0,
+    });
     // Latch divergence + arm the repair timer via a dropped RM on a full
     // channel.
     let tx = session.bmp_tx.clone().unwrap();
@@ -1008,6 +1021,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
     }
     // TCP disconnect must abandon the repair outright.
     session.handle_tcp_disconnect();
+    assert!(session.tcp_ao_info.is_none(), "disconnect clears AO health");
     assert!(
         !session.bmp_stream_diverged,
         "disconnect clears the divergence latch"
@@ -1022,6 +1036,16 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
         bmp_rx.try_recv().is_err(),
         "no synthetic PeerDown/PeerUp for a dead session"
     );
+}
+
+#[test]
+fn connect_failure_is_retained_for_neighbor_diagnostics() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let error = std::io::Error::other(
+        "failed to install TCP-AO key (send_id=7, recv_id=9, algorithm=hmac(sha256))",
+    );
+    session.record_connect_failure(&error);
+    assert_eq!(session.last_error, error.to_string());
 }
 /// LAN-201: a partial repair attempt — `PeerDown` enqueued, `PeerUp` hits
 /// a full channel — leaves the latch set and retries. The collector-visible

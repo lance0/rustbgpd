@@ -511,6 +511,10 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "transaction fence test covers both reject and restore paths"
+)]
 async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynamic_peer() {
     let (tx, rx) = mpsc::channel(16);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
@@ -560,6 +564,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
     tx.send(PeerManagerCommand::AcceptInbound {
         stream: server_stream,
         peer_addr: remote_addr,
+        tcp_ao_info: None,
     })
     .await
     .unwrap();
@@ -587,6 +592,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
     tx.send(PeerManagerCommand::AcceptInbound {
         stream: server_stream,
         peer_addr: remote_addr,
+        tcp_ao_info: None,
     })
     .await
     .unwrap();
@@ -968,6 +974,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -4274,6 +4281,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -5135,6 +5143,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5198,6 +5207,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5258,6 +5268,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5316,6 +5327,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5868,6 +5880,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         flap_count: 0,
                         uptime_secs: u64::from(state == SessionState::Established),
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -5978,6 +5991,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -6106,6 +6120,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             flap_count: 0,
                             uptime_secs: 1,
                             last_error: String::new(),
+                            tcp_ao_info: None,
                         });
                     }
                     PeerCommand::Shutdown => break,
@@ -6324,6 +6339,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 _ => {}
@@ -6438,6 +6454,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             flap_count: 0,
                             uptime_secs: 1,
                             last_error: String::new(),
+                            tcp_ao_info: None,
                         });
                     }
                     PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6611,6 +6628,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6784,6 +6802,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6951,6 +6970,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7149,6 +7169,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7370,6 +7391,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7701,6 +7723,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        tcp_ao_info: None,
                     });
                 }
                 PeerCommand::CollisionDump => {
@@ -7727,7 +7750,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr).await;
+    mgr.handle_inbound(server_stream, remote_addr, None).await;
     assert!(
         mgr.peers
             .get(&key(peer_addr))
@@ -7885,7 +7908,7 @@ async fn inbound_state_query_timeout_keeps_existing_session() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr).await;
+    mgr.handle_inbound(server_stream, remote_addr, None).await;
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
     assert_eq!(
@@ -7959,7 +7982,7 @@ async fn inbound_after_session_task_exit_takes_accept_path() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr).await;
+    mgr.handle_inbound(server_stream, remote_addr, None).await;
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
     assert_ne!(
@@ -8446,7 +8469,8 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+        .await;
 
     assert_eq!(
         mgr.dynamic_peer_count, 1,
@@ -8532,7 +8556,8 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+        .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).unwrap();
     assert!(managed.is_dynamic);
@@ -8589,7 +8614,8 @@ async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
     let client_stream = client.await.unwrap();
 
     let link_local: IpAddr = "fe80::1".parse().unwrap();
-    mgr.handle_inbound(server_stream, sock(link_local)).await;
+    mgr.handle_inbound(server_stream, sock(link_local), None)
+        .await;
 
     assert_eq!(
         mgr.dynamic_peer_count, 0,
@@ -8693,7 +8719,8 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+        .await;
     assert_eq!(mgr.dynamic_peer_count, 1);
 
     let managed = mgr.peers.get_mut(&key(peer_addr)).unwrap();
@@ -8739,7 +8766,7 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, sock(peer_addr2)).await;
+    mgr.handle_inbound(server2, sock(peer_addr2), None).await;
 
     let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
@@ -8783,7 +8810,8 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr)).await;
+    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+        .await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     mgr.peers
         .get_mut(&key(peer_addr))
@@ -8823,7 +8851,7 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, sock(peer_addr2)).await;
+    mgr.handle_inbound(server2, sock(peer_addr2), None).await;
 
     let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
@@ -9436,7 +9464,7 @@ async fn strict_bfd_drops_inbound_until_up() {
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, sock(peer)).await;
+    mgr.handle_inbound(server_stream, sock(peer), None).await;
 
     // The inbound was dropped: the managed session was neither replaced nor
     // given a pending collision candidate, so no BGP session started.
@@ -9476,7 +9504,7 @@ async fn nonstrict_bfd_down_drops_inbound_while_held() {
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, sock(peer)).await;
+    mgr.handle_inbound(server_stream, sock(peer), None).await;
 
     let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(

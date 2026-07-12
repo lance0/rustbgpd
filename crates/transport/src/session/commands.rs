@@ -69,6 +69,7 @@ impl PeerSession {
                     flap_count: self.flap_count,
                     uptime_secs,
                     last_error: self.last_error.clone(),
+                    tcp_ao_info: self.tcp_ao_info.map(Box::new),
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())

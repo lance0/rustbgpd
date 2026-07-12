@@ -60,6 +60,15 @@ fn build_peer_info(
         flap_count: session_state.map_or(0, |s| s.flap_count),
         uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
         last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
+        authentication: if managed.transport_config.tcp_ao.is_some() {
+            "tcp_ao"
+        } else if managed.transport_config.md5_password.is_some() {
+            "md5"
+        } else {
+            "plaintext"
+        }
+        .to_string(),
+        tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().copied()),
         is_dynamic: managed.is_dynamic,
         stale,
     }

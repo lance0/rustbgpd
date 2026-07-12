@@ -12,6 +12,10 @@ use tokio::task::{JoinError, JoinHandle};
 const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl PeerSession {
+    pub(super) fn record_connect_failure(&mut self, error: &impl std::fmt::Display) {
+        self.last_error = error.to_string();
+    }
+
     /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
     ///
     /// Returns `true` if every emitted Address-Prefix ORF group of a negotiated
@@ -310,6 +314,7 @@ impl PeerSession {
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
         self.read_buf.clear();
+        self.tcp_ao_info = None;
         self.clear_bmp_stream_repair();
     }
 
@@ -326,6 +331,7 @@ impl PeerSession {
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
         self.read_buf.clear();
+        self.tcp_ao_info = None;
         self.clear_bmp_stream_repair();
     }
 
@@ -610,8 +616,8 @@ impl PeerSession {
 }
 
 pub(super) async fn poll_connect(
-    connect_task: &mut Option<JoinHandle<std::io::Result<TcpStream>>>,
-) -> Result<std::io::Result<TcpStream>, JoinError> {
+    connect_task: &mut Option<super::ConnectTask>,
+) -> Result<super::ConnectResult, JoinError> {
     let Some(task) = connect_task.as_mut() else {
         unreachable!("poll_connect called without an active connect task");
     };
@@ -621,7 +627,7 @@ pub(super) async fn poll_connect(
 async fn create_and_connect(
     config: TransportConfig,
     peer_label: String,
-) -> std::io::Result<TcpStream> {
+) -> std::io::Result<(TcpStream, Option<crate::TcpAoInfoSnapshot>)> {
     use socket2::{Domain, Protocol, SockAddr, Type};
 
     let domain = if config.remote_addr.is_ipv4() {
@@ -696,7 +702,7 @@ async fn create_and_connect(
         return Err(err);
     }
 
-    if config.tcp_ao.is_some() {
+    let tcp_ao_info = if config.tcp_ao.is_some() {
         match crate::socket_opts::get_tcp_ao_info(&stream) {
             Ok(info) => {
                 info!(
@@ -715,6 +721,7 @@ async fn create_and_connect(
                     pkt_dropped_icmp = info.pkt_dropped_icmp,
                     "TCP-AO active-open socket inspected"
                 );
+                Some(info)
             }
             Err(err) => {
                 warn!(
@@ -723,11 +730,14 @@ async fn create_and_connect(
                     error = %err,
                     "failed to inspect TCP-AO active-open socket"
                 );
+                None
             }
         }
-    }
+    } else {
+        None
+    };
 
-    Ok(stream)
+    Ok((stream, tcp_ao_info))
 }
 
 /// Read from the TCP read half into the buffer. Extracted as a

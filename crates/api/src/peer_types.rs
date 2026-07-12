@@ -6,7 +6,9 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_transport::{ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoConfig};
+use rustbgpd_transport::{
+    ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoConfig, TcpAoInfoSnapshot,
+};
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
@@ -848,6 +850,8 @@ pub enum PeerManagerCommand {
         stream: TcpStream,
         /// Remote peer socket address, including IPv6 scope for link-local.
         peer_addr: std::net::SocketAddr,
+        /// Connection-time TCP-AO inspection tied to this accepted stream.
+        tcp_ao_info: Option<rustbgpd_transport::TcpAoInfoSnapshot>,
     },
     /// Reconcile peers after config reload (add/remove/change).
     ReconcilePeers {
@@ -1804,6 +1808,10 @@ pub struct PeerInfo {
     pub uptime_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
+    /// Configured transport authentication: plaintext, MD5, or `tcp_ao`.
+    pub authentication: String,
+    /// Connection-time TCP-AO health for the currently owned stream.
+    pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
     /// True when the per-peer session-state query did not complete in time

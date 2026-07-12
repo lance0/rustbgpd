@@ -439,6 +439,8 @@ pub struct PeerSessionState {
     pub uptime_secs: u64,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
+    /// Connection-time TCP-AO socket inspection. Cleared on disconnect.
+    pub tcp_ao_info: Option<Box<crate::TcpAoInfoSnapshot>>,
     /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
     pub otc_routes_blocked: u64,
     /// Import policy evaluations that permitted a route.
@@ -768,6 +770,7 @@ impl PeerHandle {
             advertise_graceful_shutdown,
             session_identity,
             None,
+            None,
         )
     }
 
@@ -795,6 +798,7 @@ impl PeerHandle {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
         event_sink: Option<Arc<dyn TransportEventSink>>,
+        tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -818,6 +822,7 @@ impl PeerHandle {
                     validation_rx,
                     advertise_graceful_shutdown,
                     session_identity,
+                    tcp_ao_info,
                 );
                 if let Some(sink) = event_sink {
                     session.set_event_sink(sink);

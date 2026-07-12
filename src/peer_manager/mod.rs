@@ -789,8 +789,8 @@ impl PeerManager {
                             let result = self.set_graceful_shutdown(peer, enabled).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
-                            self.handle_inbound(stream, peer_addr).await;
+                        PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info } => {
+                            self.handle_inbound(stream, peer_addr, tcp_ao_info).await;
                         }
                         PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
                             let result = self.reconcile_peers(added, removed, changed).await;
