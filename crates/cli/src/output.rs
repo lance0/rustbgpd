@@ -240,6 +240,7 @@ pub struct JsonNeighborDetail {
     pub flap_count: u64,
     pub last_error: String,
     pub authentication: String,
+    pub tcp_ao_health: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_ao: Option<JsonTcpAoState>,
     pub description: String,
@@ -1015,6 +1016,7 @@ mod tests {
             flap_count: 7,
             last_error: String::new(),
             authentication: "tcp_ao".to_string(),
+            tcp_ao_health: "unavailable".to_string(),
             tcp_ao: None,
             description: "peer-2".to_string(),
             hold_time: 90,
@@ -1050,6 +1052,8 @@ mod tests {
         assert_eq!(value["strict_role"], true);
         assert_eq!(value["remote_role"], "rs-client");
         assert_eq!(value["role_negotiated"], true);
+        assert_eq!(value["authentication"], "tcp_ao");
+        assert_eq!(value["tcp_ao_health"], "unavailable");
         assert_eq!(value["otc_routes_blocked"], 3);
         assert_eq!(value["import_policy_routes_permitted"], 8);
         assert_eq!(value["import_policy_routes_denied"], 1);

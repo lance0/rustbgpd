@@ -405,6 +405,10 @@ message NeighborState {
   AuthenticationMode authentication = 26;
   // Connection-time Linux TCP-AO inspection; absent when not AO or disconnected.
   TcpAoState tcp_ao = 27;
+  // Health derived from the configured mode and connection-time inspection.
+  // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available
+  // (disconnected, still connecting, or inspection failed).
+  TcpAoHealth tcp_ao_health = 28;
 }
 
 enum AuthenticationMode {
@@ -412,6 +416,14 @@ enum AuthenticationMode {
   AUTHENTICATION_MODE_PLAINTEXT = 1;
   AUTHENTICATION_MODE_MD5 = 2;
   AUTHENTICATION_MODE_TCP_AO = 3;
+}
+
+enum TcpAoHealth {
+  TCP_AO_HEALTH_UNSPECIFIED = 0;
+  TCP_AO_HEALTH_NOT_APPLICABLE = 1;
+  TCP_AO_HEALTH_UNAVAILABLE = 2;
+  TCP_AO_HEALTH_HEALTHY = 3;
+  TCP_AO_HEALTH_DEGRADED = 4;
 }
 
 message TcpAoState {

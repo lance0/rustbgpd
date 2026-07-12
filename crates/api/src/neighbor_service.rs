@@ -409,6 +409,22 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         rustbgpd_fsm::SessionState::Established => proto::SessionState::Established,
     };
 
+    let tcp_ao_health = if info.authentication != "tcp_ao" {
+        proto::TcpAoHealth::NotApplicable
+    } else if let Some(ao) = info.tcp_ao_info {
+        if ao.pkt_bad > 0
+            || ao.pkt_key_not_found > 0
+            || ao.pkt_ao_required > 0
+            || ao.pkt_dropped_icmp > 0
+        {
+            proto::TcpAoHealth::Degraded
+        } else {
+            proto::TcpAoHealth::Healthy
+        }
+    } else {
+        proto::TcpAoHealth::Unavailable
+    };
+
     proto::NeighborState {
         config: Some(config),
         state: state.into(),
@@ -451,6 +467,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             packets_ao_required: ao.pkt_ao_required,
             packets_dropped_icmp: ao.pkt_dropped_icmp,
         }),
+        tcp_ao_health: tcp_ao_health.into(),
     }
 }
 
@@ -1910,6 +1927,71 @@ mod tests {
         assert_eq!(ao.packets_key_not_found, 2);
         assert_eq!(ao.packets_ao_required, 3);
         assert_eq!(ao.packets_dropped_icmp, 4);
+        assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Degraded as i32);
+    }
+
+    #[test]
+    fn peer_info_to_proto_reports_tcp_ao_unavailable_without_socket_snapshot() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = None;
+
+        let state = peer_info_to_proto(&info);
+
+        assert_eq!(
+            state.authentication,
+            proto::AuthenticationMode::TcpAo as i32
+        );
+        assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Unavailable as i32);
+        assert!(state.tcp_ao.is_none());
+    }
+
+    #[test]
+    fn peer_info_to_proto_reports_tcp_ao_health_not_applicable_for_plaintext() {
+        let info = peer_info("10.0.0.1".parse().unwrap());
+
+        let state = peer_info_to_proto(&info);
+
+        assert_eq!(
+            state.tcp_ao_health,
+            proto::TcpAoHealth::NotApplicable as i32
+        );
+    }
+
+    #[test]
+    fn peer_info_to_proto_reports_clean_tcp_ao_snapshot_as_healthy() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: true,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 9,
+            pkt_good: 20,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+
+        let state = peer_info_to_proto(&info);
+
+        assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Healthy as i32);
+    }
+
+    #[test]
+    fn established_tcp_ao_peer_with_failed_inspection_is_unavailable() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = None;
+
+        let state = peer_info_to_proto(&info);
+
+        assert_eq!(state.state, proto::SessionState::Established as i32);
+        assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Unavailable as i32);
+        assert!(state.tcp_ao.is_none());
     }
 
     #[tokio::test]

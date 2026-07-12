@@ -902,10 +902,14 @@ bundle (system facts + crash reports) and the manifest records which
 sections are missing.
 
 For live inspection, `rbgp neighbor <address>` reports the configured
-authentication mode. Connected TCP-AO sessions also show the connection-time
-current/RNext KeyIDs and packet verification counters. An absent TCP-AO health
-block means no AO socket is currently owned; inspect `last_error` for setup or
-connect failures.
+authentication mode and an explicit TCP-AO health state. `unavailable` means
+TCP-AO is configured but no socket inspection snapshot is available (the peer
+may be disconnected, connecting, or socket inspection may have failed).
+`healthy` means the connection-time snapshot has no authentication error
+counters; `degraded` means at least one error counter is non-zero. Connected
+sessions also show current/RNext KeyIDs and packet verification counters.
+Counters are captured when the socket connects and are not continuously
+refreshed; inspect `last_error` for setup or connect failures.
 
 What is never collected: the raw daemon config file (the config section is
 the daemon's own secret-redacted effective dump — the same document as

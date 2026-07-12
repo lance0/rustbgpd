@@ -113,6 +113,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
             authentication: authentication_label(n.authentication).to_string(),
+            tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
             tcp_ao: n.tcp_ao.as_ref().map(|ao| JsonTcpAoState {
                 current_key_id: ao.current_key_id,
                 rnext_key_id: ao.rnext_key_id,
@@ -240,6 +241,15 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Authentication:        {}",
             authentication_label(n.authentication)
         );
+        if matches!(
+            crate::proto::AuthenticationMode::try_from(n.authentication),
+            Ok(crate::proto::AuthenticationMode::TcpAo)
+        ) {
+            println!(
+                "TCP-AO Health:        {}",
+                tcp_ao_health_label(n.tcp_ao_health)
+            );
+        }
         if let Some(ao) = &n.tcp_ao {
             println!(
                 "TCP-AO Keys:           current={} rnext={}",
@@ -280,6 +290,16 @@ fn authentication_label(value: i32) -> &'static str {
         Ok(crate::proto::AuthenticationMode::Md5) => "md5",
         Ok(crate::proto::AuthenticationMode::Plaintext) => "plaintext",
         Ok(crate::proto::AuthenticationMode::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn tcp_ao_health_label(value: i32) -> &'static str {
+    match crate::proto::TcpAoHealth::try_from(value) {
+        Ok(crate::proto::TcpAoHealth::NotApplicable) => "not_applicable",
+        Ok(crate::proto::TcpAoHealth::Unavailable) => "unavailable",
+        Ok(crate::proto::TcpAoHealth::Healthy) => "healthy",
+        Ok(crate::proto::TcpAoHealth::Degraded) => "degraded",
+        Ok(crate::proto::TcpAoHealth::Unspecified) | Err(_) => "unknown",
     }
 }
 

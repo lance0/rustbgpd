@@ -250,6 +250,11 @@ the effective transport configuration. For a currently connected TCP-AO
 session, `NeighborState.tcp_ao` contains the connection-time socket inspection:
 current/RNext KeyIDs and Linux verification/error counters. The message is
 cleared on disconnect; counters are not continuously refreshed.
+`NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
+`UNAVAILABLE` when TCP-AO is configured but there is no socket snapshot
+(including disconnect and inspection failure), `HEALTHY` when the snapshot has
+no error counters, and `DEGRADED` when any bad, key-not-found,
+unsigned-required, or dropped-ICMP counter is non-zero.
 
 ---
 

@@ -716,6 +716,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             flap_count: 0,
             last_error: String::new(),
             authentication: server_proto::AuthenticationMode::TcpAo.into(),
+            tcp_ao_health: server_proto::TcpAoHealth::Unavailable.into(),
             tcp_ao: None,
             is_dynamic: false,
             stale: false,
