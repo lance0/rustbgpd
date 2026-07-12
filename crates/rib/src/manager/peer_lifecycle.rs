@@ -839,6 +839,11 @@ impl RibManager {
         let target_peer_group = self.peer_group.get(&peer).cloned();
         let cluster_id = self.cluster_id;
         let peer_add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+        let peer_add_path_send_limits = self
+            .peer_add_path_send_limits
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
         let peer_add_path_send_families = self
             .peer_add_path_send_families
             .get(&peer)
@@ -923,10 +928,12 @@ impl RibManager {
             if orf_gated.contains(&prefix_family(prefix)) {
                 continue;
             }
-            let prefix_send_max = if peer_add_path_send_max > 0
-                && peer_add_path_send_families.contains(&prefix_family(prefix))
-            {
-                peer_add_path_send_max
+            let family = prefix_family(prefix);
+            let prefix_send_max = if peer_add_path_send_families.contains(&family) {
+                peer_add_path_send_limits
+                    .get(&family)
+                    .copied()
+                    .unwrap_or(peer_add_path_send_max)
             } else {
                 0
             };

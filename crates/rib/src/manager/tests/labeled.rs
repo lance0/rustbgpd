@@ -449,6 +449,22 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     assert_eq!(rank_1.next_hop, best.next_hop, "rank 1 = best by tiebreak");
     assert_eq!(rank_2.next_hop, second.next_hop, "rank 2 = runner-up");
 
+    tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
+        peer: addpath_target,
+        afi: Afi::Ipv4,
+        safi: Safi::LabeledUnicast,
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let refreshed = drain_final_labeled(&mut addpath_out);
+    assert_eq!(
+        refreshed.len(),
+        2,
+        "route refresh preserves the family-local labeled cap"
+    );
+
     let plain_staged = drain_final_labeled(&mut plain_out);
     assert_eq!(plain_staged.len(), 1, "non-Add-Path peer stays single-best");
     let single = plain_staged

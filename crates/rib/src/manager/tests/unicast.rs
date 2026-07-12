@@ -1,5 +1,20 @@
 use super::*;
 
+fn drain_unicast_state(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> HashMap<(Prefix, u32), Route> {
+    let mut state = HashMap::new();
+    while let Ok(update) = rx.try_recv() {
+        for route in update.announce.iter() {
+            state.insert((route.prefix, route.path_id), route.clone());
+        }
+        for withdrawn in update.withdraw {
+            state.remove(&withdrawn);
+        }
+    }
+    state
+}
+
 #[test]
 fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
     let (_tx, rx) = mpsc::channel(1);
@@ -41,6 +56,168 @@ fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
         ),
         5
     );
+}
+
+#[tokio::test]
+async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+    let mut v4_routes = Vec::new();
+    let mut v6_routes = Vec::new();
+    for host in 1..=3 {
+        let v4_route = make_route(v4, Ipv4Addr::new(10, 0, 0, host));
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: v4_route.peer,
+            announced: vec![v4_route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        v4_routes.push(v4_route);
+
+        let v6_route = make_v6_route(v6, format!("2001:db8::{host}").parse().unwrap());
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: v6_route.peer,
+            announced: vec![v6_route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        v6_routes.push(v6_route);
+    }
+    let (sync_tx, sync_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: sync_tx })
+        .await
+        .unwrap();
+    assert_eq!(sync_rx.await.unwrap(), 2);
+
+    let target: IpAddr = "192.0.2.9".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 7,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        add_path_send_max: 1,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerAddPathLimits {
+        peer: target,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 1),
+            ((Afi::Ipv6, Safi::Unicast), 2),
+        ],
+    })
+    .await
+    .unwrap();
+    let (sync_tx, sync_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: sync_tx })
+        .await
+        .unwrap();
+    let _ = sync_rx.await.unwrap();
+    let initial = drain_unicast_state(&mut out_rx);
+    assert_eq!(
+        initial.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(),
+        1
+    );
+    assert_eq!(
+        initial.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(),
+        2
+    );
+
+    for route in [v4_routes.remove(0), v6_routes.remove(0)] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![],
+            withdrawn: vec![(route.prefix, route.path_id)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let (sync_tx, sync_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: sync_tx })
+        .await
+        .unwrap();
+    let _ = sync_rx.await.unwrap();
+    let reranked = drain_unicast_state(&mut out_rx);
+    assert_eq!(
+        reranked
+            .keys()
+            .filter(|(p, _)| *p == Prefix::V4(v4))
+            .count(),
+        1
+    );
+    assert_eq!(
+        reranked
+            .keys()
+            .filter(|(p, _)| *p == Prefix::V6(v6))
+            .count(),
+        2
+    );
+
+    for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer: target,
+            session_id: 7,
+            afi,
+            safi,
+        })
+        .await
+        .unwrap();
+    }
+    let (sync_tx, sync_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: sync_tx })
+        .await
+        .unwrap();
+    let _ = sync_rx.await.unwrap();
+    let refreshed = drain_unicast_state(&mut out_rx);
+    assert_eq!(
+        refreshed
+            .keys()
+            .filter(|(p, _)| *p == Prefix::V4(v4))
+            .count(),
+        1
+    );
+    assert_eq!(
+        refreshed
+            .keys()
+            .filter(|(p, _)| *p == Prefix::V6(v6))
+            .count(),
+        2
+    );
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 #[tokio::test]
