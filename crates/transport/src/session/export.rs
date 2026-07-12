@@ -13,8 +13,13 @@ use super::{
     RtcRibRouteKey, Safi, TransportConfig, UpdateMessage, VpnRibRoute, VpnRibRouteKey,
     is_ipv6_link_local, is_private_asn,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use rustbgpd_rib::{
+    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
+    ExactExportResult, ExactExportSnapshot,
+};
 use rustbgpd_wire::EncodeError;
 
 /// Immutable inputs that determine one established session's outbound wire
@@ -26,6 +31,7 @@ use rustbgpd_wire::EncodeError;
 )]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SessionExportProfile {
+    owner_id: u64,
     generation: u64,
     local_asn: u32,
     local_router_id: Ipv4Addr,
@@ -49,6 +55,7 @@ impl std::fmt::Debug for SessionExportProfile {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SessionExportProfile")
+            .field("owner_id", &self.owner_id)
             .field("generation", &self.generation)
             .field("local_asn", &self.local_asn)
             .field("local_router_id", &self.local_router_id)
@@ -87,6 +94,7 @@ impl SessionExportProfile {
             && session.config.peer_interface.is_some()
             && session.config.peer_scope_id.is_some();
         Self {
+            owner_id: 0,
             generation: 0,
             local_asn: session.config.peer.local_asn,
             local_router_id: session.config.peer.local_router_id,
@@ -154,6 +162,7 @@ impl SessionExportProfile {
     ) -> Self {
         let peer_ip = config.remote_addr.ip();
         Self {
+            owner_id: 0,
             generation: 0,
             local_asn: config.peer.local_asn,
             local_router_id: config.peer.local_router_id,
@@ -1552,12 +1561,87 @@ impl UnreachNlri<'_> {
 
 /// Replaceable owner of immutable export-profile snapshots.
 pub(crate) struct SessionExportEncoder {
+    owner_id: u64,
     current: RwLock<Arc<SessionExportProfile>>,
 }
 
+static NEXT_EXPORT_ENCODER_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ExactExportEncoder for SessionExportEncoder {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
+        SessionExportEncoder::snapshot(self)
+    }
+}
+
+impl ExactExportSnapshot for SessionExportProfile {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn generation(&self) -> u64 {
+        SessionExportProfile::generation(self)
+    }
+
+    fn probe_announcement(
+        &self,
+        candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        let candidate = match candidate {
+            ExactExportCandidate::Unicast {
+                route,
+                next_hop_override,
+            } => ExportCandidate::Unicast {
+                route,
+                next_hop_override,
+            },
+            ExactExportCandidate::FlowSpec(route) => ExportCandidate::FlowSpec(route),
+            ExactExportCandidate::Evpn(route) => ExportCandidate::Evpn(route),
+            ExactExportCandidate::BgpLs(route) => ExportCandidate::BgpLs(route),
+            ExactExportCandidate::Vpn(route) => ExportCandidate::Vpn(route),
+            ExactExportCandidate::Labeled(route) => ExportCandidate::Labeled(route),
+            ExactExportCandidate::Rtc(route) => ExportCandidate::Rtc(route),
+        };
+        let probe = SessionExportProfile::probe_announcement(self, candidate).map_err(|error| {
+            let code = match &error {
+                ExportProbeError::Encode(_) => ExactExportErrorCode::Encoding,
+                ExportProbeError::MissingIpv6NextHop => ExactExportErrorCode::MissingIpv6NextHop,
+                ExportProbeError::Ipv4RequiresExtendedNextHop => {
+                    ExactExportErrorCode::Ipv4RequiresExtendedNextHop
+                }
+            };
+            ExactExportError::new(code, error)
+        })?;
+        if probe.encoded_len > probe.max_len {
+            return Err(ExactExportError::new(
+                ExactExportErrorCode::MessageTooLong,
+                format_args!(
+                    "encoded UPDATE is {} bytes; negotiated maximum is {} bytes",
+                    probe.encoded_len, probe.max_len
+                ),
+            ));
+        }
+        Ok(ExactExportResult {
+            encoded_len: probe.encoded_len,
+            max_len: probe.max_len,
+            generation: probe.generation,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 impl SessionExportEncoder {
-    pub(super) fn new(profile: SessionExportProfile) -> Self {
+    pub(super) fn new(mut profile: SessionExportProfile) -> Self {
+        let owner_id = NEXT_EXPORT_ENCODER_ID.fetch_add(1, Ordering::Relaxed);
+        profile.owner_id = owner_id;
         Self {
+            owner_id,
             current: RwLock::new(Arc::new(profile)),
         }
     }
@@ -1567,6 +1651,7 @@ impl SessionExportEncoder {
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        profile.owner_id = self.owner_id;
         profile.generation = current.generation();
         if **current == profile {
             return Arc::clone(&current);
@@ -1794,6 +1879,45 @@ mod tests {
             "new Add-Path profile changes wire bytes"
         );
         assert!(Arc::ptr_eq(&new, &encoder.snapshot()));
+    }
+
+    #[test]
+    fn object_safe_exact_export_bridge_preserves_identity_and_generation() {
+        let config = config_with_auth_secret("not-retained");
+        let encoder: Arc<dyn ExactExportEncoder> = Arc::new(SessionExportEncoder::new(
+            SessionExportProfile::initial(&config, None, false),
+        ));
+        let snapshot = encoder.snapshot();
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 7,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        };
+        let candidate = ExactExportCandidate::Unicast {
+            route: &route,
+            next_hop_override: None,
+        };
+
+        assert_eq!(
+            candidate.key(),
+            rustbgpd_rib::ExactExportKey::Unicast(route.prefix, route.path_id)
+        );
+        let result = snapshot.probe_announcement(candidate).unwrap();
+        assert_eq!(result.generation, snapshot.generation());
+        assert!(result.encoded_len <= result.max_len);
+        assert!(snapshot.as_any().is::<SessionExportProfile>());
     }
 
     fn encoded(message: UpdateMessage) -> Vec<u8> {

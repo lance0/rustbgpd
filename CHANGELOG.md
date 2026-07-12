@@ -76,6 +76,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Unexportable routes now fail before Adj-RIB-Out commit.** Every
+  route-bearing envelope carries one immutable snapshot of the session's exact
+  encoder and negotiated message ceiling. The RIB probes the final one-route
+  wire form for all supported families after policy and next-hop preparation;
+  a rejected announcement is never recorded as advertised, while a route that
+  becomes unexportable is withdrawn. Update-group members retain the shared
+  staged table and apply a sparse per-member rejection overlay, so 4096-byte
+  and Extended Message peers can share policy work without sharing an
+  incorrect advertised view. Rejections are logged once per transition and
+  counted by `bgp_exact_export_rejections_total{peer,family,reason}`. A later
+  accepted recompute or resync retries the route; an ordinary source withdraw
+  retires the rejection without emitting a duplicate wire withdrawal. The
+  transport's Cease/8 overflow teardown remains a defense against invariant
+  violations and races, not the primary correctness mechanism. (LAN-361)
+
 - **Outbound transport hardening closes EVPN overflow and bounded-probe
   gaps.** A single EVPN announcement or withdrawal that cannot fit the
   negotiated message ceiling now invokes the established Cease/8 outbound

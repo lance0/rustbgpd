@@ -261,6 +261,8 @@ impl RibManager {
         self.live_sessions.remove(&peer);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_export_encoders
+            .retain(|(context_peer, _), _| *context_peer != peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
@@ -420,6 +422,8 @@ impl RibManager {
         self.peer_is_ebgp.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
         self.peer_local_roles.remove(&peer);
+        self.peer_export_encoders.remove(&peer);
+        self.peer_unexportable.remove(&peer);
         self.pending_otc_blocked.remove(&peer);
         // The ORR vantage binding is per-registration: dropping the last
         // peer bound to a vantage must also drop the vantage's cached
@@ -544,6 +548,9 @@ impl RibManager {
             .pending_peer_export_context
             .remove(&(peer, session_id))
             .flatten();
+        let exact_export_encoder = self
+            .pending_peer_export_encoders
+            .remove(&(peer, session_id));
 
         let record = LiveSessionRecord {
             session_id,
@@ -561,6 +568,7 @@ impl RibManager {
             add_path_send_max,
             negotiated_orf_recv,
             negotiated_llgr_families,
+            exact_export_encoder,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
@@ -610,6 +618,10 @@ impl RibManager {
         let add_path_send_max = record.add_path_send_max;
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let negotiated_llgr_families = record.negotiated_llgr_families.clone();
+        let exact_export_encoder = record.exact_export_encoder.clone();
+        #[cfg(any(test, feature = "bench-internals"))]
+        let exact_export_encoder =
+            exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
 
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
@@ -704,6 +716,15 @@ impl RibManager {
         self.peer_is_ebgp.insert(peer, is_ebgp);
         self.peer_is_rr_client.insert(peer, route_reflector_client);
         self.peer_local_roles.insert(peer, local_role);
+        if let Some(encoder) = exact_export_encoder {
+            self.peer_export_encoders.insert(peer, encoder);
+        } else {
+            // Registration remains alive so inbound routing and operator
+            // state stay available, but the precommit gate below has no
+            // authority to claim any announcement is wire-exportable.
+            warn!(%peer, session_id, "peer registered without an exact export encoder — outbound announcements fail closed");
+            self.peer_export_encoders.remove(&peer);
+        }
         if let Some(vantage) = orr_vantage {
             self.peer_orr_vantage.insert(peer, vantage);
             // The vantage may register after the BGP-LS routes arrived

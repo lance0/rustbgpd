@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -316,6 +317,212 @@ use crate::route::{
     VpnRibRouteKey,
 };
 
+/// Stable identity of one route tested by the exact outbound encoder.
+///
+/// The key deliberately contains no attributes or next-hop data: it is used
+/// to maintain a per-peer rejected overlay alongside the ordinary
+/// Adj-RIB-Out identity maps.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExactExportKey {
+    /// IPv4/IPv6 unicast prefix plus Add-Path identifier.
+    Unicast(Prefix, u32),
+    /// RFC 8955/8956 `FlowSpec` identity.
+    FlowSpec(crate::route::FlowSpecKey),
+    /// RFC 7432 EVPN identity.
+    Evpn(EvpnRouteKey),
+    /// RFC 9552 BGP-LS identity.
+    BgpLs(BgpLsRouteKey),
+    /// VPNv4/VPNv6 identity.
+    Vpn(VpnRibRouteKey),
+    /// Labeled-unicast identity.
+    Labeled(LabeledRibRouteKey),
+    /// RT-Constrain identity.
+    Rtc(RtcRibRouteKey),
+}
+
+impl ExactExportKey {
+    /// Stable low-cardinality family label used by exact-export rejection
+    /// metrics. The values are deliberately constrained to the telemetry
+    /// allow-list; no NLRI or peer-controlled text enters a label.
+    #[must_use]
+    pub fn family_label(&self) -> &'static str {
+        match self {
+            Self::Unicast(Prefix::V4(_), _) => "ipv4_unicast",
+            Self::Unicast(Prefix::V6(_), _) => "ipv6_unicast",
+            Self::FlowSpec(key) if key.afi == Afi::Ipv4 => "ipv4_flowspec",
+            Self::FlowSpec(_) => "ipv6_flowspec",
+            Self::Evpn(_) => "l2vpn_evpn",
+            Self::BgpLs(key) if key.family == crate::route::BgpLsFamily::LinkState => "bgpls",
+            Self::BgpLs(_) => "bgpls_vpn",
+            Self::Vpn(key) if key.afi_safi().0 == Afi::Ipv4 => "l3vpn_ipv4_unicast",
+            Self::Vpn(_) => "l3vpn_ipv6_unicast",
+            Self::Labeled(key) if key.afi_safi().0 == Afi::Ipv4 => "ipv4_labeled_unicast",
+            Self::Labeled(_) => "ipv6_labeled_unicast",
+            Self::Rtc(_) => "rtc",
+        }
+    }
+}
+
+/// Borrowed, family-complete input to a session's exact export probe.
+///
+/// Candidates are already post-policy. The unicast next-hop override is kept
+/// beside the route because it is part of the final wire representation.
+#[derive(Clone, Copy)]
+pub enum ExactExportCandidate<'a> {
+    /// IPv4/IPv6 unicast.
+    Unicast {
+        /// Post-policy route.
+        route: &'a Route,
+        /// Post-policy next-hop action for this route.
+        next_hop_override: Option<&'a rustbgpd_policy::NextHopAction>,
+    },
+    /// RFC 8955/8956 `FlowSpec`.
+    FlowSpec(&'a FlowSpecRoute),
+    /// RFC 7432 EVPN.
+    Evpn(&'a EvpnRibRoute),
+    /// RFC 9552 BGP-LS.
+    BgpLs(&'a BgpLsRibRoute),
+    /// VPNv4/VPNv6.
+    Vpn(&'a VpnRibRoute),
+    /// Labeled-unicast.
+    Labeled(&'a LabeledRibRoute),
+    /// RT-Constrain.
+    Rtc(&'a RtcRibRoute),
+}
+
+impl ExactExportCandidate<'_> {
+    /// Return the canonical Adj-RIB-Out identity for this candidate.
+    #[must_use]
+    pub fn key(&self) -> ExactExportKey {
+        match self {
+            Self::Unicast { route, .. } => ExactExportKey::Unicast(route.prefix, route.path_id),
+            Self::FlowSpec(route) => ExactExportKey::FlowSpec(route.selection_key()),
+            Self::Evpn(route) => ExactExportKey::Evpn(route.key()),
+            Self::BgpLs(route) => ExactExportKey::BgpLs(route.key()),
+            Self::Vpn(route) => ExactExportKey::Vpn(route.key()),
+            Self::Labeled(route) => ExactExportKey::Labeled(route.key()),
+            Self::Rtc(route) => ExactExportKey::Rtc(route.key()),
+        }
+    }
+}
+
+/// Bounded machine-readable reason for rejecting an exact export candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExactExportErrorCode {
+    /// A structured wire encoder rejected the candidate.
+    Encoding,
+    /// No usable IPv6 next-hop exists for this session and route.
+    MissingIpv6NextHop,
+    /// A scoped link-local session cannot send IPv4 without RFC 8950.
+    Ipv4RequiresExtendedNextHop,
+    /// The one-route UPDATE exceeds the negotiated message ceiling.
+    MessageTooLong,
+}
+
+impl ExactExportErrorCode {
+    /// Stable low-cardinality label suitable for metrics and API projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Encoding => "encoding",
+            Self::MissingIpv6NextHop => "missing_ipv6_next_hop",
+            Self::Ipv4RequiresExtendedNextHop => "ipv4_requires_extended_next_hop",
+            Self::MessageTooLong => "message_too_long",
+        }
+    }
+}
+
+/// Exact export rejection with a low-cardinality code and bounded detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactExportError {
+    code: ExactExportErrorCode,
+    detail: String,
+}
+
+impl ExactExportError {
+    const MAX_DETAIL_CHARS: usize = 256;
+
+    /// Construct an error while enforcing the diagnostic cardinality bound.
+    #[must_use]
+    pub fn new(code: ExactExportErrorCode, detail: impl std::fmt::Display) -> Self {
+        let detail = detail
+            .to_string()
+            .chars()
+            .take(Self::MAX_DETAIL_CHARS)
+            .collect();
+        Self { code, detail }
+    }
+
+    /// Stable rejection category.
+    #[must_use]
+    pub const fn code(&self) -> ExactExportErrorCode {
+        self.code
+    }
+
+    /// Human-readable detail, bounded to 256 Unicode scalar values.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for ExactExportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code.as_str(), self.detail)
+    }
+}
+
+impl std::error::Error for ExactExportError {}
+
+/// Successful exact one-route export probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExactExportResult {
+    /// Encoded BGP message length including the fixed header.
+    pub encoded_len: usize,
+    /// Negotiated message ceiling used by the same immutable snapshot.
+    pub max_len: usize,
+    /// Immutable session export-profile generation used by the probe.
+    pub generation: u64,
+}
+
+/// Immutable exact-export view captured once for a whole outbound envelope.
+///
+/// `as_any` is intentionally part of the contract: the transport must verify
+/// that a RIB envelope was probed with its own concrete session profile before
+/// using that same profile for live encoding.
+pub trait ExactExportSnapshot: Any + Send + Sync {
+    /// Stable identity of the encoder/session that produced this snapshot.
+    fn owner_id(&self) -> u64;
+
+    /// Monotonic generation of the immutable session export profile.
+    fn generation(&self) -> u64;
+
+    /// Probe one post-policy route using the exact live message builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded typed error when preparation or encoding fails, or
+    /// when the exact single-route message exceeds the snapshot's negotiated
+    /// ceiling.
+    fn probe_announcement(
+        &self,
+        candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError>;
+
+    /// Concrete type hook used by the owning transport at the trust boundary.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Replaceable owner of immutable exact-export snapshots.
+pub trait ExactExportEncoder: Send + Sync {
+    /// Stable identity used by transport to reject another session's snapshot.
+    fn owner_id(&self) -> u64;
+
+    /// Capture the profile that both RIB precommit and live envelope encoding
+    /// must use without observing a mid-envelope runtime change.
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot>;
+}
+
 /// Per-peer post-policy Adj-RIB-Out route counts per AFI/SAFI —
 /// the RFC 8671 BMP stat type 15/17 source.
 pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
@@ -323,6 +530,10 @@ pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 /// Routes to be sent outbound to a peer.
 #[derive(Default)]
 pub struct OutboundRouteUpdate {
+    /// Exact session export snapshot used to preflight every announcement in
+    /// this envelope. Transport rejects an envelope whose snapshot is absent
+    /// or belongs to another encoder implementation.
+    pub exact_export_snapshot: Option<Arc<dyn ExactExportSnapshot>>,
     /// Routes to announce to this peer. `Arc`-shared so an update-group
     /// fanout enqueues ONE staged announce vector to every in-sync
     /// member instead of cloning the `Route` shells per member
@@ -905,6 +1116,17 @@ pub enum RibUpdate {
         session_id: u64,
         /// Local RFC 9234 BGP Role, if configured.
         local_role: Option<BgpRole>,
+    },
+    /// Stage the session's exact outbound encoder immediately before
+    /// [`RibUpdate::PeerUp`] builds the initial Adj-RIB-Out. The session id
+    /// prevents a queued collision loser from replacing the winner's encoder.
+    SetPeerExportEncoder {
+        /// Peer whose exact encoder is being staged.
+        peer: IpAddr,
+        /// Transport session identity that will accompany `PeerUp`.
+        session_id: u64,
+        /// Session-owned replaceable encoder.
+        encoder: Arc<dyn ExactExportEncoder>,
     },
     /// Inject a locally-originated route.
     InjectRoute {

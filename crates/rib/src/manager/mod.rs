@@ -27,14 +27,59 @@ use crate::best_path::best_path_cmp_with_reason;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
-    BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage, RouteQueryFilter,
-    RouteQueryKey, RouteQueryScope, route_query_key,
+    BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
+    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, route_query_key,
 };
 
 use helpers::{
     DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family, unicast_route_family,
 };
+
+#[cfg(any(test, feature = "bench-internals"))]
+struct PermissiveTestExactExport;
+
+#[cfg(any(test, feature = "bench-internals"))]
+impl crate::update::ExactExportSnapshot for PermissiveTestExactExport {
+    fn owner_id(&self) -> u64 {
+        0
+    }
+
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: crate::update::ExactExportCandidate<'_>,
+    ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+        Ok(crate::update::ExactExportResult {
+            encoded_len: 0,
+            max_len: usize::MAX,
+            generation: 0,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+impl ExactExportEncoder for PermissiveTestExactExport {
+    fn owner_id(&self) -> u64 {
+        0
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        Arc::new(Self)
+    }
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn permissive_test_exact_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    Arc::new(PermissiveTestExactExport)
+}
 
 /// Reverse index of unicast announcing peers: prefix → the peers whose
 /// Adj-RIB-In currently holds at least one route for it. `FxHash` +
@@ -125,6 +170,20 @@ pub struct RibManager {
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
+    /// Session-stamped exact encoder staged immediately before `PeerUp`.
+    /// Keeping the handle separate from the legacy registration payload
+    /// avoids making every non-transport `PeerUp` producer construct a fake
+    /// wire encoder while still fencing collision losers by session id.
+    pending_peer_export_encoders: HashMap<(IpAddr, u64), Arc<dyn ExactExportEncoder>>,
+    /// Exact encoder owned by the active outbound registration. Every
+    /// precommit pass captures one immutable snapshot from this handle and
+    /// attaches that same snapshot to the outbound envelope.
+    peer_export_encoders: HashMap<IpAddr, Arc<dyn ExactExportEncoder>>,
+    /// Sparse per-peer identities rejected by exact wire preparation. For
+    /// update-group members this is the member-local overlay over the shared
+    /// group table; for private peers it suppresses repeated diagnostics and
+    /// withdrawals for routes that were never advertised.
+    peer_unexportable: HashMap<IpAddr, HashSet<ExactExportKey>>,
     export_policy: Option<PolicyChain>,
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
@@ -396,6 +455,7 @@ pub(super) struct LiveSessionRecord {
     add_path_send_max: u32,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
+    exact_export_encoder: Option<Arc<dyn ExactExportEncoder>>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -759,6 +819,10 @@ impl RibManager {
 impl RibManager {
     /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "constructor initializes the manager's deliberately centralized actor state"
+    )]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,
         query_rx: mpsc::Receiver<RibUpdate>,
@@ -806,6 +870,9 @@ impl RibManager {
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             pending_peer_export_context: HashMap::new(),
+            pending_peer_export_encoders: HashMap::new(),
+            peer_export_encoders: HashMap::new(),
+            peer_unexportable: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
@@ -1028,6 +1095,19 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
+        let may_remove_route_identity = matches!(
+            &update,
+            RibUpdate::RoutesReceived { .. }
+                | RibUpdate::BgpLsRoutesReceived { .. }
+                | RibUpdate::VpnRoutesReceived { .. }
+                | RibUpdate::LabeledRoutesReceived { .. }
+                | RibUpdate::RtcRoutesReceived { .. }
+                | RibUpdate::PeerDown { .. }
+                | RibUpdate::PeerDeleted { .. }
+                | RibUpdate::WithdrawInjected { .. }
+                | RibUpdate::WithdrawFlowSpec { .. }
+                | RibUpdate::WithdrawEvpn { .. }
+        );
         match update {
             RibUpdate::RoutesReceived {
                 peer,
@@ -1202,6 +1282,17 @@ impl RibManager {
                 // id because collision-window senders can interleave.
                 self.pending_peer_export_context
                     .insert((peer, session_id), local_role);
+            }
+            RibUpdate::SetPeerExportEncoder {
+                peer,
+                session_id,
+                encoder,
+            } => {
+                // Like the role context above, this is deliberately staged
+                // before PeerUp. Collision-window senders can interleave, so
+                // only the matching session consumes the handle.
+                self.pending_peer_export_encoders
+                    .insert((peer, session_id), encoder);
             }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {
@@ -1455,6 +1546,37 @@ impl RibManager {
                 self.handle_query_bmp_loc_rib_stats(reply);
             }
         }
+        if may_remove_route_identity {
+            self.prune_exact_export_rejections();
+        }
+    }
+
+    /// Remove sparse rejection-overlay keys whose source identity no longer
+    /// exists in any Adj-RIB-In. Work is proportional to the rejected overlay,
+    /// never to the full Internet table: every keyed family uses its direct
+    /// lookup, while FlowSpec/EVPN scan only when one of their sparse keys is
+    /// actually rejected.
+    fn prune_exact_export_rejections(&mut self) {
+        if self.peer_unexportable.is_empty() {
+            return;
+        }
+        let key_is_live = |key: &ExactExportKey| {
+            self.ribs.values().any(|rib| match key {
+                ExactExportKey::Unicast(prefix, path_id) => rib.get(prefix, *path_id).is_some(),
+                ExactExportKey::FlowSpec(key) => rib
+                    .iter_flowspec()
+                    .any(|route| route.selection_key() == *key),
+                ExactExportKey::Evpn(key) => rib.iter_evpn().any(|route| route.key() == *key),
+                ExactExportKey::BgpLs(key) => rib.get_bgpls(key).is_some(),
+                ExactExportKey::Vpn(key) => rib.get_vpn(key).is_some(),
+                ExactExportKey::Labeled(key) => rib.get_labeled(key).is_some(),
+                ExactExportKey::Rtc(key) => rib.get_rtc(key).is_some(),
+            })
+        };
+        self.peer_unexportable.retain(|_, rejected| {
+            rejected.retain(key_is_live);
+            !rejected.is_empty()
+        });
     }
 
     /// One bounded chunk of the RFC 9069 Loc-RIB table dump: synthesize
@@ -1859,6 +1981,55 @@ impl RibManager {
         trace.into_explain(peer, prefix, rd, None)
     }
 
+    fn apply_exact_export_overlay_to_explain(
+        &self,
+        peer: IpAddr,
+        key: &ExactExportKey,
+        mut explanation: ExplainAdvertisedRoute,
+    ) -> ExplainAdvertisedRoute {
+        if explanation.decision != crate::update::ExplainDecision::Advertise
+            || !self
+                .peer_unexportable
+                .get(&peer)
+                .is_some_and(|rejected| rejected.contains(key))
+        {
+            return explanation;
+        }
+        let detail =
+            "the active session's exact wire encoder rejected this post-policy route".to_string();
+        explanation.decision = crate::update::ExplainDecision::Deny;
+        explanation.already_advertised = false;
+        explanation.reasons = vec![crate::update::ExplainReason {
+            code: "exact_export_rejected",
+            message: detail.clone(),
+        }];
+        explanation.gates.push(crate::update::ExportGateStep {
+            gate: "exact_export",
+            code: "exact_export_rejected",
+            verdict: crate::update::ExportGateVerdict::Stop,
+            detail,
+        });
+        explanation
+    }
+
+    /// Materialize the member-specific wire view used to explain a grouped
+    /// unicast export. Rejected rows remain absent until an exact encoder
+    /// accepts them again, just as they do in live group projections.
+    fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
+        let group = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))?;
+        let rejected = self.peer_unexportable.get(&peer);
+        let mut view = AdjRibOut::new(peer);
+        for route in group.table.iter().filter(|route| {
+            let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+            route.peer != peer && !rejected.is_some_and(|keys| keys.contains(&key))
+        }) {
+            view.insert(route.clone());
+        }
+        Some(view)
+    }
+
     /// Explain the unicast export ladder for `(prefix, peer)`.
     ///
     /// Truthfulness mechanism: for the single-best shapes — per-peer
@@ -1875,6 +2046,10 @@ impl RibManager {
     /// ranks the same filtered-best candidate walk live staging
     /// performs, so it reports the advertised runner-up (not a false
     /// "denied") when the Loc-RIB best is policy-denied.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the explain path mirrors the complete live unicast gate ladder"
+    )]
     fn explain_unicast_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
         let family = prefix_family(&prefix);
         if self
@@ -1909,7 +2084,7 @@ impl RibManager {
         let per_client_best = self.peer_per_client_best.contains(&peer);
 
         if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
-            return Self::explain_single_best_prefix(
+            let explanation = Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,
                 &self.unicast_prefix_peers,
@@ -1931,22 +2106,24 @@ impl RibManager {
                 orr_ctx,
                 per_client_best,
             );
+            if add_path_send_max > 0 {
+                return explanation;
+            }
+            return self.apply_exact_export_overlay_to_explain(
+                peer,
+                &ExactExportKey::Unicast(prefix, explanation.path_id),
+                explanation,
+            );
         }
 
-        // Dry run of the live single-best staging body. A grouped
-        // member's advertised state is the group table (update-groups
-        // design §2: members hold no per-peer unicast Adj-RIB-Out).
-        //
-        // Limitation: the group table still holds routes this member
-        // itself sourced, which split-horizon excludes from the live
-        // emit but which the dry-run's `already_advertised` gate does
-        // not filter. A member-scoped AdjRibOut view (`route.peer !=
-        // peer`) is not synthesized here, so for a member's own-sourced
-        // prefixes the dry-run may show them as already-advertised.
+        // Dry run of the live single-best staging body. A grouped member has
+        // no private unicast Adj-RIB-Out, so materialize its exact wire view:
+        // shared table minus own-sourced and member-local unexportable rows.
         let member_of = self.grouped_member_of(peer);
         let empty_rib_out;
-        let rib_out = if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
-            &group.table
+        let grouped_rib_out = self.grouped_unicast_explain_view(peer);
+        let rib_out = if let Some(grouped) = grouped_rib_out.as_ref() {
+            grouped
         } else if let Some(out) = self.adj_ribs_out.get(&peer) {
             out
         } else {
@@ -1987,7 +2164,12 @@ impl RibManager {
             &mut policy_filtered,
             false,
         );
-        trace.into_explain(peer, prefix, None, member_of.map(|gid| gid as u64))
+        let explanation = trace.into_explain(peer, prefix, None, member_of.map(|gid| gid as u64));
+        self.apply_exact_export_overlay_to_explain(
+            peer,
+            &ExactExportKey::Unicast(prefix, explanation.path_id),
+            explanation,
+        )
     }
 
     /// Explain the VPNv4/VPNv6 (SAFI 128) export ladder for
@@ -1999,6 +2181,10 @@ impl RibManager {
     /// reflection runs. A VPN-staging group member is diffed against
     /// its group table under its own RT filter `Φ_m`, matching the
     /// emit-time matrix.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the explain path mirrors the complete live VPN gate ladder"
+    )]
     fn explain_vpn_export(
         &mut self,
         peer: IpAddr,
@@ -2052,8 +2238,20 @@ impl RibManager {
 
         let vpn_grouped = self.vpn_grouped_member_of(peer);
         let empty_rib_out;
+        let grouped_rib_out;
         let rib_out = if let Some(group) = vpn_grouped.and_then(|gid| self.group_ribs.get(&gid)) {
-            &group.table
+            let rejected = self.peer_unexportable.get(&peer);
+            let mut view = AdjRibOut::new(peer);
+            for route in group.table.iter_vpn().filter(|route| {
+                let key = ExactExportKey::Vpn(route.key());
+                route.peer != peer
+                    && update_groups::rt_passes(rtc_filter.as_ref(), route)
+                    && !rejected.is_some_and(|keys| keys.contains(&key))
+            }) {
+                view.insert_vpn(route.clone());
+            }
+            grouped_rib_out = view;
+            &grouped_rib_out
         } else if let Some(out) = self.adj_ribs_out.get(&peer) {
             out
         } else {
@@ -2095,7 +2293,19 @@ impl RibManager {
             &mut vpn_withdraw,
             false,
         );
-        trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64))
+        let explanation =
+            trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64));
+        if add_path_send_max > 0 {
+            return explanation;
+        }
+        self.apply_exact_export_overlay_to_explain(
+            peer,
+            &ExactExportKey::Vpn(crate::route::VpnRibRouteKey {
+                nlri_key: key,
+                path_id: explanation.path_id,
+            }),
+            explanation,
+        )
     }
 
     #[expect(
@@ -2567,13 +2777,12 @@ impl RibManager {
         // their unicast family counts from the group tables (BMP RFC
         // 8671 stat type 17 must not report zero for them).
         for (&peer, membership) in &self.update_groups.members {
-            let update_groups::GroupMembership::Grouped(gid) = membership else {
+            let update_groups::GroupMembership::Grouped(_) = membership else {
                 continue;
             };
-            let Some(group) = self.group_ribs.get(gid) else {
+            let Some(synthesized) = self.grouped_family_counts(peer) else {
                 continue;
             };
-            let synthesized = group.family_counts_for(peer);
             if synthesized.is_empty() {
                 continue;
             }

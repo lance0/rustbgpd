@@ -484,18 +484,33 @@ fn record_export_policy_eval(
     }
 }
 
+fn adj_rib_out_contains_exact_key(
+    rib_out: &AdjRibOut,
+    key: &crate::update::ExactExportKey,
+) -> bool {
+    use crate::update::ExactExportKey;
+    match key {
+        ExactExportKey::Unicast(prefix, path_id) => rib_out.get(prefix, *path_id).is_some(),
+        ExactExportKey::FlowSpec(key) => rib_out.get_flowspec(key).is_some(),
+        ExactExportKey::Evpn(key) => rib_out.get_evpn(key).is_some(),
+        ExactExportKey::BgpLs(key) => rib_out.get_bgpls(key).is_some(),
+        ExactExportKey::Vpn(key) => rib_out.get_vpn(key).is_some(),
+        ExactExportKey::Labeled(key) => rib_out.get_labeled(key).is_some(),
+        ExactExportKey::Rtc(key) => rib_out.get_rtc(key).is_some(),
+    }
+}
+
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
-        reason = "outbound commit needs all family queues for one atomic send"
+        reason = "RIB update messages carry every supported family as one transaction"
     )]
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
-        mut next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-        mut announce: Arc<[crate::route::Route]>,
-        mut withdraw: Vec<(Prefix, u32)>,
+        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: Arc<[crate::route::Route]>,
+        withdraw: Vec<(Prefix, u32)>,
         end_of_rib: Vec<(Afi, Safi)>,
         refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
         flowspec_announce: Vec<crate::route::FlowSpecRoute>,
@@ -511,11 +526,88 @@ impl RibManager {
         rtc_announce: Vec<crate::route::RtcRibRoute>,
         rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
     ) -> bool {
+        self.try_send_and_commit_outbound_update_with_group_prior(
+            peer,
+            next_hop_override,
+            announce,
+            withdraw,
+            end_of_rib,
+            refresh_markers,
+            flowspec_announce,
+            flowspec_withdraw,
+            evpn_announce,
+            evpn_withdraw,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce,
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            HashSet::new(),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "outbound commit needs all family queues for one atomic send"
+    )]
+    pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
+        &mut self,
+        peer: IpAddr,
+        mut next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        mut announce: Arc<[crate::route::Route]>,
+        mut withdraw: Vec<(Prefix, u32)>,
+        end_of_rib: Vec<(Afi, Safi)>,
+        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
+        mut flowspec_announce: Vec<crate::route::FlowSpecRoute>,
+        mut flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
+        mut evpn_announce: Vec<crate::route::EvpnRibRoute>,
+        mut evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
+        mut bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
+        mut bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
+        mut vpn_announce: Vec<crate::route::VpnRibRoute>,
+        mut vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
+        mut labeled_announce: Vec<crate::route::LabeledRibRoute>,
+        mut labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
+        mut rtc_announce: Vec<crate::route::RtcRibRoute>,
+        mut rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+        group_prior: HashSet<crate::update::ExactExportKey>,
+    ) -> bool {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
         };
         let Ok(permit) = tx.try_reserve() else {
             return false;
+        };
+
+        // Validate the trust boundary before consuming any durable pending
+        // state (OTC diagnostics or the rejected-route overlay). A failed
+        // precommit must leave those structures intact for the retry.
+        let has_candidate_route_payload = !announce.is_empty()
+            || !withdraw.is_empty()
+            || !flowspec_announce.is_empty()
+            || !flowspec_withdraw.is_empty()
+            || !evpn_announce.is_empty()
+            || !evpn_withdraw.is_empty()
+            || !bgpls_announce.is_empty()
+            || !bgpls_withdraw.is_empty()
+            || !vpn_announce.is_empty()
+            || !vpn_withdraw.is_empty()
+            || !labeled_announce.is_empty()
+            || !labeled_withdraw.is_empty()
+            || !rtc_announce.is_empty()
+            || !rtc_withdraw.is_empty();
+        let exact_export_snapshot = if has_candidate_route_payload {
+            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                warn!(%peer, "route-bearing outbound update has no exact export encoder — refusing Adj-RIB-Out commit");
+                return false;
+            };
+            Some(encoder.snapshot())
+        } else {
+            None
         };
 
         // A grouped member's unicast advertised state is group-owned
@@ -524,10 +616,6 @@ impl RibManager {
         // Same for VPN when the member's group stages VPN (non-RTC
         // groups, v2 slice 1). Other families always commit per peer.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
-        let grouped_vpn_count = self
-            .vpn_grouped_member_of(peer)
-            .and_then(|gid| self.group_ribs.get(&gid))
-            .map(|group| group.vpn_advertised_count_for(peer));
 
         // RFC 9234 egress enforcement for every concrete-peer selection
         // shape. Single-best group staging applies the same gate before its
@@ -577,6 +665,213 @@ impl RibManager {
             announce = permitted.into();
             next_hop_override = permitted_next_hops.into();
         }
+
+        // A route rejected on an earlier pass was never advertised (or its
+        // prior advertisement was withdrawn by that transition). Suppress a
+        // later ordinary withdrawal for the same identity and retire the
+        // sparse rejection entry. This runs before deciding whether the
+        // envelope is route-bearing, so a rejected-only withdrawal needs no
+        // transport snapshot or empty wire message.
+        if let Some(rejected) = self.peer_unexportable.get_mut(&peer) {
+            withdraw.retain(|(prefix, path_id)| {
+                !rejected.remove(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
+            });
+            flowspec_withdraw.retain(|key| {
+                !rejected.remove(&crate::update::ExactExportKey::FlowSpec(key.clone()))
+            });
+            evpn_withdraw
+                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Evpn(*key)));
+            bgpls_withdraw
+                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::BgpLs(key.clone())));
+            vpn_withdraw
+                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Vpn(key.clone())));
+            labeled_withdraw
+                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Labeled(*key)));
+            rtc_withdraw
+                .retain(|key| !rejected.remove(&crate::update::ExactExportKey::Rtc(key.clone())));
+        }
+        if self
+            .peer_unexportable
+            .get(&peer)
+            .is_some_and(HashSet::is_empty)
+        {
+            self.peer_unexportable.remove(&peer);
+        }
+
+        if let Some(snapshot) = exact_export_snapshot.as_ref() {
+            use crate::update::{ExactExportCandidate, ExactExportKey};
+
+            let mut previously_advertised = group_prior;
+            let candidate_keys = announce
+                .iter()
+                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+                .chain(
+                    flowspec_announce
+                        .iter()
+                        .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
+                )
+                .chain(
+                    evpn_announce
+                        .iter()
+                        .map(|route| ExactExportKey::Evpn(route.key())),
+                )
+                .chain(
+                    bgpls_announce
+                        .iter()
+                        .map(|route| ExactExportKey::BgpLs(route.key())),
+                )
+                .chain(
+                    vpn_announce
+                        .iter()
+                        .map(|route| ExactExportKey::Vpn(route.key())),
+                )
+                .chain(
+                    labeled_announce
+                        .iter()
+                        .map(|route| ExactExportKey::Labeled(route.key())),
+                )
+                .chain(
+                    rtc_announce
+                        .iter()
+                        .map(|route| ExactExportKey::Rtc(route.key())),
+                )
+                .collect::<Vec<_>>();
+            if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                previously_advertised.extend(
+                    candidate_keys
+                        .iter()
+                        .filter(|key| adj_rib_out_contains_exact_key(rib_out, key))
+                        .cloned(),
+                );
+            }
+
+            let mut owed_withdrawals = HashSet::new();
+            let mut new_rejections = Vec::new();
+            {
+                let rejected = self.peer_unexportable.entry(peer).or_default();
+                let mut accepts = |candidate: ExactExportCandidate<'_>| {
+                    let key = candidate.key();
+                    match snapshot.probe_announcement(candidate) {
+                        Ok(_) => {
+                            rejected.remove(&key);
+                            true
+                        }
+                        Err(error) => {
+                            let newly_rejected = rejected.insert(key.clone());
+                            if newly_rejected && previously_advertised.contains(&key) {
+                                owed_withdrawals.insert(key.clone());
+                            }
+                            if newly_rejected {
+                                new_rejections.push((key, error));
+                            }
+                            false
+                        }
+                    }
+                };
+
+                debug_assert_eq!(announce.len(), next_hop_override.len());
+                let unicast_keep = announce
+                    .iter()
+                    .zip(next_hop_override.iter())
+                    .map(|(route, next_hop)| {
+                        accepts(ExactExportCandidate::Unicast {
+                            route,
+                            next_hop_override: next_hop.as_ref(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if unicast_keep.iter().any(|keep| !keep) {
+                    let permitted_routes = announce
+                        .iter()
+                        .cloned()
+                        .zip(unicast_keep.iter().copied())
+                        .filter_map(|(route, keep)| keep.then_some(route))
+                        .collect::<Vec<_>>();
+                    let permitted_next_hops = next_hop_override
+                        .iter()
+                        .cloned()
+                        .zip(unicast_keep.iter().copied())
+                        .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
+                        .collect::<Vec<_>>();
+                    announce = permitted_routes.into();
+                    next_hop_override = permitted_next_hops.into();
+                }
+                flowspec_announce.retain(|route| accepts(ExactExportCandidate::FlowSpec(route)));
+                evpn_announce.retain(|route| accepts(ExactExportCandidate::Evpn(route)));
+                bgpls_announce.retain(|route| accepts(ExactExportCandidate::BgpLs(route)));
+                vpn_announce.retain(|route| accepts(ExactExportCandidate::Vpn(route)));
+                labeled_announce.retain(|route| accepts(ExactExportCandidate::Labeled(route)));
+                rtc_announce.retain(|route| accepts(ExactExportCandidate::Rtc(route)));
+            }
+
+            for key in owed_withdrawals {
+                match key {
+                    ExactExportKey::Unicast(prefix, path_id) => {
+                        if !withdraw.contains(&(prefix, path_id)) {
+                            withdraw.push((prefix, path_id));
+                        }
+                    }
+                    ExactExportKey::FlowSpec(key) => {
+                        if !flowspec_withdraw.contains(&key) {
+                            flowspec_withdraw.push(key);
+                        }
+                    }
+                    ExactExportKey::Evpn(key) => {
+                        if !evpn_withdraw.contains(&key) {
+                            evpn_withdraw.push(key);
+                        }
+                    }
+                    ExactExportKey::BgpLs(key) => {
+                        if !bgpls_withdraw.contains(&key) {
+                            bgpls_withdraw.push(key);
+                        }
+                    }
+                    ExactExportKey::Vpn(key) => {
+                        if !vpn_withdraw.contains(&key) {
+                            vpn_withdraw.push(key);
+                        }
+                    }
+                    ExactExportKey::Labeled(key) => {
+                        if !labeled_withdraw.contains(&key) {
+                            labeled_withdraw.push(key);
+                        }
+                    }
+                    ExactExportKey::Rtc(key) => {
+                        if !rtc_withdraw.contains(&key) {
+                            rtc_withdraw.push(key);
+                        }
+                    }
+                }
+            }
+            for (key, error) in new_rejections {
+                self.metrics.record_exact_export_rejection(
+                    &peer.to_string(),
+                    key.family_label(),
+                    error.code().as_str(),
+                );
+                warn!(
+                    %peer,
+                    ?key,
+                    reason = error.code().as_str(),
+                    detail = error.detail(),
+                    profile_generation = snapshot.generation(),
+                    "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable"
+                );
+            }
+        }
+
+        if self
+            .peer_unexportable
+            .get(&peer)
+            .is_some_and(HashSet::is_empty)
+        {
+            self.peer_unexportable.remove(&peer);
+        }
+
+        // Recompute grouped projections after the sparse overlay mutation;
+        // these counts drive both metrics and query/BMP truth.
+        let grouped_unicast_count = self.grouped_advertised_count(peer);
+        let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
 
         if !announce.is_empty()
             || !withdraw.is_empty()
@@ -682,6 +977,7 @@ impl RibManager {
         }
 
         permit.send(OutboundRouteUpdate {
+            exact_export_snapshot,
             announce,
             withdraw,
             end_of_rib,
@@ -968,6 +1264,7 @@ impl RibManager {
             // across all its chunks in one coalesced outbound pass.
             self.flush_pending_distribute();
         }
+        self.prune_exact_export_rejections();
 
         true
     }
@@ -2194,7 +2491,65 @@ impl RibManager {
                 };
                 let announced_count = announce.len();
                 let withdrawn_count = withdraw.len();
-                if self.try_send_and_commit_outbound_update(
+                let group_prior = if let Some(gid) = member_of {
+                    let mut prior = HashSet::new();
+                    if is_dirty {
+                        // The member's wire is the last successfully sent
+                        // view, while the shared table may have advanced
+                        // through failed passes. Treat every resync announce
+                        // as possibly replacing an advertised key so an exact
+                        // rejection over-withdraws instead of leaking stale
+                        // attributes on the peer.
+                        prior.extend(announce.iter().map(|route| {
+                            crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
+                        }));
+                        prior.extend(
+                            vpn_announce
+                                .iter()
+                                .map(|route| crate::update::ExactExportKey::Vpn(route.key())),
+                        );
+                    } else if is_force {
+                        if let Some(group) = self.group_ribs.get(&gid) {
+                            let rejected = self.peer_unexportable.get(&peer);
+                            prior.extend(group.table.iter().filter_map(|route| {
+                                let key = crate::update::ExactExportKey::Unicast(
+                                    route.prefix,
+                                    route.path_id,
+                                );
+                                (route.peer != peer
+                                    && !rejected.is_some_and(|keys| keys.contains(&key)))
+                                .then_some(key)
+                            }));
+                        }
+                    } else if let Some(stage) = group_stage.get(&gid) {
+                        let rejected = self.peer_unexportable.get(&peer);
+                        prior.extend(stage.deltas.iter().filter_map(|delta| {
+                            let key =
+                                crate::update::ExactExportKey::Unicast(delta.prefix, delta.path_id);
+                            (delta.old_source.is_some_and(|source| source != peer)
+                                && !rejected.is_some_and(|keys| keys.contains(&key)))
+                            .then_some(crate::update::ExactExportKey::Unicast(
+                                delta.prefix,
+                                delta.path_id,
+                            ))
+                        }));
+                    }
+                    if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                        prior.extend(base.unicast.keys().map(|(prefix, path_id)| {
+                            crate::update::ExactExportKey::Unicast(*prefix, *path_id)
+                        }));
+                        prior.extend(base.vpn.keys().map(|key| {
+                            crate::update::ExactExportKey::Vpn(crate::route::VpnRibRouteKey {
+                                nlri_key: *key,
+                                path_id: 0,
+                            })
+                        }));
+                    }
+                    prior
+                } else {
+                    HashSet::new()
+                };
+                if self.try_send_and_commit_outbound_update_with_group_prior(
                     peer,
                     nh_override_flags,
                     announce,
@@ -2213,6 +2568,7 @@ impl RibManager {
                     labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
+                    group_prior,
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,

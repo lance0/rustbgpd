@@ -24,6 +24,24 @@ use std::sync::Arc;
 // capped. A peer able to craft colliding attribute sets already has
 // strictly higher-impact vectors (churn flood, hijack).
 use rustc_hash::FxHashMap as HashMap;
+
+fn has_route_payload(update: &OutboundRouteUpdate) -> bool {
+    !update.announce.is_empty()
+        || !update.withdraw.is_empty()
+        || !update.flowspec_announce.is_empty()
+        || !update.flowspec_withdraw.is_empty()
+        || !update.evpn_announce.is_empty()
+        || !update.evpn_withdraw.is_empty()
+        || !update.bgpls_announce.is_empty()
+        || !update.bgpls_withdraw.is_empty()
+        || !update.vpn_announce.is_empty()
+        || !update.vpn_withdraw.is_empty()
+        || !update.labeled_announce.is_empty()
+        || !update.labeled_withdraw.is_empty()
+        || !update.rtc_announce.is_empty()
+        || !update.rtc_withdraw.is_empty()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NextHopOverrideKey {
     None,
@@ -178,11 +196,43 @@ impl PeerSession {
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
-        // Production only reads the profile published by lifecycle/runtime
-        // seams, so its generation remains stable between real changes.
-        #[cfg(test)]
-        self.publish_export_profile();
-        let export = self.export_encoder.snapshot();
+        let snapshot: Arc<dyn rustbgpd_rib::ExactExportSnapshot> = match update
+            .exact_export_snapshot
+            .as_ref()
+        {
+            Some(snapshot) => Arc::clone(snapshot),
+            None if !has_route_payload(&update) => self.export_encoder.snapshot(),
+            None => {
+                warn!(
+                    peer = %self.peer_label,
+                    "RIB route-bearing envelope omitted its exact export snapshot — sending Cease/Out-of-Resources and tearing down"
+                );
+                self.trigger_outbound_saturation_teardown();
+                return;
+            }
+        };
+        let Some(export) = snapshot.as_any().downcast_ref::<SessionExportProfile>() else {
+            warn!(
+                peer = %self.peer_label,
+                "RIB outbound envelope carries an exact export snapshot from the wrong encoder — sending Cease/Out-of-Resources and tearing down"
+            );
+            self.trigger_outbound_saturation_teardown();
+            return;
+        };
+        if rustbgpd_rib::ExactExportSnapshot::owner_id(export)
+            != rustbgpd_rib::ExactExportEncoder::owner_id(self.export_encoder.as_ref())
+        {
+            warn!(
+                peer = %self.peer_label,
+                "RIB outbound envelope carries an exact export snapshot owned by another session — sending Cease/Out-of-Resources and tearing down"
+            );
+            self.trigger_outbound_saturation_teardown();
+            return;
+        }
+        debug_assert_eq!(
+            rustbgpd_rib::ExactExportSnapshot::generation(export),
+            export.generation()
+        );
         for route in &update.otc_blocked {
             self.record_otc_egress_block(route);
         }
@@ -360,7 +410,7 @@ impl PeerSession {
             for (route, nh_override_ref) in &v4_routes {
                 let nh_override = *nh_override_ref;
                 let cached_attrs = Self::prepared_outbound_attributes_cached(
-                    &export,
+                    export,
                     &mut prepared_attr_cache,
                     route,
                     local_ipv4,
@@ -440,7 +490,7 @@ impl PeerSession {
             let mut v4_groups: Vec<V4BodyGroup> = Vec::new();
             for (route, nh_override) in &v4_routes {
                 let cached_attrs = Self::prepared_outbound_attributes_cached(
-                    &export,
+                    export,
                     &mut prepared_attr_cache,
                     route,
                     local_ipv4,
@@ -489,7 +539,7 @@ impl PeerSession {
         for (route, nh_override_ref) in &v6_routes {
             let nh_override = *nh_override_ref;
             let cached_attrs = Self::prepared_outbound_attributes_cached(
-                &export,
+                export,
                 &mut prepared_attr_cache,
                 route,
                 local_ipv4,
@@ -620,7 +670,7 @@ impl PeerSession {
             }
             let max_len = export.max_message_len();
             let (afi, safi, ipv4_mode) = wire.expect("non-empty EVPN withdrawal batch");
-            if !self.send_evpn_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
+            if !self.send_evpn_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -667,7 +717,7 @@ impl PeerSession {
                 _ => 2,
             });
             for (afi, safi, ipv4_mode, routes) in groups {
-                if !self.send_bgpls_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
+                if !self.send_bgpls_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len)
                 {
                     return;
                 }
@@ -711,7 +761,7 @@ impl PeerSession {
                 Afi::L2Vpn | Afi::BgpLs => 2,
             });
             for (afi, safi, ipv4_mode, routes) in groups {
-                if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len) {
+                if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len) {
                     return;
                 }
             }
@@ -760,7 +810,7 @@ impl PeerSession {
             });
             for (afi, safi, ipv4_mode, routes) in groups {
                 if !self
-                    .send_labeled_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
+                    .send_labeled_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len)
                 {
                     return;
                 }
@@ -788,7 +838,7 @@ impl PeerSession {
             }
             let max_len = export.max_message_len();
             let (afi, safi, ipv4_mode) = wire.expect("non-empty RTC withdrawal batch");
-            if !self.send_rtc_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
+            if !self.send_rtc_unreach_chunked(export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -815,7 +865,7 @@ impl PeerSession {
             }
             let max_len = export.max_message_len();
             for (next_hop, attrs, routes) in evpn_groups {
-                if !self.send_evpn_reach_chunked(&export, next_hop, &attrs, &routes, max_len) {
+                if !self.send_evpn_reach_chunked(export, next_hop, &attrs, &routes, max_len) {
                     return;
                 }
             }
@@ -856,7 +906,7 @@ impl PeerSession {
                     next_hop,
                     &attrs,
                     &routes,
-                    &export,
+                    export,
                     max_len,
                 ) {
                     return;
@@ -909,7 +959,7 @@ impl PeerSession {
                     link_local_next_hop,
                     &attrs,
                     &routes,
-                    &export,
+                    export,
                     max_len,
                 ) {
                     return;
@@ -962,7 +1012,7 @@ impl PeerSession {
                     link_local_next_hop,
                     &attrs,
                     &routes,
-                    &export,
+                    export,
                     max_len,
                 ) {
                     return;
@@ -996,7 +1046,7 @@ impl PeerSession {
             }
             let max_len = export.max_message_len();
             for (next_hop, attrs, routes) in rtc_groups {
-                if !self.send_rtc_reach_chunked(&export, next_hop, &attrs, &routes, max_len) {
+                if !self.send_rtc_reach_chunked(export, next_hop, &attrs, &routes, max_len) {
                     return;
                 }
             }

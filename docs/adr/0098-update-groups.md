@@ -92,6 +92,19 @@ up, with a key built only from RIB-staging inputs.
    block in `rib::adj_rib_in`, mirrored at the top of
    `transport::session::outbound`).
 
+8. **Exact exportability is a per-member precommit overlay, not a group-key
+   input.** One immutable session encoder snapshot is attached to each
+   route-bearing envelope. After shared staging, every candidate is probed in
+   its final one-route wire form before that member's Adj-RIB-Out projection is
+   committed. A sparse `(peer, route identity)` rejection overlay subtracts
+   unexportable routes from grouped advertised queries and BMP counts without
+   splitting otherwise-identical 4096-byte and Extended Message peers into
+   separate groups. A newly rejected prior advertisement is withdrawn;
+   recompute/resync retries it, while a source withdrawal simply retires an
+   identity that was never advertised. The transport Cease/8 path remains the
+   defense for a missing/mismatched snapshot or a live-encoder invariant
+   breach.
+
 ## As-built deviations from the design report
 
 - **Dirty resync is state-equivalent, not stream-equivalent.** A grouped
@@ -114,6 +127,11 @@ up, with a key built only from RIB-staging inputs.
 - **`pending_extra_withdraws`.** A dirty member that regroups carries
   the old group's tombstones as extra (over-)withdraws into the
   destination resync — a case the design's lifecycle sketch glossed.
+- **Per-member exportability overlay.** The group table remains the shared
+  post-policy intent. Each member's advertised projection subtracts its sparse
+  exact-export rejection set, including on queries, BMP stat 17, dirty resync,
+  and regroup. This keeps group identity independent of negotiated wire size
+  while preserving commit-after-exact-probe semantics per peer.
 
 ## Consequences
 
@@ -133,4 +151,6 @@ up, with a key built only from RIB-staging inputs.
   either land in the shared body or disqualify.
 - Observability: `bgp_update_groups`, `bgp_update_group_members{group}`,
   `bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`;
-  per-peer membership/reason via `NeighborState.update_group`.
+  per-peer membership/reason via `NeighborState.update_group`. Exact-export
+  failures add `bgp_exact_export_rejections_total{peer,family,reason}`; labels
+  are bounded, and peer series are reaped when configuration deletes the peer.

@@ -165,7 +165,7 @@ pub(crate) struct PeerSession {
     export_policy: Option<PolicyChain>,
     /// Authoritative immutable snapshot owner for outbound wire encoding.
     /// Each RIB envelope captures one snapshot before any preparation/build.
-    export_encoder: SessionExportEncoder,
+    export_encoder: Arc<SessionExportEncoder>,
     /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
     /// outbound update gets `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`)
     /// added to its Communities attribute (creating one if absent).
@@ -554,11 +554,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
-        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+        let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             None,
             advertise_graceful_shutdown,
-        ));
+        )));
         Self {
             config,
             fsm,
@@ -665,11 +665,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
-        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+        let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             stream.local_addr().ok().map(|addr| addr.ip()),
             advertise_graceful_shutdown,
-        ));
+        )));
         // Split the inbound stream and spawn the writer immediately —
         // we're in async context here (inside `tokio::spawn` from
         // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside

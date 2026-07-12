@@ -461,11 +461,10 @@ authenticated sensitive-read surface.
 ### Ingress rejection / route-leak detection
 
 Mechanisms that block routes for protocol-correctness reasons: most
-reject at the session boundary before the route reaches the RIB; the
-one egress case is `egress_to_upstream_via_otc`, which rejects an
-outbound advertisement after policy but before Adj-RIB-Out commit. If a
-previously advertised route becomes blocked, the RIB withdraws it and removes
-the logical advertised entry. Where a metric
+reject at the session boundary before the route reaches the RIB. Egress OTC
+and exact-export checks instead reject an outbound advertisement after policy
+but before Adj-RIB-Out commit. If a previously advertised route becomes
+blocked, the RIB withdraws it and removes the logical advertised entry. Where a metric
 carries a `reason` label, its values are the canonical contract
 pinned in `crates/telemetry/src/reason_labels.rs` — stable across
 releases and shared verbatim by the metric label, the log-line
@@ -479,6 +478,7 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_as_path_loop_detected_total{peer}` | Prefixes rejected because our own ASN appears in the received `AS_PATH` (RFC 4271 §9.1.2). No `reason` label — the mechanism is the metric name; withdrawals in the same UPDATE are still processed |
 | `bgp_rr_loop_detected_total{peer}` | UPDATEs rejected by route-reflection loop detection (RFC 4456 §8). No `reason` label; the debug log line emitted with each increment carries `reason=originator_id` (received `ORIGINATOR_ID` equals our router-id) or `reason=cluster_list` (our cluster-id already in `CLUSTER_LIST`) |
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |
+| `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by a Cease / Maximum Number of Prefixes Reached NOTIFICATION and session teardown (see "Peer max-prefix exceeded" above) |
 
 ### Event Streams
@@ -1411,6 +1411,22 @@ with split horizon applied per member exactly like the emit-time
 source-flip matrix. The response carries `update_group_id` when the
 peer's export is group-staged. Explain queries never count toward
 `bgp_policy_routes_total` or per-term policy hit counters.
+
+The live commit path then applies one final exact-wire gate through an
+immutable snapshot of the session encoder and its negotiated 4096/65535-byte
+ceiling. A failed announcement never enters Adj-RIB-Out. If it had been
+advertised before an attribute, next-hop, capability, or ceiling change made
+it unexportable, that transition sends a withdrawal. For update groups the
+shared staged table is unchanged; a sparse per-member overlay removes the
+rejected identity from that peer's advertised query and BMP count, allowing a
+classic-message peer and an Extended Message peer to remain grouped safely.
+Later recompute or dirty resync retries the route, while a source withdrawal
+clears the rejection without sending a duplicate withdrawal for a route that
+was never advertised. Watch
+`bgp_exact_export_rejections_total{peer,family,reason}` and the corresponding
+warning log. Cease/8 still tears down the session if transport encounters an
+impossible single-route message or a missing/mismatched encoder snapshot; that
+is defense in depth, not the normal rejection path.
 
 An RFC 9107 ORR peer's explain ranks the per-vantage candidate set the
 ORR export uses (with per-candidate cost output). When filtered or ignored
