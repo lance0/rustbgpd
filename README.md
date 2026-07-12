@@ -278,7 +278,7 @@ evolving API.**
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design), true RFC VLAN-aware bundle VTEP origination + dataplane (non-zero Ethernet Tag RR receive/reflect shipped, M82), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, BGP-LS local topology production, Confederation, TCP-AO dynamic-neighbor / runtime-rotation / multi-key rollover |
+| **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design), true RFC VLAN-aware bundle VTEP origination + dataplane (non-zero Ethernet Tag RR receive/reflect shipped, M82), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, BGP-LS local topology production, Confederation, TCP-AO runtime rotation / multi-key rollover / runtime protected-range CRUD |
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation

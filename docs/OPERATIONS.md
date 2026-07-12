@@ -901,10 +901,12 @@ more checks are red. A doctor run against a down daemon still produces a
 bundle (system facts + crash reports) and the manifest records which
 sections are missing.
 
-For live inspection, `rbgp neighbor <address>` reports the configured
-authentication mode and an explicit TCP-AO health state. `unavailable` means
-TCP-AO is configured but no socket inspection snapshot is available (the peer
-may be disconnected, connecting, or socket inspection may have failed).
+For live inspection, `rbgp neighbor <address>` reports the effective protected
+transport and an explicit TCP-AO health state. Direct dynamic-prefix sessions
+derive TCP-AO identity from their validated accepted socket rather than a
+per-neighbor key configuration. `unavailable` means TCP-AO protection is
+expected but no socket inspection snapshot is available (the peer may be
+disconnected, connecting, or socket inspection may have failed).
 `healthy` means the live snapshot has valid current/RNext keys and no
 authentication error counters; `degraded` means either key-validity flag is
 missing or at least one cumulative socket-lifetime error counter is non-zero.

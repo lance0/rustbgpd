@@ -245,9 +245,11 @@ attempt without falling back to unauthenticated TCP. Dynamic-range keys are
 config-file-only: runtime range CRUD rejects protected ranges and overlaps.
 Runtime key rotation is not exposed.
 
-`NeighborState.authentication` reports `PLAINTEXT`, `MD5`, or `TCP_AO` from
-the effective transport configuration. When socket inspection succeeds for a
-connected TCP-AO session, `NeighborState.tcp_ao` contains current/RNext KeyIDs
+`NeighborState.authentication` reports the effective protected transport as
+`PLAINTEXT`, `MD5`, or `TCP_AO`. For direct dynamic-prefix TCP-AO sessions,
+that identity comes from the validated accepted socket rather than a synthesized
+per-neighbor key configuration. When socket inspection succeeds for a connected
+TCP-AO session, `NeighborState.tcp_ao` contains current/RNext KeyIDs
 and Linux verification/error counters. The daemon refreshes this read-only
 snapshot from the live socket for each neighbor state query and clears it on
 disconnect or inspection failure; it never serves an older healthy snapshot as

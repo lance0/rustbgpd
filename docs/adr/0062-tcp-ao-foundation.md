@@ -105,5 +105,7 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   restart. Runtime range CRUD cannot mutate or overlap a protected range.
 
 Still deferred: runtime key rotation / deletion on an already-listening socket,
-multi-key rollover, peer-group inheritance, and API/CLI exposure of
-accepted-socket inspection results.
+multi-key rollover, and peer-group inheritance. API/CLI neighbor state exposes
+redacted live inspection results (KeyIDs, validity flags, and counters) for
+static and direct dynamic-prefix protected sessions; runtime protected-range
+CRUD remains restart-gated.
