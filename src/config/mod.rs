@@ -2646,6 +2646,17 @@ impl RuntimeSnapshotKey {
         Self(std::collections::hash_map::RandomState::new())
     }
 
+    /// Compact, process-local identity for a canonical hashable context.
+    ///
+    /// Uses the same secret per-process key material as runtime snapshot
+    /// tokens, so config-controlled context fields cannot cheaply construct a
+    /// collision in an unkeyed pre-hash. The fixed-width result avoids
+    /// materializing large debug or serialization strings.
+    pub(crate) fn digest_context<T: std::hash::Hash>(&self, context: &T) -> [u8; 8] {
+        use std::hash::BuildHasher;
+        self.0.hash_one(context).to_be_bytes()
+    }
+
     /// Keyed change-detector token for `config`. Hashes the canonical TOML
     /// serialization under this key, so the token changes when any config byte
     /// relevant to a candidate changes (secrets included) but cannot be

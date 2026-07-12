@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
 use rustbgpd_policy::PolicyChain;
@@ -12,38 +11,6 @@ use tokio::sync::oneshot;
 
 use super::{PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::{Config, ResolvedNeighbor};
-
-/// Fixed-width, allocation-free identity for a canonical RIB snapshot.
-///
-/// Snapshot tokens are process-local, so this hash only needs to remain stable
-/// for one daemon lifetime. FNV-1a gives `Hash` a deterministic byte sink; the
-/// result is subsequently protected by the peer manager's keyed token hash.
-struct SnapshotIdentityHasher(u64);
-
-impl Default for SnapshotIdentityHasher {
-    fn default() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-}
-
-impl Hasher for SnapshotIdentityHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
-
-pub(super) fn snapshot_identity(snapshot: &UpdateGroupSnapshot) -> [u8; 8] {
-    let mut hasher = SnapshotIdentityHasher::default();
-    snapshot.hash(&mut hasher);
-    hasher.finish().to_be_bytes()
-}
 
 fn by_peer(config: &Config) -> Result<BTreeMap<IpAddr, ResolvedNeighbor>, String> {
     config
@@ -403,15 +370,16 @@ mod tests {
 
     #[test]
     fn snapshot_identity_is_fixed_width_deterministic_and_state_sensitive() {
+        let key = crate::config::RuntimeSnapshotKey::random();
         let snapshot = snapshot_fixture();
-        assert_eq!(snapshot_identity(&snapshot).len(), 8);
-        assert_eq!(snapshot_identity(&snapshot), snapshot_identity(&snapshot));
+        assert_eq!(key.digest_context(&snapshot).len(), 8);
+        assert_eq!(key.digest_context(&snapshot), key.digest_context(&snapshot));
 
         let mut changed = snapshot;
         changed.peers[0].runtime_membership = "private:orf_installed".to_string();
         assert_ne!(
-            snapshot_identity(&changed),
-            snapshot_identity(&snapshot_fixture())
+            key.digest_context(&changed),
+            key.digest_context(&snapshot_fixture())
         );
     }
 

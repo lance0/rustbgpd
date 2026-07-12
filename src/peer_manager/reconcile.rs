@@ -142,7 +142,7 @@ impl PeerManager {
             .query_update_group_snapshot()
             .await
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
-        let live_snapshot_identity = super::update_group_plan::snapshot_identity(&live_snapshot);
+        let live_snapshot_identity = self.snapshot_key.digest_context(&live_snapshot);
         let runtime_snapshot_token = self
             .snapshot_key
             .token_with_context(&self.current_config, &live_snapshot_identity)
