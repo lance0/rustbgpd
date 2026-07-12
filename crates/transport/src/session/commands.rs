@@ -254,6 +254,7 @@ impl PeerSession {
                 self.config.gr_stale_routes_time = gr_stale_routes_time;
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;
                 self.config.remove_private_as = remove_private_as;
+                self.publish_export_profile();
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
@@ -264,6 +265,7 @@ impl PeerSession {
                 // RFC 8326 §5 expects the operator to follow this with
                 // a re-advertise so peers see the tagged routes.
                 self.advertise_graceful_shutdown = enabled;
+                self.publish_export_profile();
                 info!(
                     peer = %self.peer_label,
                     enabled,

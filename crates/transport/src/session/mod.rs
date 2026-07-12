@@ -1,4 +1,5 @@
 mod commands;
+pub(crate) mod export;
 mod fsm;
 pub mod import_decision_cache;
 pub(crate) mod inbound;
@@ -50,9 +51,10 @@ use crate::timer::{Timers, poll_timer};
 use self::io::read_tcp;
 
 #[cfg(test)]
-use self::fsm::{hard_reset_notification_in_actions, notification_teardown_event};
+use self::export::remove_private_asns;
+use self::export::{SessionExportEncoder, SessionExportProfile};
 #[cfg(test)]
-use self::outbound::remove_private_asns;
+use self::fsm::{hard_reset_notification_in_actions, notification_teardown_event};
 
 /// Runtime for a single BGP peer session.
 ///
@@ -161,6 +163,9 @@ pub(crate) struct PeerSession {
     import_needs_as_path_string: bool,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PolicyChain>,
+    /// Authoritative immutable snapshot owner for outbound wire encoding.
+    /// Each RIB envelope captures one snapshot before any preparation/build.
+    export_encoder: SessionExportEncoder,
     /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
     /// outbound update gets `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`)
     /// added to its Communities attribute (creating one if absent).
@@ -500,6 +505,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+            &config,
+            None,
+            advertise_graceful_shutdown,
+        ));
         Self {
             config,
             fsm,
@@ -528,6 +538,7 @@ impl PeerSession {
             import_policy,
             import_needs_as_path_string,
             export_policy,
+            export_encoder,
             advertise_graceful_shutdown,
             session_notify_tx,
             session_lifecycle_tx,
@@ -603,6 +614,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+            &config,
+            stream.local_addr().ok().map(|addr| addr.ip()),
+            advertise_graceful_shutdown,
+        ));
         // Split the inbound stream and spawn the writer immediately —
         // we're in async context here (inside `tokio::spawn` from
         // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside
@@ -643,6 +659,7 @@ impl PeerSession {
             import_policy,
             import_needs_as_path_string,
             export_policy,
+            export_encoder,
             advertise_graceful_shutdown,
             session_notify_tx,
             session_lifecycle_tx,
