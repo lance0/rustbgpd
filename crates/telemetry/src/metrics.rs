@@ -19,6 +19,15 @@ static NEXT_METRICS_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 /// recreating, from zero) the series like `with_label_values` does.
 static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// Bounded label contract for aggregate ORR topology-input diagnostics.
+const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
+    "included_default",
+    "excluded_nondefault",
+    "malformed_topology",
+    "malformed_attribute_29",
+    "default_with_ignored_flex_algo",
+];
+
 /// One memoized `bgp_policy_routes_total` child handle.
 ///
 /// `record_policy_routes` fires once per route × policy evaluation —
@@ -99,6 +108,7 @@ pub struct BgpMetrics {
     orr_topology_nodes: IntGauge,
     orr_topology_links: IntGauge,
     orr_unresolved_vantages: IntGauge,
+    orr_input_objects: IntGaugeVec,
 
     // ── Event streams ───────────────────────────────────────────
     event_stream_lagged: IntCounterVec,
@@ -418,6 +428,20 @@ impl BgpMetrics {
             "Configured RFC 9107 ORR vantages that do not resolve to a BGP-LS topology node (their peers fall back to the standard best path).",
         )
         .expect("valid metric definition");
+
+        let orr_input_objects = IntGaugeVec::new(
+            Opts::new(
+                "bgp_orr_input_objects",
+                "BGP-LS inputs considered by the RFC 9107 ORR default-topology builder, by one of five fixed classifications. Flex-Algorithm inputs remain included in the default total and are also counted by their ignored-data subset label.",
+            ),
+            &["classification"],
+        )
+        .expect("valid metric definition");
+        for classification in ORR_INPUT_CLASSIFICATIONS {
+            orr_input_objects
+                .with_label_values(&[classification])
+                .set(0);
+        }
 
         let event_stream_lagged = IntCounterVec::new(
             Opts::new(
@@ -1394,6 +1418,9 @@ impl BgpMetrics {
             .register(Box::new(orr_unresolved_vantages.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(orr_input_objects.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(event_stream_lagged.clone()))
             .expect("metric not already registered");
         registry
@@ -1731,6 +1758,7 @@ impl BgpMetrics {
             orr_topology_nodes,
             orr_topology_links,
             orr_unresolved_vantages,
+            orr_input_objects,
             event_stream_lagged,
             event_stream_subscribers,
             grpc_authz_decisions,
@@ -2119,6 +2147,16 @@ impl BgpMetrics {
     /// a topology node.
     pub fn set_orr_unresolved_vantages(&self, count: i64) {
         self.orr_unresolved_vantages.set(count);
+    }
+
+    /// Set all five fixed ORR input-classification series. Calling this with
+    /// the default diagnostics resets every series to zero when ORR is idle.
+    pub fn set_orr_input_diagnostics(&self, values: [u64; 5]) {
+        for (classification, value) in ORR_INPUT_CLASSIFICATIONS.iter().zip(values) {
+            self.orr_input_objects
+                .with_label_values(&[classification])
+                .set(i64::try_from(value).unwrap_or(i64::MAX));
+        }
     }
 
     /// Record events missed by a slow live event-stream subscriber.
@@ -3302,9 +3340,40 @@ mod tests {
     fn new_creates_metrics_at_zero() {
         let m = BgpMetrics::new();
         let text = gather_text(&m);
-        // Metrics should be registered but no label vectors initialized yet
-        // (prometheus only emits metrics once a label combination is observed)
+        // Dynamic peer-label vectors remain absent until observed.
         assert!(!text.contains("bgp_session_state_transitions_total"));
+    }
+
+    #[test]
+    fn new_materializes_exactly_five_zero_orr_input_series() {
+        let m = BgpMetrics::new();
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_orr_input_objects")
+            .expect("ORR input diagnostic metric registered");
+        let observed: std::collections::BTreeMap<_, _> = family
+            .metric
+            .iter()
+            .map(|metric| {
+                assert_eq!(metric.get_label().len(), 1, "only classification label");
+                assert_eq!(metric.get_label()[0].name(), "classification");
+                (
+                    metric.get_label()[0].value().to_owned(),
+                    metric.get_gauge().value(),
+                )
+            })
+            .collect();
+        assert_eq!(observed.len(), ORR_INPUT_CLASSIFICATIONS.len());
+        for classification in ORR_INPUT_CLASSIFICATIONS {
+            assert!(
+                observed
+                    .get(classification)
+                    .is_some_and(|value| value.abs() < f64::EPSILON),
+                "{classification} starts at zero"
+            );
+        }
     }
 
     /// LAN-322: the per-peer totals sum every message type in both

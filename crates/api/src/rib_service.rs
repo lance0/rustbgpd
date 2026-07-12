@@ -1745,6 +1745,15 @@ impl proto::rib_service_server::RibService for RibService {
                 .collect(),
             topology_nodes: snapshot.topology_nodes,
             topology_links: snapshot.topology_links,
+            input_diagnostics: Some(proto::OrrInputDiagnostics {
+                included_default: snapshot.input_diagnostics.included_default,
+                excluded_nondefault: snapshot.input_diagnostics.excluded_nondefault,
+                malformed_topology: snapshot.input_diagnostics.malformed_topology,
+                malformed_attribute_29: snapshot.input_diagnostics.malformed_attribute_29,
+                default_with_ignored_flex_algo: snapshot
+                    .input_diagnostics
+                    .default_with_ignored_flex_algo,
+            }),
         }))
     }
 
@@ -2764,6 +2773,13 @@ mod tests {
                     ],
                     topology_nodes: 4,
                     topology_links: 4,
+                    input_diagnostics: rustbgpd_rib::orr::OrrInputDiagnostics {
+                        included_default: 8,
+                        excluded_nondefault: 2,
+                        malformed_topology: 1,
+                        malformed_attribute_29: 3,
+                        default_with_ignored_flex_algo: 4,
+                    },
                 });
             }
         });
@@ -2775,6 +2791,16 @@ mod tests {
             .into_inner();
         assert_eq!(resp.topology_nodes, 4);
         assert_eq!(resp.topology_links, 4);
+        assert_eq!(
+            resp.input_diagnostics,
+            Some(proto::OrrInputDiagnostics {
+                included_default: 8,
+                excluded_nondefault: 2,
+                malformed_topology: 1,
+                malformed_attribute_29: 3,
+                default_with_ignored_flex_algo: 4,
+            })
+        );
         assert_eq!(resp.vantages.len(), 2);
 
         let resolved = &resp.vantages[0];

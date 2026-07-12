@@ -32,6 +32,24 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ---
 
+## RFC 9552 and RFC 9107 — ORR topology scope
+
+- ORR builds only the default BGP-LS topology. Link and Prefix NLRIs use a
+  single descriptor MT-ID; Node membership comes only from Multi-Topology TLV
+  263 inside BGP-LS Attribute 29. IS-IS interprets the lower 12 bits, while
+  OSPF requires the reserved high bits clear and a value in `0..=127`.
+- Absent MT-ID is default. A Node list containing zero is default even when it
+  also advertises non-zero memberships. Valid non-zero-only objects are
+  excluded; duplicate, wrongly placed, structurally invalid, or
+  protocol-uninterpretable topology data is excluded fail-closed before graph
+  insertion.
+- Flex-Algorithm definition/prefix inputs and Flex Prefix-SID/SR-Algorithm
+  values do not select another SPF. They are reported as ignored aggregate
+  input while the valid base default object and classic IGP/Prefix Metric stay
+  active.
+
+---
+
 ## RFC 9234 — Roles and Only-to-Customer
 
 - The configured local Role is session-stamped into the RIB before `PeerUp`,

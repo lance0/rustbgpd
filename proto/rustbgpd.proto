@@ -1527,7 +1527,9 @@ message ExplainAdvertisedRouteResponse {
   // the same candidate set and order distribution would use. The
   // decisive step for the winner is reported through reasons (code
   // orr_interior_cost when the vantage cost decided, with the compared
-  // costs in the message). Empty for non-ORR explains.
+  // costs in the message). Reasons may also contain the explicitly
+  // non-decisive aggregate code orr_topology_input_diagnostics. Empty for
+  // non-ORR explains.
   repeated OrrExplainCandidate orr_candidates = 12;
   // The full export gate ladder in the exact order the live export
   // path evaluates it, one step per gate. A Stop step names the gate
@@ -2729,12 +2731,27 @@ message OrrVantageStatusEntry {
   repeated string peers = 8;
 }
 
+// Aggregate BGP-LS input classification for the cached default-topology ORR
+// graph. Counts are per Adj-RIB-In input before NLRI deduplication.
+message OrrInputDiagnostics {
+  uint64 included_default = 1;
+  uint64 excluded_nondefault = 2;
+  uint64 malformed_topology = 3;
+  uint64 malformed_attribute_29 = 4;
+  // Subset of included_default whose Flex-Algorithm data was ignored while
+  // the base object and classic metric remained usable.
+  uint64 default_with_ignored_flex_algo = 5;
+}
+
 message ListOrrStatusResponse {
   repeated OrrVantageStatusEntry vantages = 1;
   // Cached ORR topology node total.
   uint32 topology_nodes = 2;
   // Cached ORR topology usable-directed-link total.
   uint32 topology_links = 3;
+  // Default-topology input classification. Absent only when talking to an
+  // older server that predates this additive field.
+  OrrInputDiagnostics input_diagnostics = 4;
 }
 
 // Controller-injected EVPN route. Supports Type 2 (MAC/IP), Type 3

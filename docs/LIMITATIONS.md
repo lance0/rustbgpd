@@ -15,7 +15,10 @@ operator is comfortable with an evolving config and gRPC API.
 - VPNv4 / VPNv6 support is route-reflector / controller-feed only. VRF import,
   MPLS label forwarding, and CE-facing attachment are out of scope.
 - BGP-LS support is receive, reflection, API export, and ORR topology input.
-  rustbgpd does not synthesize local BGP-LS objects.
+  rustbgpd does not synthesize local BGP-LS objects. ORR computes only the
+  RFC 9552 default topology: non-default MT-ID and malformed topology inputs
+  are excluded fail-closed, while Flex-Algorithm data is ignored and no
+  selectable non-default/Flex SPF is implemented.
 - Confederations are not implemented.
 
 ## EVPN

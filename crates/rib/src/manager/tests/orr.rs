@@ -39,8 +39,47 @@ async fn peer_up_registers_orr_vantage_and_teardown_clears() {
     assert_eq!(status.vantages[0].peers, vec![client]);
     assert_eq!(status.topology_nodes, 4);
     assert_eq!(status.topology_links, 4);
+    assert_eq!(status.input_diagnostics.included_default, 4);
+    assert_eq!(status.input_diagnostics.excluded_nondefault, 0);
     assert!(
         (gauge_metric_value(&metrics, "bgp_orr_topology_nodes", &[]) - 4.0).abs() < f64::EPSILON
+    );
+    let input_family = metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_orr_input_objects")
+        .expect("ORR input diagnostic metric registered");
+    let classifications: std::collections::BTreeSet<_> = input_family
+        .metric
+        .iter()
+        .map(|metric| {
+            assert_eq!(metric.get_label().len(), 1, "only classification label");
+            assert_eq!(metric.get_label()[0].name(), "classification");
+            metric.get_label()[0].value().to_owned()
+        })
+        .collect();
+    assert_eq!(
+        classifications,
+        [
+            "default_with_ignored_flex_algo",
+            "excluded_nondefault",
+            "included_default",
+            "malformed_attribute_29",
+            "malformed_topology",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert!(
+        (gauge_metric_value(
+            &metrics,
+            "bgp_orr_input_objects",
+            &[("classification", "included_default")],
+        ) - 4.0)
+            .abs()
+            < f64::EPSILON
     );
 
     tx.send(RibUpdate::PeerDown {
@@ -56,7 +95,23 @@ async fn peer_up_registers_orr_vantage_and_teardown_clears() {
         "teardown clears the vantage registry"
     );
     assert_eq!(status.topology_nodes, 0, "cached state emptied");
+    assert_eq!(
+        status.input_diagnostics,
+        crate::orr::OrrInputDiagnostics::default()
+    );
     assert!(gauge_metric_value(&metrics, "bgp_orr_topology_nodes", &[]).abs() < f64::EPSILON);
+    for classification in classifications {
+        assert!(
+            gauge_metric_value(
+                &metrics,
+                "bgp_orr_input_objects",
+                &[("classification", classification.as_str())],
+            )
+            .abs()
+                < f64::EPSILON,
+            "{classification} resets when the last vantage is removed"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();
@@ -592,6 +647,59 @@ async fn topology_metric_flip_marks_only_affected_vantage_peers_dirty_and_flips_
     );
 }
 
+/// A non-default topology object is observable but cannot perturb the
+/// cached default graph, SPF signatures, or any client's advertised state.
+#[tokio::test]
+async fn excluded_topology_mutation_does_not_dirty_or_stage_outbound() {
+    use crate::orr::fixtures::{A, X, link_route, mt_id_tlv, v4_interface, v4_neighbor};
+
+    let (tx, handle) = orr_rr_manager().await;
+    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
+    let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
+    let mut out_c = orr_client_peer_up(&tx, client_c, None).await;
+
+    announce_divergent_bests(&tx).await;
+    let _ = drain_final_unicast(&mut out_a);
+    let _ = drain_final_unicast(&mut out_b);
+    let _ = drain_final_unicast(&mut out_c);
+
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![link_route(
+            ORR_FEED,
+            A,
+            X,
+            Some(0),
+            &[
+                v4_interface(Ipv4Addr::new(10, 0, A, X)),
+                v4_neighbor(Ipv4Addr::new(10, 0, X, A)),
+                mt_id_tlv(&[2]),
+            ],
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let status = query_orr_status(&tx).await;
+    assert_eq!(status.topology_nodes, 4);
+    assert_eq!(status.topology_links, 4);
+    assert_eq!(status.input_diagnostics.included_default, 4);
+    assert_eq!(status.input_diagnostics.excluded_nondefault, 1);
+
+    drop(tx);
+    handle.await.unwrap();
+    assert!(out_a.try_recv().is_err(), "vantage A must not be restaged");
+    assert!(out_b.try_recv().is_err(), "vantage B must not be restaged");
+    assert!(
+        out_c.try_recv().is_err(),
+        "plain client must not be restaged"
+    );
+}
+
 /// A vantage that does not resolve to a topology node silently falls
 /// back to the standard single-best: the ORR client's advertisement is
 /// identical to a vantage-less peer's.
@@ -746,6 +854,8 @@ async fn route_refresh_replays_vantage_best() {
 /// interior-cost reason with the compared costs.
 #[tokio::test]
 async fn explain_advertised_route_reports_orr_vantage_and_costs() {
+    use crate::orr::fixtures::{A, X, link_route, mt_id_tlv};
+
     let (tx, handle) = orr_rr_manager().await;
     let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
     let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
@@ -761,6 +871,14 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
         vec![ibgp_route(orr_prefix(), src_unknown, nh_unknown)],
     )
     .await;
+    tx.send(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(ORR_FEED),
+        announced: vec![link_route(ORR_FEED, A, X, Some(0), &[mt_id_tlv(&[2])])],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
 
     let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
@@ -795,6 +913,27 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
         orr_reason.message.contains("orr_cost 1 < 10"),
         "compared vantage costs rendered: {}",
         orr_reason.message
+    );
+    let diagnostic_reason = explain
+        .reasons
+        .iter()
+        .find(|reason| reason.code == "orr_topology_input_diagnostics")
+        .expect("aggregate filtered-input diagnostics are explained");
+    assert!(diagnostic_reason.message.contains("aggregate non-decisive"));
+    assert!(
+        diagnostic_reason
+            .message
+            .contains("winner and decisive cost are unchanged")
+    );
+    assert!(diagnostic_reason.message.contains("excluded_nondefault=1"));
+    assert_eq!(
+        explain
+            .reasons
+            .iter()
+            .filter(|reason| reason.code == "orr_interior_cost")
+            .count(),
+        1,
+        "the aggregate diagnostic does not replace the decisive cost reason"
     );
 
     drop(tx);

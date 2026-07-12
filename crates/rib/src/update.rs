@@ -470,7 +470,8 @@ pub struct ExplainAdvertisedRoute {
     pub route_peer: Option<IpAddr>,
     /// Selected best route type.
     pub route_type: Option<rustbgpd_policy::RouteType>,
-    /// Decisive explanation reasons, in order.
+    /// Explanation reasons, in order. Most entries are decisive; stable
+    /// aggregate diagnostics may be non-decisive and say so explicitly.
     pub reasons: Vec<ExplainReason>,
     /// Export modifications that would be applied.
     pub modifications: rustbgpd_policy::RouteModifications,
@@ -571,7 +572,8 @@ pub enum ExplainDecision {
     UnsupportedFamily,
 }
 
-/// One decisive reason in an advertised-route explanation.
+/// One reason in an advertised-route explanation. A reason may be an
+/// explicitly labeled aggregate/non-decisive diagnostic.
 #[derive(Debug, Clone)]
 pub struct ExplainReason {
     pub code: &'static str,
