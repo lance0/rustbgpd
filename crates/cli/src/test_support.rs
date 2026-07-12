@@ -1399,6 +1399,13 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             }],
             topology_nodes: 4,
             topology_links: 4,
+            input_diagnostics: Some(server_proto::OrrInputDiagnostics {
+                included_default: 4,
+                excluded_nondefault: 0,
+                malformed_topology: 0,
+                malformed_attribute_29: 0,
+                default_with_ignored_flex_algo: 0,
+            }),
         }))
     }
 

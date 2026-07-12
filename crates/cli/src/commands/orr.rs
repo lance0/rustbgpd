@@ -5,7 +5,9 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
 use crate::proto::rib_service_client::RibServiceClient;
-use crate::proto::{ListOrrStatusRequest, ListOrrStatusResponse, OrrVantageStatusEntry};
+use crate::proto::{
+    ListOrrStatusRequest, ListOrrStatusResponse, OrrInputDiagnostics, OrrVantageStatusEntry,
+};
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
@@ -63,7 +65,22 @@ fn print_orr_status(resp: &ListOrrStatusResponse, json: bool) -> Result<(), CliE
             resp.topology_nodes, resp.topology_links
         );
     }
+    if !json {
+        let diagnostics = input_diagnostics(resp);
+        println!(
+            "Topology inputs: included_default={} excluded_nondefault={} malformed_topology={} malformed_attribute_29={} default_with_ignored_flex_algo={}",
+            diagnostics.included_default,
+            diagnostics.excluded_nondefault,
+            diagnostics.malformed_topology,
+            diagnostics.malformed_attribute_29,
+            diagnostics.default_with_ignored_flex_algo,
+        );
+    }
     Ok(())
+}
+
+fn input_diagnostics(resp: &ListOrrStatusResponse) -> OrrInputDiagnostics {
+    resp.input_diagnostics.unwrap_or_default()
 }
 
 struct JsonOrrStatus<'a>(&'a ListOrrStatusResponse);
@@ -73,10 +90,34 @@ impl Serialize for JsonOrrStatus<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("vantages", &JsonVantages(&self.0.vantages))?;
         map.serialize_entry("topology_nodes", &self.0.topology_nodes)?;
         map.serialize_entry("topology_links", &self.0.topology_links)?;
+        map.serialize_entry(
+            "input_diagnostics",
+            &JsonInputDiagnostics(&input_diagnostics(self.0)),
+        )?;
+        map.end()
+    }
+}
+
+struct JsonInputDiagnostics<'a>(&'a OrrInputDiagnostics);
+
+impl Serialize for JsonInputDiagnostics<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(5))?;
+        map.serialize_entry("included_default", &self.0.included_default)?;
+        map.serialize_entry("excluded_nondefault", &self.0.excluded_nondefault)?;
+        map.serialize_entry("malformed_topology", &self.0.malformed_topology)?;
+        map.serialize_entry("malformed_attribute_29", &self.0.malformed_attribute_29)?;
+        map.serialize_entry(
+            "default_with_ignored_flex_algo",
+            &self.0.default_with_ignored_flex_algo,
+        )?;
         map.end()
     }
 }
@@ -167,6 +208,13 @@ mod tests {
                 vantages: vec![resolved, unresolved],
                 topology_nodes: 4,
                 topology_links: 4,
+                input_diagnostics: Some(OrrInputDiagnostics {
+                    included_default: 7,
+                    excluded_nondefault: 2,
+                    malformed_topology: 1,
+                    malformed_attribute_29: 3,
+                    default_with_ignored_flex_algo: 4,
+                }),
             },
             false,
         )
@@ -195,6 +243,13 @@ mod tests {
             }],
             topology_nodes: 4,
             topology_links: 6,
+            input_diagnostics: Some(OrrInputDiagnostics {
+                included_default: 7,
+                excluded_nondefault: 2,
+                malformed_topology: 1,
+                malformed_attribute_29: 3,
+                default_with_ignored_flex_algo: 4,
+            }),
         };
 
         let value = serde_json::to_value(JsonOrrStatus(&resp)).unwrap();
@@ -214,6 +269,35 @@ mod tests {
                 }],
                 "topology_nodes": 4,
                 "topology_links": 6,
+                "input_diagnostics": {
+                    "included_default": 7,
+                    "excluded_nondefault": 2,
+                    "malformed_topology": 1,
+                    "malformed_attribute_29": 3,
+                    "default_with_ignored_flex_algo": 4,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn older_server_missing_input_diagnostics_renders_zero_object() {
+        let resp = ListOrrStatusResponse {
+            vantages: Vec::new(),
+            topology_nodes: 0,
+            topology_links: 0,
+            input_diagnostics: None,
+        };
+        assert_eq!(input_diagnostics(&resp), OrrInputDiagnostics::default());
+        let value = serde_json::to_value(JsonOrrStatus(&resp)).unwrap();
+        assert_eq!(
+            value["input_diagnostics"],
+            serde_json::json!({
+                "included_default": 0,
+                "excluded_nondefault": 0,
+                "malformed_topology": 0,
+                "malformed_attribute_29": 0,
+                "default_with_ignored_flex_algo": 0,
             })
         );
     }

@@ -34,8 +34,8 @@ use lru::LruCache;
 use prefix_trie::PrefixMap;
 use rustbgpd_wire::{
     BGP_LS_TLV_AUTONOMOUS_SYSTEM, BGP_LS_TLV_BGP_LS_IDENTIFIER, BGP_LS_TLV_IGP_ROUTER_ID,
-    BgpLsNlri, BgpLsNlriType, BgpLsNodeKey, BgpLsTlv, PathAttribute, Prefix, bgp_ls_attribute_tlvs,
-    decode_bgpls_tlvs, igp_metric, prefix_metric,
+    BGP_LS_TLV_MULTI_TOPOLOGY_ID, BgpLsNlri, BgpLsNlriType, BgpLsNodeKey, BgpLsTlv, PathAttribute,
+    Prefix, bgp_ls_attribute_tlvs, decode_bgpls_tlvs, igp_metric, prefix_metric,
 };
 
 use crate::route::BgpLsRibRoute;
@@ -44,6 +44,20 @@ use crate::route::BgpLsRibRoute;
 /// stores it as `PathAttribute::Unknown(RawAttribute)` on purpose; this is
 /// the only place that needs the code point.
 const BGP_LS_ATTRIBUTE_TYPE_CODE: u8 = 29;
+
+/// RFC 9085 SR-Algorithm Node Attribute TLV.
+const BGP_LS_TLV_SR_ALGORITHM: u16 = 1035;
+/// RFC 9351 Flexible Algorithm Definition Node Attribute TLV.
+const BGP_LS_TLV_FLEX_ALGO_DEFINITION: u16 = 1039;
+/// RFC 9351 Flexible Algorithm Prefix Metric Attribute TLV.
+const BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC: u16 = 1044;
+/// RFC 9085 Prefix-SID Attribute TLV.
+const BGP_LS_TLV_PREFIX_SID: u16 = 1158;
+
+const PROTOCOL_ISIS_LEVEL_1: u8 = 1;
+const PROTOCOL_ISIS_LEVEL_2: u8 = 2;
+const PROTOCOL_OSPFV2: u8 = 3;
+const PROTOCOL_OSPFV3: u8 = 6;
 
 /// Next-hop cost LRU capacity per [`SpfResult`]. A fresh cache is created
 /// per SPF run, so a topology rebuild invalidates it by construction.
@@ -118,18 +132,306 @@ impl NodeDescriptors {
 }
 
 /// The route's BGP-LS Attribute TLVs, parsed lazily from the raw
-/// `PathAttribute::Unknown` bytes. Absent or malformed attributes yield no
-/// TLVs (the route then simply carries no metrics).
-fn attribute_tlvs(route: &BgpLsRibRoute) -> Vec<BgpLsTlv> {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Unknown(raw) if raw.type_code == BGP_LS_ATTRIBUTE_TYPE_CODE => Some(raw),
-            _ => None,
+/// `PathAttribute::Unknown` bytes. Absence is distinct from malformed or
+/// duplicate Attribute 29: malformed input must not become an implicit
+/// zero-metric topology object.
+fn attribute_tlvs(route: &BgpLsRibRoute) -> Result<Option<Vec<BgpLsTlv>>, ()> {
+    let mut matching = route.attributes.iter().filter_map(|attr| match attr {
+        PathAttribute::Unknown(raw) if raw.type_code == BGP_LS_ATTRIBUTE_TYPE_CODE => Some(raw),
+        _ => None,
+    });
+    let Some(raw) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        return Err(());
+    }
+    bgp_ls_attribute_tlvs(&raw.data).map(Some).map_err(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopologyScope {
+    Default,
+    NonDefault,
+    Malformed,
+}
+
+fn decode_mt_ids(protocol_id: u8, value: &[u8]) -> Result<Vec<u16>, ()> {
+    if value.is_empty() || !value.len().is_multiple_of(2) {
+        return Err(());
+    }
+    value
+        .chunks_exact(2)
+        .map(|raw| {
+            let raw = u16::from_be_bytes([raw[0], raw[1]]);
+            match protocol_id {
+                PROTOCOL_ISIS_LEVEL_1 | PROTOCOL_ISIS_LEVEL_2 => Ok(raw & 0x0fff),
+                PROTOCOL_OSPFV2 | PROTOCOL_OSPFV3 if raw <= 127 => Ok(raw),
+                _ => Err(()),
+            }
         })
-        .and_then(|raw| bgp_ls_attribute_tlvs(&raw.data).ok())
-        .unwrap_or_default()
+        .collect()
+}
+
+fn descriptor_topology_scope(nlri: &BgpLsNlri) -> TopologyScope {
+    let Ok(Some(tlvs)) = nlri.descriptor_tlvs() else {
+        return TopologyScope::Malformed;
+    };
+    let mut mt = tlvs
+        .iter()
+        .filter(|tlv| tlv.type_code == BGP_LS_TLV_MULTI_TOPOLOGY_ID);
+    let Some(tlv) = mt.next() else {
+        return TopologyScope::Default;
+    };
+    if nlri.nlri_type == BgpLsNlriType::Node {
+        // Node MT membership belongs in Attribute 29, never the Node NLRI
+        // descriptor. Accepting it here would mix two identity surfaces.
+        return TopologyScope::Malformed;
+    }
+    if mt.next().is_some() || tlv.value.len() != 2 {
+        return TopologyScope::Malformed;
+    }
+    let Some(protocol_id) = nlri.protocol_id() else {
+        return TopologyScope::Malformed;
+    };
+    match decode_mt_ids(protocol_id, &tlv.value) {
+        Ok(ids) if ids == [0] => TopologyScope::Default,
+        Ok(_) => TopologyScope::NonDefault,
+        Err(()) => TopologyScope::Malformed,
+    }
+}
+
+fn node_topology_scope(protocol_id: u8, attributes: &[BgpLsTlv]) -> TopologyScope {
+    let mut mt = attributes
+        .iter()
+        .filter(|tlv| tlv.type_code == BGP_LS_TLV_MULTI_TOPOLOGY_ID);
+    let Some(tlv) = mt.next() else {
+        return TopologyScope::Default;
+    };
+    if mt.next().is_some() {
+        return TopologyScope::Malformed;
+    }
+    match decode_mt_ids(protocol_id, &tlv.value) {
+        Ok(ids) if ids.contains(&0) => TopologyScope::Default,
+        Ok(_) => TopologyScope::NonDefault,
+        Err(()) => TopologyScope::Malformed,
+    }
+}
+
+fn has_ignored_flex(nlri_type: BgpLsNlriType, attributes: &[BgpLsTlv]) -> bool {
+    attributes.iter().any(|tlv| match nlri_type {
+        BgpLsNlriType::Node => match tlv.type_code {
+            BGP_LS_TLV_FLEX_ALGO_DEFINITION => true,
+            BGP_LS_TLV_SR_ALGORITHM => tlv.value.iter().any(|algorithm| *algorithm >= 128),
+            _ => false,
+        },
+        BgpLsNlriType::Ipv4TopologyPrefix | BgpLsNlriType::Ipv6TopologyPrefix => {
+            match tlv.type_code {
+                BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC => true,
+                BGP_LS_TLV_PREFIX_SID => {
+                    matches!(tlv.value.len(), 7 | 8)
+                        && tlv.value.get(1).is_some_and(|algorithm| *algorithm >= 128)
+                }
+                _ => false,
+            }
+        }
+        BgpLsNlriType::Link | BgpLsNlriType::Unknown(_) => false,
+    })
+}
+
+/// Aggregate classification of BGP-LS inputs considered by one ORR topology
+/// build. Counts are per Adj-RIB-In input before NLRI deduplication and
+/// saturate instead of wrapping.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrrInputDiagnostics {
+    pub included_default: u64,
+    pub excluded_nondefault: u64,
+    pub malformed_topology: u64,
+    pub malformed_attribute_29: u64,
+    /// Subset of `included_default` carrying inert Flex-Algorithm data.
+    pub default_with_ignored_flex_algo: u64,
+}
+
+impl OrrInputDiagnostics {
+    fn record(&mut self, classification: InputClassification) {
+        match classification {
+            InputClassification::IncludedDefault => {
+                self.included_default = self.included_default.saturating_add(1);
+            }
+            InputClassification::ExcludedNonDefault => {
+                self.excluded_nondefault = self.excluded_nondefault.saturating_add(1);
+            }
+            InputClassification::MalformedTopology => {
+                self.malformed_topology = self.malformed_topology.saturating_add(1);
+            }
+            InputClassification::MalformedAttribute29 => {
+                self.malformed_attribute_29 = self.malformed_attribute_29.saturating_add(1);
+            }
+            InputClassification::DefaultWithIgnoredFlexAlgo => {
+                self.included_default = self.included_default.saturating_add(1);
+                self.default_with_ignored_flex_algo =
+                    self.default_with_ignored_flex_algo.saturating_add(1);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn values(self) -> [u64; 5] {
+        [
+            self.included_default,
+            self.excluded_nondefault,
+            self.malformed_topology,
+            self.malformed_attribute_29,
+            self.default_with_ignored_flex_algo,
+        ]
+    }
+
+    #[must_use]
+    pub fn noteworthy(self) -> bool {
+        self.excluded_nondefault != 0
+            || self.malformed_topology != 0
+            || self.malformed_attribute_29 != 0
+            || self.default_with_ignored_flex_algo != 0
+    }
+
+    #[must_use]
+    pub fn summary(self) -> String {
+        format!(
+            "included_default={} excluded_nondefault={} malformed_topology={} \
+             malformed_attribute_29={} default_with_ignored_flex_algo={}",
+            self.included_default,
+            self.excluded_nondefault,
+            self.malformed_topology,
+            self.malformed_attribute_29,
+            self.default_with_ignored_flex_algo
+        )
+    }
+
+    fn exclusion_presence(self) -> [bool; 3] {
+        [
+            self.excluded_nondefault != 0,
+            self.malformed_topology != 0,
+            self.malformed_attribute_29 != 0,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputClassification {
+    IncludedDefault,
+    ExcludedNonDefault,
+    MalformedTopology,
+    MalformedAttribute29,
+    DefaultWithIgnoredFlexAlgo,
+}
+
+impl InputClassification {
+    fn included(self) -> bool {
+        matches!(
+            self,
+            Self::IncludedDefault | Self::DefaultWithIgnoredFlexAlgo
+        )
+    }
+}
+
+fn classify_input(
+    nlri: &BgpLsNlri,
+    attributes: Result<Option<&[BgpLsTlv]>, ()>,
+) -> InputClassification {
+    // Descriptor/topology framing takes precedence over Attribute 29. This
+    // keeps one stable classification when both independent surfaces are bad.
+    let descriptor_scope = descriptor_topology_scope(nlri);
+    if descriptor_scope == TopologyScope::Malformed {
+        return InputClassification::MalformedTopology;
+    }
+    let attributes = match attributes {
+        Ok(attributes) => attributes.unwrap_or_default(),
+        Err(()) => return InputClassification::MalformedAttribute29,
+    };
+
+    let scope = match nlri.nlri_type {
+        BgpLsNlriType::Node => {
+            if attributes
+                .iter()
+                .any(|tlv| tlv.type_code == BGP_LS_TLV_MULTI_TOPOLOGY_ID)
+            {
+                let Some(protocol_id) = nlri.protocol_id() else {
+                    return InputClassification::MalformedTopology;
+                };
+                node_topology_scope(protocol_id, attributes)
+            } else {
+                TopologyScope::Default
+            }
+        }
+        BgpLsNlriType::Link
+        | BgpLsNlriType::Ipv4TopologyPrefix
+        | BgpLsNlriType::Ipv6TopologyPrefix => {
+            if attributes
+                .iter()
+                .any(|tlv| tlv.type_code == BGP_LS_TLV_MULTI_TOPOLOGY_ID)
+            {
+                TopologyScope::Malformed
+            } else {
+                descriptor_scope
+            }
+        }
+        BgpLsNlriType::Unknown(_) => return InputClassification::MalformedTopology,
+    };
+    match scope {
+        TopologyScope::NonDefault => InputClassification::ExcludedNonDefault,
+        TopologyScope::Malformed => InputClassification::MalformedTopology,
+        TopologyScope::Default if has_ignored_flex(nlri.nlri_type, attributes) => {
+            InputClassification::DefaultWithIgnoredFlexAlgo
+        }
+        TopologyScope::Default => InputClassification::IncludedDefault,
+    }
+}
+
+/// Aggregate log transition for ORR input classifications. Non-zero count
+/// changes do not retrigger logs; only entering or clearing noteworthy input
+/// does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrrInputTransition {
+    ExclusionsActivated,
+    ExclusionsCleared,
+    FlexChanged,
+    Cleared,
+}
+
+#[must_use]
+pub(crate) fn input_diagnostics_transition(
+    previous: OrrInputDiagnostics,
+    current: OrrInputDiagnostics,
+) -> Option<OrrInputTransition> {
+    let previous_exclusions = previous.exclusion_presence();
+    let current_exclusions = current.exclusion_presence();
+    let previous_flex = previous.default_with_ignored_flex_algo != 0;
+    let current_flex = current.default_with_ignored_flex_algo != 0;
+    let exclusion_activated = previous_exclusions
+        .iter()
+        .zip(current_exclusions)
+        .any(|(previous, current)| !previous && current);
+    let exclusion_cleared = previous_exclusions
+        .iter()
+        .zip(current_exclusions)
+        .any(|(previous, current)| *previous && !current);
+    if exclusion_activated {
+        Some(OrrInputTransition::ExclusionsActivated)
+    } else if exclusion_cleared {
+        if current_exclusions.into_iter().any(|present| present) || current_flex {
+            Some(OrrInputTransition::ExclusionsCleared)
+        } else {
+            Some(OrrInputTransition::Cleared)
+        }
+    } else if previous_flex != current_flex {
+        if current_flex || current_exclusions.iter().any(|present| *present) {
+            Some(OrrInputTransition::FlexChanged)
+        } else {
+            Some(OrrInputTransition::Cleared)
+        }
+    } else {
+        None
+    }
 }
 
 /// Directed weighted topology graph built from BGP-LS routes.
@@ -152,6 +454,7 @@ pub struct OrrTopology {
     /// (TLV 1155, 0 when absent).
     prefix_v4: PrefixMap<Ipv4Net, Vec<(NodeIx, u32)>>,
     prefix_v6: PrefixMap<Ipv6Net, Vec<(NodeIx, u32)>>,
+    input_diagnostics: OrrInputDiagnostics,
 }
 
 impl Default for OrrTopology {
@@ -189,15 +492,33 @@ impl OrrTopology {
         // preserving first-seen order for deterministic node indexes.
         let mut order: Vec<(&'a BgpLsNlri, Element)> = Vec::new();
         let mut seen: HashMap<&'a BgpLsNlri, usize> = HashMap::new();
+        let mut input_diagnostics = OrrInputDiagnostics::default();
         for route in routes {
+            if matches!(route.nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
+                continue;
+            }
+            let attribute_tlvs = attribute_tlvs(route);
+            let classification_attributes = match &attribute_tlvs {
+                Ok(tlvs) => Ok(tlvs.as_deref()),
+                Err(()) => Err(()),
+            };
+            let classification = classify_input(&route.nlri, classification_attributes);
+            input_diagnostics.record(classification);
+            if !classification.included() {
+                continue;
+            }
+            let Ok(attributes) = attribute_tlvs else {
+                continue;
+            };
+            let attributes = attributes.unwrap_or_default();
             let element = match route.nlri.nlri_type {
                 BgpLsNlriType::Node => Element::Node,
                 BgpLsNlriType::Link => Element::Link {
-                    metric: igp_metric(&attribute_tlvs(route)),
+                    metric: igp_metric(&attributes),
                 },
                 BgpLsNlriType::Ipv4TopologyPrefix | BgpLsNlriType::Ipv6TopologyPrefix => {
                     Element::IpPrefix {
-                        metric: prefix_metric(&attribute_tlvs(route)).unwrap_or(0),
+                        metric: prefix_metric(&attributes).unwrap_or(0),
                     }
                 }
                 BgpLsNlriType::Unknown(_) => continue,
@@ -231,6 +552,7 @@ impl OrrTopology {
             addr_index: HashMap::new(),
             prefix_v4: PrefixMap::new(),
             prefix_v6: PrefixMap::new(),
+            input_diagnostics,
         };
         for (nlri, element) in order {
             match element {
@@ -325,6 +647,12 @@ impl OrrTopology {
     #[must_use]
     pub fn links(&self) -> &[OrrLink] {
         &self.links
+    }
+
+    /// Aggregate classification of inputs considered by this topology build.
+    #[must_use]
+    pub fn input_diagnostics(&self) -> OrrInputDiagnostics {
+        self.input_diagnostics
     }
 
     /// The canonical key of an interned node.
@@ -667,6 +995,8 @@ pub struct OrrStatusSnapshot {
     pub topology_nodes: u32,
     /// Topology usable-directed-link total.
     pub topology_links: u32,
+    /// Default-topology input classification for the cached graph.
+    pub input_diagnostics: OrrInputDiagnostics,
 }
 
 /// Status of one configured ORR vantage.
@@ -720,6 +1050,7 @@ pub(crate) mod fixtures {
         BgpLsNodeKey, BgpLsTlv, PathAttribute, RawAttribute, encode_bgpls_tlvs,
     };
 
+    use super::{BGP_LS_TLV_MULTI_TOPOLOGY_ID, PROTOCOL_ISIS_LEVEL_2};
     use crate::route::{BgpLsFamily, BgpLsRibRoute, RouteOrigin};
 
     fn sub_tlvs(tlvs: &[BgpLsTlv]) -> Bytes {
@@ -743,11 +1074,19 @@ pub(crate) mod fixtures {
         ])
     }
 
-    fn build_nlri(nlri_type: BgpLsNlriType, tlvs: &[BgpLsTlv]) -> BgpLsNlri {
-        let mut payload = vec![2]; // protocol-id: IS-IS L2
+    pub(crate) fn build_nlri_protocol(
+        nlri_type: BgpLsNlriType,
+        protocol_id: u8,
+        tlvs: &[BgpLsTlv],
+    ) -> BgpLsNlri {
+        let mut payload = vec![protocol_id];
         payload.extend_from_slice(&0_u64.to_be_bytes()); // identifier
         encode_bgpls_tlvs(tlvs, &mut payload).expect("fixture TLVs encode");
         BgpLsNlri::try_new(nlri_type, None, Bytes::from(payload)).expect("fixture NLRI fits")
+    }
+
+    fn build_nlri(nlri_type: BgpLsNlriType, tlvs: &[BgpLsTlv]) -> BgpLsNlri {
+        build_nlri_protocol(nlri_type, PROTOCOL_ISIS_LEVEL_2, tlvs)
     }
 
     /// The canonical key of fixture node `id`.
@@ -821,7 +1160,11 @@ pub(crate) mod fixtures {
         )
     }
 
-    fn rib_route(peer: Ipv4Addr, nlri: BgpLsNlri, attributes: Vec<PathAttribute>) -> BgpLsRibRoute {
+    pub(crate) fn rib_route(
+        peer: Ipv4Addr,
+        nlri: BgpLsNlri,
+        attributes: Vec<PathAttribute>,
+    ) -> BgpLsRibRoute {
         BgpLsRibRoute {
             family: BgpLsFamily::LinkState,
             nlri,
@@ -835,6 +1178,18 @@ pub(crate) mod fixtures {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    /// Multi-Topology Identifier TLV 263 with the supplied raw 16-bit values.
+    pub(crate) fn mt_id_tlv(ids: &[u16]) -> BgpLsTlv {
+        BgpLsTlv::new(
+            BGP_LS_TLV_MULTI_TOPOLOGY_ID,
+            Bytes::from(
+                ids.iter()
+                    .flat_map(|id| id.to_be_bytes())
+                    .collect::<Vec<_>>(),
+            ),
+        )
     }
 
     /// A Link NLRI route `local -> remote` with optional IGP metric and
@@ -925,6 +1280,11 @@ mod tests {
 
     use super::fixtures::*;
     use super::*;
+    use bytes::Bytes;
+    use rustbgpd_wire::{
+        BGP_LS_TLV_IP_REACHABILITY, BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, BGP_LS_TLV_PREFIX_METRIC,
+        BGP_LS_TLV_REMOTE_NODE_DESCRIPTORS, RawAttribute,
+    };
 
     const PEER1: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
     const PEER2: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
@@ -936,6 +1296,657 @@ mod tests {
 
     fn ix(topo: &OrrTopology, id: u8) -> NodeIx {
         topo.node_ix(&node_key(id)).expect("fixture node interned")
+    }
+
+    fn link_nlri(protocol_id: u8, mt_tlvs: &[BgpLsTlv]) -> BgpLsNlri {
+        let mut descriptors = vec![
+            BgpLsTlv::new(BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, node_container(A)),
+            BgpLsTlv::new(BGP_LS_TLV_REMOTE_NODE_DESCRIPTORS, node_container(X)),
+        ];
+        descriptors.extend_from_slice(mt_tlvs);
+        build_nlri_protocol(BgpLsNlriType::Link, protocol_id, &descriptors)
+    }
+
+    fn node_nlri_with_descriptors(protocol_id: u8, extra: &[BgpLsTlv]) -> BgpLsNlri {
+        let mut descriptors = vec![BgpLsTlv::new(
+            BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS,
+            node_container(A),
+        )];
+        descriptors.extend_from_slice(extra);
+        build_nlri_protocol(BgpLsNlriType::Node, protocol_id, &descriptors)
+    }
+
+    fn prefix_nlri(protocol_id: u8, node: u8, mt: Option<BgpLsTlv>) -> BgpLsNlri {
+        let mut descriptors = vec![BgpLsTlv::new(
+            BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS,
+            node_container(node),
+        )];
+        if let Some(mt) = mt {
+            descriptors.push(mt);
+        }
+        descriptors.push(BgpLsTlv::new(
+            BGP_LS_TLV_IP_REACHABILITY,
+            Bytes::from_static(&[24, 203, 0, 113]),
+        ));
+        build_nlri_protocol(BgpLsNlriType::Ipv4TopologyPrefix, protocol_id, &descriptors)
+    }
+
+    fn mt_link_route(
+        peer: Ipv4Addr,
+        local: u8,
+        remote: u8,
+        metric: u32,
+        mt_id: u16,
+        extra_descriptors: &[BgpLsTlv],
+    ) -> BgpLsRibRoute {
+        let mut descriptors = vec![
+            BgpLsTlv::new(BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, node_container(local)),
+            BgpLsTlv::new(BGP_LS_TLV_REMOTE_NODE_DESCRIPTORS, node_container(remote)),
+        ];
+        descriptors.extend_from_slice(extra_descriptors);
+        descriptors.push(mt_id_tlv(&[mt_id]));
+        rib_route(
+            peer,
+            build_nlri_protocol(BgpLsNlriType::Link, PROTOCOL_ISIS_LEVEL_2, &descriptors),
+            vec![bgp_ls_attribute(&[igp_metric_tlv(metric)])],
+        )
+    }
+
+    fn mt_prefix_route(
+        peer: Ipv4Addr,
+        node: u8,
+        prefix: Ipv4Addr,
+        prefix_len: u8,
+        metric: u32,
+        mt_id: u16,
+    ) -> BgpLsRibRoute {
+        let mut reach = vec![prefix_len];
+        reach.extend_from_slice(&prefix.octets()[..usize::from(prefix_len.div_ceil(8))]);
+        rib_route(
+            peer,
+            build_nlri_protocol(
+                BgpLsNlriType::Ipv4TopologyPrefix,
+                PROTOCOL_ISIS_LEVEL_2,
+                &[
+                    BgpLsTlv::new(BGP_LS_TLV_LOCAL_NODE_DESCRIPTORS, node_container(node)),
+                    mt_id_tlv(&[mt_id]),
+                    BgpLsTlv::new(BGP_LS_TLV_IP_REACHABILITY, Bytes::from(reach)),
+                ],
+            ),
+            vec![bgp_ls_attribute(&[BgpLsTlv::new(
+                BGP_LS_TLV_PREFIX_METRIC,
+                Bytes::from(metric.to_be_bytes().to_vec()),
+            )])],
+        )
+    }
+
+    fn malformed_attribute() -> PathAttribute {
+        PathAttribute::Unknown(RawAttribute {
+            flags: 0x80,
+            type_code: BGP_LS_ATTRIBUTE_TYPE_CODE,
+            data: Bytes::from_static(&[0x01, 0x07, 0x00]),
+        })
+    }
+
+    fn classify(nlri: BgpLsNlri, attributes: Vec<PathAttribute>) -> InputClassification {
+        let route = rib_route(PEER1, nlri, attributes);
+        let attributes = attribute_tlvs(&route);
+        let attributes = match &attributes {
+            Ok(tlvs) => Ok(tlvs.as_deref()),
+            Err(()) => Err(()),
+        };
+        classify_input(&route.nlri, attributes)
+    }
+
+    fn raw_tlv(type_code: u16, value: &[u8]) -> BgpLsTlv {
+        BgpLsTlv::new(type_code, Bytes::copy_from_slice(value))
+    }
+
+    #[test]
+    fn link_and_prefix_mt_id_classification_is_protocol_strict() {
+        assert_eq!(
+            classify(link_nlri(99, &[]), vec![]),
+            InputClassification::IncludedDefault,
+            "absent MT-ID is default without interpreting protocol-id"
+        );
+        for protocol in [PROTOCOL_ISIS_LEVEL_1, PROTOCOL_ISIS_LEVEL_2] {
+            assert_eq!(
+                classify(link_nlri(protocol, &[mt_id_tlv(&[0xf000])]), vec![]),
+                InputClassification::IncludedDefault,
+                "IS-IS reserved bits are ignored"
+            );
+            assert_eq!(
+                classify(link_nlri(protocol, &[mt_id_tlv(&[2])]), vec![]),
+                InputClassification::ExcludedNonDefault
+            );
+        }
+        for protocol in [PROTOCOL_OSPFV2, PROTOCOL_OSPFV3] {
+            assert_eq!(
+                classify(link_nlri(protocol, &[mt_id_tlv(&[0])]), vec![]),
+                InputClassification::IncludedDefault
+            );
+            assert_eq!(
+                classify(link_nlri(protocol, &[mt_id_tlv(&[2])]), vec![]),
+                InputClassification::ExcludedNonDefault
+            );
+            assert_eq!(
+                classify(link_nlri(protocol, &[mt_id_tlv(&[128])]), vec![]),
+                InputClassification::MalformedTopology
+            );
+        }
+        assert_eq!(
+            classify(link_nlri(99, &[mt_id_tlv(&[0])]), vec![]),
+            InputClassification::MalformedTopology
+        );
+        assert_eq!(
+            classify(
+                prefix_nlri(PROTOCOL_ISIS_LEVEL_2, A, Some(mt_id_tlv(&[3]))),
+                vec![]
+            ),
+            InputClassification::ExcludedNonDefault
+        );
+        assert_eq!(
+            classify(prefix_nlri(99, A, None), vec![]),
+            InputClassification::IncludedDefault
+        );
+        assert_eq!(
+            classify(
+                prefix_nlri(PROTOCOL_ISIS_LEVEL_2, A, Some(mt_id_tlv(&[0]))),
+                vec![]
+            ),
+            InputClassification::IncludedDefault
+        );
+    }
+
+    #[test]
+    fn link_mt_id_shape_and_placement_fail_closed() {
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[mt_id_tlv(&[0]), mt_id_tlv(&[0])]),
+                vec![]
+            ),
+            InputClassification::MalformedTopology
+        );
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[mt_id_tlv(&[0, 2])]),
+                vec![]
+            ),
+            InputClassification::MalformedTopology
+        );
+        assert_eq!(
+            classify(
+                link_nlri(
+                    PROTOCOL_ISIS_LEVEL_2,
+                    &[raw_tlv(BGP_LS_TLV_MULTI_TOPOLOGY_ID, &[0])]
+                ),
+                vec![]
+            ),
+            InputClassification::MalformedTopology
+        );
+        for value in [&[][..], &[0, 0, 0][..]] {
+            assert_eq!(
+                classify(
+                    link_nlri(
+                        PROTOCOL_ISIS_LEVEL_2,
+                        &[raw_tlv(BGP_LS_TLV_MULTI_TOPOLOGY_ID, value)]
+                    ),
+                    vec![]
+                ),
+                InputClassification::MalformedTopology
+            );
+        }
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[]),
+                vec![bgp_ls_attribute(&[mt_id_tlv(&[0])])]
+            ),
+            InputClassification::MalformedTopology,
+            "TLV 263 belongs in Link/Prefix descriptors, not Attribute 29"
+        );
+    }
+
+    #[test]
+    fn node_mt_id_uses_only_attribute_29_and_accepts_default_membership() {
+        let node = node_nlri_with_descriptors(99, &[]);
+        assert_eq!(
+            classify(node.clone(), vec![]),
+            InputClassification::IncludedDefault,
+            "absent Node MT-ID is default without interpreting protocol-id"
+        );
+        let node = node_nlri_with_descriptors(PROTOCOL_ISIS_LEVEL_2, &[]);
+        assert_eq!(
+            classify(node.clone(), vec![bgp_ls_attribute(&[mt_id_tlv(&[0, 2])])]),
+            InputClassification::IncludedDefault
+        );
+        assert_eq!(
+            classify(node.clone(), vec![bgp_ls_attribute(&[mt_id_tlv(&[2, 3])])]),
+            InputClassification::ExcludedNonDefault
+        );
+        assert_eq!(
+            classify(
+                node.clone(),
+                vec![bgp_ls_attribute(&[mt_id_tlv(&[0]), mt_id_tlv(&[2])])]
+            ),
+            InputClassification::MalformedTopology
+        );
+        assert_eq!(
+            classify(
+                node_nlri_with_descriptors(PROTOCOL_ISIS_LEVEL_2, &[mt_id_tlv(&[0])]),
+                vec![]
+            ),
+            InputClassification::MalformedTopology,
+            "Node descriptor MT-ID is invalid placement"
+        );
+        for malformed in [
+            raw_tlv(BGP_LS_TLV_MULTI_TOPOLOGY_ID, &[]),
+            raw_tlv(BGP_LS_TLV_MULTI_TOPOLOGY_ID, &[0]),
+        ] {
+            assert_eq!(
+                classify(
+                    node.clone(),
+                    vec![bgp_ls_attribute(std::slice::from_ref(&malformed))]
+                ),
+                InputClassification::MalformedTopology
+            );
+        }
+        assert_eq!(
+            classify(
+                node_nlri_with_descriptors(99, &[]),
+                vec![bgp_ls_attribute(&[mt_id_tlv(&[0])])]
+            ),
+            InputClassification::MalformedTopology,
+            "an unknown protocol cannot interpret Node MT membership"
+        );
+        assert_eq!(
+            classify(
+                node_nlri_with_descriptors(PROTOCOL_OSPFV2, &[]),
+                vec![bgp_ls_attribute(&[mt_id_tlv(&[128])])]
+            ),
+            InputClassification::MalformedTopology,
+            "OSPF Node membership rejects reserved high bits"
+        );
+    }
+
+    #[test]
+    fn malformed_descriptor_precedes_malformed_attribute_29() {
+        let mut payload = vec![PROTOCOL_ISIS_LEVEL_2];
+        payload.extend_from_slice(&0_u64.to_be_bytes());
+        payload.extend_from_slice(&[0x01, 0x00, 0x00]);
+        let nlri = BgpLsNlri::try_new(BgpLsNlriType::Link, None, Bytes::from(payload)).unwrap();
+        assert_eq!(
+            classify(nlri, vec![malformed_attribute()]),
+            InputClassification::MalformedTopology
+        );
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[]),
+                vec![malformed_attribute()]
+            ),
+            InputClassification::MalformedAttribute29
+        );
+        let valid_attribute = bgp_ls_attribute(&[]);
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[]),
+                vec![valid_attribute.clone(), valid_attribute]
+            ),
+            InputClassification::MalformedAttribute29,
+            "duplicate Attribute 29 is fail-closed"
+        );
+    }
+
+    #[test]
+    fn ignored_flex_is_kind_aware_and_prefix_sid_shape_strict() {
+        let node = node_nlri_with_descriptors(PROTOCOL_ISIS_LEVEL_2, &[]);
+        assert_eq!(
+            classify(
+                node.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_FLEX_ALGO_DEFINITION,
+                    &[128, 0, 0, 0]
+                )])]
+            ),
+            InputClassification::DefaultWithIgnoredFlexAlgo
+        );
+        assert_eq!(
+            classify(
+                node.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_SR_ALGORITHM,
+                    &[0, 1]
+                )])]
+            ),
+            InputClassification::IncludedDefault,
+            "standard SR algorithms are not Flex-Algorithm input"
+        );
+        assert_eq!(
+            classify(
+                node.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_SR_ALGORITHM,
+                    &[0, 128]
+                )])]
+            ),
+            InputClassification::DefaultWithIgnoredFlexAlgo
+        );
+        assert_eq!(
+            classify(
+                node.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC,
+                    &[128, 0, 0, 0, 0, 0, 0, 1]
+                )])]
+            ),
+            InputClassification::IncludedDefault,
+            "FAPM is a Prefix attribute, not a Node Flex signal"
+        );
+
+        let prefix = prefix_nlri(PROTOCOL_ISIS_LEVEL_2, A, None);
+        assert_eq!(
+            classify(
+                prefix.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC,
+                    &[128, 0, 0, 0, 0, 0, 0, 1]
+                )])]
+            ),
+            InputClassification::DefaultWithIgnoredFlexAlgo
+        );
+        for len in [7_usize, 8] {
+            let mut value = vec![0; len];
+            value[1] = 128;
+            assert_eq!(
+                classify(
+                    prefix.clone(),
+                    vec![bgp_ls_attribute(&[raw_tlv(BGP_LS_TLV_PREFIX_SID, &value)])]
+                ),
+                InputClassification::DefaultWithIgnoredFlexAlgo
+            );
+        }
+        assert_eq!(
+            classify(
+                prefix.clone(),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_PREFIX_SID,
+                    &[0, 128]
+                )])]
+            ),
+            InputClassification::IncludedDefault,
+            "short Prefix-SID values are not interpreted"
+        );
+        assert_eq!(
+            classify(
+                link_nlri(PROTOCOL_ISIS_LEVEL_2, &[]),
+                vec![bgp_ls_attribute(&[raw_tlv(
+                    BGP_LS_TLV_FLEX_ALGO_DEFINITION,
+                    &[128, 0, 0, 0]
+                )])]
+            ),
+            InputClassification::IncludedDefault,
+            "Link objects do not own FAD/FAPM/SR-Algorithm/Prefix-SID"
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_input_level_saturating_and_flex_is_subset() {
+        let nlri = node_nlri_with_descriptors(PROTOCOL_ISIS_LEVEL_2, &[]);
+        let attributes = vec![bgp_ls_attribute(&[raw_tlv(
+            BGP_LS_TLV_FLEX_ALGO_DEFINITION,
+            &[128, 0, 0, 0],
+        )])];
+        let routes = [
+            rib_route(PEER1, nlri.clone(), attributes.clone()),
+            rib_route(PEER2, nlri, attributes),
+        ];
+        let diagnostics = OrrTopology::build(routes.iter()).input_diagnostics();
+        assert_eq!(diagnostics.included_default, 2, "counted before dedup");
+        assert_eq!(diagnostics.default_with_ignored_flex_algo, 2);
+
+        let mut diagnostics = OrrInputDiagnostics {
+            included_default: u64::MAX,
+            ..OrrInputDiagnostics::default()
+        };
+        diagnostics.record(InputClassification::IncludedDefault);
+        assert_eq!(diagnostics.included_default, u64::MAX);
+    }
+
+    #[test]
+    fn diagnostic_transitions_are_presence_based_and_severity_aware() {
+        let baseline = OrrInputDiagnostics {
+            excluded_nondefault: 2,
+            ..OrrInputDiagnostics::default()
+        };
+        assert_eq!(
+            input_diagnostics_transition(
+                baseline,
+                OrrInputDiagnostics {
+                    excluded_nondefault: 9,
+                    ..OrrInputDiagnostics::default()
+                }
+            ),
+            None,
+            "positive count changes do not retrigger a transition"
+        );
+        assert_eq!(
+            input_diagnostics_transition(
+                OrrInputDiagnostics {
+                    excluded_nondefault: 1,
+                    malformed_topology: 1,
+                    ..OrrInputDiagnostics::default()
+                },
+                OrrInputDiagnostics {
+                    excluded_nondefault: 1,
+                    ..OrrInputDiagnostics::default()
+                }
+            ),
+            Some(OrrInputTransition::ExclusionsCleared),
+            "a partial exclusion recovery is informational"
+        );
+        assert_eq!(
+            input_diagnostics_transition(
+                OrrInputDiagnostics {
+                    excluded_nondefault: 1,
+                    ..OrrInputDiagnostics::default()
+                },
+                OrrInputDiagnostics {
+                    malformed_topology: 1,
+                    ..OrrInputDiagnostics::default()
+                }
+            ),
+            Some(OrrInputTransition::ExclusionsActivated),
+            "an activation wins when another bucket clears in the same rebuild"
+        );
+        assert_eq!(
+            input_diagnostics_transition(
+                OrrInputDiagnostics {
+                    excluded_nondefault: 1,
+                    ..OrrInputDiagnostics::default()
+                },
+                OrrInputDiagnostics {
+                    excluded_nondefault: 1,
+                    default_with_ignored_flex_algo: 1,
+                    ..OrrInputDiagnostics::default()
+                }
+            ),
+            Some(OrrInputTransition::FlexChanged),
+            "Flex transitions remain informational while exclusions are active"
+        );
+    }
+
+    #[test]
+    fn nondefault_link_cannot_compete_with_default_topology() {
+        for excluded_first in [true, false] {
+            let excluded = mt_link_route(PEER1, A, X, 1, 2, &[]);
+            let default = link_route(PEER2, A, X, Some(50), &[]);
+            let routes = if excluded_first {
+                vec![excluded, default]
+            } else {
+                vec![default, excluded]
+            };
+            let topology = OrrTopology::build(routes.iter());
+            assert_eq!(topology.node_count(), 2);
+            assert_eq!(topology.link_count(), 1);
+            assert_eq!(topology.links()[0].cost, 50);
+            assert_eq!(
+                topology.spf(ix(&topology, A)).dist_to(ix(&topology, X)),
+                Some(50)
+            );
+            assert_eq!(
+                topology.input_diagnostics(),
+                OrrInputDiagnostics {
+                    included_default: 1,
+                    excluded_nondefault: 1,
+                    ..OrrInputDiagnostics::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn nondefault_prefix_cannot_compete_with_default_topology() {
+        let mut routes = square_topology(PEER1);
+        routes.push(mt_prefix_route(
+            PEER1,
+            Y,
+            Ipv4Addr::new(192, 0, 2, 0),
+            24,
+            1,
+            2,
+        ));
+        routes.push(prefix_route(
+            PEER2,
+            X,
+            Ipv4Addr::new(192, 0, 2, 0),
+            24,
+            Some(50),
+        ));
+        let topology = OrrTopology::build(routes.iter());
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
+        assert_eq!(topology.resolve_node(address), Some(ix(&topology, X)));
+        assert_eq!(
+            topology.spf(ix(&topology, A)).cost_to(&topology, address),
+            Some(51),
+            "only A-to-X default cost plus the classic default prefix metric applies"
+        );
+        assert_eq!(topology.input_diagnostics().excluded_nondefault, 1);
+    }
+
+    #[test]
+    fn excluded_link_never_claims_nodes_or_addresses_regardless_of_order() {
+        let shared = Ipv4Addr::new(10, 255, 0, 1);
+        for excluded_first in [true, false] {
+            let excluded = mt_link_route(PEER1, A, X, 1, 2, &[v4_interface(shared)]);
+            let default = link_route(PEER2, B, Y, Some(10), &[v4_interface(shared)]);
+            let routes = if excluded_first {
+                vec![excluded, default]
+            } else {
+                vec![default, excluded]
+            };
+            let topology = OrrTopology::build(routes.iter());
+            assert_eq!(topology.node_count(), 2);
+            assert!(topology.node_ix(&node_key(A)).is_none());
+            assert!(topology.node_ix(&node_key(X)).is_none());
+            assert_eq!(
+                topology.resolve_node(IpAddr::V4(shared)),
+                Some(ix(&topology, B))
+            );
+        }
+    }
+
+    #[test]
+    fn nondefault_only_input_builds_an_empty_graph() {
+        let routes = [
+            mt_link_route(
+                PEER1,
+                A,
+                X,
+                1,
+                2,
+                &[v4_interface(Ipv4Addr::new(10, 255, 0, 2))],
+            ),
+            mt_prefix_route(PEER1, X, Ipv4Addr::new(192, 0, 2, 0), 24, 0, 2),
+        ];
+        let topology = OrrTopology::build(routes.iter());
+        assert_eq!(topology.node_count(), 0);
+        assert_eq!(topology.link_count(), 0);
+        assert_eq!(
+            topology.resolve_node(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2))),
+            None
+        );
+        assert_eq!(topology.input_diagnostics().excluded_nondefault, 2);
+        assert_eq!(
+            topology.resolve_node(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_attribute_29_never_contributes_any_graph_surface() {
+        let link = rib_route(
+            PEER1,
+            link_nlri(
+                PROTOCOL_ISIS_LEVEL_2,
+                &[v4_interface(Ipv4Addr::new(10, 255, 0, 3))],
+            ),
+            vec![malformed_attribute()],
+        );
+        let routes = [
+            rib_route(
+                PEER1,
+                node_nlri_with_descriptors(PROTOCOL_ISIS_LEVEL_2, &[]),
+                vec![malformed_attribute()],
+            ),
+            link,
+            rib_route(
+                PEER1,
+                prefix_nlri(PROTOCOL_ISIS_LEVEL_2, X, None),
+                vec![malformed_attribute()],
+            ),
+        ];
+        let topology = OrrTopology::build(routes.iter());
+        assert_eq!(topology.node_count(), 0);
+        assert_eq!(topology.link_count(), 0);
+        assert_eq!(
+            topology.resolve_node(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 3))),
+            None
+        );
+        assert_eq!(
+            topology.resolve_node(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            None
+        );
+        assert_eq!(topology.input_diagnostics().malformed_attribute_29, 3);
+    }
+
+    #[test]
+    fn flex_prefix_metric_is_inert_but_classic_metric_remains_usable() {
+        let mut routes = square_topology(PEER1);
+        let nlri = prefix_nlri(PROTOCOL_ISIS_LEVEL_2, X, None);
+        routes.push(rib_route(
+            PEER1,
+            nlri,
+            vec![bgp_ls_attribute(&[
+                BgpLsTlv::new(
+                    BGP_LS_TLV_PREFIX_METRIC,
+                    Bytes::from(50_u32.to_be_bytes().to_vec()),
+                ),
+                raw_tlv(
+                    BGP_LS_TLV_FLEX_ALGO_PREFIX_METRIC,
+                    &[128, 0, 0, 0, 0, 0, 0, 1],
+                ),
+            ])],
+        ));
+        let topology = OrrTopology::build(routes.iter());
+        let address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert_eq!(
+            topology.spf(ix(&topology, A)).cost_to(&topology, address),
+            Some(51)
+        );
+        assert_eq!(topology.input_diagnostics().included_default, 5);
+        assert_eq!(
+            topology.input_diagnostics().default_with_ignored_flex_algo,
+            1
+        );
     }
 
     #[test]

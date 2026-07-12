@@ -701,6 +701,42 @@ impl PendingRoutesReceived {
     }
 }
 
+fn log_orr_input_transition(
+    previous: crate::orr::OrrInputDiagnostics,
+    current: crate::orr::OrrInputDiagnostics,
+) {
+    match crate::orr::input_diagnostics_transition(previous, current) {
+        Some(crate::orr::OrrInputTransition::ExclusionsActivated) => warn!(
+            included_default = current.included_default,
+            excluded_nondefault = current.excluded_nondefault,
+            malformed_topology = current.malformed_topology,
+            malformed_attribute_29 = current.malformed_attribute_29,
+            default_with_ignored_flex_algo = current.default_with_ignored_flex_algo,
+            "ORR BGP-LS exclusions became active for the supported default topology"
+        ),
+        Some(crate::orr::OrrInputTransition::ExclusionsCleared) => info!(
+            included_default = current.included_default,
+            excluded_nondefault = current.excluded_nondefault,
+            malformed_topology = current.malformed_topology,
+            malformed_attribute_29 = current.malformed_attribute_29,
+            default_with_ignored_flex_algo = current.default_with_ignored_flex_algo,
+            "one or more ORR BGP-LS exclusion categories cleared; other diagnostics remain active"
+        ),
+        Some(crate::orr::OrrInputTransition::FlexChanged) => info!(
+            included_default = current.included_default,
+            excluded_nondefault = current.excluded_nondefault,
+            malformed_topology = current.malformed_topology,
+            malformed_attribute_29 = current.malformed_attribute_29,
+            default_with_ignored_flex_algo = current.default_with_ignored_flex_algo,
+            "ORR ignored Flex-Algorithm input changed; classic default-topology metrics remain active"
+        ),
+        Some(crate::orr::OrrInputTransition::Cleared) => {
+            info!("ORR BGP-LS input filtering is no longer active");
+        }
+        None => {}
+    }
+}
+
 impl RibManager {
     /// Sweep the global attribute intern table (drop entries no route
     /// references any more) and refresh its gauge. Run after any batch
@@ -3013,11 +3049,17 @@ impl RibManager {
     pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {
         if self.peer_orr_vantage.is_empty() {
             if !self.orr.is_empty() {
+                log_orr_input_transition(
+                    self.orr.topology.input_diagnostics(),
+                    crate::orr::OrrInputDiagnostics::default(),
+                );
                 self.orr = crate::orr::OrrState::default();
-                self.metrics.set_orr_topology_nodes(0);
-                self.metrics.set_orr_topology_links(0);
-                self.metrics.set_orr_unresolved_vantages(0);
             }
+            self.metrics.set_orr_topology_nodes(0);
+            self.metrics.set_orr_topology_links(0);
+            self.metrics.set_orr_unresolved_vantages(0);
+            self.metrics
+                .set_orr_input_diagnostics(crate::orr::OrrInputDiagnostics::default().values());
             return HashSet::new();
         }
 
@@ -3026,6 +3068,8 @@ impl RibManager {
                 .values()
                 .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
         );
+        let input_diagnostics = topology.input_diagnostics();
+        log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
         let vantages: HashSet<IpAddr> = self.peer_orr_vantage.values().copied().collect();
         let mut changed = HashSet::new();
         let mut spf = HashMap::new();
@@ -3070,6 +3114,8 @@ impl RibManager {
             .set_orr_topology_links(i64::try_from(topology.link_count()).unwrap_or(i64::MAX));
         self.metrics
             .set_orr_unresolved_vantages(i64::try_from(unresolved).unwrap_or(i64::MAX));
+        self.metrics
+            .set_orr_input_diagnostics(input_diagnostics.values());
         self.orr = crate::orr::OrrState {
             topology,
             spf,
@@ -3127,6 +3173,7 @@ impl RibManager {
             vantages,
             topology_nodes: u32::try_from(self.orr.topology.node_count()).unwrap_or(u32::MAX),
             topology_links: u32::try_from(self.orr.topology.link_count()).unwrap_or(u32::MAX),
+            input_diagnostics: self.orr.topology.input_diagnostics(),
         });
     }
 

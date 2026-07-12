@@ -248,6 +248,16 @@ impl RibManager {
         // Loc-RIB best, unchanged.
         let best = if let Some((topology, spf, vantage)) = orr {
             explain.orr_vantage = Some(vantage);
+            let input_diagnostics = topology.input_diagnostics();
+            if input_diagnostics.noteworthy() {
+                explain.reasons.push(ExplainReason {
+                    code: "orr_topology_input_diagnostics",
+                    message: format!(
+                        "aggregate non-decisive ORR input diagnostics; winner and decisive cost are unchanged; default-topology SPF uses {}",
+                        input_diagnostics.summary()
+                    ),
+                });
+            }
             let mut ranked: Vec<&crate::route::Route> = orr_candidates(
                 ribs,
                 prefix_peers,
