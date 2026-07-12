@@ -1,7 +1,6 @@
 use super::export::{
-    PreparedUnicastAttributes, PreparedUnicastCandidate, ReachNlri, SessionExportProfile,
-    UnreachNlri, bgpls_nlri_from_key, evpn_route_from_key, has_otc, labeled_withdraw_entry,
-    vpn_withdraw_entry,
+    ExportWithdrawal, PreparedUnicastAttributes, PreparedUnicastCandidate, PreparedWithdrawal,
+    ReachNlri, SessionExportProfile, UnreachNlri, has_otc,
 };
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
@@ -262,82 +261,73 @@ impl PeerSession {
         let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedUnicastAttributes> =
             HashMap::default();
         // Split withdrawals by address family, filtering by negotiated families
-        let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v4_body_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v4_mp_withdraw: Vec<NlriEntry> = Vec::new();
+        let mut v4_mp_wire = None;
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
+        let mut v6_wire = None;
         for &(ref prefix, path_id) in &update.withdraw {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
-            match prefix {
-                Prefix::V4(v4) => v4_withdraw.push(Ipv4NlriEntry {
-                    path_id,
-                    prefix: *v4,
-                }),
-                v6 @ Prefix::V6(_) => v6_withdraw.push(NlriEntry {
-                    path_id,
-                    prefix: *v6,
-                }),
+            match export.prepare_withdrawal(ExportWithdrawal::Unicast {
+                prefix: *prefix,
+                path_id,
+            }) {
+                Ok(PreparedWithdrawal::Ipv4Body(entry)) => v4_body_withdraw.push(entry),
+                Ok(PreparedWithdrawal::Unicast(prepared)) => {
+                    let wire = (prepared.afi, prepared.safi, prepared.ipv4_mode);
+                    if prepared.afi == Afi::Ipv4 {
+                        v4_mp_wire = Some(wire);
+                        v4_mp_withdraw.push(prepared.nlri);
+                    } else {
+                        v6_wire = Some(wire);
+                        v6_withdraw.push(prepared.nlri);
+                    }
+                }
+                Ok(_) => unreachable!("unicast withdrawal must prepare as unicast"),
+                Err(error) => warn!(
+                    peer = %self.peer_label,
+                    %prefix,
+                    %error,
+                    "not sending unicast withdrawal: exact export preparation failed"
+                ),
             }
         }
-        // Send IPv4 withdrawals via body NLRI or IPv4 MP_UNREACH_NLRI,
-        // depending on Extended Next Hop negotiation.
-        if !v4_withdraw.is_empty() {
-            if export.is_scoped_link_local_peer() && !use_extended_nexthop_ipv4 {
-                warn!(
-                    peer = %self.peer_label,
-                    "not sending IPv4 withdrawals to scoped link-local peer without negotiated Extended Next Hop"
-                );
-            } else {
-                let max_len = export.max_message_len();
-                let ok = if use_extended_nexthop_ipv4 {
-                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
-                        let entries: Vec<_> = chunk
-                            .iter()
-                            .map(|entry| NlriEntry {
-                                path_id: entry.path_id,
-                                prefix: Prefix::V4(entry.prefix),
-                            })
-                            .collect();
-                        export
-                            .build_mp_unreach(
-                                Afi::Ipv4,
-                                Safi::Unicast,
-                                UnreachNlri::Unicast(&entries),
-                                Ipv4UnicastMode::MpReach,
-                            )
-                            .expect("IPv4 MP_UNREACH construction was previously infallible")
-                    })
-                } else {
-                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
-                        export
-                            .build_ipv4_body(&[], chunk, &[])
-                            .expect("IPv4 body withdrawal construction was previously infallible")
-                    })
-                };
-                if !ok {
-                    return;
-                }
+        if !v4_body_withdraw.is_empty() {
+            let max_len = export.max_message_len();
+            if !self.send_v4_chunked(&v4_body_withdraw, max_len, "withdraw", |chunk| {
+                export
+                    .build_ipv4_body(&[], chunk, &[])
+                    .expect("IPv4 body withdrawal construction was previously infallible")
+            }) {
+                return;
+            }
+        }
+        if let Some((afi, safi, ipv4_mode)) = v4_mp_wire {
+            let max_len = export.max_message_len();
+            if !self.send_mp_chunked(
+                &v4_mp_withdraw,
+                max_len,
+                "IPv4 unicast",
+                "withdrawal",
+                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
+            ) {
+                return;
             }
         }
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`, chunked to the
         // negotiated message ceiling just like IPv4. A large Add-Path
         // withdrawal set must not be handed to `enqueue_bulk` as one
         // oversized message after the RIB has already committed it.
-        if !v6_withdraw.is_empty() {
+        if let Some((afi, safi, ipv4_mode)) = v6_wire {
             let max_len = export.max_message_len();
             if !self.send_mp_chunked(
                 &v6_withdraw,
                 max_len,
                 "IPv6 unicast",
                 "withdrawal",
-                |chunk| {
-                    export.build_mp_unreach(
-                        Afi::Ipv6,
-                        Safi::Unicast,
-                        UnreachNlri::Unicast(chunk),
-                        Ipv4UnicastMode::Body,
-                    )
-                },
+                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
             ) {
                 return;
             }
@@ -572,30 +562,39 @@ impl PeerSession {
         }
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
         if !update.flowspec_withdraw.is_empty() {
-            let mut fs_withdrawals = [
-                (Afi::Ipv4, Vec::<FlowSpecRule>::new()),
-                (Afi::Ipv6, Vec::<FlowSpecRule>::new()),
-            ];
+            type FlowSpecWithdrawalGroup = Option<(Afi, Safi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
+            // Preserve the established deterministic wire order: IPv4, then IPv6.
+            let mut fs_withdrawals: [FlowSpecWithdrawalGroup; 2] = [None, None];
             for key in &update.flowspec_withdraw {
-                let Some((_, rules)) = fs_withdrawals.iter_mut().find(|(afi, _)| *afi == key.afi)
+                let PreparedWithdrawal::FlowSpec(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::FlowSpec(key))
+                    .expect("FlowSpec withdrawal preparation is infallible")
                 else {
-                    warn!(afi = ?key.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
-                    continue;
+                    unreachable!("FlowSpec key must prepare as FlowSpec")
                 };
-                rules.push(key.rule.clone());
-            }
-            for (afi, rules) in fs_withdrawals {
-                if rules.is_empty() {
-                    continue;
+                let slot = match prepared.afi {
+                    Afi::Ipv4 => &mut fs_withdrawals[0],
+                    Afi::Ipv6 => &mut fs_withdrawals[1],
+                    Afi::L2Vpn | Afi::BgpLs => {
+                        warn!(afi = ?prepared.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
+                        continue;
+                    }
+                };
+                if let Some((_, _, _, rules)) = slot {
+                    rules.push(prepared.nlri);
+                } else {
+                    *slot = Some((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
+            }
+            for (afi, safi, ipv4_mode, rules) in fs_withdrawals.into_iter().flatten() {
                 let max_len = export.max_message_len();
                 if !self.send_mp_chunked(&rules, max_len, "FlowSpec", "withdrawal", |chunk| {
-                    export.build_mp_unreach(
-                        afi,
-                        Safi::FlowSpec,
-                        UnreachNlri::FlowSpec(chunk),
-                        Ipv4UnicastMode::Body,
-                    )
+                    export.build_mp_unreach(afi, safi, UnreachNlri::FlowSpec(chunk), ipv4_mode)
                 }) {
                     return;
                 }
@@ -607,13 +606,21 @@ impl PeerSession {
         // can otherwise exceed the limit and `enqueue_bulk` returns
         // `MessageTooLong`, dropping the rest of the update.
         if !update.evpn_withdraw.is_empty() {
-            let routes: Vec<EvpnRoute> = update
-                .evpn_withdraw
-                .iter()
-                .map(|key| evpn_route_from_key(*key))
-                .collect();
+            let mut routes = Vec::with_capacity(update.evpn_withdraw.len());
+            let mut wire = None;
+            for key in &update.evpn_withdraw {
+                let PreparedWithdrawal::Evpn(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Evpn(key))
+                    .expect("EVPN withdrawal preparation is infallible")
+                else {
+                    unreachable!("EVPN key must prepare as EVPN")
+                };
+                wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
+                routes.push(prepared.nlri);
+            }
             let max_len = export.max_message_len();
-            if !self.send_evpn_unreach_chunked(&export, &routes, max_len) {
+            let (afi, safi, ipv4_mode) = wire.expect("non-empty EVPN withdrawal batch");
+            if !self.send_evpn_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -621,38 +628,49 @@ impl PeerSession {
         // chunked so the RIB never commits a route that transport could not
         // enqueue.
         if !update.bgpls_withdraw.is_empty() {
-            let mut base_routes = Vec::new();
-            let mut vpn_routes = Vec::new();
+            let mut groups = Vec::<(
+                Afi,
+                Safi,
+                Ipv4UnicastMode,
+                Vec<rustbgpd_wire::bgpls::BgpLsNlri>,
+            )>::new();
             for key in &update.bgpls_withdraw {
-                let nlri = bgpls_nlri_from_key(key);
-                match key.family {
-                    rustbgpd_rib::BgpLsFamily::LinkState
-                        if self
-                            .negotiated_families
-                            .contains(&(Afi::BgpLs, Safi::BgpLs)) =>
-                    {
-                        base_routes.push(nlri);
-                    }
-                    rustbgpd_rib::BgpLsFamily::LinkStateVpn
-                        if self
-                            .negotiated_families
-                            .contains(&(Afi::BgpLs, Safi::BgpLsVpn)) =>
-                    {
-                        vpn_routes.push(nlri);
-                    }
-                    _ => {}
+                let PreparedWithdrawal::BgpLs(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::BgpLs(key))
+                    .expect("BGP-LS withdrawal preparation is infallible")
+                else {
+                    unreachable!("BGP-LS key must prepare as BGP-LS")
+                };
+                if !self
+                    .negotiated_families
+                    .contains(&(prepared.afi, prepared.safi))
+                {
+                    continue;
+                }
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
             let max_len = export.max_message_len();
-            if !base_routes.is_empty()
-                && !self.send_bgpls_unreach_chunked(Safi::BgpLs, &base_routes, &export, max_len)
-            {
-                return;
-            }
-            if !vpn_routes.is_empty()
-                && !self.send_bgpls_unreach_chunked(Safi::BgpLsVpn, &vpn_routes, &export, max_len)
-            {
-                return;
+            groups.sort_by_key(|(_, safi, _, _)| match safi {
+                Safi::BgpLs => 0,
+                Safi::BgpLsVpn => 1,
+                _ => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self.send_bgpls_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
+                {
+                    return;
+                }
             }
         }
         // Send VPNv4/VPNv6 withdrawals via MP_UNREACH_NLRI, grouped by AFI
@@ -660,25 +678,40 @@ impl PeerSession {
         // compatibility field instead of a label stack, so the rebuilt NLRI
         // carries no labels (the withdraw encoder ignores them).
         if !update.vpn_withdraw.is_empty() {
-            let mut v4_routes = Vec::new();
-            let mut v6_routes = Vec::new();
+            let mut groups =
+                Vec::<(Afi, Safi, Ipv4UnicastMode, Vec<rustbgpd_wire::VpnNlriEntry>)>::new();
             for key in &update.vpn_withdraw {
-                let entry = vpn_withdraw_entry(key);
-                let family = key.afi_safi();
+                let PreparedWithdrawal::Vpn(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Vpn(key))
+                    .expect("VPN withdrawal preparation is infallible")
+                else {
+                    unreachable!("VPN key must prepare as VPN")
+                };
+                let family = (prepared.afi, prepared.safi);
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                match family.0 {
-                    Afi::Ipv4 => v4_routes.push(entry),
-                    Afi::Ipv6 => v6_routes.push(entry),
-                    Afi::L2Vpn | Afi::BgpLs => {}
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
             let max_len = export.max_message_len();
-            for (afi, routes) in [(Afi::Ipv4, v4_routes), (Afi::Ipv6, v6_routes)] {
-                if !routes.is_empty()
-                    && !self.send_vpn_unreach_chunked(afi, &routes, &export, max_len)
-                {
+            groups.sort_by_key(|(afi, _, _, _)| match afi {
+                Afi::Ipv4 => 0,
+                Afi::Ipv6 => 1,
+                Afi::L2Vpn | Afi::BgpLs => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len) {
                     return;
                 }
             }
@@ -689,24 +722,45 @@ impl PeerSession {
         // rebuilt NLRI carries no labels (the withdraw encoder ignores
         // them).
         if !update.labeled_withdraw.is_empty() {
-            let mut v4_routes = Vec::new();
-            let mut v6_routes = Vec::new();
+            let mut groups = Vec::<(
+                Afi,
+                Safi,
+                Ipv4UnicastMode,
+                Vec<rustbgpd_wire::LabeledNlriEntry>,
+            )>::new();
             for key in &update.labeled_withdraw {
-                let entry = labeled_withdraw_entry(key);
-                let family = key.afi_safi();
+                let PreparedWithdrawal::Labeled(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Labeled(key))
+                    .expect("labeled withdrawal preparation is infallible")
+                else {
+                    unreachable!("labeled key must prepare as labeled unicast")
+                };
+                let family = (prepared.afi, prepared.safi);
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                match family.0 {
-                    Afi::Ipv4 => v4_routes.push(entry),
-                    Afi::Ipv6 => v6_routes.push(entry),
-                    Afi::L2Vpn | Afi::BgpLs => {}
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
             let max_len = export.max_message_len();
-            for (afi, routes) in [(Afi::Ipv4, v4_routes), (Afi::Ipv6, v6_routes)] {
-                if !routes.is_empty()
-                    && !self.send_labeled_unreach_chunked(afi, &routes, &export, max_len)
+            groups.sort_by_key(|(afi, _, _, _)| match afi {
+                Afi::Ipv4 => 0,
+                Afi::Ipv6 => 1,
+                Afi::L2Vpn | Afi::BgpLs => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self
+                    .send_labeled_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
                 {
                     return;
                 }
@@ -720,10 +774,21 @@ impl PeerSession {
                 .negotiated_families
                 .contains(&(Afi::Ipv4, Safi::RtConstrain))
         {
-            let routes: Vec<rustbgpd_wire::RtcNlri> =
-                update.rtc_withdraw.iter().map(|key| key.nlri).collect();
+            let mut routes = Vec::with_capacity(update.rtc_withdraw.len());
+            let mut wire = None;
+            for key in &update.rtc_withdraw {
+                let PreparedWithdrawal::Rtc(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Rtc(key))
+                    .expect("RTC withdrawal preparation is infallible")
+                else {
+                    unreachable!("RTC key must prepare as RTC")
+                };
+                wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
+                routes.push(prepared.nlri);
+            }
             let max_len = export.max_message_len();
-            if !self.send_rtc_unreach_chunked(&export, &routes, max_len) {
+            let (afi, safi, ipv4_mode) = wire.expect("non-empty RTC withdrawal batch");
+            if !self.send_rtc_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -1257,6 +1322,9 @@ impl PeerSession {
     fn send_evpn_unreach_chunked(
         &mut self,
         profile: &SessionExportProfile,
+        afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[EvpnRoute],
         max_len: usize,
     ) -> bool {
@@ -1265,12 +1333,7 @@ impl PeerSession {
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
-                .build_mp_unreach(
-                    Afi::L2Vpn,
-                    Safi::Evpn,
-                    UnreachNlri::Evpn(&routes[idx..end]),
-                    Ipv4UnicastMode::Body,
-                )
+                .build_mp_unreach(afi, safi, UnreachNlri::Evpn(&routes[idx..end]), ipv4_mode)
                 .expect("EVPN MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
@@ -1352,7 +1415,9 @@ impl PeerSession {
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_bgpls_unreach_chunked(
         &mut self,
+        afi: Afi,
         safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
         profile: &SessionExportProfile,
         max_len: usize,
@@ -1362,12 +1427,7 @@ impl PeerSession {
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
-                .build_mp_unreach(
-                    Afi::BgpLs,
-                    safi,
-                    UnreachNlri::BgpLs(&routes[idx..end]),
-                    Ipv4UnicastMode::Body,
-                )
+                .build_mp_unreach(afi, safi, UnreachNlri::BgpLs(&routes[idx..end]), ipv4_mode)
                 .expect("BGP-LS MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
@@ -1464,6 +1524,8 @@ impl PeerSession {
     fn send_vpn_unreach_chunked(
         &mut self,
         afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::VpnNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
@@ -1473,12 +1535,7 @@ impl PeerSession {
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
-                .build_mp_unreach(
-                    afi,
-                    Safi::MplsVpn,
-                    UnreachNlri::Vpn(&routes[idx..end]),
-                    Ipv4UnicastMode::Body,
-                )
+                .build_mp_unreach(afi, safi, UnreachNlri::Vpn(&routes[idx..end]), ipv4_mode)
                 .expect("VPN MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
@@ -1570,6 +1627,8 @@ impl PeerSession {
     fn send_labeled_unreach_chunked(
         &mut self,
         afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::LabeledNlriEntry],
         profile: &SessionExportProfile,
         max_len: usize,
@@ -1581,9 +1640,9 @@ impl PeerSession {
             let msg = profile
                 .build_mp_unreach(
                     afi,
-                    Safi::LabeledUnicast,
+                    safi,
                     UnreachNlri::Labeled(&routes[idx..end]),
-                    Ipv4UnicastMode::Body,
+                    ipv4_mode,
                 )
                 .expect("labeled-unicast MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
@@ -1668,6 +1727,9 @@ impl PeerSession {
     fn send_rtc_unreach_chunked(
         &mut self,
         profile: &SessionExportProfile,
+        afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::RtcNlri],
         max_len: usize,
     ) -> bool {
@@ -1676,12 +1738,7 @@ impl PeerSession {
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
             let msg = profile
-                .build_mp_unreach(
-                    Afi::Ipv4,
-                    Safi::RtConstrain,
-                    UnreachNlri::Rtc(&routes[idx..end]),
-                    Ipv4UnicastMode::Body,
-                )
+                .build_mp_unreach(afi, safi, UnreachNlri::Rtc(&routes[idx..end]), ipv4_mode)
                 .expect("RTC MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
@@ -1855,7 +1912,14 @@ mod tests {
                     1,
                 )
             } else {
-                session.send_evpn_unreach_chunked(&profile, std::slice::from_ref(&route), 1)
+                session.send_evpn_unreach_chunked(
+                    &profile,
+                    Afi::L2Vpn,
+                    Safi::Evpn,
+                    Ipv4UnicastMode::Body,
+                    std::slice::from_ref(&route),
+                    1,
+                )
             };
             assert!(!sent, "overflowing EVPN send must fail closed");
             assert!(session.read_half.is_none());

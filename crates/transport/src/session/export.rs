@@ -957,92 +957,132 @@ impl SessionExportProfile {
         &self,
         withdrawal: ExportWithdrawal<'_>,
     ) -> Result<ExactExportProbe, ExportProbeError> {
-        match withdrawal {
+        match self.prepare_withdrawal(withdrawal)? {
+            PreparedWithdrawal::Ipv4Body(entry) => self
+                .probe_ipv4_body(&[], std::slice::from_ref(&entry), &[])
+                .map_err(Into::into),
+            PreparedWithdrawal::Unicast(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::Unicast(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::FlowSpec(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::FlowSpec(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::Evpn(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::Evpn(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::BgpLs(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::BgpLs(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::Vpn(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::Vpn(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::Labeled(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::Labeled(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+            PreparedWithdrawal::Rtc(prepared) => self
+                .probe_mp_unreach(
+                    prepared.afi,
+                    prepared.safi,
+                    UnreachNlri::Rtc(std::slice::from_ref(&prepared.nlri)),
+                    prepared.ipv4_mode,
+                )
+                .map_err(Into::into),
+        }
+    }
+
+    /// Resolve one real Adj-RIB-Out identity into its authoritative wire
+    /// family, encoding mode, and NLRI representation. Live batching and the
+    /// exact one-route probe both consume this typed result.
+    pub(super) fn prepare_withdrawal(
+        &self,
+        withdrawal: ExportWithdrawal<'_>,
+    ) -> Result<PreparedWithdrawal, ExportProbeError> {
+        Ok(match withdrawal {
             ExportWithdrawal::Unicast { prefix, path_id } => match prefix {
                 Prefix::V4(prefix) if self.use_extended_nexthop_ipv4() => {
-                    let entry = NlriEntry {
-                        path_id,
-                        prefix: Prefix::V4(prefix),
-                    };
-                    self.probe_mp_unreach(
-                        Afi::Ipv4,
-                        Safi::Unicast,
-                        UnreachNlri::Unicast(std::slice::from_ref(&entry)),
-                        Ipv4UnicastMode::MpReach,
-                    )
-                    .map_err(Into::into)
+                    PreparedWithdrawal::Unicast(PreparedMpWithdrawal {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        ipv4_mode: Ipv4UnicastMode::MpReach,
+                        nlri: NlriEntry {
+                            path_id,
+                            prefix: Prefix::V4(prefix),
+                        },
+                    })
                 }
                 Prefix::V4(prefix) => {
                     if self.scoped_link_local_peer {
                         return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
                     }
-                    self.probe_ipv4_body(
-                        &[],
-                        std::slice::from_ref(&Ipv4NlriEntry { path_id, prefix }),
-                        &[],
-                    )
-                    .map_err(Into::into)
+                    PreparedWithdrawal::Ipv4Body(Ipv4NlriEntry { path_id, prefix })
                 }
-                Prefix::V6(_) => {
-                    let entry = NlriEntry { path_id, prefix };
-                    self.probe_mp_unreach(
-                        Afi::Ipv6,
-                        Safi::Unicast,
-                        UnreachNlri::Unicast(std::slice::from_ref(&entry)),
-                        Ipv4UnicastMode::Body,
-                    )
-                    .map_err(Into::into)
-                }
+                Prefix::V6(_) => PreparedWithdrawal::Unicast(PreparedMpWithdrawal::new(
+                    Afi::Ipv6,
+                    Safi::Unicast,
+                    NlriEntry { path_id, prefix },
+                )),
             },
-            ExportWithdrawal::FlowSpec(key) => self
-                .probe_mp_unreach(
-                    key.afi,
-                    Safi::FlowSpec,
-                    UnreachNlri::FlowSpec(std::slice::from_ref(&key.rule)),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-            ExportWithdrawal::Evpn(key) => self
-                .probe_mp_unreach(
-                    Afi::L2Vpn,
-                    Safi::Evpn,
-                    UnreachNlri::Evpn(std::slice::from_ref(&evpn_route_from_key(*key))),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-            ExportWithdrawal::BgpLs(key) => self
-                .probe_mp_unreach(
-                    Afi::BgpLs,
-                    key.family.to_afi_safi().1,
-                    UnreachNlri::BgpLs(std::slice::from_ref(&bgpls_nlri_from_key(key))),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-            ExportWithdrawal::Vpn(key) => self
-                .probe_mp_unreach(
-                    key.afi_safi().0,
-                    Safi::MplsVpn,
-                    UnreachNlri::Vpn(std::slice::from_ref(&vpn_withdraw_entry(key))),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-            ExportWithdrawal::Labeled(key) => self
-                .probe_mp_unreach(
+            ExportWithdrawal::FlowSpec(key) => PreparedWithdrawal::FlowSpec(
+                PreparedMpWithdrawal::new(key.afi, Safi::FlowSpec, key.rule.clone()),
+            ),
+            ExportWithdrawal::Evpn(key) => PreparedWithdrawal::Evpn(PreparedMpWithdrawal::new(
+                Afi::L2Vpn,
+                Safi::Evpn,
+                evpn_route_from_key(*key),
+            )),
+            ExportWithdrawal::BgpLs(key) => PreparedWithdrawal::BgpLs(PreparedMpWithdrawal::new(
+                Afi::BgpLs,
+                key.family.to_afi_safi().1,
+                bgpls_nlri_from_key(key),
+            )),
+            ExportWithdrawal::Vpn(key) => PreparedWithdrawal::Vpn(PreparedMpWithdrawal::new(
+                key.afi_safi().0,
+                Safi::MplsVpn,
+                vpn_withdraw_entry(key),
+            )),
+            ExportWithdrawal::Labeled(key) => {
+                PreparedWithdrawal::Labeled(PreparedMpWithdrawal::new(
                     key.afi_safi().0,
                     Safi::LabeledUnicast,
-                    UnreachNlri::Labeled(std::slice::from_ref(&labeled_withdraw_entry(key))),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-            ExportWithdrawal::Rtc(key) => self
-                .probe_mp_unreach(
-                    Afi::Ipv4,
-                    Safi::RtConstrain,
-                    UnreachNlri::Rtc(std::slice::from_ref(&key.nlri)),
-                    Ipv4UnicastMode::Body,
-                )
-                .map_err(Into::into),
-        }
+                    labeled_withdraw_entry(key),
+                ))
+            }
+            ExportWithdrawal::Rtc(key) => PreparedWithdrawal::Rtc(PreparedMpWithdrawal::new(
+                Afi::Ipv4,
+                Safi::RtConstrain,
+                key.nlri,
+            )),
+        })
     }
 
     pub(super) fn build_ipv4_body(
@@ -1211,6 +1251,35 @@ pub(crate) enum ExportWithdrawal<'a> {
     Vpn(&'a VpnRibRouteKey),
     Labeled(&'a LabeledRibRouteKey),
     Rtc(&'a RtcRibRouteKey),
+}
+
+pub(super) struct PreparedMpWithdrawal<T> {
+    pub(super) afi: Afi,
+    pub(super) safi: Safi,
+    pub(super) ipv4_mode: Ipv4UnicastMode,
+    pub(super) nlri: T,
+}
+
+impl<T> PreparedMpWithdrawal<T> {
+    fn new(afi: Afi, safi: Safi, nlri: T) -> Self {
+        Self {
+            afi,
+            safi,
+            ipv4_mode: Ipv4UnicastMode::Body,
+            nlri,
+        }
+    }
+}
+
+pub(super) enum PreparedWithdrawal {
+    Ipv4Body(Ipv4NlriEntry),
+    Unicast(PreparedMpWithdrawal<NlriEntry>),
+    FlowSpec(PreparedMpWithdrawal<FlowSpecRule>),
+    Evpn(PreparedMpWithdrawal<EvpnRoute>),
+    BgpLs(PreparedMpWithdrawal<rustbgpd_wire::bgpls::BgpLsNlri>),
+    Vpn(PreparedMpWithdrawal<rustbgpd_wire::VpnNlriEntry>),
+    Labeled(PreparedMpWithdrawal<rustbgpd_wire::LabeledNlriEntry>),
+    Rtc(PreparedMpWithdrawal<rustbgpd_wire::RtcNlri>),
 }
 
 #[allow(
