@@ -109,6 +109,13 @@ fn proto_definition_to_input(
                 .map_err(|e| Status::invalid_argument(format!("invalid orr_vantage {raw:?}: {e}")))
         })
         .transpose()?;
+    let paths_limit_receive_max = definition
+        .paths_limit_receive_max
+        .map(|value| {
+            u16::try_from(value)
+                .map_err(|_| Status::invalid_argument("paths_limit_receive_max must be <= 65535"))
+        })
+        .transpose()?;
 
     Ok(PeerGroupDefinition {
         hold_time,
@@ -134,16 +141,24 @@ fn proto_definition_to_input(
         add_path: definition
             .add_path_receive
             .map(|receive| AddPathDefinition {
-                receive_max: None,
+                receive_max: paths_limit_receive_max,
                 receive,
                 send: definition.add_path_send.unwrap_or(false),
                 send_max: definition.add_path_send_max,
             })
             .or_else(|| {
                 definition.add_path_send.map(|send| AddPathDefinition {
-                    receive_max: None,
+                    receive_max: paths_limit_receive_max,
                     receive: false,
                     send,
+                    send_max: definition.add_path_send_max,
+                })
+            })
+            .or_else(|| {
+                paths_limit_receive_max.map(|receive_max| AddPathDefinition {
+                    receive_max: Some(receive_max),
+                    receive: false,
+                    send: false,
                     send_max: definition.add_path_send_max,
                 })
             }),
@@ -183,6 +198,11 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
             .add_path
             .as_ref()
             .and_then(|add_path| add_path.send_max),
+        paths_limit_receive_max: definition
+            .add_path
+            .as_ref()
+            .and_then(|add_path| add_path.receive_max)
+            .map(u32::from),
         import_policy: definition
             .import_policy
             .iter()
@@ -701,6 +721,23 @@ mod tests {
         assert_eq!(input.per_client_best, Some(true));
         let back = input_definition_to_proto(&input);
         assert_eq!(back.per_client_best, Some(true));
+    }
+
+    #[test]
+    fn paths_limit_receive_max_round_trips_and_rejects_overflow() {
+        let mut definition = sample_definition();
+        definition.add_path_receive = Some(true);
+        definition.paths_limit_receive_max = Some(7);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.add_path.as_ref().and_then(|a| a.receive_max), Some(7));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.paths_limit_receive_max, Some(7));
+
+        let mut invalid = sample_definition();
+        invalid.paths_limit_receive_max = Some(65_536);
+        let err = proto_definition_to_input(invalid).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("paths_limit_receive_max"));
     }
 
     #[tokio::test]

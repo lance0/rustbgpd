@@ -637,6 +637,8 @@ message PeerGroupDefinition {
   // RFC 7947 §2.3.2 per-client best-path inherited by neighbors in this
   // group. Requires route_server_client. See NeighborConfig.
   optional bool per_client_best = 24;
+  // Experimental Paths-Limit receiver preference inherited by neighbors.
+  optional uint32 paths_limit_receive_max = 25;
 }
 
 message NamedPeerGroup {
