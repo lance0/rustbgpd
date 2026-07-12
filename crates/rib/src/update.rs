@@ -341,6 +341,59 @@ pub enum ExactExportKey {
 }
 
 impl ExactExportKey {
+    /// Compact diagnostic identity that never formats peer-controlled NLRI
+    /// payloads. The hash is for local correlation only, not a stable API.
+    #[must_use]
+    pub fn bounded_log_identity(&self) -> String {
+        use std::hash::{Hash, Hasher};
+
+        if let Self::Unicast(prefix, path_id) = self {
+            return format!("prefix={prefix} path_id={path_id}");
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        let path_id = match self {
+            Self::BgpLs(key) => key.path_id,
+            Self::Vpn(key) => key.path_id,
+            Self::Labeled(key) => key.path_id,
+            Self::Rtc(key) => key.path_id,
+            Self::Unicast(_, path_id) => *path_id,
+            Self::FlowSpec(_) | Self::Evpn(_) => 0,
+        };
+        format!(
+            "family={} path_id={path_id} key_hash={:016x}",
+            self.family_label(),
+            hasher.finish()
+        )
+    }
+
+    /// Family NLRI identity without a session-local outbound Add-Path rank.
+    #[must_use]
+    pub fn nlri_identity(&self) -> Self {
+        match self {
+            Self::Unicast(prefix, _) => Self::Unicast(*prefix, 0),
+            Self::FlowSpec(key) => Self::FlowSpec(key.clone()),
+            Self::Evpn(key) => Self::Evpn(*key),
+            Self::BgpLs(key) => Self::BgpLs(crate::route::BgpLsRouteKey {
+                family: key.family,
+                nlri: key.nlri.clone(),
+                path_id: 0,
+            }),
+            Self::Vpn(key) => Self::Vpn(crate::route::VpnRibRouteKey {
+                nlri_key: key.nlri_key,
+                path_id: 0,
+            }),
+            Self::Labeled(key) => Self::Labeled(crate::route::LabeledRibRouteKey {
+                prefix: key.prefix,
+                path_id: 0,
+            }),
+            Self::Rtc(key) => Self::Rtc(crate::route::RtcRibRouteKey {
+                nlri: key.nlri,
+                path_id: 0,
+            }),
+        }
+    }
+
     /// Stable low-cardinality family label used by exact-export rejection
     /// metrics. The values are deliberately constrained to the telemetry
     /// allow-list; no NLRI or peer-controlled text enters a label.
@@ -420,15 +473,22 @@ pub enum ExactExportErrorCode {
 }
 
 impl ExactExportErrorCode {
+    /// Canonical typed observability reason for this failure class.
+    #[must_use]
+    pub const fn reason(self) -> rustbgpd_telemetry::reason_labels::ExactExportReason {
+        use rustbgpd_telemetry::reason_labels::ExactExportReason;
+        match self {
+            Self::Encoding => ExactExportReason::Encoding,
+            Self::MissingIpv6NextHop => ExactExportReason::MissingIpv6NextHop,
+            Self::Ipv4RequiresExtendedNextHop => ExactExportReason::Ipv4RequiresExtendedNextHop,
+            Self::MessageTooLong => ExactExportReason::MessageTooLong,
+        }
+    }
+
     /// Stable low-cardinality label suitable for metrics and API projection.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Encoding => "encoding",
-            Self::MissingIpv6NextHop => "missing_ipv6_next_hop",
-            Self::Ipv4RequiresExtendedNextHop => "ipv4_requires_extended_next_hop",
-            Self::MessageTooLong => "message_too_long",
-        }
+        self.reason().as_str()
     }
 }
 

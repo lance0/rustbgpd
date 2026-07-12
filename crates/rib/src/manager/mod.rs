@@ -1095,19 +1095,6 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
-        let may_remove_route_identity = matches!(
-            &update,
-            RibUpdate::RoutesReceived { .. }
-                | RibUpdate::BgpLsRoutesReceived { .. }
-                | RibUpdate::VpnRoutesReceived { .. }
-                | RibUpdate::LabeledRoutesReceived { .. }
-                | RibUpdate::RtcRoutesReceived { .. }
-                | RibUpdate::PeerDown { .. }
-                | RibUpdate::PeerDeleted { .. }
-                | RibUpdate::WithdrawInjected { .. }
-                | RibUpdate::WithdrawFlowSpec { .. }
-                | RibUpdate::WithdrawEvpn { .. }
-        );
         match update {
             RibUpdate::RoutesReceived {
                 peer,
@@ -1138,6 +1125,9 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", "bgpls") {
+                    self.forget_exact_export_rejections(
+                        withdrawn.iter().cloned().map(ExactExportKey::BgpLs),
+                    );
                     self.handle_bgpls_routes_received(peer, announced, withdrawn);
                 }
             }
@@ -1148,6 +1138,9 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", "vpn") {
+                    self.forget_exact_export_rejections(
+                        withdrawn.iter().cloned().map(ExactExportKey::Vpn),
+                    );
                     self.handle_vpn_routes_received(peer, announced, withdrawn);
                 }
             }
@@ -1159,6 +1152,9 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", "labeled")
                 {
+                    self.forget_exact_export_rejections(
+                        withdrawn.iter().copied().map(ExactExportKey::Labeled),
+                    );
                     self.handle_labeled_routes_received(peer, announced, withdrawn);
                 }
             }
@@ -1169,10 +1165,16 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", "rtc") {
+                    self.forget_exact_export_rejections(
+                        withdrawn.iter().cloned().map(ExactExportKey::Rtc),
+                    );
                     self.handle_rtc_routes_received(peer, announced, withdrawn);
                 }
             }
-            RibUpdate::PeerDown { peer, session_id } => self.handle_peer_down(peer, session_id),
+            RibUpdate::PeerDown { peer, session_id } => {
+                self.handle_peer_down(peer, session_id);
+                self.prune_exact_export_rejections();
+            }
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
                 peer,
@@ -1299,7 +1301,10 @@ impl RibManager {
                 prefix,
                 path_id,
                 reply,
-            } => self.handle_withdraw_injected(prefix, path_id, reply),
+            } => {
+                self.forget_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+                self.handle_withdraw_injected(prefix, path_id, reply);
+            }
             RibUpdate::QueryReceivedRoutes { peer, reply } => {
                 self.handle_query_received_routes(peer, reply);
             }
@@ -1488,10 +1493,14 @@ impl RibManager {
             RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { key, reply } => {
+                self.forget_exact_export_rejections([ExactExportKey::FlowSpec(key.clone())]);
                 self.handle_withdraw_flowspec(key, reply);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
-            RibUpdate::WithdrawEvpn { key, reply } => self.handle_withdraw_evpn(key, reply),
+            RibUpdate::WithdrawEvpn { key, reply } => {
+                self.forget_exact_export_rejections([ExactExportKey::Evpn(key)]);
+                self.handle_withdraw_evpn(key, reply);
+            }
             RibUpdate::QueryFlowSpecRoutes { reply } => {
                 self.handle_query_flowspec_routes(reply);
             }
@@ -1546,35 +1555,70 @@ impl RibManager {
                 self.handle_query_bmp_loc_rib_stats(reply);
             }
         }
-        if may_remove_route_identity {
-            self.prune_exact_export_rejections();
-        }
     }
 
-    /// Remove sparse rejection-overlay keys whose source identity no longer
-    /// exists in any Adj-RIB-In. Work is proportional to the rejected overlay,
-    /// never to the full Internet table: every keyed family uses its direct
-    /// lookup, while FlowSpec/EVPN scan only when one of their sparse keys is
-    /// actually rejected.
+    /// Remove sparse rejection-overlay keys whose NLRI identity no longer
+    /// exists in any Adj-RIB-In. This full live-set rebuild is reserved for
+    /// infrequent bulk lifecycle sweeps; the UPDATE hot path uses targeted
+    /// withdrawal cleanup instead.
     fn prune_exact_export_rejections(&mut self) {
         if self.peer_unexportable.is_empty() {
             return;
         }
-        let key_is_live = |key: &ExactExportKey| {
-            self.ribs.values().any(|rib| match key {
-                ExactExportKey::Unicast(prefix, path_id) => rib.get(prefix, *path_id).is_some(),
-                ExactExportKey::FlowSpec(key) => rib
-                    .iter_flowspec()
-                    .any(|route| route.selection_key() == *key),
-                ExactExportKey::Evpn(key) => rib.iter_evpn().any(|route| route.key() == *key),
-                ExactExportKey::BgpLs(key) => rib.get_bgpls(key).is_some(),
-                ExactExportKey::Vpn(key) => rib.get_vpn(key).is_some(),
-                ExactExportKey::Labeled(key) => rib.get_labeled(key).is_some(),
-                ExactExportKey::Rtc(key) => rib.get_rtc(key).is_some(),
+        let live = self
+            .ribs
+            .values()
+            .flat_map(|rib| {
+                rib.iter()
+                    .map(|route| ExactExportKey::Unicast(route.prefix, 0))
+                    .chain(
+                        rib.iter_flowspec()
+                            .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
+                    )
+                    .chain(
+                        rib.iter_evpn()
+                            .map(|route| ExactExportKey::Evpn(route.key())),
+                    )
+                    .chain(
+                        rib.iter_bgpls()
+                            .map(|route| ExactExportKey::BgpLs(route.key()).nlri_identity()),
+                    )
+                    .chain(
+                        rib.iter_vpn()
+                            .map(|route| ExactExportKey::Vpn(route.key()).nlri_identity()),
+                    )
+                    .chain(
+                        rib.iter_labeled()
+                            .map(|route| ExactExportKey::Labeled(route.key()).nlri_identity()),
+                    )
+                    .chain(
+                        rib.iter_rtc()
+                            .map(|route| ExactExportKey::Rtc(route.key()).nlri_identity()),
+                    )
             })
-        };
+            .collect::<HashSet<_>>();
         self.peer_unexportable.retain(|_, rejected| {
-            rejected.retain(key_is_live);
+            rejected.retain(|key| live.contains(&key.nlri_identity()));
+            !rejected.is_empty()
+        });
+    }
+
+    fn forget_exact_export_rejections(
+        &mut self,
+        withdrawn: impl IntoIterator<Item = ExactExportKey>,
+    ) {
+        if self.peer_unexportable.is_empty() {
+            return;
+        }
+        let withdrawn = withdrawn
+            .into_iter()
+            .map(|key| key.nlri_identity())
+            .collect::<HashSet<_>>();
+        if withdrawn.is_empty() {
+            return;
+        }
+        self.peer_unexportable.retain(|_, rejected| {
+            rejected.retain(|key| !withdrawn.contains(&key.nlri_identity()));
             !rejected.is_empty()
         });
     }

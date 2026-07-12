@@ -30,8 +30,8 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
-    ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict,
-    NeighborPolicyStats, OutboundRouteUpdate, RibCommandError,
+    ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
+    ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, RibCommandError,
 };
 
 mod bgpls;
@@ -847,11 +847,11 @@ impl RibManager {
                 self.metrics.record_exact_export_rejection(
                     &peer.to_string(),
                     key.family_label(),
-                    error.code().as_str(),
+                    error.code().reason(),
                 );
                 warn!(
                     %peer,
-                    ?key,
+                    identity = %key.bounded_log_identity(),
                     reason = error.code().as_str(),
                     detail = error.detail(),
                     profile_generation = snapshot.generation(),
@@ -1238,18 +1238,32 @@ impl RibManager {
 
         match chunk {
             PendingRouteChunk::Withdrawn(withdrawn) => {
+                self.forget_exact_export_rejections(
+                    withdrawn
+                        .iter()
+                        .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id)),
+                );
                 self.process_withdraw_chunk(peer, withdrawn);
             }
             PendingRouteChunk::Announced(announced) => {
                 self.process_announce_chunk(peer, announced);
             }
             PendingRouteChunk::FlowSpecWithdrawn(flowspec_withdrawn) => {
+                self.forget_exact_export_rejections(
+                    flowspec_withdrawn
+                        .iter()
+                        .cloned()
+                        .map(ExactExportKey::FlowSpec),
+                );
                 self.process_flowspec_withdraw_chunk(peer, flowspec_withdrawn);
             }
             PendingRouteChunk::FlowSpecAnnounced(flowspec_announced) => {
                 self.process_flowspec_announce_chunk(peer, flowspec_announced);
             }
             PendingRouteChunk::EvpnWithdrawn(evpn_withdrawn) => {
+                self.forget_exact_export_rejections(
+                    evpn_withdrawn.iter().copied().map(ExactExportKey::Evpn),
+                );
                 self.process_evpn_withdraw_chunk(peer, evpn_withdrawn);
             }
             PendingRouteChunk::EvpnAnnounced(evpn_announced) => {
@@ -1264,8 +1278,6 @@ impl RibManager {
             // across all its chunks in one coalesced outbound pass.
             self.flush_pending_distribute();
         }
-        self.prune_exact_export_rejections();
-
         true
     }
 

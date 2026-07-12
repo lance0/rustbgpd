@@ -2352,10 +2352,13 @@ impl BgpMetrics {
     /// probe before the RIB commits it to Adj-RIB-Out.
     ///
     /// `family` uses the daemon's bounded OpenConfig-style AFI/SAFI labels;
-    /// `reason` uses the four stable exact-export error codes. Unexpected
-    /// values collapse to `unknown` so this public surface cannot introduce
-    /// unbounded Prometheus cardinality.
-    pub fn record_exact_export_rejection(&self, peer: &str, family: &str, reason: &str) {
+    /// `reason` is the canonical typed exact-export vocabulary.
+    pub fn record_exact_export_rejection(
+        &self,
+        peer: &str,
+        family: &str,
+        reason: crate::reason_labels::ExactExportReason,
+    ) {
         let family = match family {
             "ipv4_unicast"
             | "ipv6_unicast"
@@ -2371,13 +2374,7 @@ impl BgpMetrics {
             | "rtc" => family,
             _ => "unknown",
         };
-        let reason = match reason {
-            "encoding"
-            | "missing_ipv6_next_hop"
-            | "ipv4_requires_extended_next_hop"
-            | "message_too_long" => reason,
-            _ => "unknown",
-        };
+        let reason = reason.as_str();
         self.exact_export_rejections
             .with_label_values(&[peer, family, reason])
             .inc();
@@ -3470,11 +3467,21 @@ mod tests {
 
     #[test]
     fn exact_export_rejections_use_bounded_labels_and_are_peer_reaped() {
+        use crate::reason_labels::ExactExportReason;
+
         let m = BgpMetrics::new();
-        m.record_exact_export_rejection("10.0.0.1", "ipv4_unicast", "message_too_long");
-        m.record_exact_export_rejection("10.0.0.1", "ipv4_unicast", "message_too_long");
-        m.record_exact_export_rejection("10.0.0.1", "invented-family", "route-203.0.113.0/24");
-        m.record_exact_export_rejection("10.0.0.2", "l2vpn_evpn", "encoding");
+        m.record_exact_export_rejection(
+            "10.0.0.1",
+            "ipv4_unicast",
+            ExactExportReason::MessageTooLong,
+        );
+        m.record_exact_export_rejection(
+            "10.0.0.1",
+            "ipv4_unicast",
+            ExactExportReason::MessageTooLong,
+        );
+        m.record_exact_export_rejection("10.0.0.1", "invented-family", ExactExportReason::Encoding);
+        m.record_exact_export_rejection("10.0.0.2", "l2vpn_evpn", ExactExportReason::Encoding);
 
         assert_eq!(
             m.exact_export_rejections
@@ -3484,10 +3491,10 @@ mod tests {
         );
         assert_eq!(
             m.exact_export_rejections
-                .with_label_values(&["10.0.0.1", "unknown", "unknown"])
+                .with_label_values(&["10.0.0.1", "unknown", "encoding"])
                 .get(),
             1,
-            "unexpected values must collapse instead of growing cardinality"
+            "unexpected family values must collapse instead of growing cardinality"
         );
 
         m.reap_peer_series("10.0.0.1");
@@ -4589,7 +4596,11 @@ mod tests {
         m.record_inbound_rib_backpressure(peer);
         m.record_hold_timer_rearmed_pending_input(peer);
         m.record_send_hold_expiration(peer);
-        m.record_exact_export_rejection(peer, "ipv4_unicast", "message_too_long");
+        m.record_exact_export_rejection(
+            peer,
+            "ipv4_unicast",
+            crate::reason_labels::ExactExportReason::MessageTooLong,
+        );
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
         m.record_rib_stale_session_message_ignored(peer, "routes");

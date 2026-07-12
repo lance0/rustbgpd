@@ -254,6 +254,13 @@ async fn every_route_family_is_probed_before_commit() {
         ExactExportKey::Labeled(labeled.key()),
         ExactExportKey::Rtc(rtc.key()),
     ]);
+    for key in &expected {
+        assert!(
+            key.bounded_log_identity().len() <= 96,
+            "diagnostic identity must stay bounded: {}",
+            key.bounded_log_identity()
+        );
+    }
 
     let encoder = MockExactExportEncoder::accepting(21);
     let mut manager = test_manager();
@@ -346,11 +353,14 @@ fn missing_encoder_does_not_consume_retry_state() {
 fn rejection_pruning_follows_sparse_overlay_liveness() {
     let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
     let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5));
-    let route = make_route(
+    let mut route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 4, 0), 24),
         Ipv4Addr::new(198, 51, 100, 5),
     );
-    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    route.path_id = 42;
+    // The rejected overlay records the outbound single-best identity, not
+    // the source's inbound Add-Path ID.
+    let key = ExactExportKey::Unicast(route.prefix, 0);
     let mut manager = test_manager();
     let mut rib = AdjRibIn::new(source);
     rib.insert(route.clone());
@@ -362,11 +372,20 @@ fn rejection_pruning_follows_sparse_overlay_liveness() {
     manager.prune_exact_export_rejections();
     assert!(manager.peer_unexportable[&target].contains(&key));
 
+    manager.forget_exact_export_rejections([ExactExportKey::Unicast(route.prefix, 42)]);
+    assert!(
+        !manager.peer_unexportable.contains_key(&target),
+        "targeted withdrawal cleanup must normalize inbound and outbound path IDs"
+    );
+    manager
+        .peer_unexportable
+        .insert(target, HashSet::from([key]));
+
     manager
         .ribs
         .get_mut(&source)
         .unwrap()
-        .withdraw(&route.prefix, route.path_id);
+        .withdraw(&route.prefix, 42);
     manager.prune_exact_export_rejections();
     assert!(!manager.peer_unexportable.contains_key(&target));
 }
