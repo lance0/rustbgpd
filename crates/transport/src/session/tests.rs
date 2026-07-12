@@ -1360,24 +1360,31 @@ fn otc_egress_preserves_existing_otc() {
 #[test]
 fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
-        for prefix in [
-            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
-            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
+        for (prefix, route_next_hop) in [
+            (
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ),
+            (
+                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
+                IpAddr::V6("2001:db8::2".parse().unwrap()),
+            ),
         ] {
             let mut session = make_test_session(65001, 65002);
             session.config.peer.local_role = Some(role);
-            let mut route = replace_route_attrs(
-                &make_route(100),
-                vec![
-                    PathAttribute::Origin(Origin::Igp),
-                    PathAttribute::AsPath(AsPath {
-                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
-                    }),
-                    PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-                    PathAttribute::OnlyToCustomer(65002),
-                ],
-            );
+            let mut attributes = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::OnlyToCustomer(65002),
+            ];
+            if let IpAddr::V4(next_hop) = route_next_hop {
+                attributes.push(PathAttribute::NextHop(next_hop));
+            }
+            let mut route = replace_route_attrs(&make_route(100), attributes);
             route.prefix = prefix;
+            route.next_hop = route_next_hop;
             assert!(
                 session.otc_egress_blocks_unicast(&route),
                 "role {role:?} must not propagate an OTC-tagged {prefix} route"
