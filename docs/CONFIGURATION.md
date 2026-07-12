@@ -2276,8 +2276,9 @@ Only the exact published 1,000-peer uniform and 900-shared/100-private
 topologies receive measured capacity labels; smaller or otherwise different
 shapes are `outside_measured`, not extrapolated. The optimistic transaction
 token is also bound to the live negotiated update-group snapshot, so a session
-flap, capability change, or membership change after Plan makes Apply fail with
-`FAILED_PRECONDITION` and requires a fresh plan.
+flap, capability change, or membership change observed by Apply's mandatory
+re-plan makes Apply fail with `FAILED_PRECONDITION` and requires a fresh plan.
+The token is optimistic concurrency, not a session freeze after that re-plan.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
 the normal apply invocation — `rbgp config apply <config.toml>

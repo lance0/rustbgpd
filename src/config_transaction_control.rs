@@ -1270,7 +1270,8 @@ async fn apply_config_transaction_locked(
     let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
     let update_group_impact =
         rustbgpd_api::config_service::update_group_impact_to_proto(plan.update_group_impact);
-    commit_apply_family(
+    let committed_candidate_toml = request.candidate_toml.clone();
+    let mut response = commit_apply_family(
         deps,
         &config_tx,
         family,
@@ -1280,7 +1281,13 @@ async fn apply_config_transaction_locked(
         post_commit_runtime_snapshot_token,
         update_group_impact,
     )
-    .await
+    .await?;
+    if family == ApplyFamily::LivePolicyImpact {
+        let authoritative =
+            plan_candidate(&deps.peer_mgr_tx, committed_candidate_toml, String::new()).await?;
+        response.runtime_snapshot_token = authoritative.runtime_snapshot_token;
+    }
+    Ok(response)
 }
 
 #[expect(
@@ -3633,10 +3640,31 @@ peer_group = "{group}"
         apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
         dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     ) {
+        let mut plan_calls = 0usize;
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    expected_runtime_snapshot_token,
+                    reply,
+                    ..
+                } => {
+                    let mut response = plan.clone();
+                    if plan_calls > 0 {
+                        response.runtime_snapshot_token =
+                            plan.post_commit_runtime_snapshot_token.clone();
+                    }
+                    plan_calls += 1;
+                    if let Some(expected) =
+                        expected_runtime_snapshot_token.filter(|value| !value.is_empty())
+                        && expected != response.runtime_snapshot_token
+                    {
+                        let _ = reply.send(Err(RuntimeConfigTransactionPlanError::StaleSnapshot {
+                            expected,
+                            current: response.runtime_snapshot_token,
+                        }));
+                    } else {
+                        let _ = reply.send(Ok(response));
+                    }
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -3838,7 +3866,7 @@ remote_asn = 65010
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5265,7 +5293,7 @@ default_action = "permit"
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5387,7 +5415,7 @@ default_action = "permit"
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5410,6 +5438,18 @@ default_action = "permit"
         );
         assert_eq!(*snapshot_toml.lock().await, candidate_toml);
         assert!(response.human_text.contains("live policy-impact"));
+        assert_eq!(response.runtime_snapshot_token, "kv1:new:2");
+        let chained = plan_candidate(
+            &peer_tx,
+            candidate_toml.clone(),
+            response.runtime_snapshot_token.clone(),
+        )
+        .await
+        .expect("returned post-commit token must chain into a second plan");
+        assert_eq!(
+            chained.runtime_snapshot_token,
+            response.runtime_snapshot_token
+        );
         let calls = apply_calls.lock().await;
         assert_eq!(calls.len(), 1, "exactly one apply call");
         assert_eq!(calls[0].len(), 1, "one impacted static neighbor");

@@ -187,7 +187,9 @@ enum ConfigTransactionPlanStatus {
 message ConfigTransactionPlanResponse {
   ConfigTransactionPlanStatus status = 1;
   // Opaque process-local optimistic-concurrency token for the live runtime
-  // config snapshot used to produce this plan. It is not a cryptographic
+  // config and negotiated update-group snapshot observed while producing this
+  // plan. Apply performs the same observation before mutation; the token does
+  // not freeze sessions after that apply-time re-plan. It is not a cryptographic
   // commitment or authorization credential; clients must re-plan after daemon
   // restart.
   string runtime_snapshot_token = 2;

@@ -179,7 +179,7 @@ log_format = "json"
                         llgr_families: vec![],
                         add_path_send: false,
                         per_client_best: false,
-                        orr_vantage: false,
+                        orr_vantage: None,
                         orf_installed: false,
                     },
                     classification: rustbgpd_rib::UpdateGroupClassification::Groupable(

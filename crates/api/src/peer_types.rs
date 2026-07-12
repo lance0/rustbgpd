@@ -385,9 +385,10 @@ pub struct RuntimeConfigTransactionPlan {
     pub status: RuntimeConfigTransactionStatus,
     pub runtime_snapshot_token: String,
     /// Keyed token the live runtime config would carry once this candidate is
-    /// committed. The apply path returns it so a client can chain a follow-up
-    /// apply without re-planning. Computed under the same peer-manager key as
-    /// `runtime_snapshot_token`; not surfaced in the gRPC plan response.
+    /// committed if the negotiated snapshot is unchanged. Live policy apply
+    /// refreshes the authoritative token after RIB convergence before returning
+    /// it, so clients can safely chain a follow-up plan. Not surfaced in the
+    /// gRPC plan response.
     pub post_commit_runtime_snapshot_token: String,
     pub diff: RuntimeConfigDiff,
     pub supported_sections: Vec<String>,

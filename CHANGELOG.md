@@ -22,7 +22,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The transaction token covers the negotiated live-session snapshot as well as
   config, private fallbacks retain policy-content identity, and capacity labels
   apply only to the exact measured topologies; intervening session changes are
-  rejected at apply re-plan rather than silently changing the accepted impact.
+  rejected at the apply-time re-plan rather than silently changing the accepted
+  impact. The token does not freeze sessions after that re-plan.
 
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths

@@ -53,7 +53,7 @@ fn candidate_input(
         llgr_families: live.input.llgr_families.clone(),
         add_path_send: live.input.add_path_send,
         per_client_best: candidate.transport_config.per_client_best,
-        orr_vantage: candidate.transport_config.orr_vantage.is_some(),
+        orr_vantage: candidate.transport_config.orr_vantage,
         orf_installed: live.input.orf_installed,
     }
 }
@@ -126,7 +126,15 @@ fn capacity_class(
     if indeterminate > 0 {
         ("unknown", "future session negotiation is not projected")
     } else if projected_peers == 1_000 && private_views == 0 && shared_groups == 1 {
-        ("fully_shared", "one shared group and no private views")
+        (
+            "within_uniform",
+            "exact measured 1000-peer uniform topology",
+        )
+    } else if private_views == 0 && shared_groups == 1 {
+        (
+            "fully_shared",
+            "structurally one shared group; no measured capacity claim",
+        )
     } else if projected_peers == 1_000 && private_views == 100 && shared_groups == 1 {
         (
             "within_mixed",
@@ -183,25 +191,14 @@ impl PeerManager {
                 || PlannedGroupability::Indeterminate {
                     reason: "indeterminate_session_negotiation".to_string(),
                 },
-                |row| {
-                    raw_state(
-                        &row.classification,
-                        row.input
-                            .policy_fingerprint
-                            .as_deref()
-                            .unwrap_or("no-policy"),
-                    )
-                },
+                |row| raw_state(&row.classification, &format!("{:?}", row.input)),
             );
             let candidate_state = match (live, current_cfg, candidate_cfg) {
                 (Some(live), Some(current), Some(candidate))
                     if preserves_negotiation(current, candidate) =>
                 {
                     let input = candidate_input(live, candidate, self.local_asn);
-                    let fingerprint = input
-                        .policy_fingerprint
-                        .clone()
-                        .unwrap_or_else(|| "no-policy".to_string());
+                    let fingerprint = format!("{input:?}");
                     raw_state(&classify_update_group(input), &fingerprint)
                 }
                 _ => PlannedGroupability::Indeterminate {
@@ -397,11 +394,11 @@ mod tests {
 
     #[test]
     fn uniform_and_mixed_fleet_capacity_goldens() {
-        assert_eq!(capacity_class(1_000, 1, 0, 0).0, "fully_shared");
+        assert_eq!(capacity_class(1_000, 1, 0, 0).0, "within_uniform");
         assert_eq!(capacity_class(1_000, 2, 0, 0).0, "outside_measured");
         assert_eq!(capacity_class(1_000, 1, 100, 0).0, "within_mixed");
         assert_eq!(capacity_class(1_000, 1, 101, 0).0, "outside_measured");
-        assert_eq!(capacity_class(10, 1, 0, 0).0, "outside_measured");
+        assert_eq!(capacity_class(10, 1, 0, 0).0, "fully_shared");
         assert_eq!(capacity_class(10, 1, 0, 1).0, "unknown");
     }
 
@@ -418,7 +415,7 @@ mod tests {
                 llgr_families: vec![],
                 add_path_send: false,
                 per_client_best: false,
-                orr_vantage: false,
+                orr_vantage: None,
                 orf_installed: false,
             }
         }
@@ -428,6 +425,10 @@ mod tests {
         private_peer.policy_requires_peer_context = true;
         let mut private_orf = fixture("orf");
         private_orf.orf_installed = true;
+        let mut orr_a = fixture("orr");
+        orr_a.orr_vantage = Some("192.0.2.10".parse().unwrap());
+        let mut orr_b = orr_a.clone();
+        orr_b.orr_vantage = Some("192.0.2.11".parse().unwrap());
         let mut rtc = fixture("rtc");
         rtc.sendable_families = vec![(1, 128), (1, 132)];
         let cases = [
@@ -456,6 +457,12 @@ mod tests {
                 "private_resync",
             ),
             (
+                "same_reason_orr_vantage_change",
+                orr_a,
+                orr_b,
+                "private_resync",
+            ),
+            (
                 "content_identical_reinstall",
                 shared_a.clone(),
                 shared_a.clone(),
@@ -464,11 +471,8 @@ mod tests {
             ("rtc_membership_stable", rtc.clone(), rtc, "no_op"),
         ];
         for (name, current_input, candidate_input, expected) in cases {
-            let current_fingerprint = current_input.policy_fingerprint.clone().unwrap_or_default();
-            let candidate_fingerprint = candidate_input
-                .policy_fingerprint
-                .clone()
-                .unwrap_or_default();
+            let current_fingerprint = format!("{current_input:?}");
+            let candidate_fingerprint = format!("{candidate_input:?}");
             let current = raw_state(&classify_update_group(current_input), &current_fingerprint);
             let planned = raw_state(
                 &classify_update_group(candidate_input.clone()),

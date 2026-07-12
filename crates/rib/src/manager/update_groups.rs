@@ -2088,7 +2088,7 @@ impl RibManager {
             llgr_families,
             add_path_send: self.peer_has_any_add_path_send(peer),
             per_client_best: self.peer_per_client_best.contains(&peer),
-            orr_vantage: self.peer_orr_vantage.contains_key(&peer),
+            orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
             orf_installed,
         }
     }

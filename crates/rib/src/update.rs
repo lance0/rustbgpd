@@ -26,7 +26,7 @@ pub struct UpdateGroupClassifierInput {
     pub llgr_families: Vec<(u16, u8)>,
     pub add_path_send: bool,
     pub per_client_best: bool,
-    pub orr_vantage: bool,
+    pub orr_vantage: Option<IpAddr>,
     pub orf_installed: bool,
 }
 
@@ -86,7 +86,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
         UpdateGroupClassification::AddPathSend
     } else if input.per_client_best {
         UpdateGroupClassification::PerClientBest
-    } else if input.orr_vantage {
+    } else if input.orr_vantage.is_some() {
         UpdateGroupClassification::OrrVantage
     } else if input.orf_installed {
         UpdateGroupClassification::OrfInstalled
@@ -192,7 +192,7 @@ mod update_group_classifier_tests {
             llgr_families: vec![],
             add_path_send: false,
             per_client_best: false,
-            orr_vantage: false,
+            orr_vantage: None,
             orf_installed: false,
         }
     }
@@ -249,7 +249,7 @@ mod update_group_classifier_tests {
             (
                 "orr",
                 UpdateGroupClassifierInput {
-                    orr_vantage: true,
+                    orr_vantage: Some("192.0.2.9".parse().unwrap()),
                     ..input()
                 },
                 Some("orr_vantage"),
