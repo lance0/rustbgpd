@@ -550,6 +550,9 @@ impl RibManager {
             debug_assert_eq!(announce.len(), next_hop_override.len());
             let mut permitted = Vec::with_capacity(announce.len());
             let mut permitted_next_hops = Vec::with_capacity(next_hop_override.len());
+            // Preserve the caller's withdrawal order while making duplicate
+            // detection constant-time for large policy reload/resync batches.
+            let mut withdrawn_keys: HashSet<(Prefix, u32)> = withdraw.iter().copied().collect();
             for (route, next_hop) in announce
                 .iter()
                 .cloned()
@@ -561,7 +564,7 @@ impl RibManager {
                         .get(&peer)
                         .and_then(|rib_out| rib_out.get(&route.prefix, route.path_id))
                         .is_some()
-                        && !withdraw.contains(&(route.prefix, route.path_id))
+                        && withdrawn_keys.insert((route.prefix, route.path_id))
                     {
                         withdraw.push((route.prefix, route.path_id));
                     }
