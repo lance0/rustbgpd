@@ -1822,9 +1822,13 @@ pub struct PeerInfo {
     pub uptime_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
-    /// Configured transport authentication: plaintext, MD5, or `tcp_ao`.
+    /// Effective transport authentication: plaintext, MD5, or `tcp_ao`.
+    /// Protected accepted dynamic sessions derive this from durable live
+    /// transport identity rather than a per-neighbor key configuration.
     pub authentication: String,
-    /// Query-time TCP-AO health for the currently owned stream.
+    /// Query-time TCP-AO inspection snapshot for the currently owned stream,
+    /// including `KeyID` validity flags and cumulative verification counters.
+    /// Health classification is derived at the protobuf/API boundary.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
