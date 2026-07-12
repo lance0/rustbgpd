@@ -435,6 +435,22 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         export_policy_routes_permitted: info.export_policy_routes_permitted,
         export_policy_routes_denied: info.export_policy_routes_denied,
         update_group: String::new(),
+        authentication: match info.authentication.as_str() {
+            "tcp_ao" => proto::AuthenticationMode::TcpAo.into(),
+            "md5" => proto::AuthenticationMode::Md5.into(),
+            _ => proto::AuthenticationMode::Plaintext.into(),
+        },
+        tcp_ao: info.tcp_ao_info.map(|ao| proto::TcpAoState {
+            current_key_id: ao.has_current_key.then_some(u32::from(ao.current_key)),
+            rnext_key_id: ao.has_rnext_key.then_some(u32::from(ao.rnext_key)),
+            ao_required: ao.ao_required,
+            accept_icmps: ao.accept_icmps,
+            packets_good: ao.pkt_good,
+            packets_bad: ao.pkt_bad,
+            packets_key_not_found: ao.pkt_key_not_found,
+            packets_ao_required: ao.pkt_ao_required,
+            packets_dropped_icmp: ao.pkt_dropped_icmp,
+        }),
     }
 }
 
@@ -1862,6 +1878,38 @@ mod tests {
         assert_eq!(state.messages_received, 4321);
         assert_eq!(state.messages_sent, 1234);
         assert!(state.route_reflector_client);
+    }
+
+    #[test]
+    fn peer_info_to_proto_carries_tcp_ao_health_without_inventing_key_ids() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: false,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 0,
+            pkt_good: 21,
+            pkt_bad: 1,
+            pkt_key_not_found: 2,
+            pkt_ao_required: 3,
+            pkt_dropped_icmp: 4,
+        });
+        let state = peer_info_to_proto(&info);
+        assert_eq!(
+            state.authentication,
+            proto::AuthenticationMode::TcpAo as i32
+        );
+        let ao = state.tcp_ao.unwrap();
+        assert_eq!(ao.current_key_id, Some(7));
+        assert_eq!(ao.rnext_key_id, None);
+        assert_eq!(ao.packets_good, 21);
+        assert_eq!(ao.packets_bad, 1);
+        assert_eq!(ao.packets_key_not_found, 2);
+        assert_eq!(ao.packets_ao_required, 3);
+        assert_eq!(ao.packets_dropped_icmp, 4);
     }
 
     #[tokio::test]

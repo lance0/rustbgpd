@@ -401,6 +401,29 @@ message NeighborState {
   // client. Read-only state: RR-client is configured via TOML or
   // peer-group, not on the runtime neighbor-add gRPC surface.
   bool route_reflector_client = 25;
+  // Configured transport authentication for this session.
+  AuthenticationMode authentication = 26;
+  // Connection-time Linux TCP-AO inspection; absent when not AO or disconnected.
+  TcpAoState tcp_ao = 27;
+}
+
+enum AuthenticationMode {
+  AUTHENTICATION_MODE_UNSPECIFIED = 0;
+  AUTHENTICATION_MODE_PLAINTEXT = 1;
+  AUTHENTICATION_MODE_MD5 = 2;
+  AUTHENTICATION_MODE_TCP_AO = 3;
+}
+
+message TcpAoState {
+  optional uint32 current_key_id = 1;
+  optional uint32 rnext_key_id = 2;
+  bool ao_required = 3;
+  bool accept_icmps = 4;
+  uint64 packets_good = 5;
+  uint64 packets_bad = 6;
+  uint64 packets_key_not_found = 7;
+  uint64 packets_ao_required = 8;
+  uint64 packets_dropped_icmp = 9;
 }
 
 message DynamicNeighborRange {
