@@ -383,6 +383,10 @@ pub struct ImportPolicyTermHits {
 /// connection, while a merely unresponsive task may still be an Established
 /// session that RFC 4271 §6.8 says must win against the new connection.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "state queries are transient command replies; boxing every successful reply would add allocation to the common path"
+)]
 pub enum StateQueryOutcome {
     /// The session task answered within the deadline.
     State(PeerSessionState),

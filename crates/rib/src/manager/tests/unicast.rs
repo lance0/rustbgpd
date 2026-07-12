@@ -17,7 +17,7 @@ fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
         session_id: 6,
         limits: vec![((Afi::Ipv4, Safi::Unicast), 1)],
     });
-    assert!(manager.peer_add_path_send_limits.get(&peer).is_none());
+    assert!(!manager.peer_add_path_send_limits.contains_key(&peer));
 
     manager.handle_update(RibUpdate::PeerAddPathLimits {
         peer,

@@ -371,6 +371,11 @@ fn parse_bgp_role_proto(role: &str) -> Result<Option<BgpRole>, Status> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    reason = "neighbor conversion keeps config, session state, and family-local capability visibility in one audit-friendly mapping"
+)]
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     let families = info
         .families
@@ -401,47 +406,60 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         paths_limit_receive_max: u32::from(info.paths_limit_receive_max),
     };
 
-    let mut paths_limit_families = info.families.clone();
-    for (family, _) in info
-        .peer_paths_limits
-        .iter()
-        .chain(info.effective_add_path_send_limits.iter())
-    {
-        if !paths_limit_families.contains(family) {
-            paths_limit_families.push(*family);
+    let paths_limits = paths_limit_state_to_proto(info);
+
+    fn paths_limit_state_to_proto(info: &PeerInfo) -> Vec<proto::PathsLimitState> {
+        let mut paths_limit_families = info.families.clone();
+        for family in info
+            .peer_paths_limits
+            .iter()
+            .map(|(family, _)| family)
+            .chain(
+                info.effective_add_path_send_limits
+                    .iter()
+                    .map(|(family, _)| family),
+            )
+        {
+            if !paths_limit_families.contains(family) {
+                paths_limit_families.push(*family);
+            }
         }
-    }
-    let paths_limits = paths_limit_families
-        .iter()
-        .filter_map(|family| {
-            let received = info
-                .peer_paths_limits
-                .iter()
-                .find_map(|(candidate, value)| (candidate == family).then_some(u32::from(*value)))
-                .unwrap_or(0);
-            let effective = info
-                .effective_add_path_send_limits
-                .iter()
-                .find_map(|(candidate, value)| (candidate == family).then_some(*value))
-                .unwrap_or(0);
-            let advertised = if info.add_path_receive
-                && matches!(
-                    family.1,
-                    Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast
-                ) {
-                u32::from(info.paths_limit_receive_max)
-            } else {
-                0
-            };
-            (advertised != 0 || received != 0 || effective != 0).then(|| proto::PathsLimitState {
-                family: family_to_string(family.0, family.1),
-                configured_receive_max: u32::from(info.paths_limit_receive_max),
-                advertised_receive_max: advertised,
-                received_receive_max: received,
-                effective_send_max: effective,
+        paths_limit_families
+            .iter()
+            .filter_map(|family| {
+                let received = info
+                    .peer_paths_limits
+                    .iter()
+                    .find_map(|(candidate, value)| {
+                        (candidate == family).then_some(u32::from(*value))
+                    })
+                    .unwrap_or(0);
+                let effective = info
+                    .effective_add_path_send_limits
+                    .iter()
+                    .find_map(|(candidate, value)| (candidate == family).then_some(*value))
+                    .unwrap_or(0);
+                let advertised = if info.add_path_receive
+                    && matches!(
+                        family.1,
+                        Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast
+                    ) {
+                    u32::from(info.paths_limit_receive_max)
+                } else {
+                    0
+                };
+                (advertised != 0 || received != 0 || effective != 0).then(|| {
+                    proto::PathsLimitState {
+                        family: family_to_string(family.0, family.1),
+                        configured_receive_max: u32::from(info.paths_limit_receive_max),
+                        advertised_receive_max: advertised,
+                        received_receive_max: received,
+                        effective_send_max: effective,
+                    }
+                })
             })
-        })
-        .collect();
+            .collect()
+    }
 
     let state = match info.state {
         rustbgpd_fsm::SessionState::Idle => proto::SessionState::Idle,
