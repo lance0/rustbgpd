@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_after_apply_parity_transition_matrix() {
+    fn classifier_transition_matrix_covers_planner_states() {
         fn fixture(policy: &str) -> UpdateGroupClassifierInput {
             UpdateGroupClassifierInput {
                 policy_fingerprint: Some(policy.to_string()),
@@ -582,15 +582,10 @@ mod tests {
             let candidate_fingerprint = format!("{candidate_input:?}");
             let current = raw_state(&classify_update_group(current_input), &current_fingerprint);
             let planned = raw_state(
-                &classify_update_group(candidate_input.clone()),
-                &candidate_fingerprint,
-            );
-            let observed_after_apply = raw_state(
                 &classify_update_group(candidate_input),
                 &candidate_fingerprint,
             );
             assert_eq!(transition(&current, &planned), expected, "plan {name}");
-            assert_eq!(observed_after_apply, planned, "runtime parity {name}");
         }
     }
 }
