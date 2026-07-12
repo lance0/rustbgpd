@@ -39,6 +39,10 @@ impl EstablishedPolicyPeerAcks {
     pub(crate) async fn wait_for_exit(&self) {
         loop {
             let notified = self.exit_notify.notified();
+            tokio::pin!(notified);
+            // Register before observing the flag so `notify_waiters` cannot
+            // land between the state check and this waiter becoming visible.
+            notified.as_mut().enable();
             if self.exited.load(Ordering::SeqCst) {
                 return;
             }
@@ -102,7 +106,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
             }
         }
         acks.exited.store(true, Ordering::SeqCst);
-        acks.exit_notify.notify_one();
+        acks.exit_notify.notify_waiters();
         Ok(())
     });
     PeerHandle::from_parts(command_tx, task)
@@ -151,5 +155,33 @@ impl PeerManager {
         );
         self.register_session(session_id, &key);
         acks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::task::Poll;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn exit_wait_wakes_every_registered_clone() {
+        let acks = EstablishedPolicyPeerAcks::default();
+        let mut first = Box::pin(acks.wait_for_exit());
+        let mut second = Box::pin(acks.wait_for_exit());
+
+        assert!(matches!(futures::poll!(first.as_mut()), Poll::Pending));
+        assert!(matches!(futures::poll!(second.as_mut()), Poll::Pending));
+
+        acks.exited.store(true, Ordering::SeqCst);
+        acks.exit_notify.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first.await;
+            second.await;
+        })
+        .await
+        .expect("every registered clone observes task exit");
     }
 }
