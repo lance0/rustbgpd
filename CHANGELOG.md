@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config plans project update-group impact before apply.** Plan and apply
+  expose one deterministic schema-v1 structure with established-peer
+  current/candidate groupability, exact fallback reasons, plan-local group IDs,
+  transition and resync rollups, projected shared/private totals, and only
+  conservative published-receipt capacity classes. Session reshape and future
+  negotiation remain explicitly indeterminate; no memory or time estimate is
+  implied. Policy-lint integration and post-renegotiation projection remain in
+  LAN-356.
+
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths
   are staged for every gRPC/gNMI listener and published as one immutable

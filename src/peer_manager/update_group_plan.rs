@@ -35,9 +35,6 @@ fn preserves_negotiation(current: &ResolvedNeighbor, candidate: &ResolvedNeighbo
         && left.peer.prefix_orf_receive == right.peer.prefix_orf_receive
         && left.peer.disable_ipv4_unicast == right.peer.disable_ipv4_unicast
         && left.llgr_stale_time == right.llgr_stale_time
-        && left.route_reflector_client == right.route_reflector_client
-        && left.orr_vantage == right.orr_vantage
-        && left.per_client_best == right.per_client_best
 }
 
 fn candidate_input(
@@ -159,9 +156,19 @@ impl PeerManager {
                     raw_groups.insert(id.clone());
                 }
             }
-            let families = live.map_or_else(BTreeSet::new, |row| {
+            let mut families = live.map_or_else(BTreeSet::new, |row| {
                 row.input.sendable_families.iter().copied().collect()
             });
+            for config in [current_cfg, candidate_cfg].into_iter().flatten() {
+                families.extend(
+                    config
+                        .transport_config
+                        .peer
+                        .families
+                        .iter()
+                        .map(|&(afi, safi)| (afi as u16, safi as u8)),
+                );
+            }
             for (afi, safi) in families {
                 rows.push((
                     peer,
@@ -270,5 +277,45 @@ impl PeerManager {
             capacity_class: capacity_class.to_string(),
             capacity_basis: capacity_basis.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transitions_keep_resync_and_indeterminate_distinct() {
+        let shared_a = PlannedGroupability::Group {
+            id: "plan-group-001".to_string(),
+        };
+        let shared_b = PlannedGroupability::Group {
+            id: "plan-group-002".to_string(),
+        };
+        let private = PlannedGroupability::Private {
+            reason: "policy_peer_context".to_string(),
+        };
+        let unknown = PlannedGroupability::Indeterminate {
+            reason: "indeterminate_session_negotiation".to_string(),
+        };
+        assert_eq!(transition(&shared_a, &shared_a), "no_op");
+        assert_eq!(transition(&shared_a, &shared_b), "regroup");
+        assert_eq!(transition(&private, &shared_a), "shared_migration");
+        assert_eq!(transition(&shared_a, &private), "private_resync");
+        assert_eq!(transition(&shared_a, &unknown), "indeterminate");
+    }
+
+    #[test]
+    fn plan_local_group_ids_are_not_runtime_ids() {
+        let raw = PlannedGroupability::Group {
+            id: "raw:fingerprint".to_string(),
+        };
+        let ids = BTreeMap::from([("raw:fingerprint".to_string(), "plan-group-001".to_string())]);
+        assert_eq!(
+            canonicalize_group(raw, &ids),
+            PlannedGroupability::Group {
+                id: "plan-group-001".to_string()
+            }
+        );
     }
 }

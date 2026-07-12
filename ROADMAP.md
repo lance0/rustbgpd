@@ -228,11 +228,13 @@ new AFI/SAFI and EVPN dataplane expansion.
   reloads on completion time, control-query latency, session continuity, and
   folded advertised-state equivalence. The withdrawn historical `< 1 s` claim
   is not evidence until the corrected run replaces it.
-- **Expose groupability before apply.** Extend config planning and policy linting
-  with projected update-group membership, exact fallback reasons, affected
-  peers/families, private outbound-view count, regroup/full-resync scope, and a
-  bounded capacity class. Do not present byte-precise memory or time estimates
-  until a calibrated model exists.
+- **Expose groupability before apply.** Config transaction planning now projects
+  established-peer update-group membership with exact fallback reasons,
+  affected peers/families, shared/private totals, resync scope, and bounded
+  receipt-envelope capacity classes. Remaining: surface the same classifier in
+  policy linting and add a post-renegotiation projection; until then session
+  reshape stays explicitly indeterminate. Do not present byte-precise memory or
+  time estimates until a calibrated model exists.
 - **Keep update-group correctness as a permanent fault program.** The bounded
   deterministic foundation is shipped: grouped and forced-per-peer output are
   compared under channel saturation/virtual retry, dirty policy swaps and

@@ -2261,6 +2261,17 @@ restart to enable the subsystem.
 Operators can drive the workflow through `rbgp config plan <config.toml>`
 and `rbgp config apply <config.toml> --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
+Plan and apply responses also carry `update_group_impact` schema version 1.
+It projects each established peer and negotiated AFI/SAFI through the same
+groupability classifier used by live update-group registration, assigns
+deterministic plan-local group IDs, and distinguishes regroup, shared migration,
+private resync, and no-op transitions. New, down, deleted, or session-reshaped
+peers are reported as `indeterminate_session_negotiation`; the planner never
+guesses future capabilities. `local_resync` describes local outbound
+re-evaluation, while `remote_route_refresh` is separate and remains false for
+this outbound-only projection. Capacity is a receipt-envelope class
+(`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
+`unknown`), not a byte, memory, or completion-time estimate.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
 the normal apply invocation — `rbgp config apply <config.toml>
