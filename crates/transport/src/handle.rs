@@ -418,6 +418,10 @@ pub struct PeerSessionState {
     pub remote_role: Option<BgpRole>,
     /// True when both sides advertised compatible BGP Roles.
     pub role_negotiated: bool,
+    /// Peer-advertised experimental Paths-Limit values.
+    pub peer_paths_limits: Vec<((Afi, Safi), u16)>,
+    /// Effective family-local outbound Add-Path caps.
+    pub effective_add_path_send_limits: Vec<((Afi, Safi), u32)>,
     /// Total UPDATE messages received.
     pub updates_received: u64,
     /// Total UPDATE messages sent.

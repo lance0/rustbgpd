@@ -406,11 +406,26 @@ impl PeerSession {
                         .collect();
                     let add_path_send_max =
                         if self.config.peer.add_path_send && !add_path_send_families.is_empty() {
-                            let max = self.config.peer.add_path_send_max;
-                            if max == 0 { u32::MAX } else { max }
+                            // The PeerUp initial table is emitted before the
+                            // following family map reaches the RIB. Seed it
+                            // with the strictest effective family limit so it
+                            // can never transiently exceed a peer preference;
+                            // PeerAddPathLimits immediately installs exact
+                            // family-local values and resynchronizes.
+                            neg.effective_add_path_send_limits
+                                .values()
+                                .copied()
+                                .min()
+                                .unwrap_or(0)
                         } else {
                             0
                         };
+                    let add_path_send_limits = neg
+                        .effective_add_path_send_limits
+                        .iter()
+                        .filter(|(family, _)| sendable_families.contains(family))
+                        .map(|(family, limit)| (*family, *limit))
+                        .collect();
 
                     self.negotiated = Some(*neg);
                     self.established_at = Some(Instant::now());
@@ -459,6 +474,14 @@ impl PeerSession {
                                         .collect()
                                 })
                                 .unwrap_or_default(),
+                        })
+                        .await;
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::PeerAddPathLimits {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            limits: add_path_send_limits,
                         })
                         .await;
                     let _ = self

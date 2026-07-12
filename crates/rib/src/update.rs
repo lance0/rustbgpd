@@ -526,6 +526,15 @@ pub enum RibUpdate {
         /// transport.
         negotiated_llgr_families: Vec<(Afi, Safi)>,
     },
+    /// Family-local effective Add-Path caps after applying peer Paths-Limit.
+    PeerAddPathLimits {
+        /// Peer address.
+        peer: IpAddr,
+        /// Transport session identity; stale sessions are ignored.
+        session_id: u64,
+        /// Effective limit per negotiated Add-Path send family.
+        limits: Vec<((Afi, Safi), u32)>,
+    },
     /// Peer pushed Address-Prefix ORF entries via ROUTE-REFRESH (RFC 5291).
     /// Install/update the per-peer outbound prefix filter for `(afi, safi)` and
     /// re-evaluate this peer's Adj-RIB-Out.

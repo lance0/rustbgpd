@@ -1,5 +1,48 @@
 use super::*;
 
+#[test]
+fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    manager.outbound_session_ids.insert(peer, 7);
+    manager.peer_add_path_send_max.insert(peer, 8);
+    manager.peer_add_path_send_families.insert(
+        peer,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+    );
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 6,
+        limits: vec![((Afi::Ipv4, Safi::Unicast), 1)],
+    });
+    assert!(manager.peer_add_path_send_limits.get(&peer).is_none());
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 2),
+            ((Afi::Ipv6, Safi::Unicast), 5),
+        ],
+    });
+    assert_eq!(
+        manager.add_path_send_max_for_prefix(
+            peer,
+            &Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24))
+        ),
+        2
+    );
+    assert_eq!(
+        manager.add_path_send_max_for_prefix(
+            peer,
+            &Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32))
+        ),
+        5
+    );
+}
+
 #[tokio::test]
 async fn routes_received_and_queried() {
     let (tx, rx) = mpsc::channel(64);

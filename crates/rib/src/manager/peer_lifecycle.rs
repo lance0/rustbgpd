@@ -428,6 +428,7 @@ impl RibManager {
             self.resync_orr_bound_peers(&changed);
         }
         self.peer_add_path_send_max.remove(&peer);
+        self.peer_add_path_send_limits.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
         self.peer_per_client_best.remove(&peer);
         // ORF state is per-session (RFC 5291): a surviving §6 gate can never

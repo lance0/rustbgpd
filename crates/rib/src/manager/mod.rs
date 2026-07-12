@@ -207,6 +207,8 @@ pub struct RibManager {
     llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
     peer_add_path_send_max: HashMap<IpAddr, u32>,
+    /// Effective family-local Add-Path caps, including peer Paths-Limit.
+    peer_add_path_send_limits: HashMap<IpAddr, HashMap<(Afi, Safi), u32>>,
     /// Route-server clients with RFC 7947 §2.3.2 per-client best-path
     /// enabled: unicast export stages the first export-policy-permitted
     /// candidate (path-hiding mitigation) at `path_id 0` instead of the
@@ -788,6 +790,7 @@ impl RibManager {
             llgr_stale_deadlines: HashMap::new(),
             llgr_peer_config: HashMap::new(),
             peer_add_path_send_max: HashMap::new(),
+            peer_add_path_send_limits: HashMap::new(),
             peer_per_client_best: HashSet::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
@@ -909,6 +912,13 @@ impl RibManager {
             return 0;
         }
         let family = prefix_family(prefix);
+        if let Some(limit) = self
+            .peer_add_path_send_limits
+            .get(&peer)
+            .and_then(|limits| limits.get(&family))
+        {
+            return *limit;
+        }
         if self
             .peer_add_path_send_families
             .get(&peer)
@@ -1069,6 +1079,17 @@ impl RibManager {
                 negotiated_orf_recv,
                 negotiated_llgr_families,
             ),
+            RibUpdate::PeerAddPathLimits {
+                peer,
+                session_id,
+                limits,
+            } => {
+                if self.outbound_session_ids.get(&peer).copied() == Some(session_id) {
+                    self.peer_add_path_send_limits
+                        .insert(peer, limits.into_iter().collect());
+                    self.send_initial_table(peer);
+                }
+            }
             RibUpdate::PeerOrfUpdate {
                 peer,
                 session_id,
