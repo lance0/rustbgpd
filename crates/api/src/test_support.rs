@@ -69,6 +69,8 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         flap_count: 0,
         uptime_secs: 0,
         last_error: String::new(),
+        authentication: "plaintext".to_string(),
+        tcp_ao_info: None,
         is_dynamic: false,
         stale: false,
     }

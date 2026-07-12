@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::{PeerHandle, SessionIdentity, StateQueryOutcome};
+use rustbgpd_transport::{PeerHandle, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -15,6 +15,7 @@ impl PeerManager {
         &mut self,
         peer_key: PeerKey,
         stream: TcpStream,
+        tcp_ao_info: Option<TcpAoInfoSnapshot>,
     ) -> bool {
         let peer_addr = peer_key.address;
         if self
@@ -49,6 +50,7 @@ impl PeerManager {
             advertise_graceful_shutdown,
             SessionIdentity::inbound_candidate(session_id),
             self.transport_event_sink.clone(),
+            tcp_ao_info,
         );
 
         if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
@@ -104,7 +106,12 @@ impl PeerManager {
     }
 
     #[expect(clippy::too_many_lines)]
-    pub(super) async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: SocketAddr) {
+    pub(super) async fn handle_inbound(
+        &mut self,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        tcp_ao_info: Option<TcpAoInfoSnapshot>,
+    ) {
         let peer_ip = peer_addr.ip();
         let peer_key = self.inbound_peer_key(peer_addr);
         // If peer is not statically configured, try dynamic range matching.
@@ -205,6 +212,7 @@ impl PeerManager {
                     advertise_graceful_shutdown,
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
+                    tcp_ao_info,
                 );
 
                 if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
@@ -351,7 +359,8 @@ impl PeerManager {
         match fsm_state {
             SessionState::Idle => {
                 // Accept immediately — no collision possible
-                self.replace_with_inbound(peer_key.clone(), stream).await;
+                self.replace_with_inbound(peer_key.clone(), stream, tcp_ao_info)
+                    .await;
             }
             SessionState::Established => {
                 // Already established — drop inbound (no collision)
@@ -362,13 +371,16 @@ impl PeerManager {
                 // deadlocks simultaneous active-open: both outbound sessions
                 // wait for OPEN while both accepted inbound sockets sit inert.
                 info!(%peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
-                self.spawn_pending_inbound(peer_key.clone(), stream).await;
+                self.spawn_pending_inbound(peer_key.clone(), stream, tcp_ao_info)
+                    .await;
             }
             SessionState::OpenConfirm => {
                 // We already have router-id from negotiation; start a live
                 // inbound candidate and resolve immediately.
                 let remote_router_id = current_state.and_then(|s| s.remote_router_id);
-                let started = self.spawn_pending_inbound(peer_key.clone(), stream).await;
+                let started = self
+                    .spawn_pending_inbound(peer_key.clone(), stream, tcp_ao_info)
+                    .await;
                 if let Some(rid) = remote_router_id {
                     if started {
                         self.resolve_collision(peer_key, rid).await;
@@ -476,7 +488,12 @@ impl PeerManager {
         true
     }
 
-    pub(super) async fn replace_with_inbound(&mut self, peer_key: PeerKey, stream: TcpStream) {
+    pub(super) async fn replace_with_inbound(
+        &mut self,
+        peer_key: PeerKey,
+        stream: TcpStream,
+        tcp_ao_info: Option<TcpAoInfoSnapshot>,
+    ) {
         let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
         let Some((old_handle, old_session_id)) = ({
@@ -506,6 +523,7 @@ impl PeerManager {
                     advertise_graceful_shutdown,
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
+                    tcp_ao_info,
                 ),
             );
             managed.session_id = session_id;

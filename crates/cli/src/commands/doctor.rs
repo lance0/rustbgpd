@@ -74,7 +74,7 @@ pub(crate) struct DoctorOptions<'a> {
     pub json: bool,
 }
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum CheckStatus {
     Ok,
@@ -276,6 +276,56 @@ fn parse_state_dir(effective_toml: &str) -> Option<String> {
             .as_str()?
             .to_string(),
     )
+}
+
+fn tcp_ao_configured_targets(effective_toml: &str) -> Vec<String> {
+    let Ok(value) = toml::from_str::<toml::Value>(effective_toml) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for (table, identity) in [("neighbors", "address"), ("dynamic_neighbors", "prefix")] {
+        if let Some(rows) = value.get(table).and_then(toml::Value::as_array) {
+            for row in rows {
+                if row.get("tcp_ao").is_some()
+                    && let Some(target) = row.get(identity).and_then(toml::Value::as_str)
+                {
+                    targets.push(target.to_string());
+                }
+            }
+        }
+    }
+    targets.sort();
+    targets
+}
+
+fn tcp_ao_capability_checks(effective_toml: &str, support: i32) -> Vec<Check> {
+    tcp_ao_configured_targets(effective_toml)
+        .into_iter()
+        .map(|target| {
+            let (status, verdict) = match crate::proto::TcpAoSupport::try_from(support) {
+                Ok(crate::proto::TcpAoSupport::Supported) => {
+                    (CheckStatus::Ok, "kernel TCP-AO support available")
+                }
+                Ok(crate::proto::TcpAoSupport::Unsupported) => (
+                    CheckStatus::Fail,
+                    "config requires TCP-AO but the kernel reports it unsupported",
+                ),
+                Ok(crate::proto::TcpAoSupport::ProbeFailed) => (
+                    CheckStatus::Warn,
+                    "config requires TCP-AO but the kernel capability probe failed",
+                ),
+                Ok(crate::proto::TcpAoSupport::Unspecified) | Err(_) => (
+                    CheckStatus::Warn,
+                    "config requires TCP-AO but kernel capability is unknown",
+                ),
+            };
+            Check {
+                name: format!("peer.{target}.tcp_ao_capability"),
+                status,
+                detail: format!("neighbor {target}: {verdict}"),
+            }
+        })
+        .collect()
 }
 
 /// Parse the soft/hard "Max open files" row of a `/proc/<pid>/limits`
@@ -483,6 +533,7 @@ pub(crate) async fn run(
     let mut sections: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut daemon_version: Option<String> = None;
     let mut state_dir: Option<String> = None;
+    let mut tcp_ao_support = crate::proto::TcpAoSupport::Unspecified.into();
 
     // ---- daemon-backed sections -------------------------------------
     match connection {
@@ -559,6 +610,7 @@ pub(crate) async fn run(
             match global.get_global(GetGlobalRequest {}).await {
                 Ok(resp) => {
                     let global_state = resp.into_inner();
+                    tcp_ao_support = global_state.tcp_ao_support;
                     bundle.add_json(
                         "system/global.json",
                         &GlobalSnapshot {
@@ -601,6 +653,9 @@ pub(crate) async fn run(
             {
                 Ok(resp) => {
                     let toml_text = resp.into_inner().toml;
+                    for check in tcp_ao_capability_checks(&toml_text, tcp_ao_support) {
+                        reporter.record(check.name, check.status, check.detail);
+                    }
                     state_dir = parse_state_dir(&toml_text);
                     bundle.add("config/effective.toml", toml_text.into_bytes());
                     sections.insert(
@@ -899,6 +954,38 @@ mod tests {
     fn redact_text_replaces_sensitive_lines() {
         let redacted = redact_text("ok 1\napi_token=secret\npassword = nope\nok 2");
         assert_eq!(redacted, "ok 1\n[REDACTED]\n[REDACTED]\nok 2");
+    }
+
+    #[test]
+    fn tcp_ao_capability_lint_fails_each_protected_target_when_unsupported() {
+        let config = r#"
+[[neighbors]]
+address = "192.0.2.1"
+tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+[[dynamic_neighbors]]
+prefix = "198.51.100.0/24"
+tcp_ao = { key = "<redacted>", send_id = 3, recv_id = 4, algorithm = "hmac(sha256)" }
+"#;
+        let checks =
+            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::Unsupported.into());
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| check.status == CheckStatus::Fail));
+        assert_eq!(checks[0].name, "peer.192.0.2.1.tcp_ao_capability");
+        assert_eq!(checks[1].name, "peer.198.51.100.0/24.tcp_ao_capability");
+    }
+
+    #[test]
+    fn tcp_ao_capability_lint_distinguishes_supported_and_unknown() {
+        let config = r#"[[neighbors]]
+address = "192.0.2.1"
+tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+        let supported =
+            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::Supported.into());
+        assert_eq!(supported[0].status, CheckStatus::Ok);
+        let unknown =
+            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::ProbeFailed.into());
+        assert_eq!(unknown[0].status, CheckStatus::Warn);
     }
 
     #[test]

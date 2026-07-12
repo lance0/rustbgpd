@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit};
+use crate::output::{self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonTcpAoState};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
@@ -112,6 +112,19 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             messages_sent: n.messages_sent,
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
+            authentication: authentication_label(n.authentication).to_string(),
+            tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
+            tcp_ao: n.tcp_ao.as_ref().map(|ao| JsonTcpAoState {
+                current_key_id: ao.current_key_id,
+                rnext_key_id: ao.rnext_key_id,
+                ao_required: ao.ao_required,
+                accept_icmps: ao.accept_icmps,
+                packets_good: ao.packets_good,
+                packets_bad: ao.packets_bad,
+                packets_key_not_found: ao.packets_key_not_found,
+                packets_ao_required: ao.packets_ao_required,
+                packets_dropped_icmp: ao.packets_dropped_icmp,
+            }),
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
@@ -245,6 +258,32 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         println!("Notifications Sent:    {}", n.notifications_sent);
         println!("Messages Received:     {}", n.messages_received);
         println!("Messages Sent:         {}", n.messages_sent);
+        println!(
+            "Authentication:        {}",
+            authentication_label(n.authentication)
+        );
+        if matches!(
+            crate::proto::AuthenticationMode::try_from(n.authentication),
+            Ok(crate::proto::AuthenticationMode::TcpAo)
+        ) {
+            println!(
+                "TCP-AO Health:        {}",
+                tcp_ao_health_label(n.tcp_ao_health)
+            );
+        }
+        if let Some(ao) = &n.tcp_ao {
+            println!(
+                "TCP-AO Keys:           current={} rnext={}",
+                ao.current_key_id
+                    .map_or_else(|| "none".to_string(), |v| v.to_string()),
+                ao.rnext_key_id
+                    .map_or_else(|| "none".to_string(), |v| v.to_string())
+            );
+            println!(
+                "TCP-AO Packets:        good={} bad={} key-not-found={} unsigned-required={}",
+                ao.packets_good, ao.packets_bad, ao.packets_key_not_found, ao.packets_ao_required
+            );
+        }
         println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
         println!("Policy Stats:");
         println!(
@@ -264,6 +303,25 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         }
     }
     Ok(())
+}
+
+fn authentication_label(value: i32) -> &'static str {
+    match crate::proto::AuthenticationMode::try_from(value) {
+        Ok(crate::proto::AuthenticationMode::TcpAo) => "tcp_ao",
+        Ok(crate::proto::AuthenticationMode::Md5) => "md5",
+        Ok(crate::proto::AuthenticationMode::Plaintext) => "plaintext",
+        Ok(crate::proto::AuthenticationMode::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn tcp_ao_health_label(value: i32) -> &'static str {
+    match crate::proto::TcpAoHealth::try_from(value) {
+        Ok(crate::proto::TcpAoHealth::NotApplicable) => "not_applicable",
+        Ok(crate::proto::TcpAoHealth::Unavailable) => "unavailable",
+        Ok(crate::proto::TcpAoHealth::Healthy) => "healthy",
+        Ok(crate::proto::TcpAoHealth::Degraded) => "degraded",
+        Ok(crate::proto::TcpAoHealth::Unspecified) | Err(_) => "unknown",
+    }
 }
 
 pub struct AddNeighborOpts {

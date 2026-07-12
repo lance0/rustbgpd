@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Neighbor diagnostics expose transport authentication health.** Neighbor
+  API, JSON, and human output identify plaintext, TCP-MD5, and TCP-AO sessions;
+  connected TCP-AO peers include connection-time current/RNext KeyIDs and
+  verification counters when socket inspection succeeds. Connect setup
+  failures remain visible in `last_error`;
+  `rbgp doctor` flags configured AO peers on unsupported kernels, and the
+  configuration guide documents directional KeyID cross-mapping.
+
 - **Experimental Add-Path Paths-Limit capability.** Neighbors and peer groups
   can advertise a per-family receiver preference with `add_path.receive_max`.
   Remote code-76 tuples cap only the matching outbound Add-Path family, with

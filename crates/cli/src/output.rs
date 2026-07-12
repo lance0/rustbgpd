@@ -239,6 +239,10 @@ pub struct JsonNeighborDetail {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    pub authentication: String,
+    pub tcp_ao_health: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_ao: Option<JsonTcpAoState>,
     pub description: String,
     pub hold_time: u32,
     /// Effective RFC 9687 send hold time in seconds (0 = disabled).
@@ -278,6 +282,21 @@ pub struct JsonNeighborDetail {
     /// Update-group membership: `group:N` or the ungrouped reason.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub update_group: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonTcpAoState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_key_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rnext_key_id: Option<u32>,
+    pub ao_required: bool,
+    pub accept_icmps: bool,
+    pub packets_good: u64,
+    pub packets_bad: u64,
+    pub packets_key_not_found: u64,
+    pub packets_ao_required: u64,
+    pub packets_dropped_icmp: u64,
 }
 
 #[derive(Serialize)]
@@ -1007,6 +1026,9 @@ mod tests {
             messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
+            authentication: "tcp_ao".to_string(),
+            tcp_ao_health: "unavailable".to_string(),
+            tcp_ao: None,
             description: "peer-2".to_string(),
             hold_time: 90,
             send_hold_time: 480,
@@ -1042,6 +1064,8 @@ mod tests {
         assert_eq!(value["strict_role"], true);
         assert_eq!(value["remote_role"], "rs-client");
         assert_eq!(value["role_negotiated"], true);
+        assert_eq!(value["authentication"], "tcp_ao");
+        assert_eq!(value["tcp_ao_health"], "unavailable");
         assert_eq!(value["otc_routes_blocked"], 3);
         assert_eq!(value["import_policy_routes_permitted"], 8);
         assert_eq!(value["import_policy_routes_denied"], 1);

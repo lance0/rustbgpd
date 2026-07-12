@@ -2863,6 +2863,7 @@ async fn run<T>(
                         .send(PeerManagerCommand::AcceptInbound {
                             stream: conn.stream,
                             peer_addr: conn.peer_addr,
+                            tcp_ao_info: conn.tcp_ao_info,
                         })
                         .await
                     {

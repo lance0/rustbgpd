@@ -454,6 +454,42 @@ message NeighborState {
   bool route_reflector_client = 25;
   // Experimental Paths-Limit values, one row per relevant family.
   repeated PathsLimitState paths_limits = 26;
+  // Configured transport authentication for this session.
+  AuthenticationMode authentication = 27;
+  // Best-effort connection-time Linux TCP-AO inspection; absent when not AO
+  // or when no snapshot is available (including disconnect or inspection failure).
+  TcpAoState tcp_ao = 28;
+  // Health derived from the configured mode and connection-time inspection.
+  // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available
+  // (disconnected, still connecting, or inspection failed).
+  TcpAoHealth tcp_ao_health = 29;
+}
+
+enum AuthenticationMode {
+  AUTHENTICATION_MODE_UNSPECIFIED = 0;
+  AUTHENTICATION_MODE_PLAINTEXT = 1;
+  AUTHENTICATION_MODE_MD5 = 2;
+  AUTHENTICATION_MODE_TCP_AO = 3;
+}
+
+enum TcpAoHealth {
+  TCP_AO_HEALTH_UNSPECIFIED = 0;
+  TCP_AO_HEALTH_NOT_APPLICABLE = 1;
+  TCP_AO_HEALTH_UNAVAILABLE = 2;
+  TCP_AO_HEALTH_HEALTHY = 3;
+  TCP_AO_HEALTH_DEGRADED = 4;
+}
+
+message TcpAoState {
+  optional uint32 current_key_id = 1;
+  optional uint32 rnext_key_id = 2;
+  bool ao_required = 3;
+  bool accept_icmps = 4;
+  uint64 packets_good = 5;
+  uint64 packets_bad = 6;
+  uint64 packets_key_not_found = 7;
+  uint64 packets_ao_required = 8;
+  uint64 packets_dropped_icmp = 9;
 }
 
 message DynamicNeighborRange {

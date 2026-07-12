@@ -881,7 +881,8 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 `rbgp doctor` runs red/green triage checks live (daemon reachable and
 healthy, peers stuck outside Established with time-in-state, flap loops,
-daemon `nofile` rlimits, recent panic reports) and writes one redacted
+TCP-AO configuration against the daemon's kernel capability probe, daemon
+`nofile` rlimits, recent panic reports) and writes one redacted
 `rustbgpd-doctor-<ts>.tar.gz`:
 
 ```
@@ -899,6 +900,17 @@ Exit codes: `0` all checks green, `1` error, `2` bundle written but one or
 more checks are red. A doctor run against a down daemon still produces a
 bundle (system facts + crash reports) and the manifest records which
 sections are missing.
+
+For live inspection, `rbgp neighbor <address>` reports the configured
+authentication mode and an explicit TCP-AO health state. `unavailable` means
+TCP-AO is configured but no socket inspection snapshot is available (the peer
+may be disconnected, connecting, or socket inspection may have failed).
+`healthy` means the connection-time snapshot has no authentication error
+counters; `degraded` means at least one error counter is non-zero. When socket
+inspection succeeds, connected sessions also show current/RNext KeyIDs and
+packet verification counters.
+Counters are captured when the socket connects and are not continuously
+refreshed; inspect `last_error` for setup or connect failures.
 
 What is never collected: the raw daemon config file (the config section is
 the daemon's own secret-redacted effective dump — the same document as

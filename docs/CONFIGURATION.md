@@ -611,7 +611,9 @@ tcp_ao = {
 
 Allowed `algorithm` values are `"hmac(sha1)"`, `"hmac(sha256)"`, and
 `"cmac(aes128)"`. `key` must be 1--80 bytes. `send_id` and `recv_id` are
-TCP-AO KeyIDs (`0..=255`). `preferred` and `deprecated` are parsed as
+TCP-AO KeyIDs (`0..=255`). They are directional: this neighbor's `send_id`
+must equal the peer's `recv_id`, and this neighbor's `recv_id` must equal the
+peer's `send_id`. `preferred` and `deprecated` are parsed as
 rollover metadata for future multi-key support; with the current single-key
 runtime, active-open sockets install the configured key as the initial current
 / receive-next key, while listener MKTs are installed without current /
