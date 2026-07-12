@@ -18,7 +18,7 @@ use crate::server::{
     AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_runtime_config_event,
     read_only_rejection,
 };
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{EffectiveDistributionMode, PeerOutboundState, RibUpdate};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -169,13 +169,13 @@ async fn query_export_policy_stats(
         .map_err(|_| Status::internal("RIB manager dropped reply"))
 }
 
-async fn query_update_group(
+async fn query_peer_outbound_state(
     rib_tx: &mpsc::Sender<RibUpdate>,
     peer: std::net::IpAddr,
-) -> Result<String, Status> {
+) -> Result<PeerOutboundState, Status> {
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
-        .send(RibUpdate::QueryPeerUpdateGroup {
+        .send(RibUpdate::QueryPeerOutboundState {
             peer,
             reply: reply_tx,
         })
@@ -424,6 +424,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                 paths_limit_families.push(*family);
             }
         }
+        paths_limit_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
         paths_limit_families
             .iter()
             .filter_map(|family| {
@@ -437,8 +438,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                 let effective = info
                     .effective_add_path_send_limits
                     .iter()
-                    .find_map(|(candidate, value)| (candidate == family).then_some(*value))
-                    .unwrap_or(0);
+                    .find_map(|(candidate, value)| (candidate == family).then_some(*value));
+                let effective_send_active = effective.is_some();
+                let effective_send_max =
+                    effective.map_or(0, |value| if value == u32::MAX { 0 } else { value });
                 let advertised = if info.add_path_receive
                     && matches!(
                         family.1,
@@ -448,13 +451,14 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                 } else {
                     0
                 };
-                (advertised != 0 || received != 0 || effective != 0).then(|| {
+                (advertised != 0 || received != 0 || effective_send_active).then(|| {
                     proto::PathsLimitState {
                         family: family_to_string(family.0, family.1),
                         configured_receive_max: u32::from(info.paths_limit_receive_max),
                         advertised_receive_max: advertised,
                         received_receive_max: received,
-                        effective_send_max: effective,
+                        effective_send_max,
+                        effective_send_active,
                     }
                 })
             })
@@ -531,6 +535,19 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             packets_dropped_icmp: ao.pkt_dropped_icmp,
         }),
         tcp_ao_health: tcp_ao_health.into(),
+        effective_distribution_mode: proto::EffectiveDistributionMode::Unknown.into(),
+    }
+}
+
+fn effective_distribution_mode_to_proto(
+    mode: EffectiveDistributionMode,
+) -> proto::EffectiveDistributionMode {
+    match mode {
+        EffectiveDistributionMode::Unknown => proto::EffectiveDistributionMode::Unknown,
+        EffectiveDistributionMode::SingleBest => proto::EffectiveDistributionMode::SingleBest,
+        EffectiveDistributionMode::AddPath => proto::EffectiveDistributionMode::AddPath,
+        EffectiveDistributionMode::Orr => proto::EffectiveDistributionMode::Orr,
+        EffectiveDistributionMode::PerClientBest => proto::EffectiveDistributionMode::PerClientBest,
     }
 }
 
@@ -842,7 +859,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
             state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
             state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
-            state.update_group = query_update_group(&self.rib_tx, info.address).await?;
+            let outbound = query_peer_outbound_state(&self.rib_tx, info.address).await?;
+            state.update_group = outbound.update_group;
+            state.effective_distribution_mode =
+                effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
             neighbors.push(state);
         }
 
@@ -875,7 +895,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
         state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
         state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
-        state.update_group = query_update_group(&self.rib_tx, info.address).await?;
+        let outbound = query_peer_outbound_state(&self.rib_tx, info.address).await?;
+        state.update_group = outbound.update_group;
+        state.effective_distribution_mode =
+            effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
         Ok(Response::new(state))
     }
 
@@ -1201,6 +1224,16 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
+    }
+
+    #[test]
+    fn neighbor_observability_proto_fields_are_append_only() {
+        let source = include_str!("../../../proto/rustbgpd.proto");
+        assert!(source.contains("AuthenticationMode authentication = 27;"));
+        assert!(source.contains("TcpAoState tcp_ao = 28;"));
+        assert!(source.contains("TcpAoHealth tcp_ao_health = 29;"));
+        assert!(source.contains("EffectiveDistributionMode effective_distribution_mode = 30;"));
+        assert!(source.contains("bool effective_send_active = 6;"));
     }
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {
@@ -1896,8 +1929,11 @@ mod tests {
                             ..Default::default()
                         });
                     }
-                    RibUpdate::QueryPeerUpdateGroup { reply, .. } => {
-                        let _ = reply.send("group:0".to_string());
+                    RibUpdate::QueryPeerOutboundState { reply, .. } => {
+                        let _ = reply.send(PeerOutboundState {
+                            update_group: "group:0".to_string(),
+                            effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                        });
                     }
                     _ => {}
                 }
@@ -1917,6 +1953,10 @@ mod tests {
         assert_eq!(resp.export_policy_routes_permitted, 3);
         assert_eq!(resp.export_policy_routes_denied, 4);
         assert_eq!(resp.update_group, "group:0");
+        assert_eq!(
+            resp.effective_distribution_mode,
+            proto::EffectiveDistributionMode::AddPath as i32
+        );
     }
 
     #[test]
@@ -1962,6 +2002,37 @@ mod tests {
         assert_eq!(state.messages_received, 4321);
         assert_eq!(state.messages_sent, 1234);
         assert!(state.route_reflector_client);
+    }
+
+    #[test]
+    fn paths_limit_output_is_numeric_ordered_and_normalizes_active_unlimited() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.families = vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
+        info.paths_limit_receive_max = 3;
+        info.peer_paths_limits = vec![
+            ((Afi::L2Vpn, Safi::Evpn), 9),
+            ((Afi::Ipv6, Safi::Unicast), 4),
+        ];
+        info.effective_add_path_send_limits = vec![
+            ((Afi::Ipv6, Safi::Unicast), 2),
+            ((Afi::Ipv4, Safi::Unicast), u32::MAX),
+        ];
+
+        let paths = peer_info_to_proto(&info).paths_limits;
+
+        assert_eq!(
+            paths
+                .iter()
+                .map(|row| row.family.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ipv4_unicast", "ipv6_unicast", "L2Vpn_Evpn"]
+        );
+        assert!(paths[0].effective_send_active);
+        assert_eq!(paths[0].effective_send_max, 0);
+        assert!(paths[1].effective_send_active);
+        assert_eq!(paths[1].effective_send_max, 2);
+        assert!(!paths[2].effective_send_active);
+        assert_eq!(paths[2].effective_send_max, 0);
     }
 
     #[test]

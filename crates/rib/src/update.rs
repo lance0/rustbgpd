@@ -655,6 +655,30 @@ pub struct RoutePage {
     pub has_more: bool,
 }
 
+/// Effective live unicast distribution mode for a registered peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveDistributionMode {
+    /// The peer has no active outbound registration.
+    Unknown,
+    /// Ordinary Loc-RIB single-best distribution.
+    SingleBest,
+    /// Negotiated Add-Path send is active for at least one family.
+    AddPath,
+    /// RFC 9107 ORR is active with a resolved vantage.
+    Orr,
+    /// RFC 7947 per-client-best export is active.
+    PerClientBest,
+}
+
+/// Atomic neighbor-facing snapshot of live outbound RIB state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerOutboundState {
+    /// Update-group membership label, or empty when unregistered.
+    pub update_group: String,
+    /// Effective live distribution mode.
+    pub effective_distribution_mode: EffectiveDistributionMode,
+}
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
     /// Peer session sent us routes.
@@ -1083,6 +1107,13 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<String>,
+    },
+    /// Query: atomically return neighbor-facing live outbound state.
+    QueryPeerOutboundState {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel.
+        reply: oneshot::Sender<PeerOutboundState>,
     },
     /// Side-effect-free snapshot used by config impact planning.
     QueryUpdateGroupSnapshot {

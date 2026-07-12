@@ -137,6 +137,20 @@ async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Strin
     reply_rx.await.unwrap()
 }
 
+async fn query_peer_outbound_state(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+) -> crate::PeerOutboundState {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerOutboundState {
+        peer,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 fn regroups_total(metrics: &BgpMetrics) -> f64 {
     metrics
         .registry()
@@ -168,6 +182,12 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
 
     assert_eq!(query_update_group(&tx, a).await, "group:0");
     assert_eq!(query_update_group(&tx, b).await, "group:0");
+    assert_eq!(
+        query_peer_outbound_state(&tx, a)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::SingleBest
+    );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_groups", &[]),
         1.0,
@@ -210,6 +230,12 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
     .await
     .unwrap();
     assert_eq!(query_update_group(&tx, a).await, "");
+    assert_eq!(
+        query_peer_outbound_state(&tx, a)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::Unknown
+    );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_members", &[("group", "0")]),
         0.0,
@@ -297,6 +323,30 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     assert_eq!(
         query_update_group(&tx, orf_negotiated_peer).await,
         "orf_installed"
+    );
+    assert_eq!(
+        query_peer_outbound_state(&tx, policy_peer)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::SingleBest
+    );
+    assert_eq!(
+        query_peer_outbound_state(&tx, add_path_peer)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::AddPath
+    );
+    assert_eq!(
+        query_peer_outbound_state(&tx, per_client_best_peer)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::PerClientBest
+    );
+    assert_eq!(
+        query_peer_outbound_state(&tx, orf_negotiated_peer)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::SingleBest
     );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),

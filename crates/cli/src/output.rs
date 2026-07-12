@@ -254,8 +254,7 @@ pub struct JsonNeighborDetail {
     pub route_server_client: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub per_client_best: bool,
-    /// Unicast distribution mode: `single-best`, `add-path`, `orr`, or
-    /// `per-client-best`.
+    /// Effective live unicast distribution mode, or `unknown` while down.
     pub distribution_mode: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
@@ -306,6 +305,7 @@ pub struct JsonPathsLimit {
     pub advertised_receive_max: u32,
     pub received_receive_max: u32,
     pub effective_send_max: u32,
+    pub effective_send_active: bool,
 }
 
 #[cfg(test)]

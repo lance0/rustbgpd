@@ -1210,6 +1210,9 @@ impl RibManager {
             RibUpdate::QueryPeerUpdateGroup { peer, reply } => {
                 self.handle_query_peer_update_group(peer, reply);
             }
+            RibUpdate::QueryPeerOutboundState { peer, reply } => {
+                self.handle_query_peer_outbound_state(peer, reply);
+            }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);
             }

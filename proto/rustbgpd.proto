@@ -395,7 +395,12 @@ message PathsLimitState {
   uint32 configured_receive_max = 2;
   uint32 advertised_receive_max = 3;
   uint32 received_receive_max = 4;
+  // Normalized effective send cap. Zero means unlimited only when
+  // effective_send_active is true.
   uint32 effective_send_max = 5;
+  // True when Add-Path send is active for this family. Distinguishes an
+  // active unlimited cap from an inactive family.
+  bool effective_send_active = 6;
 }
 
 message NeighborState {
@@ -463,6 +468,18 @@ message NeighborState {
   // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available
   // (disconnected, still connecting, or inspection failed).
   TcpAoHealth tcp_ao_health = 29;
+  // Effective live unicast distribution mode reported by the RIB. This is
+  // UNKNOWN while the peer has no active outbound registration.
+  EffectiveDistributionMode effective_distribution_mode = 30;
+}
+
+enum EffectiveDistributionMode {
+  EFFECTIVE_DISTRIBUTION_MODE_UNSPECIFIED = 0;
+  EFFECTIVE_DISTRIBUTION_MODE_UNKNOWN = 1;
+  EFFECTIVE_DISTRIBUTION_MODE_SINGLE_BEST = 2;
+  EFFECTIVE_DISTRIBUTION_MODE_ADD_PATH = 3;
+  EFFECTIVE_DISTRIBUTION_MODE_ORR = 4;
+  EFFECTIVE_DISTRIBUTION_MODE_PER_CLIENT_BEST = 5;
 }
 
 enum AuthenticationMode {
