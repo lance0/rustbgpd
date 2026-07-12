@@ -14,10 +14,11 @@ thread, every profiler sample on `ribmgr` is manager-task work — no bucketing.
 
 Per run it reports RSS at each phase, cold stage/drain times, sustained
 throughput (blocks or waves) over a profiled window, the manager thread's
-CPU-seconds and busy fraction, and writes a folded-stack profile to
-`<out>.folded` (Brendan-Gregg format: `thread<TAB>frame;frame;...<TAB>count`).
-Classify the folded output by the owning-function markers listed in Part 1 of
-the receipt.
+CPU-seconds and busy fraction, and writes a deterministically sorted folded
+profile to `<out>.folded` (root-to-leaf stack order:
+`thread<TAB>frame;frame;...<TAB>count`). Classify it with
+`../rebaseline/classify_cpu.py`; the committed map and fixtures are documented
+in [`../rebaseline/README.md`](../rebaseline/README.md).
 
 Because the harness reaches into `RibManager` internals, it must be kept
 compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
@@ -68,3 +69,7 @@ rrharness churn 1000 1000 3000 20 churn-1000-{a,b}
 
 A tiny smoke shape (`flood 4 100 2 /tmp/smoke`) runs in a couple of seconds and
 emits a folded profile.
+
+The manager busy fraction uses the host's checked `sysconf(_SC_CLK_TCK)` value
+and treats malformed or unreadable `/proc/self/task/<tid>/stat` data as an
+error. It never substitutes a guessed tick rate or a zero CPU sample.

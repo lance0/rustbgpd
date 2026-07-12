@@ -45,6 +45,14 @@ jobs:
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
       - run: cargo check -p rustbgpd --all-features --lib
+      - name: Check standalone scale harnesses and receipt classifiers
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
+          cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+          python3 bench/scale/rebaseline/test_classifiers.py
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:
