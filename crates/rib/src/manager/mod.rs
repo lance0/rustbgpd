@@ -1684,14 +1684,16 @@ impl RibManager {
         if withdrawn.is_empty() {
             return;
         }
-        if !self.peer_unexportable.values().any(|rejected| {
-            rejected
-                .iter()
-                .any(|key| withdrawn.contains(&key.nlri_identity()))
-        }) {
+        let rejected_withdrawn = self
+            .peer_unexportable
+            .values()
+            .flat_map(|rejected| rejected.iter().map(ExactExportKey::nlri_identity))
+            .filter(|identity| withdrawn.contains(identity))
+            .collect::<HashSet<_>>();
+        if rejected_withdrawn.is_empty() {
             return;
         }
-        let live = withdrawn
+        let live = rejected_withdrawn
             .iter()
             .filter(|key| self.exact_export_nlri_is_live(key))
             .cloned()
@@ -1699,7 +1701,7 @@ impl RibManager {
         self.peer_unexportable.retain(|_, rejected| {
             rejected.retain(|key| {
                 let identity = key.nlri_identity();
-                !withdrawn.contains(&identity) || live.contains(&identity)
+                !rejected_withdrawn.contains(&identity) || live.contains(&identity)
             });
             !rejected.is_empty()
         });
