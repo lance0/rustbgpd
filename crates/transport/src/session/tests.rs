@@ -1064,6 +1064,9 @@ async fn tcp_ao_query_test_session() -> PeerSession {
         preferred: true,
         deprecated: false,
     });
+    // The test mutates config after construction; production constructors
+    // seed this durable bit from config before the session starts.
+    session.tcp_ao_protected = true;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let connect = TcpStream::connect(listener.local_addr().unwrap());
     let accept = listener.accept();
