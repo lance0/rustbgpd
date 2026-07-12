@@ -454,7 +454,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         authentication: match info.authentication.as_str() {
             "tcp_ao" => proto::AuthenticationMode::TcpAo.into(),
             "md5" => proto::AuthenticationMode::Md5.into(),
-            _ => proto::AuthenticationMode::Plaintext.into(),
+            "plaintext" => proto::AuthenticationMode::Plaintext.into(),
+            _ => proto::AuthenticationMode::Unspecified.into(),
         },
         tcp_ao: info.tcp_ao_info.map(|ao| proto::TcpAoState {
             current_key_id: ao.has_current_key.then_some(u32::from(ao.current_key)),
@@ -1955,6 +1956,19 @@ mod tests {
         assert_eq!(
             state.tcp_ao_health,
             proto::TcpAoHealth::NotApplicable as i32
+        );
+    }
+
+    #[test]
+    fn peer_info_to_proto_does_not_misreport_unknown_authentication_as_plaintext() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "future_auth_mode".to_string();
+
+        let state = peer_info_to_proto(&info);
+
+        assert_eq!(
+            state.authentication,
+            proto::AuthenticationMode::Unspecified as i32
         );
     }
 
