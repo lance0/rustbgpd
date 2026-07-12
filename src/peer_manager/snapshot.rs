@@ -44,6 +44,13 @@ fn build_peer_info(
         add_path_receive: managed.transport_config.peer.add_path_receive,
         add_path_send: managed.transport_config.peer.add_path_send,
         add_path_send_max: managed.transport_config.peer.add_path_send_max,
+        paths_limit_receive_max: managed.transport_config.peer.paths_limit_receive_max,
+        peer_paths_limits: session_state
+            .map(|state| state.peer_paths_limits.clone())
+            .unwrap_or_default(),
+        effective_add_path_send_limits: session_state
+            .map(|state| state.effective_add_path_send_limits.clone())
+            .unwrap_or_default(),
         updates_received: session_state.map_or(0, |s| s.updates_received),
         updates_sent: session_state.map_or(0, |s| s.updates_sent),
         notifications_received: session_state.map_or(0, |s| s.notifications_received),

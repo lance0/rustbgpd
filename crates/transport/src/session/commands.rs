@@ -57,6 +57,17 @@ impl PeerSession {
                     local_role: neg.and_then(|n| n.local_role),
                     remote_role: neg.and_then(|n| n.remote_role),
                     role_negotiated: neg.is_some_and(|n| n.role_negotiated),
+                    peer_paths_limits: neg
+                        .map(|n| n.peer_paths_limits.iter().map(|(f, v)| (*f, *v)).collect())
+                        .unwrap_or_default(),
+                    effective_add_path_send_limits: neg
+                        .map(|n| {
+                            n.effective_add_path_send_limits
+                                .iter()
+                                .map(|(f, v)| (*f, *v))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     updates_received: self.updates_received,
                     updates_sent: self.updates_sent,
                     notifications_received: self.notifications_received,

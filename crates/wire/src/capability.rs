@@ -123,6 +123,18 @@ pub struct AddPathFamily {
     pub send_receive: AddPathMode,
 }
 
+/// Per-family receiver preference carried by the experimental Paths-Limit
+/// capability (draft-abraitis-idr-addpath-paths-limit-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PathsLimitFamily {
+    /// Address family.
+    pub afi: Afi,
+    /// Sub-address family.
+    pub safi: Safi,
+    /// Maximum number of paths the sender would like to receive.
+    pub receive_limit: u16,
+}
+
 /// Per-family entry in the Extended Next Hop Encoding capability (RFC 8950).
 ///
 /// Each tuple advertises that NLRI for `(nlri_afi, nlri_safi)` may use the
@@ -228,6 +240,8 @@ pub enum Capability {
     LongLivedGracefulRestart(Vec<LlgrFamily>),
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
     AddPath(Vec<AddPathFamily>),
+    /// Experimental Paths-Limit receiver preferences (capability code 76).
+    PathsLimit(Vec<PathsLimitFamily>),
     /// RFC 5291: Outbound Route Filtering — per-family ORF-Type/role blocks.
     OutboundRouteFilter(Vec<crate::orf::OrfCapEntry>),
     /// RFC 6793: 4-Byte AS Number.
@@ -485,6 +499,48 @@ impl Capability {
                     })
                 }
             }
+            capability_code::PATHS_LIMIT => {
+                // draft-04: repeated AFI(2) + SAFI(1) + receive-limit(2) tuples.
+                if !usize::from(length).is_multiple_of(5) {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let raw_data = buf.copy_to_bytes(usize::from(length));
+                let mut cursor = raw_data.clone();
+                let mut families = Vec::with_capacity(usize::from(length) / 5);
+                let mut all_valid = true;
+                while cursor.has_remaining() {
+                    let afi_raw = cursor.get_u16();
+                    let safi_raw = cursor.get_u8();
+                    let receive_limit = cursor.get_u16();
+                    if let (Some(afi), Some(safi)) =
+                        (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
+                    {
+                        // A zero limit has no meaning and is ignored by draft-04.
+                        if receive_limit != 0
+                            && !families.iter().any(|entry: &PathsLimitFamily| {
+                                entry.afi == afi && entry.safi == safi
+                            })
+                        {
+                            families.push(PathsLimitFamily {
+                                afi,
+                                safi,
+                                receive_limit,
+                            });
+                        }
+                    } else {
+                        all_valid = false;
+                    }
+                }
+                if all_valid {
+                    Ok(Capability::PathsLimit(families))
+                } else {
+                    Ok(Capability::Unknown {
+                        code,
+                        data: raw_data,
+                    })
+                }
+            }
             capability_code::OUTBOUND_ROUTE_FILTERING => {
                 // RFC 5291 §4: per-family blocks. Preserve as Unknown on a
                 // structural error or unrecognized AFI/SAFI (lossless
@@ -663,6 +719,26 @@ impl Capability {
                     buf.put_u8(fam.send_receive as u8);
                 }
             }
+            Capability::PathsLimit(families) => {
+                let value_len = families.len() * 5;
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "paths_limit_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
+                buf.put_u8(capability_code::PATHS_LIMIT);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "value_len is checked against the u8 maximum above"
+                )]
+                buf.put_u8(value_len as u8);
+                for fam in families {
+                    buf.put_u16(fam.afi as u16);
+                    buf.put_u8(fam.safi as u8);
+                    buf.put_u16(fam.receive_limit);
+                }
+            }
             Capability::OutboundRouteFilter(entries) => {
                 // RFC 5291 §4: the value carries one or more blocks. An empty
                 // list would encode to a zero-length value, which the decoder
@@ -729,6 +805,7 @@ impl Capability {
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
             Self::LongLivedGracefulRestart(_) => capability_code::LONG_LIVED_GRACEFUL_RESTART,
             Self::AddPath(_) => capability_code::ADD_PATH,
+            Self::PathsLimit(_) => capability_code::PATHS_LIMIT,
             Self::OutboundRouteFilter(_) => capability_code::OUTBOUND_ROUTE_FILTERING,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
@@ -747,6 +824,7 @@ impl Capability {
             Self::ExtendedNextHop(families) => families.len() * 6,
             Self::LongLivedGracefulRestart(families) => families.len() * 7,
             Self::AddPath(families) => families.len() * 4,
+            Self::PathsLimit(families) => families.len() * 5,
             Self::OutboundRouteFilter(entries) => crate::orf::capability_value_len(entries),
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
@@ -1700,5 +1778,59 @@ mod tests {
         let mut buf = Bytes::copy_from_slice(data);
         let cap = Capability::decode(&mut buf).unwrap();
         assert!(matches!(cap, Capability::Unknown { code: 3, .. }));
+    }
+
+    #[test]
+    fn paths_limit_roundtrip_and_first_duplicate_wins() {
+        let cap = Capability::PathsLimit(vec![
+            PathsLimitFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                receive_limit: 4,
+            },
+            PathsLimitFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                receive_limit: 8,
+            },
+        ]);
+        let mut encoded = bytes::BytesMut::new();
+        cap.encode(&mut encoded).unwrap();
+        assert_eq!(encoded[0], 76);
+        assert_eq!(encoded[1], 10);
+        let mut buf = encoded.freeze();
+        assert_eq!(Capability::decode(&mut buf).unwrap(), cap);
+
+        let mut duplicate =
+            Bytes::from_static(&[76, 15, 0, 1, 1, 0, 3, 0, 1, 1, 0, 9, 0, 2, 1, 0, 0]);
+        assert_eq!(
+            Capability::decode(&mut duplicate).unwrap(),
+            Capability::PathsLimit(vec![PathsLimitFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                receive_limit: 3,
+            }])
+        );
+    }
+
+    #[test]
+    fn paths_limit_malformed_tuple_is_preserved() {
+        let mut empty = Bytes::from_static(&[76, 0]);
+        assert_eq!(
+            Capability::decode(&mut empty).unwrap(),
+            Capability::PathsLimit(Vec::new())
+        );
+
+        let mut bad_length = Bytes::from_static(&[76, 4, 0, 1, 1, 0]);
+        assert!(matches!(
+            Capability::decode(&mut bad_length).unwrap(),
+            Capability::Unknown { code: 76, .. }
+        ));
+
+        let mut unknown_afi = Bytes::from_static(&[76, 5, 0, 99, 1, 0, 4]);
+        assert!(matches!(
+            Capability::decode(&mut unknown_afi).unwrap(),
+            Capability::Unknown { code: 76, .. }
+        ));
     }
 }

@@ -1239,6 +1239,9 @@ async fn apply_config_transaction_locked(
                 committed_sections: Vec::new(),
                 human_text: "No changes.\n".to_string(),
                 confirmation: None,
+                update_group_impact: Some(rustbgpd_api::update_group_impact_to_proto(
+                    plan.update_group_impact,
+                )),
             });
         }
         RuntimeConfigTransactionStatus::Rejected => {
@@ -1263,7 +1266,9 @@ async fn apply_config_transaction_locked(
     // Post-commit token comes from the plan (computed under the peer-manager's
     // key); the apply path can't recompute a key-consistent token itself.
     let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
-    commit_apply_family(
+    let update_group_impact = rustbgpd_api::update_group_impact_to_proto(plan.update_group_impact);
+    let committed_candidate_toml = request.candidate_toml.clone();
+    let mut response = commit_apply_family(
         deps,
         &config_tx,
         family,
@@ -1271,10 +1276,21 @@ async fn apply_config_transaction_locked(
         candidate,
         plan.supported_sections,
         post_commit_runtime_snapshot_token,
+        update_group_impact,
     )
-    .await
+    .await?;
+    if family == ApplyFamily::LivePolicyImpact {
+        let authoritative =
+            plan_candidate(&deps.peer_mgr_tx, committed_candidate_toml, String::new()).await?;
+        response.runtime_snapshot_token = authoritative.runtime_snapshot_token;
+    }
+    Ok(response)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transaction executor carries candidate, receipt, and commit-token state"
+)]
 async fn commit_apply_family(
     deps: &FibTableControlDeps,
     config_tx: &mpsc::Sender<ConfigEvent>,
@@ -1283,6 +1299,7 @@ async fn commit_apply_family(
     candidate: Config,
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
+    update_group_impact: proto::UpdateGroupImpactPlan,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     match family {
         ApplyFamily::FibTables => {
@@ -1291,6 +1308,7 @@ async fn commit_apply_family(
                 config_tx,
                 &candidate,
                 post_commit_runtime_snapshot_token,
+                update_group_impact,
             )
             .await
         }
@@ -1303,6 +1321,7 @@ async fn commit_apply_family(
                     "Committed [[dynamic_neighbors]] transaction.\n{} range(s) active.\n",
                     candidate.dynamic_neighbors.len()
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::CatalogSnapshot => {
@@ -1316,6 +1335,7 @@ async fn commit_apply_family(
                     candidate.policy.neighbor_sets.len(),
                     candidate.peer_groups.len(),
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::LivePolicyImpact => {
@@ -1332,6 +1352,7 @@ async fn commit_apply_family(
                 format!(
                     "Committed live policy-impact runtime config transaction.\n{refreshed} live session(s) re-evaluated under the new resolved policy.\n"
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::PeerSessionReshape => {
@@ -1346,6 +1367,7 @@ async fn commit_apply_family(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
                 peer_session_reshape_commit_message(&commit),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::StaticNeighbors => {
@@ -1361,6 +1383,7 @@ async fn commit_apply_family(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
                 "Committed [[neighbors]] add/delete/modify transaction.\n".to_string(),
+                Some(update_group_impact),
             ))
         }
     }
@@ -1371,6 +1394,7 @@ async fn commit_fib_transaction(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate: &Config,
     post_commit_runtime_snapshot_token: String,
+    update_group_impact: proto::UpdateGroupImpactPlan,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
@@ -1393,6 +1417,7 @@ async fn commit_fib_transaction(
             "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
             response.tables.len()
         ),
+        Some(update_group_impact),
     ))
 }
 
@@ -2457,6 +2482,7 @@ fn committable_response(
     runtime_snapshot_token: String,
     committed_sections: Vec<String>,
     human_text: String,
+    update_group_impact: Option<proto::UpdateGroupImpactPlan>,
 ) -> proto::ConfigTransactionApplyResponse {
     proto::ConfigTransactionApplyResponse {
         status: proto::ConfigTransactionPlanStatus::Committable.into(),
@@ -2464,6 +2490,7 @@ fn committable_response(
         committed_sections,
         human_text,
         confirmation: None,
+        update_group_impact,
     }
 }
 
@@ -2583,6 +2610,7 @@ fn rejected_response(runtime_snapshot_token: String) -> proto::ConfigTransaction
         committed_sections: Vec::new(),
         human_text: "Config transaction is not committable by the current apply executor.\nRun PlanConfigTransaction for section classification.\n".to_string(),
         confirmation: None,
+        update_group_impact: None,
     }
 }
 
@@ -3062,6 +3090,7 @@ peer_group = "edge"
             unsupported_sections: Vec::new(),
             restart_required_sections: Vec::new(),
             human_text: String::new(),
+            update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan::default(),
         }
     }
 
@@ -3608,10 +3637,31 @@ peer_group = "{group}"
         apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
         dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     ) {
+        let mut plan_calls = 0usize;
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
-                    let _ = reply.send(Ok(plan.clone()));
+                PeerManagerCommand::PlanConfigTransaction {
+                    expected_runtime_snapshot_token,
+                    reply,
+                    ..
+                } => {
+                    let mut response = plan.clone();
+                    if plan_calls > 0 {
+                        response.runtime_snapshot_token =
+                            plan.post_commit_runtime_snapshot_token.clone();
+                    }
+                    plan_calls += 1;
+                    if let Some(expected) =
+                        expected_runtime_snapshot_token.filter(|value| !value.is_empty())
+                        && expected != response.runtime_snapshot_token
+                    {
+                        let _ = reply.send(Err(RuntimeConfigTransactionPlanError::StaleSnapshot {
+                            expected,
+                            current: response.runtime_snapshot_token,
+                        }));
+                    } else {
+                        let _ = reply.send(Ok(response));
+                    }
                 }
                 PeerManagerCommand::StageConfigSnapshot {
                     candidate_toml,
@@ -3813,7 +3863,7 @@ remote_asn = 65010
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5240,7 +5290,7 @@ default_action = "permit"
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5362,7 +5412,7 @@ default_action = "permit"
         });
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: candidate_toml.clone(),
                 expected_runtime_snapshot_token: "kv1:old:1".to_string(),
@@ -5385,6 +5435,18 @@ default_action = "permit"
         );
         assert_eq!(*snapshot_toml.lock().await, candidate_toml);
         assert!(response.human_text.contains("live policy-impact"));
+        assert_eq!(response.runtime_snapshot_token, "kv1:new:2");
+        let chained = plan_candidate(
+            &peer_tx,
+            candidate_toml.clone(),
+            response.runtime_snapshot_token.clone(),
+        )
+        .await
+        .expect("returned post-commit token must chain into a second plan");
+        assert_eq!(
+            chained.runtime_snapshot_token,
+            response.runtime_snapshot_token
+        );
         let calls = apply_calls.lock().await;
         assert_eq!(calls.len(), 1, "exactly one apply call");
         assert_eq!(calls[0].len(), 1, "one impacted static neighbor");
@@ -7035,5 +7097,22 @@ families = ["ipv4_unicast"]
             fib_error_to_apply_error(FibTableControlError::Unavailable("busy".to_string())),
             ConfigTransactionApplyError::Unavailable("busy".to_string())
         );
+    }
+
+    #[test]
+    fn apply_response_preserves_the_accepted_plan_impact_exactly() {
+        let impact = proto::UpdateGroupImpactPlan {
+            schema_version: 1,
+            capacity_class: "within_mixed".to_string(),
+            capacity_basis: "fixture".to_string(),
+            ..proto::UpdateGroupImpactPlan::default()
+        };
+        let response = committable_response(
+            "after".to_string(),
+            vec!["[policy]".to_string()],
+            "committed".to_string(),
+            Some(impact.clone()),
+        );
+        assert_eq!(response.update_group_impact, Some(impact));
     }
 }

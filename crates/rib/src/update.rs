@@ -10,6 +10,285 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+/// Canonical, side-effect-free input to update-group eligibility.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent runtime update-group predicates"
+)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UpdateGroupClassifierInput {
+    pub policy_fingerprint: Option<String>,
+    pub policy_provenance: Option<String>,
+    pub policy_requires_peer_context: bool,
+    pub target_is_ebgp: bool,
+    pub target_is_rr_client: bool,
+    pub sendable_families: Vec<(u16, u8)>,
+    pub llgr_families: Vec<(u16, u8)>,
+    pub add_path_send: bool,
+    pub per_client_best: bool,
+    pub orr_vantage: Option<IpAddr>,
+    pub orf_installed: bool,
+}
+
+/// Exact runtime grouping key, excluding diagnostics and non-staging families.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent fields of the runtime GroupKey"
+)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UpdateGroupFingerprint {
+    pub policy_fingerprint: Option<String>,
+    pub target_is_ebgp: bool,
+    pub target_is_rr_client: bool,
+    pub sendable_ipv4_unicast: bool,
+    pub sendable_ipv6_unicast: bool,
+    pub sendable_vpnv4: bool,
+    pub sendable_vpnv6: bool,
+    pub rtc_negotiated: bool,
+    pub llgr_families: Vec<(u16, u8)>,
+}
+
+/// Stable classifier result shared by live registration and config planning.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UpdateGroupClassification {
+    Groupable(UpdateGroupFingerprint),
+    PolicyPeerContext,
+    AddPathSend,
+    PerClientBest,
+    OrrVantage,
+    OrfInstalled,
+}
+
+impl UpdateGroupClassification {
+    #[must_use]
+    pub const fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Groupable(_) => None,
+            Self::PolicyPeerContext => Some("policy_peer_context"),
+            Self::AddPathSend => Some("add_path_send"),
+            Self::PerClientBest => Some("per_client_best"),
+            Self::OrrVantage => Some("orr_vantage"),
+            Self::OrfInstalled => Some("orf_installed"),
+        }
+    }
+}
+
+/// Apply the runtime eligibility precedence without reading or mutating RIB state.
+#[must_use]
+pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGroupClassification {
+    input.sendable_families.sort_unstable();
+    input.sendable_families.dedup();
+    input.llgr_families.sort_unstable();
+    input.llgr_families.dedup();
+    if input.policy_requires_peer_context {
+        UpdateGroupClassification::PolicyPeerContext
+    } else if input.add_path_send {
+        UpdateGroupClassification::AddPathSend
+    } else if input.per_client_best {
+        UpdateGroupClassification::PerClientBest
+    } else if input.orr_vantage.is_some() {
+        UpdateGroupClassification::OrrVantage
+    } else if input.orf_installed {
+        UpdateGroupClassification::OrfInstalled
+    } else {
+        let contains = |family| input.sendable_families.contains(&family);
+        UpdateGroupClassification::Groupable(UpdateGroupFingerprint {
+            policy_fingerprint: input.policy_fingerprint,
+            target_is_ebgp: input.target_is_ebgp,
+            target_is_rr_client: input.target_is_rr_client,
+            sendable_ipv4_unicast: contains((1, 1)),
+            sendable_ipv6_unicast: contains((2, 1)),
+            sendable_vpnv4: contains((1, 128)),
+            sendable_vpnv6: contains((2, 128)),
+            rtc_negotiated: contains((1, 132)),
+            llgr_families: input.llgr_families,
+        })
+    }
+}
+
+/// One established peer in the side-effect-free planner snapshot.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct UpdateGroupPeerSnapshot {
+    pub peer: IpAddr,
+    pub input: UpdateGroupClassifierInput,
+    pub classification: UpdateGroupClassification,
+    pub runtime_membership: String,
+}
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct UpdateGroupSnapshot {
+    pub peers: Vec<UpdateGroupPeerSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlannedGroupability {
+    Group { id: String },
+    Private { reason: String, fingerprint: String },
+    Indeterminate { reason: String },
+    Absent,
+}
+
+impl PlannedGroupability {
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Group { id } => id.clone(),
+            Self::Private { reason, .. } | Self::Indeterminate { reason } => reason.clone(),
+            Self::Absent => "absent".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateGroupFamilyImpact {
+    pub peer: IpAddr,
+    pub afi: u16,
+    pub safi: u8,
+    pub current: PlannedGroupability,
+    pub candidate: PlannedGroupability,
+    pub transition: String,
+    pub reason: String,
+    pub provenance: String,
+    pub local_resync: bool,
+    pub remote_route_refresh: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateGroupImpactRollup {
+    pub affected_peers: u32,
+    pub affected_families: u32,
+    pub no_op: u32,
+    pub regroup: u32,
+    pub shared_migration: u32,
+    pub private_resync: u32,
+    pub indeterminate: u32,
+    pub projected_shared_groups: u32,
+    pub projected_private_views: u32,
+    pub local_resyncs: u32,
+    pub remote_route_refreshes: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateGroupImpactPlan {
+    pub schema_version: u32,
+    pub entries: Vec<UpdateGroupFamilyImpact>,
+    pub rollup: UpdateGroupImpactRollup,
+    pub capacity_class: String,
+    pub capacity_basis: String,
+}
+
+#[cfg(test)]
+mod update_group_classifier_tests {
+    use super::*;
+
+    fn input() -> UpdateGroupClassifierInput {
+        UpdateGroupClassifierInput {
+            policy_fingerprint: Some("permit-all".to_string()),
+            policy_provenance: Some("toml_compiled_ir".to_string()),
+            policy_requires_peer_context: false,
+            target_is_ebgp: false,
+            target_is_rr_client: true,
+            sendable_families: vec![(2, 1), (1, 1), (1, 1)],
+            llgr_families: vec![],
+            add_path_send: false,
+            per_client_best: false,
+            orr_vantage: None,
+            orf_installed: false,
+        }
+    }
+
+    #[test]
+    fn classifier_canonicalizes_families() {
+        let UpdateGroupClassification::Groupable(result) = classify_update_group(input()) else {
+            panic!("uniform input must group");
+        };
+        assert!(result.sendable_ipv4_unicast);
+        assert!(result.sendable_ipv6_unicast);
+    }
+
+    #[test]
+    fn classifier_uses_runtime_fallback_precedence() {
+        let mut value = input();
+        value.policy_requires_peer_context = true;
+        value.add_path_send = true;
+        value.orf_installed = true;
+        assert_eq!(
+            classify_update_group(value),
+            UpdateGroupClassification::PolicyPeerContext
+        );
+    }
+
+    #[test]
+    fn classifier_golden_groupability_scenarios() {
+        let cases: Vec<(&str, UpdateGroupClassifierInput, Option<&str>)> = vec![
+            ("uniform", input(), None),
+            (
+                "rtc_membership",
+                UpdateGroupClassifierInput {
+                    sendable_families: vec![(1, 132), (1, 128)],
+                    ..input()
+                },
+                None,
+            ),
+            (
+                "per_client_best",
+                UpdateGroupClassifierInput {
+                    per_client_best: true,
+                    ..input()
+                },
+                Some("per_client_best"),
+            ),
+            (
+                "orf",
+                UpdateGroupClassifierInput {
+                    orf_installed: true,
+                    ..input()
+                },
+                Some("orf_installed"),
+            ),
+            (
+                "orr",
+                UpdateGroupClassifierInput {
+                    orr_vantage: Some("192.0.2.9".parse().unwrap()),
+                    ..input()
+                },
+                Some("orr_vantage"),
+            ),
+            (
+                "toml_peer_context",
+                UpdateGroupClassifierInput {
+                    policy_requires_peer_context: true,
+                    policy_provenance: Some("toml_compiled_ir".to_string()),
+                    ..input()
+                },
+                Some("policy_peer_context"),
+            ),
+            (
+                "rpol_peer_context",
+                UpdateGroupClassifierInput {
+                    policy_requires_peer_context: true,
+                    policy_provenance: Some("rpol_compiled_ir".to_string()),
+                    ..input()
+                },
+                Some("policy_peer_context"),
+            ),
+        ];
+        for (name, value, expected_reason) in cases {
+            let result = classify_update_group(value);
+            assert_eq!(result.reason(), expected_reason, "scenario {name}");
+        }
+    }
+
+    #[test]
+    fn canonical_fingerprint_ignores_non_key_family_and_provenance() {
+        let left = input();
+        let mut right = left.clone();
+        right.sendable_families.push((25, 70));
+        right.policy_provenance = Some("rpol_compiled_ir".to_string());
+        assert_eq!(classify_update_group(left), classify_update_group(right));
+    }
+}
+
 use crate::best_path::BestPathReason;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::{
@@ -526,6 +805,15 @@ pub enum RibUpdate {
         /// transport.
         negotiated_llgr_families: Vec<(Afi, Safi)>,
     },
+    /// Family-local effective Add-Path caps after applying peer Paths-Limit.
+    PeerAddPathLimits {
+        /// Peer address.
+        peer: IpAddr,
+        /// Transport session identity; stale sessions are ignored.
+        session_id: u64,
+        /// Effective limit per negotiated Add-Path send family.
+        limits: Vec<((Afi, Safi), u32)>,
+    },
     /// Peer pushed Address-Prefix ORF entries via ROUTE-REFRESH (RFC 5291).
     /// Install/update the per-peer outbound prefix filter for `(afi, safi)` and
     /// re-evaluate this peer's Adj-RIB-Out.
@@ -795,6 +1083,10 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<String>,
+    },
+    /// Side-effect-free snapshot used by config impact planning.
+    QueryUpdateGroupSnapshot {
+        reply: oneshot::Sender<UpdateGroupSnapshot>,
     },
     /// TEST ONLY: a peer's advertised VPN view recomputed from manager
     /// state — the Φ-filtered group table for a VPN-grouped member, the

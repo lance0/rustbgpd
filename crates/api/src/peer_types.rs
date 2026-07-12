@@ -387,15 +387,18 @@ pub struct RuntimeConfigTransactionPlan {
     pub status: RuntimeConfigTransactionStatus,
     pub runtime_snapshot_token: String,
     /// Keyed token the live runtime config would carry once this candidate is
-    /// committed. The apply path returns it so a client can chain a follow-up
-    /// apply without re-planning. Computed under the same peer-manager key as
-    /// `runtime_snapshot_token`; not surfaced in the gRPC plan response.
+    /// committed if the negotiated snapshot is unchanged. Live policy apply
+    /// refreshes the authoritative token after RIB convergence before returning
+    /// it, so clients can safely chain a follow-up plan. Not surfaced in the
+    /// gRPC plan response.
     pub post_commit_runtime_snapshot_token: String,
     pub diff: RuntimeConfigDiff,
     pub supported_sections: Vec<String>,
     pub unsupported_sections: Vec<String>,
     pub restart_required_sections: Vec<String>,
     pub human_text: String,
+    /// Side-effect-free update-group projection from the same runtime snapshot.
+    pub update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan,
 }
 
 /// Validate-only transaction planning error returned by the peer manager.
@@ -1262,6 +1265,8 @@ pub struct AddPathDefinition {
     pub send: bool,
     /// Maximum paths to send (`None` = default/unlimited).
     pub send_max: Option<u32>,
+    /// Experimental Paths-Limit receiver preference.
+    pub receive_max: Option<u16>,
 }
 
 /// One policy statement in config-shaped form.
@@ -1489,6 +1494,8 @@ pub struct PeerManagerNeighborConfig {
     pub add_path_send: bool,
     /// Maximum number of paths to advertise per prefix (Add-Path).
     pub add_path_send_max: u32,
+    /// Experimental Paths-Limit receiver preference (0 = disabled).
+    pub paths_limit_receive_max: u16,
     /// Local BGP Role advertised to this peer (RFC 9234).
     pub local_role: Option<BgpRole>,
     /// Require the peer to advertise a compatible BGP Role.
@@ -1777,6 +1784,12 @@ pub struct PeerInfo {
     pub add_path_send: bool,
     /// Maximum paths to advertise per prefix (Add-Path).
     pub add_path_send_max: u32,
+    /// Configured Paths-Limit receiver preference.
+    pub paths_limit_receive_max: u16,
+    /// Peer-advertised Paths-Limit values by family.
+    pub peer_paths_limits: Vec<((Afi, Safi), u16)>,
+    /// Effective outbound Add-Path cap by family.
+    pub effective_add_path_send_limits: Vec<((Afi, Safi), u32)>,
     /// Total UPDATE messages received.
     pub updates_received: u64,
     /// Total UPDATE messages sent.

@@ -62,6 +62,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
+        paths_limit_receive_max: 0,
         local_role: None,
         strict_role: false,
         prefix_orf_receive: false,
@@ -122,6 +123,157 @@ fn test_peer_manager() -> PeerManager {
         rib_tx,
         None,
     )
+}
+
+#[tokio::test]
+async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+    );
+    let candidate = toml::to_string_pretty(&config).unwrap();
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("first plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+            .unwrap();
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("apply re-plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot {
+                peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
+                    peer: "192.0.2.1".parse().unwrap(),
+                    input: rustbgpd_rib::UpdateGroupClassifierInput {
+                        policy_fingerprint: None,
+                        policy_provenance: None,
+                        policy_requires_peer_context: false,
+                        target_is_ebgp: false,
+                        target_is_rr_client: true,
+                        sendable_families: vec![(1, 1)],
+                        llgr_families: vec![],
+                        add_path_send: false,
+                        per_client_best: false,
+                        orr_vantage: None,
+                        orf_installed: false,
+                    },
+                    classification: rustbgpd_rib::UpdateGroupClassification::Groupable(
+                        rustbgpd_rib::UpdateGroupFingerprint {
+                            policy_fingerprint: None,
+                            target_is_ebgp: false,
+                            target_is_rr_client: true,
+                            sendable_ipv4_unicast: true,
+                            sendable_ipv6_unicast: false,
+                            sendable_vpnv4: false,
+                            sendable_vpnv6: false,
+                            rtc_negotiated: false,
+                            llgr_families: vec![],
+                        },
+                    ),
+                    runtime_membership: "group:0".to_string(),
+                }],
+            })
+            .unwrap();
+    });
+    let planned = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+    let error = mgr
+        .plan_config_transaction(
+            "this is not valid TOML =",
+            Some(&planned.runtime_snapshot_token),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::StaleSnapshot { .. }
+    ));
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn candidate_neighbor_resolution_failure_is_invalid_candidate() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+    );
+    let mut candidate = toml::to_string_pretty(&config).unwrap();
+    candidate.push_str(
+        r#"
+[[neighbors]]
+address = "fe80::2"
+interface = "rustbgpd-interface-that-does-not-exist"
+remote_asn = 65002
+"#,
+    );
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+            .unwrap();
+    });
+
+    let error = mgr
+        .plan_config_transaction(&candidate, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::InvalidCandidate(_)
+    ));
+    responder.await.unwrap();
 }
 
 async fn query_session_event_history(
@@ -962,6 +1114,8 @@ fn fake_peer_handle_with_route_refresh_reply(
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -3767,6 +3921,7 @@ fn build_transport_config_reflects_every_transport_field() {
         add_path_receive: true,
         add_path_send: true,
         add_path_send_max: 4,
+        paths_limit_receive_max: 3,
         local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
         strict_role: true,
         prefix_orf_receive: true,
@@ -3804,6 +3959,7 @@ fn build_transport_config_reflects_every_transport_field() {
         add_path_receive,
         add_path_send,
         add_path_send_max,
+        paths_limit_receive_max,
         local_role,
         strict_role,
         prefix_orf_receive,
@@ -3872,6 +4028,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.peer.add_path_send_max, *add_path_send_max,
         "add_path_send_max"
+    );
+    assert_eq!(
+        t.peer.paths_limit_receive_max, *paths_limit_receive_max,
+        "paths_limit_receive_max"
     );
     assert_eq!(t.peer.local_role, *local_role, "local_role");
     assert_eq!(t.peer.strict_role, *strict_role, "strict_role");
@@ -4269,6 +4429,8 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5131,6 +5293,8 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5195,6 +5359,8 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5256,6 +5422,8 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5315,6 +5483,8 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5868,6 +6038,8 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -5979,6 +6151,8 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -6108,6 +6282,8 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             local_role: None,
                             remote_role: None,
                             role_negotiated: false,
+                            peer_paths_limits: Vec::new(),
+                            effective_add_path_send_limits: Vec::new(),
                             updates_received: 0,
                             updates_sent: 0,
                             notifications_received: 0,
@@ -6327,6 +6503,8 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -6442,6 +6620,8 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             local_role: None,
                             remote_role: None,
                             role_negotiated: false,
+                            peer_paths_limits: Vec::new(),
+                            effective_add_path_send_limits: Vec::new(),
                             updates_received: 0,
                             updates_sent: 0,
                             notifications_received: 0,
@@ -6616,6 +6796,8 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -6790,6 +6972,8 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -6958,6 +7142,8 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -7157,6 +7343,8 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -7379,6 +7567,8 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,
@@ -7711,6 +7901,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
                         updates_received: 0,
                         updates_sent: 0,
                         notifications_received: 0,

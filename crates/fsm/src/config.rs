@@ -5,7 +5,8 @@ use std::net::Ipv4Addr;
 use rustbgpd_wire::constants::AS_TRANS;
 use rustbgpd_wire::{
     AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
-    GracefulRestartFamily, LlgrFamily, OrfCapEntry, OrfCapType, OrfSendReceive, OrfType, Safi,
+    GracefulRestartFamily, LlgrFamily, OrfCapEntry, OrfCapType, OrfSendReceive, OrfType,
+    PathsLimitFamily, Safi,
 };
 
 /// Whether the RIB currently has GR/LLGR stale-retention handling for a family.
@@ -93,6 +94,8 @@ pub struct PeerConfig {
     pub add_path_send: bool,
     /// Maximum paths per prefix to advertise (0 = unlimited).
     pub add_path_send_max: u32,
+    /// Preferred maximum paths to receive per Add-Path family (0 = do not advertise).
+    pub paths_limit_receive_max: u16,
     /// Local BGP Role advertised to this eBGP peer (RFC 9234).
     pub local_role: Option<BgpRole>,
     /// Require the peer to advertise a compatible BGP Role.
@@ -129,6 +132,7 @@ impl Default for PeerConfig {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            paths_limit_receive_max: 0,
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
@@ -214,6 +218,10 @@ impl PeerConfig {
         if !add_path_caps.is_empty() {
             caps.push(Capability::AddPath(add_path_caps));
         }
+        let paths_limit_caps = self.paths_limit_capabilities();
+        if !paths_limit_caps.is_empty() {
+            caps.push(Capability::PathsLimit(paths_limit_caps));
+        }
         let orf_caps = self.orf_capabilities();
         if !orf_caps.is_empty() {
             caps.push(Capability::OutboundRouteFilter(orf_caps));
@@ -267,6 +275,30 @@ impl PeerConfig {
                 afi,
                 safi,
                 send_receive: mode,
+            })
+            .collect()
+    }
+
+    /// Build experimental Paths-Limit entries for locally receivable
+    /// Add-Path families. A configured limit without Add-Path receive is not
+    /// advertised because the tuple would have no effect.
+    #[must_use]
+    pub fn paths_limit_capabilities(&self) -> Vec<PathsLimitFamily> {
+        if self.paths_limit_receive_max == 0 || !self.add_path_receive {
+            return Vec::new();
+        }
+        self.add_path_capabilities()
+            .into_iter()
+            .filter(|family| {
+                matches!(
+                    family.send_receive,
+                    AddPathMode::Receive | AddPathMode::Both
+                )
+            })
+            .map(|family| PathsLimitFamily {
+                afi: family.afi,
+                safi: family.safi,
+                receive_limit: self.paths_limit_receive_max,
             })
             .collect()
     }
@@ -357,6 +389,7 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            paths_limit_receive_max: 0,
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
@@ -527,6 +560,16 @@ mod tests {
             .map(|f| (f.afi, f.safi))
             .collect();
         assert_eq!(llgr_families, cfg.families);
+    }
+
+    #[test]
+    fn paths_limit_requires_add_path_receive() {
+        let mut cfg = test_config();
+        cfg.paths_limit_receive_max = 4;
+        assert!(cfg.paths_limit_capabilities().is_empty());
+        cfg.add_path_receive = true;
+        assert_eq!(cfg.paths_limit_capabilities().len(), 1);
+        assert_eq!(cfg.paths_limit_capabilities()[0].receive_limit, 4);
     }
 
     #[test]

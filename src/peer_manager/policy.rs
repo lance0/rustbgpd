@@ -1350,6 +1350,7 @@ impl PeerManager {
             add_path_receive: tc.peer.add_path_receive,
             add_path_send: tc.peer.add_path_send,
             add_path_send_max: tc.peer.add_path_send_max,
+            paths_limit_receive_max: tc.peer.paths_limit_receive_max,
             local_role: tc.peer.local_role,
             strict_role: tc.peer.strict_role,
             prefix_orf_receive: tc.peer.prefix_orf_receive,

@@ -521,9 +521,17 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
         route_reflector_client: false,
         orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
-        add_path_send_max: 2,
+        add_path_send_max: 3,
         negotiated_orf_recv: Vec::new(),
         negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut addpath_out).await;
+    tx.send(RibUpdate::PeerAddPathLimits {
+        peer: addpath_target,
+        session_id: 0,
+        limits: vec![((Afi::Ipv4, Safi::MplsVpn), 2)],
     })
     .await
     .unwrap();
@@ -573,7 +581,7 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
     assert_eq!(
         staged.len(),
         2,
-        "send_max=2 caps the staged set at two paths, not three"
+        "family-local limit=2 overrides scalar send_max=3"
     );
     let rank_1 = staged
         .get(&crate::route::VpnRibRouteKey {
@@ -589,6 +597,22 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
         .expect("outbound path_id 2 staged");
     assert_eq!(rank_1.next_hop, best.next_hop, "rank 1 = best by tiebreak");
     assert_eq!(rank_2.next_hop, second.next_hop, "rank 2 = runner-up");
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        session_id: 0,
+        peer: addpath_target,
+        afi: Afi::Ipv4,
+        safi: Safi::MplsVpn,
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    let refreshed = drain_final_vpn(&mut addpath_out);
+    assert_eq!(
+        refreshed.len(),
+        2,
+        "route refresh preserves the family-local VPN cap"
+    );
 
     let plain_staged = drain_final_vpn(&mut plain_out);
     assert_eq!(plain_staged.len(), 1, "non-Add-Path peer stays single-best");

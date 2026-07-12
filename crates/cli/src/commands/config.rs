@@ -7,6 +7,7 @@ use crate::proto::{
     ConfigTransactionPlanResponse, ConfigTransactionPlanStatus, ConfigTransactionStatusResponse,
     ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
     GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, PlanConfigTransactionRequest,
+    UpdateGroupImpactPlan,
 };
 
 const MAX_CONFIRM_ID_CHARS: usize = 128;
@@ -331,6 +332,7 @@ fn plan_to_json(resp: &ConfigTransactionPlanResponse) -> serde_json::Value {
         "unsupported_sections": resp.unsupported_sections,
         "restart_required_sections": resp.restart_required_sections,
         "human_text": resp.human_text,
+        "update_group_impact": update_group_impact_to_json(resp.update_group_impact.as_ref()),
     })
 }
 
@@ -341,7 +343,72 @@ fn apply_to_json(resp: &ConfigTransactionApplyResponse) -> serde_json::Value {
         "committed_sections": resp.committed_sections,
         "human_text": resp.human_text,
         "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+        "update_group_impact": update_group_impact_to_json(resp.update_group_impact.as_ref()),
     })
+}
+
+fn update_group_impact_to_json(plan: Option<&UpdateGroupImpactPlan>) -> serde_json::Value {
+    let Some(plan) = plan else {
+        return serde_json::Value::Null;
+    };
+    let rollup = plan.rollup.as_ref();
+    serde_json::json!({
+        "schema_version": plan.schema_version,
+        "entries": plan.entries.iter().map(|row| serde_json::json!({
+            "peer": row.peer, "afi": row.afi, "safi": row.safi,
+            "current": row.current, "candidate": row.candidate,
+            "transition": row.transition, "reason": row.reason,
+            "provenance": row.provenance, "local_resync": row.local_resync,
+            "remote_route_refresh": row.remote_route_refresh,
+        })).collect::<Vec<_>>(),
+        "rollup": rollup.map(|value| serde_json::json!({
+            "affected_peers": value.affected_peers,
+            "affected_families": value.affected_families,
+            "no_op": value.no_op, "regroup": value.regroup,
+            "shared_migration": value.shared_migration,
+            "private_resync": value.private_resync,
+            "indeterminate": value.indeterminate,
+            "projected_shared_groups": value.projected_shared_groups,
+            "projected_private_views": value.projected_private_views,
+            "local_resyncs": value.local_resyncs,
+            "remote_route_refreshes": value.remote_route_refreshes,
+        })),
+        "capacity_class": plan.capacity_class,
+        "capacity_basis": plan.capacity_basis,
+    })
+}
+
+fn print_update_group_impact(plan: Option<&UpdateGroupImpactPlan>) {
+    let Some(plan) = plan else {
+        return;
+    };
+    if let Some(rollup) = &plan.rollup {
+        println!(
+            "update_group_impact_v{}: affected_peers={} affected_families={} shared_groups={} private_views={} capacity={} ({})",
+            plan.schema_version,
+            rollup.affected_peers,
+            rollup.affected_families,
+            rollup.projected_shared_groups,
+            rollup.projected_private_views,
+            plan.capacity_class,
+            plan.capacity_basis
+        );
+    }
+    for row in &plan.entries {
+        if row.transition != "no_op" {
+            println!(
+                "  {} afi/safi {}/{}: {} -> {} [{}; local_resync={}; route_refresh={}]",
+                row.peer,
+                row.afi,
+                row.safi,
+                row.current,
+                row.candidate,
+                row.transition,
+                row.local_resync,
+                row.remote_route_refresh
+            );
+        }
+    }
 }
 
 fn confirmation_to_json(confirmation: Option<&ConfigTransactionConfirmation>) -> serde_json::Value {
@@ -377,6 +444,7 @@ fn print_plan_human(resp: &ConfigTransactionPlanResponse) {
             ("restart_required_sections", &resp.restart_required_sections),
         ],
     );
+    print_update_group_impact(resp.update_group_impact.as_ref());
 }
 
 fn print_apply_human(resp: &ConfigTransactionApplyResponse) {
@@ -387,6 +455,7 @@ fn print_apply_human(resp: &ConfigTransactionApplyResponse) {
         &[("committed_sections", &resp.committed_sections)],
     );
     print_confirmation(resp.confirmation.as_ref());
+    print_update_group_impact(resp.update_group_impact.as_ref());
 }
 
 fn print_confirmation(confirmation: Option<&ConfigTransactionConfirmation>) {
@@ -1007,12 +1076,47 @@ mod tests {
             unsupported_sections: vec!["[policy]".to_string()],
             restart_required_sections: vec!["[global]".to_string()],
             human_text: "Config transaction is rejected.\n".to_string(),
+            update_group_impact: Some(UpdateGroupImpactPlan {
+                schema_version: 1,
+                entries: vec![crate::proto::UpdateGroupFamilyImpact {
+                    peer: "192.0.2.1".to_string(),
+                    afi: 1,
+                    safi: 1,
+                    current: "plan-group-001".to_string(),
+                    candidate: "policy_peer_context".to_string(),
+                    transition: "private_resync".to_string(),
+                    reason: "policy_peer_context".to_string(),
+                    provenance: "runtime_groupability_classifier".to_string(),
+                    local_resync: true,
+                    remote_route_refresh: false,
+                }],
+                rollup: Some(crate::proto::UpdateGroupImpactRollup {
+                    affected_peers: 1,
+                    affected_families: 1,
+                    no_op: 0,
+                    regroup: 0,
+                    shared_migration: 0,
+                    private_resync: 1,
+                    indeterminate: 0,
+                    projected_shared_groups: 0,
+                    projected_private_views: 1,
+                    local_resyncs: 1,
+                    remote_route_refreshes: 0,
+                }),
+                capacity_class: "within_mixed".to_string(),
+                capacity_basis: "receipt envelope".to_string(),
+            }),
         });
 
         assert_eq!(value["status"], "committable");
         assert_eq!(value["runtime_snapshot_token"], "kv1:planned:1");
         assert_eq!(value["supported_sections"][0], "[[fib_tables]]");
         assert_eq!(value["unsupported_sections"][0], "[policy]");
+        assert_eq!(value["update_group_impact"]["schema_version"], 1);
+        assert_eq!(
+            value["update_group_impact"]["entries"][0]["transition"],
+            "private_resync"
+        );
         assert_eq!(value["restart_required_sections"][0], "[global]");
         assert_eq!(
             value["diff"]["diff_json"]["reload_applied"],
@@ -1036,6 +1140,7 @@ mod tests {
                 runtime_snapshot_token: "kv1:committed:2".to_string(),
                 human_text: "Confirmed config transaction is pending confirmation.".to_string(),
             }),
+            update_group_impact: None,
         });
 
         assert_eq!(value["status"], "committable");

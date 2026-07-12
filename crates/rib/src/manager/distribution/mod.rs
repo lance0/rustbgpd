@@ -1625,6 +1625,11 @@ impl RibManager {
             let cluster_id = self.cluster_id;
             let peer_add_path_send_max =
                 self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+            let peer_add_path_send_limits = self
+                .peer_add_path_send_limits
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             let peer_add_path_send_families = self
                 .peer_add_path_send_families
                 .get(&peer)
@@ -1678,10 +1683,11 @@ impl RibManager {
                     continue;
                 }
                 let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
-                let prefix_send_max = if peer_add_path_send_max > 0
-                    && peer_add_path_send_families.contains(&family)
-                {
-                    peer_add_path_send_max
+                let prefix_send_max = if peer_add_path_send_families.contains(&family) {
+                    peer_add_path_send_limits
+                        .get(&family)
+                        .copied()
+                        .unwrap_or(peer_add_path_send_max)
                 } else {
                     0
                 };
@@ -1924,6 +1930,7 @@ impl RibManager {
                     rtc_filter.as_ref(),
                     orr_ctx,
                     peer_add_path_send_max,
+                    self.peer_add_path_send_limits.get(&peer),
                     &peer_add_path_send_families,
                     export_pol.as_ref(),
                     &mut vpn_announce,
@@ -1949,6 +1956,7 @@ impl RibManager {
                     llgr.as_ref(),
                     orr_ctx,
                     peer_add_path_send_max,
+                    self.peer_add_path_send_limits.get(&peer),
                     &peer_add_path_send_families,
                     export_pol.as_ref(),
                     &metrics,

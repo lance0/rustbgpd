@@ -1013,6 +1013,7 @@ remote_asn = 65002
 receive = true    # accept multiple paths per prefix from this peer
 send = true       # advertise multiple paths per prefix to this peer
 send_max = 4      # limit to top 4 candidates (omit for unlimited)
+receive_max = 3   # experimental Paths-Limit preference sent to this peer
 ```
 
 | Field      | Type    | Required | Default | Description                                |
@@ -1020,10 +1021,21 @@ send_max = 4      # limit to top 4 candidates (omit for unlimited)
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
+| `receive_max` | integer | no    | —       | Experimental preferred maximum received paths per family (1..=65535) |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
 If both are enabled, `Both` is advertised.
+
+`receive_max` enables the experimental Paths-Limit capability (code 76,
+draft-abraitis-idr-addpath-paths-limit-04). rustbgpd advertises the value only
+for families where Add-Path receive is enabled. A remote Paths-Limit tuple caps
+the corresponding outbound Add-Path family at the smaller of `send_max` and
+the peer's value; it does not affect other families and never rejects excess
+inbound paths. Zero tuples and tuples without matching Add-Path negotiation are
+ignored. Because the draft expired without IETF adoption, deploy this only
+after confirming peer support. `rbgp neighbor <address>` reports configured,
+advertised, received, and effective values per family.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by
@@ -2263,6 +2275,27 @@ restart to enable the subsystem.
 Operators can drive the workflow through `rbgp config plan <config.toml>`
 and `rbgp config apply <config.toml> --expected-runtime-snapshot-token`;
 `--json` returns the same status, section, and token fields for automation.
+Plan and apply responses also carry `update_group_impact` schema version 1.
+It projects each established peer and negotiated AFI/SAFI through the same
+groupability classifier used by live update-group registration, assigns
+deterministic plan-local group IDs, and distinguishes regroup, shared migration,
+private resync, and no-op transitions. Deleted peers have an explicit `absent`
+candidate state and do not count toward the projected topology or local resyncs.
+New, down, or session-reshaped peers are reported as
+`indeterminate_session_negotiation`; the planner never guesses future
+capabilities. `local_resync` describes local outbound
+re-evaluation, while `remote_route_refresh` is separate and remains false for
+this outbound-only projection. Capacity is a receipt-envelope class
+(`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
+`unknown`), not a byte, memory, or completion-time estimate.
+Only the exact published 1,000-peer uniform and 900-shared/100-private
+topologies receive measured capacity labels. `fully_shared` is a structural,
+explicitly unmeasured label for other one-group topologies; remaining shapes are
+`outside_measured`, not extrapolated. The optimistic transaction
+token is also bound to the live negotiated update-group snapshot, so a session
+flap, capability change, or membership change observed by Apply's mandatory
+re-plan makes Apply fail with `FAILED_PRECONDITION` and requires a fresh plan.
+The token is optimistic concurrency, not a session freeze after that re-plan.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
 the normal apply invocation — `rbgp config apply <config.toml>

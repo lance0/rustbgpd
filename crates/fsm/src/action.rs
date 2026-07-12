@@ -84,6 +84,10 @@ pub struct NegotiatedSession {
     /// indicates what *we* can do: `Receive` means we accept Add-Path
     /// from the peer, `Send` means we can send Add-Path, `Both` means both.
     pub add_path_families: HashMap<(Afi, Safi), AddPathMode>,
+    /// Peer-advertised experimental Paths-Limit values (first tuple wins).
+    pub peer_paths_limits: HashMap<(Afi, Safi), u16>,
+    /// Effective family-local outbound Add-Path caps after negotiation.
+    pub effective_add_path_send_limits: HashMap<(Afi, Safi), u32>,
     /// Families for which we negotiated receiving Address-Prefix ORF entries
     /// from the peer (RFC 5291/5292): we advertised Receive and the peer
     /// advertised Send. Outbound advertisement for these families is gated
@@ -120,6 +124,8 @@ impl Default for NegotiatedSession {
             peer_llgr_capable: false,
             peer_llgr_families: Vec::new(),
             add_path_families: HashMap::new(),
+            peer_paths_limits: HashMap::new(),
+            effective_add_path_send_limits: HashMap::new(),
             negotiated_orf_recv: Vec::new(),
         }
     }

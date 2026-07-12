@@ -2939,6 +2939,7 @@ async fn run<T>(
                     add_path_receive: transport_config.peer.add_path_receive,
                     add_path_send: transport_config.peer.add_path_send,
                     add_path_send_max: transport_config.peer.add_path_send_max,
+                    paths_limit_receive_max: transport_config.peer.paths_limit_receive_max,
                     local_role: transport_config.peer.local_role,
                     strict_role: transport_config.peer.strict_role,
                     prefix_orf_receive: transport_config.peer.prefix_orf_receive,

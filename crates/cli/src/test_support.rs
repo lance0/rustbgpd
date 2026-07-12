@@ -403,6 +403,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 unsupported_sections: Vec::new(),
                 restart_required_sections: Vec::new(),
                 human_text: "Config transaction is a noop.\n".to_string(),
+                update_group_impact: None,
             }));
         }
         Ok(Response::new(server_proto::ConfigTransactionPlanResponse {
@@ -421,6 +422,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
             unsupported_sections: Vec::new(),
             restart_required_sections: Vec::new(),
             human_text: "Config transaction is committable by v1.\n".to_string(),
+            update_group_impact: None,
         }))
     }
 
@@ -437,6 +439,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 committed_sections: vec!["[[fib_tables]]".to_string()],
                 human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
                 confirmation: None,
+                update_group_impact: None,
             },
         ))
     }
@@ -704,6 +707,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
+                paths_limit_receive_max: 0,
             }),
             state: server_proto::SessionState::Established as i32,
             uptime_seconds: 30,
@@ -732,6 +736,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             messages_received: 9,
             messages_sent: 8,
             route_reflector_client: false,
+            paths_limits: Vec::new(),
         }))
     }
 
