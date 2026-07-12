@@ -1900,6 +1900,16 @@ is missing. Prioritized by risk.
 | ~~**TCP MD5 / GTSM**~~ | ~~Done (M25)~~ | ~~Two-peer scenario: MD5-authenticated session + GTSM-secured session, routes exchanged over both.~~ |
 | ~~**Cease subcode compat**~~ | ~~Done (M26)~~ | ~~FRR accepts Cease/1 (Max Prefixes) cleanly. Table updated. BIRD/GoBGP still TBD.~~ |
 
+### Experimental Paths-Limit validation
+
+The code-76 tuple codec, negotiation, family-local initial/incremental export,
+withdraw re-ranking, and route-refresh replay are covered in-tree. A real-peer
+receipt remains deferred: FRR has draft-04 source and topotest coverage, but the
+stock FRR 10.3.1 image used by M17 does not expose a stable configuration and
+inspection surface that this repository can assert without a dedicated image
+or version-specific CLI assumptions. Until that bounded M-slot is added,
+rustbgpd makes no cross-vendor interoperability claim for Paths-Limit.
+
 ### P1.5 — EVPN Route Reflector validation depth
 
 | Gap | What exists today | What's missing |

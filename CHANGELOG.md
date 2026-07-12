@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Experimental Add-Path Paths-Limit capability.** Neighbors and peer groups
+  can advertise a per-family receiver preference with `add_path.receive_max`.
+  Remote code-76 tuples cap only the matching outbound Add-Path family, with
+  configured, advertised, received, and effective values visible in
+  `rbgp neighbor` and its JSON output. The wire format follows the expired
+  `draft-abraitis-idr-addpath-paths-limit-04` and is explicitly experimental.
+  (LAN-242)
+
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths
   are staged for every gRPC/gNMI listener and published as one immutable
