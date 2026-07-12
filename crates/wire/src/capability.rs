@@ -501,7 +501,7 @@ impl Capability {
             }
             capability_code::PATHS_LIMIT => {
                 // draft-04: repeated AFI(2) + SAFI(1) + receive-limit(2) tuples.
-                if length == 0 || !usize::from(length).is_multiple_of(5) {
+                if !usize::from(length).is_multiple_of(5) {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
@@ -1815,6 +1815,12 @@ mod tests {
 
     #[test]
     fn paths_limit_malformed_tuple_is_preserved() {
+        let mut empty = Bytes::from_static(&[76, 0]);
+        assert_eq!(
+            Capability::decode(&mut empty).unwrap(),
+            Capability::PathsLimit(Vec::new())
+        );
+
         let mut bad_length = Bytes::from_static(&[76, 4, 0, 1, 1, 0]);
         assert!(matches!(
             Capability::decode(&mut bad_length).unwrap(),
