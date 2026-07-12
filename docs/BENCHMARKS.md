@@ -14,9 +14,9 @@ benchmarked build (earlier releases shipped a CI-profile, glibc-malloc
 build).
 
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
-current-main reconfirmation, distribution-fanout baseline, and memory
-attribution correction: 2026-06-02; structured high-N RIB memory profile:
-2026-06-08.
+current-main reconfirmation and memory attribution correction: 2026-06-02;
+structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
+distribution fanout A/B: 2026-07-12.
 
 | Field | Value |
 |-------|-------|
@@ -131,6 +131,9 @@ cargo bench --features bench-internals --bench fib_projection
 
 # Inbound UPDATE attribute-clone churn (requires bench-internals)
 cargo bench -p rustbgpd-transport --features bench-internals --bench inbound_attrs
+
+# Manager fanout with the authoritative exact export probe
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 
 # RPKI origin-validation microbench (RFC 6811)
 cargo bench -p rustbgpd-rpki --bench validate
@@ -417,37 +420,34 @@ not reachable in a normal build). Each measured pass is a *first* advertise
 (empty Adj-RIB-Out, so the equality-suppression fast path never fires) — the
 conservative upper bound on per-peer cost.
 
-Run it with:
+The benchmark now belongs to the transport crate so it can install a distinct
+authoritative `SessionExportEncoder` for every synthetic peer without creating
+a RIB-to-transport dependency cycle. Run it with:
 
 ```bash
-cargo bench -p rustbgpd-rib --features bench-internals --bench fanout
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
-| Peers (N) | No export policy | With export policy | Per (peer × prefix) |
-|-----------|------------------|--------------------|---------------------|
-| 1   | 12.4 µs | 14.8 µs | ~194 / ~231 ns |
-| 8   | 93.2 µs | 110 µs  | ~182 / ~215 ns |
-| 64  | 719 µs  | 847 µs  | ~176 / ~207 ns |
-| 256 | 2.92 ms | 3.46 ms | ~178 / ~211 ns |
+The July 2026 receipt compares the first real-probe baseline against ordered
+batch probing with the live prepared-attribute memo key:
 
-Fanout is cleanly **O(peers × changed prefixes)** — the per-advertisement cost
-holds at **~178 ns** across the whole range. The representative export chain
-(an eight-statement scalar-guard chain — seven `LOCAL_PREF`-range misses then a
-catch-all permit, so every route is evaluated against all eight) adds a flat
-**~18%** (~33 ns/advertisement) — real but *not* dominant: the fanout machinery
-(Loc-RIB lookup, route clone, Adj-RIB-Out insert, `OutboundRouteUpdate` build,
-channel send) is the other ~84%. Export-policy eval only dominates for *heavy*
-chains (AS_PATH regex / large-community scans), not the cheap scalar-guard
-filter measured here.
+| Peers | No policy baseline → memo | Change | Policy baseline → memo | Change |
+|-------|---------------------------|--------|------------------------|--------|
+| 1 | 45.970 → 35.488 µs | -22.3% | 49.477 → 39.558 µs | -20.3% |
+| 8 | 252.770 → 173.382 µs | -31.7% | 256.996 → 181.819 µs | -29.3% |
+| 64 | 1.920 → 1.328 ms | -30.5% | 1.919 → 1.326 ms | -30.9% |
+| 256 | 7.795 → 5.283 ms | -31.3% | 7.778 → 6.407 ms | -18.3% |
 
-For sizing: a route server with 256 clients absorbing a 64-prefix churn burst
-spends ~3 ms of single-threaded fanout; a full-table resync (≈100 k prefixes ×
-256 peers) extrapolates to ~4.5 s. Reducing that is a per-advertisement-cost or
-coalescing problem, not a parallelism one — distribution is single-task by design
-(`RibManager` owns all RIB state in one tokio task). These are a
-same-host (7970X) quick criterion run (reduced sampling); a pinned re-measure is
-deferred to the next quiet-runner pass, and any future fanout optimization is
-gated on this baseline.
+All Criterion mean-change 95% confidence intervals are entirely below zero.
+The full environment, commands, commit IDs, confidence intervals, correctness
+fence, and checked-in CSV are in the
+[`exact-export fanout receipt`](perf/exact-export-fanout-2026-07.md).
+
+The previous 2026-06 numbers used a permissive benchmark stub and did not time
+the exact export probe; they are superseded rather than a valid A/B baseline.
+The optimized path still builds one exact `UpdateMessage` per candidate. It
+only shares prepared attributes, so the benchmark continues to measure the
+full correctness gate while trapping the observed 18%..32% improvement.
 
 ### Bulk Initial Load
 

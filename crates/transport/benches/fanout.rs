@@ -16,6 +16,8 @@
 //!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
+//!
+//! Pinned A/B receipt: `docs/perf/exact-export-fanout-2026-07.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
