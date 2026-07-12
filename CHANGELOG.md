@@ -76,6 +76,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Outbound transport hardening closes EVPN overflow and bounded-probe
+  gaps.** A single EVPN announcement or withdrawal that cannot fit the
+  negotiated message ceiling now invokes the established Cease/8 outbound
+  saturation teardown, so an Established stream cannot survive with logical
+  Adj-RIB-Out ahead of the wire. IPv6-unicast and FlowSpec Extended Message
+  batches start with a bounded 1,024-entry probe, grow through exactly built
+  candidates up to a 4,096-entry probe ceiling, and remember successful and
+  failed bounds without losing, duplicating, or reordering NLRI. The
+  transport's defense-only RFC 9234 OTC gate is test-pinned as family-neutral
+  for both IPv4 and IPv6; the primary pre-commit RIB policy is unchanged.
+  (LAN-375)
+
 - **RFC 9234 OTC suppression now precedes Adj-RIB-Out commit.** IPv4/IPv6
   unicast routes carrying OTC toward a Provider, Peer, or Route Server are
   rejected while staging grouped and private export views, including ORR,
@@ -118,7 +130,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where every route is re-advertised at once). IPv4 body/MP_REACH,
   IPv4 MP_UNREACH, IPv6 MP_REACH/MP_UNREACH, and IPv4/IPv6 FlowSpec
   MP_REACH/MP_UNREACH now chunk to the negotiated maximum message size,
-  filling Extended Messages when negotiated. FlowSpec uses fallible structured
+  using bounded, exactly encoded probes that can grow beyond 1,024 entries
+  when Extended Messages are negotiated. FlowSpec uses fallible structured
   encoding throughout. Its RIB and withdrawal identity now carries AFI
   explicitly, so destination-less IPv4 and IPv6 rules can coexist and withdraw
   independently. A lone entry that still cannot fit tears the session down so

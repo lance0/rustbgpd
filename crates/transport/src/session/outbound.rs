@@ -1545,21 +1545,41 @@ impl PeerSession {
     where
         F: FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     {
-        // `max_len` is a byte budget, not an entry count. Keep the first
-        // clone/encode probe bounded, then let the exact encoded-size check
-        // halve it for large or variable-length NLRI. This avoids a 32K-entry
-        // speculative allocation when Extended Messages are negotiated.
+        // `max_len` is a byte budget, not an entry count. Keep every
+        // clone/encode probe bounded even when Extended Messages are
+        // negotiated, but grow beyond the conservative first 1,024 entries
+        // after an exact build proves that candidate fits. Remember the
+        // successful lower and failed upper bounds: after 1,024 succeeds and
+        // 2,048 fails, for example, probe 1,536, then binary-search between
+        // the proven bounds rather than retrying 2,048 or regressing below
+        // 1,024. Exact build/length checks still guard every enqueue.
+        const MAX_PROBE_ENTRIES: usize = 4096;
         let mut chunk_size = entries.len().clamp(1, 1024);
+        let max_probe = entries.len().clamp(1, MAX_PROBE_ENTRIES);
+        let mut successful_lower: usize = 0;
+        let mut failed_upper: Option<usize> = None;
         let mut idx = 0;
         while idx < entries.len() {
             let end = (idx + chunk_size).min(entries.len());
+            let probe_size = end - idx;
             let candidate = build(&entries[idx..end]);
             let needs_smaller = candidate
                 .as_ref()
                 .map_or(true, |message| message.encoded_len() > max_len);
             if needs_smaller {
-                if chunk_size > 1 {
-                    chunk_size = (chunk_size / 2).max(1);
+                if probe_size > 1 {
+                    failed_upper =
+                        Some(failed_upper.map_or(probe_size, |upper| upper.min(probe_size)));
+                    if successful_lower.saturating_add(1) >= probe_size {
+                        // Entry sizes can vary within a family. A count that
+                        // fitted an earlier slice is not proof for this one.
+                        successful_lower = 0;
+                    }
+                    chunk_size = if successful_lower + 1 < probe_size {
+                        successful_lower + (probe_size - successful_lower) / 2
+                    } else {
+                        (probe_size / 2).max(1)
+                    };
                     continue;
                 }
                 match candidate {
@@ -1587,6 +1607,16 @@ impl PeerSession {
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
+            if idx < entries.len() {
+                successful_lower = successful_lower.max(probe_size);
+                chunk_size = match failed_upper {
+                    Some(upper) if successful_lower + 1 < upper => {
+                        successful_lower + (upper - successful_lower) / 2
+                    }
+                    Some(_) => successful_lower,
+                    None => successful_lower.saturating_mul(2).min(max_probe),
+                };
+            }
         }
         true
     }
@@ -1607,7 +1637,7 @@ impl PeerSession {
         // Initial chunk size: 1000 fits comfortably under the 65535-byte
         // Extended Messages limit even for Type 5/IPv6 routes (~60 B each)
         // and shrinks on overflow for the standard 4096-byte limit.
-        let mut chunk_size: usize = 1000;
+        let mut chunk_size = routes.len().clamp(1, 1000);
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
@@ -1641,16 +1671,17 @@ impl PeerSession {
                     // and continued, returning `true` — a silent desync
                     // because RIB has already committed the route to
                     // Adj-RIB-Out and now believes the peer holds it.
-                    // Failing the send path lets the dirty-resync mechanism
-                    // notice and retry; if the route is structurally
-                    // un-sendable the peer will observe the discrepancy
-                    // rather than rustbgpd lying about the advertise state.
+                    // The caller cannot report this synchronous failure back
+                    // across the RIB/session boundary. Use the established
+                    // Cease/8 hard teardown so the stream cannot remain
+                    // Established with Adj-RIB-Out ahead of the wire.
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
                         max = max_len,
-                        "single EVPN route exceeds maximum message length — failing send so resync can retry"
+                        "single EVPN route exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
+                    self.trigger_outbound_saturation_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1675,7 +1706,7 @@ impl PeerSession {
         four_octet_as: bool,
         max_len: usize,
     ) -> bool {
-        let mut chunk_size: usize = 1000;
+        let mut chunk_size = routes.len().clamp(1, 1000);
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
@@ -1704,8 +1735,9 @@ impl PeerSession {
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
                         max = max_len,
-                        "single EVPN withdrawal exceeds maximum message length — failing send so resync can retry"
+                        "single EVPN withdrawal exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
+                    self.trigger_outbound_saturation_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -3172,6 +3204,130 @@ pub(super) fn remove_private_asns(
                 })
                 .collect();
             AsPath { segments }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, MacAddress, MplsLabel, Origin,
+        RouteDistinguisher, notification::NotificationCode, notification::cease_subcode,
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    fn make_test_session() -> PeerSession {
+        let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        peer_config.families = vec![(Afi::L2Vpn, Safi::Evpn)];
+        let config =
+            crate::config::TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(8);
+        PeerSession::new(
+            config,
+            rustbgpd_telemetry::BgpMetrics::new(),
+            command_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+    }
+
+    async fn connected_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    async fn read_message(stream: &mut TcpStream) -> Message {
+        let mut header = [0_u8; 19];
+        stream.read_exact(&mut header).await.unwrap();
+        let message_len = usize::from(u16::from_be_bytes([header[16], header[17]]));
+        let mut body = vec![0_u8; message_len - header.len()];
+        stream.read_exact(&mut body).await.unwrap();
+        let mut complete = header.to_vec();
+        complete.extend_from_slice(&body);
+        let mut bytes = Bytes::from(complete);
+        rustbgpd_wire::decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+    }
+
+    /// A single EVPN NLRI that cannot fit the negotiated message ceiling is
+    /// not a recoverable batch error: the RIB has already committed the
+    /// logical advertisement or withdrawal. Pin both private helper branches
+    /// with an artificial ceiling so even the otherwise-unreachable valid
+    /// withdrawal overflow emits a final Cease/8 and hard-closes the stream.
+    #[tokio::test]
+    async fn evpn_single_entry_overflow_tears_down_announce_and_withdraw() {
+        let route = EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0x02, 0, 0, 0xaa, 0xbb, 0xcc]),
+            ip: Some(IpAddr::V6("2001:db8::1".parse().unwrap())),
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        });
+
+        for announce in [true, false] {
+            let mut session = make_test_session();
+            let (client, mut server) = connected_stream_pair().await;
+            session.test_install_stream(client);
+
+            let sent = if announce {
+                session.send_evpn_reach_chunked(
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    &[PathAttribute::Origin(Origin::Igp)],
+                    std::slice::from_ref(&route),
+                    true,
+                    1,
+                )
+            } else {
+                session.send_evpn_unreach_chunked(std::slice::from_ref(&route), true, 1)
+            };
+            assert!(!sent, "overflowing EVPN send must fail closed");
+            assert!(session.read_half.is_none());
+            assert!(session.writer_bulk_tx.is_none());
+            assert!(session.writer_priority_tx.is_none());
+
+            let Message::Notification(notification) = read_message(&mut server).await else {
+                panic!("overflowing EVPN send must emit a NOTIFICATION");
+            };
+            assert_eq!(notification.code, NotificationCode::Cease);
+            assert_eq!(notification.subcode, cease_subcode::OUT_OF_RESOURCES);
+
+            let join = session
+                .writer_join
+                .take()
+                .expect("teardown keeps writer join handle for run-loop observation");
+            let result = timeout(Duration::from_secs(2), join)
+                .await
+                .expect("writer exits after EVPN overflow")
+                .expect("writer task must not panic");
+            assert!(matches!(
+                result,
+                Err(super::super::writer::WriterExit::TornDown)
+            ));
+            let mut trailing = [0_u8; 1];
+            assert_eq!(
+                timeout(Duration::from_secs(1), server.read(&mut trailing))
+                    .await
+                    .expect("writer hard-close reaches EOF")
+                    .unwrap(),
+                0,
+                "Cease/8 must be the final frame"
+            );
         }
     }
 }
