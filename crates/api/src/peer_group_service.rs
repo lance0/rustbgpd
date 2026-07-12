@@ -134,12 +134,14 @@ fn proto_definition_to_input(
         add_path: definition
             .add_path_receive
             .map(|receive| AddPathDefinition {
+                receive_max: None,
                 receive,
                 send: definition.add_path_send.unwrap_or(false),
                 send_max: definition.add_path_send_max,
             })
             .or_else(|| {
                 definition.add_path_send.map(|send| AddPathDefinition {
+                    receive_max: None,
                     receive: false,
                     send,
                     send_max: definition.add_path_send_max,

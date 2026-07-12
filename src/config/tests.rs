@@ -2694,10 +2694,12 @@ remote_asn = 65002
 
 [neighbors.add_path]
 receive = true
+receive_max = 3
 "#;
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
     assert!(peers[0].0.peer.add_path_receive);
+    assert_eq!(peers[0].0.peer.paths_limit_receive_max, 3);
 }
 
 #[test]

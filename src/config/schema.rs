@@ -924,6 +924,8 @@ pub struct AddPathConfig {
     pub send: bool,
     /// Maximum number of paths to advertise per prefix (0 or absent = unlimited).
     pub send_max: Option<u32>,
+    /// Experimental Paths-Limit preference per received Add-Path family.
+    pub receive_max: Option<u16>,
 }
 
 /// Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881, ADR-0067).

@@ -398,7 +398,37 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         add_path_receive: info.add_path_receive,
         add_path_send: info.add_path_send,
         add_path_send_max: info.add_path_send_max,
+        paths_limit_receive_max: u32::from(info.paths_limit_receive_max),
     };
+
+    let paths_limits = info
+        .families
+        .iter()
+        .filter_map(|family| {
+            let received = info
+                .peer_paths_limits
+                .iter()
+                .find_map(|(candidate, value)| (candidate == family).then_some(u32::from(*value)))
+                .unwrap_or(0);
+            let effective = info
+                .effective_add_path_send_limits
+                .iter()
+                .find_map(|(candidate, value)| (candidate == family).then_some(*value))
+                .unwrap_or(0);
+            let advertised = if info.add_path_receive {
+                u32::from(info.paths_limit_receive_max)
+            } else {
+                0
+            };
+            (advertised != 0 || received != 0 || effective != 0).then(|| proto::PathsLimitState {
+                family: family_to_string(family.0, family.1),
+                configured_receive_max: u32::from(info.paths_limit_receive_max),
+                advertised_receive_max: advertised,
+                received_receive_max: received,
+                effective_send_max: effective,
+            })
+        })
+        .collect();
 
     let state = match info.state {
         rustbgpd_fsm::SessionState::Idle => proto::SessionState::Idle,
@@ -422,6 +452,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         messages_received: info.messages_received,
         messages_sent: info.messages_sent,
         route_reflector_client: info.route_reflector_client,
+        paths_limits,
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
         is_dynamic: info.is_dynamic,
@@ -602,6 +633,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
+            paths_limit_receive_max: 0,
             local_role,
             strict_role: config.strict_role,
             // ORF and IPv6-only peering are not exposed on the runtime
@@ -1133,6 +1165,7 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            paths_limit_receive_max: 0,
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,

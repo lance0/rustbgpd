@@ -182,6 +182,16 @@
           "type": "boolean",
           "default": false
         },
+        "receive_max": {
+          "description": "Experimental Paths-Limit preference per received Add-Path family.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "send": {
           "description": "Advertise multiple paths per prefix to this peer (RFC 7911).",
           "type": "boolean",

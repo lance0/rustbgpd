@@ -48,6 +48,7 @@ fn api_add_path_to_config(add_path: Option<AddPathDefinition>) -> Option<AddPath
         receive: add_path.receive,
         send: add_path.send,
         send_max: add_path.send_max,
+        receive_max: add_path.receive_max,
     })
 }
 
@@ -67,6 +68,7 @@ fn config_add_path_to_api(add_path: Option<&AddPathConfig>) -> Option<AddPathDef
         receive: add_path.receive,
         send: add_path.send,
         send_max: add_path.send_max,
+        receive_max: add_path.receive_max,
     })
 }
 
@@ -444,6 +446,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                             send: cfg.add_path_send,
                             send_max: if cfg.add_path_send_max > 0 {
                                 Some(cfg.add_path_send_max)
+                            } else {
+                                None
+                            },
+                            receive_max: if cfg.paths_limit_receive_max > 0 {
+                                Some(cfg.paths_limit_receive_max)
                             } else {
                                 None
                             },
@@ -861,6 +868,7 @@ remote_asn = 65002
                     add_path_receive: false,
                     add_path_send: false,
                     add_path_send_max: 0,
+                    paths_limit_receive_max: 0,
                     local_role: None,
                     strict_role: false,
                     prefix_orf_receive: false,
