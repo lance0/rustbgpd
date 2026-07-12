@@ -1360,23 +1360,36 @@ fn otc_egress_preserves_existing_otc() {
 #[test]
 fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
     for role in [BgpRole::Customer, BgpRole::Peer, BgpRole::RouteServerClient] {
-        let mut session = make_test_session(65001, 65002);
-        session.config.peer.local_role = Some(role);
-        let route = replace_route_attrs(
-            &make_route(100),
-            vec![
+        for (prefix, route_next_hop) in [
+            (
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            ),
+            (
+                Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 64)),
+                IpAddr::V6("2001:db8::2".parse().unwrap()),
+            ),
+        ] {
+            let mut session = make_test_session(65001, 65002);
+            session.config.peer.local_role = Some(role);
+            let mut attributes = vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],
                 }),
-                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
                 PathAttribute::OnlyToCustomer(65002),
-            ],
-        );
-        assert!(
-            session.otc_egress_blocks_unicast(&route),
-            "role {role:?} must not propagate an OTC-tagged unicast route"
-        );
+            ];
+            if let IpAddr::V4(next_hop) = route_next_hop {
+                attributes.push(PathAttribute::NextHop(next_hop));
+            }
+            let mut route = replace_route_attrs(&make_route(100), attributes);
+            route.prefix = prefix;
+            route.next_hop = route_next_hop;
+            assert!(
+                session.otc_egress_blocks_unicast(&route),
+                "role {role:?} must not propagate an OTC-tagged {prefix} route"
+            );
+        }
     }
 }
 #[test]
@@ -3629,6 +3642,213 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
         .await
         .is_err(),
         "Extended Message peer should receive this withdrawal in one UPDATE"
+    );
+}
+
+/// Extended Messages should not freeze MP batches at the conservative 1,024
+/// entry first probe. Use a large shared attribute so 1,024 entries fit while
+/// 2,048 do not; the sender must remember that failed upper bound, make
+/// monotonic progress with a later in-between probe, and preserve exact order.
+#[tokio::test]
+async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    negotiated.peer_extended_message = true;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let padding = Bytes::from(vec![0x5a; 36_000]);
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+            type_code: 99,
+            data: padding,
+        }),
+    ]);
+    let count = 3_500_u32;
+    let expected: Vec<Prefix> = (0..count)
+        .map(|i| {
+            Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::from(0x2001_0db8_0003_0000_0000_0000_0000_0000_u128 + u128::from(i)),
+                128,
+            ))
+        })
+        .collect();
+    let routes: Vec<Route> = expected
+        .iter()
+        .copied()
+        .map(|prefix| Route {
+            prefix,
+            next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            attributes: Arc::clone(&attrs),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: vec![None; count as usize].into(),
+        ..empty_outbound_update()
+    });
+
+    let mut actual = Vec::new();
+    let mut chunk_sizes = Vec::new();
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(
+            raw.len() <= 65_535,
+            "Extended UPDATE is {} bytes",
+            raw.len()
+        );
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+                .unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let announced = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpReachNlri(mp) => Some(&mp.announced),
+                _ => None,
+            })
+            .expect("IPv6 announcement uses MP_REACH");
+        chunk_sizes.push(announced.len());
+        actual.extend(announced.iter().map(|entry| entry.prefix));
+    }
+    assert_eq!(
+        actual, expected,
+        "IPv6 NLRI must be emitted exactly once in order"
+    );
+    assert_eq!(chunk_sizes.first(), Some(&1024));
+    assert!(
+        chunk_sizes.iter().any(|size| *size > 1024),
+        "a proven Extended Message candidate must grow beyond 1,024: {chunk_sizes:?}"
+    );
+}
+
+/// Pin the same bounded-growth invariant for the fallible `FlowSpec` encoder.
+#[tokio::test]
+async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::FlowSpec)];
+    negotiated.peer_extended_message = true;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let padding = Bytes::from(vec![0xa5; 36_000]);
+    let count = 3_500_u32;
+    let rules: Vec<FlowSpecRule> = (0..count)
+        .map(|i| FlowSpecRule {
+            components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
+                Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new(
+                        Ipv6Addr::from(
+                            0x2001_0db8_0004_0000_0000_0000_0000_0000_u128 + u128::from(i),
+                        ),
+                        128,
+                    ),
+                    offset: 0,
+                },
+            ))],
+        })
+        .collect();
+    let routes = rules
+        .iter()
+        .cloned()
+        .map(|rule| FlowSpecRoute {
+            rule,
+            afi: Afi::Ipv6,
+            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+                    flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                        | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+                    type_code: 99,
+                    data: padding.clone(),
+                }),
+            ],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        flowspec_announce: routes,
+        ..empty_outbound_update()
+    });
+
+    let mut actual = Vec::new();
+    let mut chunk_sizes = Vec::new();
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(
+            raw.len() <= 65_535,
+            "Extended UPDATE is {} bytes",
+            raw.len()
+        );
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+                .unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let announced = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpReachNlri(mp) => Some(&mp.flowspec_announced),
+                _ => None,
+            })
+            .expect("FlowSpec announcement uses MP_REACH");
+        chunk_sizes.push(announced.len());
+        actual.extend(announced.iter().cloned());
+    }
+    assert_eq!(
+        actual, rules,
+        "FlowSpec rules must be emitted exactly once in order"
+    );
+    assert_eq!(chunk_sizes.first(), Some(&1024));
+    assert!(
+        chunk_sizes.iter().any(|size| *size > 1024),
+        "a proven Extended Message candidate must grow beyond 1,024: {chunk_sizes:?}"
     );
 }
 
