@@ -93,6 +93,59 @@ impl ExactExportEncoder for MockExactExportEncoder {
     }
 }
 
+struct WrongCardinalityBatchEncoder {
+    probed: Arc<Mutex<Vec<ExactExportKey>>>,
+}
+
+struct WrongCardinalityBatchSnapshot {
+    probed: Arc<Mutex<Vec<ExactExportKey>>>,
+}
+
+impl ExactExportSnapshot for WrongCardinalityBatchSnapshot {
+    fn owner_id(&self) -> u64 {
+        2
+    }
+
+    fn generation(&self) -> u64 {
+        1
+    }
+
+    fn probe_announcement(
+        &self,
+        candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        self.probed.lock().unwrap().push(candidate.key());
+        Ok(ExactExportResult {
+            encoded_len: 64,
+            max_len: 4_096,
+            generation: 1,
+        })
+    }
+
+    fn probe_announcements(
+        &self,
+        _candidates: &[ExactExportCandidate<'_>],
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        Vec::new()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl ExactExportEncoder for WrongCardinalityBatchEncoder {
+    fn owner_id(&self) -> u64 {
+        2
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
+        Arc::new(WrongCardinalityBatchSnapshot {
+            probed: Arc::clone(&self.probed),
+        })
+    }
+}
+
 #[derive(Default)]
 struct ExactBatch {
     announce: Vec<Route>,
@@ -294,6 +347,52 @@ async fn every_route_family_is_probed_before_commit() {
     );
 }
 
+#[tokio::test]
+async fn batched_probe_results_filter_the_matching_family_in_order() {
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 22));
+    let source = Ipv4Addr::new(198, 51, 100, 22);
+    let unicast = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 22, 0), 24), source);
+    let flowspec = make_flowspec_route(source);
+    let evpn = make_evpn_imet(source, 221);
+    let bgpls = make_bgpls_route(source, 0x42, 200);
+    let vpn = make_vpn_rib_route(source, 44, 2044, 200);
+    let labeled = make_labeled_rib_route(source, 45, 2045, 200);
+    let rtc = make_rtc_rib_route(source, 46, 200);
+    let rejected = HashSet::from([
+        ExactExportKey::FlowSpec(flowspec.selection_key()),
+        ExactExportKey::BgpLs(bgpls.key()),
+        ExactExportKey::Labeled(labeled.key()),
+    ]);
+    let encoder = MockExactExportEncoder::accepting(22);
+    encoder.set_profile(22, rejected.clone());
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, peer, encoder);
+
+    assert!(commit_batch(
+        &mut manager,
+        peer,
+        ExactBatch {
+            announce: vec![unicast],
+            flowspec_announce: vec![flowspec],
+            evpn_announce: vec![evpn],
+            bgpls_announce: vec![bgpls],
+            vpn_announce: vec![vpn],
+            labeled_announce: vec![labeled],
+            rtc_announce: vec![rtc],
+            ..ExactBatch::default()
+        }
+    ));
+    let update = rx.recv().await.unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert!(update.flowspec_announce.is_empty());
+    assert_eq!(update.evpn_announce.len(), 1);
+    assert!(update.bgpls_announce.is_empty());
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert!(update.labeled_announce.is_empty());
+    assert_eq!(update.rtc_announce.len(), 1);
+    assert_eq!(manager.peer_unexportable[&peer], rejected);
+}
+
 #[test]
 fn route_bearing_commit_without_encoder_fails_closed() {
     let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
@@ -315,6 +414,33 @@ fn route_bearing_commit_without_encoder_fails_closed() {
     ));
     assert!(!manager.adj_ribs_out.contains_key(&peer));
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn malformed_batch_probe_cardinality_falls_back_to_scalar() {
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 33));
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 33, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 33),
+    );
+    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let probed = Arc::new(Mutex::new(Vec::new()));
+    let encoder = Arc::new(WrongCardinalityBatchEncoder {
+        probed: Arc::clone(&probed),
+    });
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, peer, encoder);
+
+    assert!(commit_batch(
+        &mut manager,
+        peer,
+        ExactBatch {
+            announce: vec![route],
+            ..ExactBatch::default()
+        }
+    ));
+    assert_eq!(rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(*probed.lock().unwrap(), vec![key]);
 }
 
 #[test]

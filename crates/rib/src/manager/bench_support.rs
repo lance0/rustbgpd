@@ -35,7 +35,8 @@ impl RibManager {
     /// empty for the measured pass, independent of `channel_capacity`.
     /// `make_exact_export_encoder` must return a fresh authoritative encoder
     /// for each synthetic session so the measured path includes the same exact
-    /// wire-size probe and owner fencing as production.
+    /// wire-size probe and immutable session snapshot as production. The
+    /// writer-side owner fence is outside this RIB fanout benchmark.
     ///
     /// # Panics
     /// If `n_peers` exceeds `u32::MAX` — far beyond any realistic bench.

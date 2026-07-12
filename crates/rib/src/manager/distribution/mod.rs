@@ -702,40 +702,55 @@ impl RibManager {
             use crate::update::{ExactExportCandidate, ExactExportKey};
 
             let mut previously_advertised = group_prior;
-            let candidate_keys = announce
-                .iter()
-                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
-                .chain(
-                    flowspec_announce
+            let mut owed_withdrawals = HashSet::new();
+            let mut new_rejections = Vec::new();
+            debug_assert_eq!(announce.len(), next_hop_override.len());
+            let family_lengths = [
+                announce.len(),
+                flowspec_announce.len(),
+                evpn_announce.len(),
+                bgpls_announce.len(),
+                vpn_announce.len(),
+                labeled_announce.len(),
+                rtc_announce.len(),
+            ];
+            let (candidate_keys, probe_results) = {
+                let candidates = announce
+                    .iter()
+                    .zip(next_hop_override.iter())
+                    .map(|(route, next_hop)| ExactExportCandidate::Unicast {
+                        route,
+                        next_hop_override: next_hop.as_ref(),
+                    })
+                    .chain(flowspec_announce.iter().map(ExactExportCandidate::FlowSpec))
+                    .chain(evpn_announce.iter().map(ExactExportCandidate::Evpn))
+                    .chain(bgpls_announce.iter().map(ExactExportCandidate::BgpLs))
+                    .chain(vpn_announce.iter().map(ExactExportCandidate::Vpn))
+                    .chain(labeled_announce.iter().map(ExactExportCandidate::Labeled))
+                    .chain(rtc_announce.iter().map(ExactExportCandidate::Rtc))
+                    .collect::<Vec<_>>();
+                let candidate_keys = candidates
+                    .iter()
+                    .map(ExactExportCandidate::key)
+                    .collect::<Vec<_>>();
+                let results = snapshot.probe_announcements(&candidates);
+                let results = if results.len() == candidates.len() {
+                    results
+                } else {
+                    warn!(
+                        %peer,
+                        expected = candidates.len(),
+                        actual = results.len(),
+                        "exact export batch probe violated its result cardinality contract — falling back to fail-closed scalar probes"
+                    );
+                    candidates
                         .iter()
-                        .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
-                )
-                .chain(
-                    evpn_announce
-                        .iter()
-                        .map(|route| ExactExportKey::Evpn(route.key())),
-                )
-                .chain(
-                    bgpls_announce
-                        .iter()
-                        .map(|route| ExactExportKey::BgpLs(route.key())),
-                )
-                .chain(
-                    vpn_announce
-                        .iter()
-                        .map(|route| ExactExportKey::Vpn(route.key())),
-                )
-                .chain(
-                    labeled_announce
-                        .iter()
-                        .map(|route| ExactExportKey::Labeled(route.key())),
-                )
-                .chain(
-                    rtc_announce
-                        .iter()
-                        .map(|route| ExactExportKey::Rtc(route.key())),
-                )
-                .collect::<Vec<_>>();
+                        .copied()
+                        .map(|candidate| snapshot.probe_announcement(candidate))
+                        .collect()
+                };
+                (candidate_keys, results)
+            };
             if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                 previously_advertised.extend(
                     candidate_keys
@@ -745,13 +760,13 @@ impl RibManager {
                 );
             }
 
-            let mut owed_withdrawals = HashSet::new();
-            let mut new_rejections = Vec::new();
-            {
+            let keep = {
                 let rejected = self.peer_unexportable.entry(peer).or_default();
-                let mut accepts = |candidate: ExactExportCandidate<'_>| {
-                    let key = candidate.key();
-                    match snapshot.probe_announcement(candidate) {
+                candidate_keys
+                    .iter()
+                    .cloned()
+                    .zip(probe_results)
+                    .map(|(key, result)| match result {
                         Ok(_) => {
                             rejected.remove(&key);
                             true
@@ -766,43 +781,48 @@ impl RibManager {
                             }
                             false
                         }
-                    }
-                };
-
-                debug_assert_eq!(announce.len(), next_hop_override.len());
-                let unicast_keep = announce
-                    .iter()
-                    .zip(next_hop_override.iter())
-                    .map(|(route, next_hop)| {
-                        accepts(ExactExportCandidate::Unicast {
-                            route,
-                            next_hop_override: next_hop.as_ref(),
-                        })
                     })
+                    .collect::<Vec<_>>()
+            };
+
+            let mut offset = 0;
+            let unicast_keep = &keep[offset..offset + family_lengths[0]];
+            offset += family_lengths[0];
+            if unicast_keep.iter().any(|keep| !keep) {
+                let permitted_routes = announce
+                    .iter()
+                    .cloned()
+                    .zip(unicast_keep.iter().copied())
+                    .filter_map(|(route, keep)| keep.then_some(route))
                     .collect::<Vec<_>>();
-                if unicast_keep.iter().any(|keep| !keep) {
-                    let permitted_routes = announce
-                        .iter()
-                        .cloned()
-                        .zip(unicast_keep.iter().copied())
-                        .filter_map(|(route, keep)| keep.then_some(route))
-                        .collect::<Vec<_>>();
-                    let permitted_next_hops = next_hop_override
-                        .iter()
-                        .cloned()
-                        .zip(unicast_keep.iter().copied())
-                        .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
-                        .collect::<Vec<_>>();
-                    announce = permitted_routes.into();
-                    next_hop_override = permitted_next_hops.into();
-                }
-                flowspec_announce.retain(|route| accepts(ExactExportCandidate::FlowSpec(route)));
-                evpn_announce.retain(|route| accepts(ExactExportCandidate::Evpn(route)));
-                bgpls_announce.retain(|route| accepts(ExactExportCandidate::BgpLs(route)));
-                vpn_announce.retain(|route| accepts(ExactExportCandidate::Vpn(route)));
-                labeled_announce.retain(|route| accepts(ExactExportCandidate::Labeled(route)));
-                rtc_announce.retain(|route| accepts(ExactExportCandidate::Rtc(route)));
+                let permitted_next_hops = next_hop_override
+                    .iter()
+                    .cloned()
+                    .zip(unicast_keep.iter().copied())
+                    .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
+                    .collect::<Vec<_>>();
+                announce = permitted_routes.into();
+                next_hop_override = permitted_next_hops.into();
             }
+
+            let mut flowspec_keep = keep[offset..offset + family_lengths[1]].iter().copied();
+            flowspec_announce.retain(|_| flowspec_keep.next().unwrap_or(false));
+            offset += family_lengths[1];
+            let mut evpn_keep = keep[offset..offset + family_lengths[2]].iter().copied();
+            evpn_announce.retain(|_| evpn_keep.next().unwrap_or(false));
+            offset += family_lengths[2];
+            let mut bgpls_keep = keep[offset..offset + family_lengths[3]].iter().copied();
+            bgpls_announce.retain(|_| bgpls_keep.next().unwrap_or(false));
+            offset += family_lengths[3];
+            let mut vpn_keep = keep[offset..offset + family_lengths[4]].iter().copied();
+            vpn_announce.retain(|_| vpn_keep.next().unwrap_or(false));
+            offset += family_lengths[4];
+            let mut labeled_keep = keep[offset..offset + family_lengths[5]].iter().copied();
+            labeled_announce.retain(|_| labeled_keep.next().unwrap_or(false));
+            offset += family_lengths[5];
+            let mut rtc_keep = keep[offset..offset + family_lengths[6]].iter().copied();
+            rtc_announce.retain(|_| rtc_keep.next().unwrap_or(false));
+            debug_assert_eq!(offset + family_lengths[6], keep.len());
 
             for key in owed_withdrawals {
                 match key {

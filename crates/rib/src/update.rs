@@ -569,6 +569,21 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
         candidate: ExactExportCandidate<'_>,
     ) -> Result<ExactExportResult, ExactExportError>;
 
+    /// Probe an ordered batch of post-policy routes. The default preserves
+    /// scalar semantics exactly; implementations may override it to share
+    /// preparation work within this call. Results must have the same length
+    /// and order as `candidates`.
+    fn probe_announcements(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        candidates
+            .iter()
+            .copied()
+            .map(|candidate| self.probe_announcement(candidate))
+            .collect()
+    }
+
     /// Concrete type hook used by the owning transport at the trust boundary.
     fn as_any(&self) -> &dyn Any;
 }
