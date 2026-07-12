@@ -1189,6 +1189,9 @@ impl RibManager {
             RibUpdate::QueryPeerUpdateGroup { peer, reply } => {
                 self.handle_query_peer_update_group(peer, reply);
             }
+            RibUpdate::QueryUpdateGroupSnapshot { reply } => {
+                self.handle_query_update_group_snapshot(reply);
+            }
             #[cfg(test)]
             RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
                 self.handle_test_query_vpn_advertised(peer, reply);

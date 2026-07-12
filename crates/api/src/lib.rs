@@ -36,6 +36,7 @@ pub mod server;
 #[cfg(test)]
 mod test_support;
 
+pub use config_service::update_group_impact_to_proto;
 pub use evpn_service::EvpnService;
 
 /// Public-facing alias for the proto-encoding helpers used by the

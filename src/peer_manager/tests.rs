@@ -124,6 +124,157 @@ fn test_peer_manager() -> PeerManager {
     )
 }
 
+#[tokio::test]
+async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+    );
+    let candidate = toml::to_string_pretty(&config).unwrap();
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("first plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+            .unwrap();
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("apply re-plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot {
+                peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
+                    peer: "192.0.2.1".parse().unwrap(),
+                    input: rustbgpd_rib::UpdateGroupClassifierInput {
+                        policy_fingerprint: None,
+                        policy_provenance: None,
+                        policy_requires_peer_context: false,
+                        target_is_ebgp: false,
+                        target_is_rr_client: true,
+                        sendable_families: vec![(1, 1)],
+                        llgr_families: vec![],
+                        add_path_send: false,
+                        per_client_best: false,
+                        orr_vantage: None,
+                        orf_installed: false,
+                    },
+                    classification: rustbgpd_rib::UpdateGroupClassification::Groupable(
+                        rustbgpd_rib::UpdateGroupFingerprint {
+                            policy_fingerprint: None,
+                            target_is_ebgp: false,
+                            target_is_rr_client: true,
+                            sendable_ipv4_unicast: true,
+                            sendable_ipv6_unicast: false,
+                            sendable_vpnv4: false,
+                            sendable_vpnv6: false,
+                            rtc_negotiated: false,
+                            llgr_families: vec![],
+                        },
+                    ),
+                    runtime_membership: "group:0".to_string(),
+                }],
+            })
+            .unwrap();
+    });
+    let planned = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+    let error = mgr
+        .plan_config_transaction(
+            "this is not valid TOML =",
+            Some(&planned.runtime_snapshot_token),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::StaleSnapshot { .. }
+    ));
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn candidate_neighbor_resolution_failure_is_invalid_candidate() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+    );
+    let mut candidate = toml::to_string_pretty(&config).unwrap();
+    candidate.push_str(
+        r#"
+[[neighbors]]
+address = "fe80::2"
+interface = "rustbgpd-interface-that-does-not-exist"
+remote_asn = 65002
+"#,
+    );
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+            .unwrap();
+    });
+
+    let error = mgr
+        .plan_config_transaction(&candidate, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::InvalidCandidate(_)
+    ));
+    responder.await.unwrap();
+}
+
 async fn query_session_event_history(
     mgr: &PeerManager,
     peer: Option<IpAddr>,
