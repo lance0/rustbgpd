@@ -403,7 +403,8 @@ message NeighborState {
   bool route_reflector_client = 25;
   // Configured transport authentication for this session.
   AuthenticationMode authentication = 26;
-  // Connection-time Linux TCP-AO inspection; absent when not AO or disconnected.
+  // Best-effort connection-time Linux TCP-AO inspection; absent when not AO
+  // or when no snapshot is available (including disconnect or inspection failure).
   TcpAoState tcp_ao = 27;
   // Health derived from the configured mode and connection-time inspection.
   // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available

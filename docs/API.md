@@ -246,10 +246,10 @@ config-file-only: runtime range CRUD rejects protected ranges and overlaps.
 Runtime key rotation is not exposed.
 
 `NeighborState.authentication` reports `PLAINTEXT`, `MD5`, or `TCP_AO` from
-the effective transport configuration. For a currently connected TCP-AO
-session, `NeighborState.tcp_ao` contains the connection-time socket inspection:
-current/RNext KeyIDs and Linux verification/error counters. The message is
-cleared on disconnect; counters are not continuously refreshed.
+the effective transport configuration. When socket inspection succeeds for a
+connected TCP-AO session, `NeighborState.tcp_ao` contains the connection-time
+current/RNext KeyIDs and Linux verification/error counters. The best-effort
+message is cleared on disconnect; counters are not continuously refreshed.
 `NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
 `UNAVAILABLE` when TCP-AO is configured but there is no socket snapshot
 (including disconnect and inspection failure), `HEALTHY` when the snapshot has
