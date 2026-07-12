@@ -23,7 +23,24 @@ impl PeerSession {
             return;
         };
         match inspect(read_half.as_ref()) {
-            Ok(snapshot) => self.tcp_ao_info = Some(snapshot),
+            Ok(mut snapshot) => {
+                if self.tcp_ao_key_metadata.is_empty() {
+                    self.tcp_ao_key_metadata = super::tcp_ao_key_metadata(&self.config, None);
+                }
+                for key in &mut snapshot.keys {
+                    if let Some(metadata) = self.tcp_ao_key_metadata.iter().find(|metadata| {
+                        metadata.peer == key.peer
+                            && metadata.prefix_len == key.prefix_len
+                            && metadata.send_id == key.send_id
+                            && metadata.recv_id == key.recv_id
+                            && metadata.algorithm == key.algorithm
+                    }) {
+                        key.preferred = metadata.preferred;
+                        key.deprecated = metadata.deprecated;
+                    }
+                }
+                self.tcp_ao_info = Some(snapshot);
+            }
             Err(error) => {
                 if self.tcp_ao_info.is_some() {
                     warn!(
@@ -122,7 +139,7 @@ impl PeerSession {
                     flap_count: self.flap_count,
                     uptime_secs,
                     last_error: self.last_error.clone(),
-                    tcp_ao_info: self.tcp_ao_info.map(Box::new),
+                    tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
                     tcp_ao_protected: self.tcp_ao_protected,
                 };
                 let _ = reply.send(state);

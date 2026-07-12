@@ -230,7 +230,13 @@ impl BgpListener {
             return Ok(None);
         };
 
-        match crate::socket_opts::get_tcp_ao_info(stream) {
+        match crate::socket_opts::get_tcp_ao_info_for_config(
+            stream,
+            key.peer,
+            key.prefix_len,
+            &key.config,
+            true,
+        ) {
             Ok(info) => {
                 info!(
                     peer = %peer_ip,
@@ -283,6 +289,10 @@ fn accepted_tcp_ao_info_is_valid(
         && info.pkt_bad == 0
         && info.pkt_key_not_found == 0
         && info.pkt_ao_required == 0
+        && info.keys.len() == 1
+        && info.keys[0].is_current
+        && info.keys[0].is_rnext
+        && info.keys[0].pkt_bad == 0
 }
 
 #[cfg(test)]
@@ -394,6 +404,20 @@ mod tests {
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
+            keys: vec![crate::TcpAoKeyState {
+                peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                prefix_len: 32,
+                send_id: current_key,
+                recv_id: 9,
+                algorithm: TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: true,
+                preferred: false,
+                deprecated: false,
+                vrf_ifindex: None,
+                pkt_good,
+                pkt_bad: 0,
+            }],
         }
     }
 
@@ -497,7 +521,7 @@ mod tests {
         assert!(accepted_tcp_ao_info_is_valid(&valid, 7, 9));
         assert!(!accepted_tcp_ao_info_is_valid(&valid, 8, 9));
         assert!(!accepted_tcp_ao_info_is_valid(&valid, 7, 8));
-        let mut bad = valid;
+        let mut bad = valid.clone();
         bad.pkt_bad = 1;
         assert!(!accepted_tcp_ao_info_is_valid(&bad, 7, 9));
         let mut missing = valid;
@@ -628,7 +652,16 @@ mod tests {
             accepted.peer_addr.ip(),
             "127.0.0.2".parse::<IpAddr>().unwrap()
         );
-        assert!(accepted.tcp_ao_info.is_some());
+        let info = accepted.tcp_ao_info.as_ref().expect("accepted AO snapshot");
+        assert_eq!(info.keys.len(), 1);
+        let key = &info.keys[0];
+        assert_eq!(key.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(key.prefix_len, 24);
+        assert_eq!(key.send_id, config.send_id);
+        assert_eq!(key.recv_id, config.recv_id);
+        assert_eq!(key.algorithm, config.algorithm);
+        assert!(key.is_current);
+        assert!(key.is_rnext);
 
         let protected_unsigned = tokio::task::spawn_blocking(move || {
             connect_from("127.0.0.3".parse().unwrap(), destination, None)

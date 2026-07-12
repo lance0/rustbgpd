@@ -28,6 +28,7 @@ socket2.workspace = true
 libc.workspace = true
 lru.workspace = true
 rustc-hash.workspace = true
+zeroize.workspace = true
 
 [features]
 # Exposes `RouteAttrBundle` + `materialize_attrs` (inbound attribute

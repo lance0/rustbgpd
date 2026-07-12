@@ -265,6 +265,9 @@ pub(crate) struct PeerSession {
     last_error: String,
     /// Latest query-time TCP-AO inspection for the currently owned stream.
     tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+    /// Secret-free configured MKT identity/rollover metadata. This survives
+    /// inspection failures so recovered snapshots retain their annotations.
+    tcp_ao_key_metadata: Vec<TcpAoKeyMetadata>,
     /// Durable protection identity for this session. Unlike `tcp_ao_info`,
     /// inspection failure never clears this bit, so a protected accepted
     /// session keeps retrying read-only inspection on later queries.
@@ -305,6 +308,51 @@ pub(crate) struct PeerSession {
     /// rather than a global registry counter so a policy edit to an
     /// unrelated peer can't false-`STALE` this peer's decisions.
     import_policy_generation: u64,
+}
+
+#[derive(Clone)]
+struct TcpAoKeyMetadata {
+    peer: IpAddr,
+    prefix_len: u8,
+    send_id: u8,
+    recv_id: u8,
+    algorithm: crate::TcpAoAlgorithm,
+    preferred: bool,
+    deprecated: bool,
+}
+
+fn tcp_ao_key_metadata(
+    config: &TransportConfig,
+    initial: Option<&crate::TcpAoInfoSnapshot>,
+) -> Vec<TcpAoKeyMetadata> {
+    if let Some(key) = config.tcp_ao.as_ref() {
+        return vec![TcpAoKeyMetadata {
+            peer: config.remote_addr.ip(),
+            prefix_len: if config.remote_addr.is_ipv4() {
+                32
+            } else {
+                128
+            },
+            send_id: key.send_id,
+            recv_id: key.recv_id,
+            algorithm: key.algorithm,
+            preferred: key.preferred,
+            deprecated: key.deprecated,
+        }];
+    }
+    initial
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.keys)
+        .map(|key| TcpAoKeyMetadata {
+            peer: key.peer,
+            prefix_len: key.prefix_len,
+            send_id: key.send_id,
+            recv_id: key.recv_id,
+            algorithm: key.algorithm,
+            preferred: key.preferred,
+            deprecated: key.deprecated,
+        })
+        .collect()
 }
 
 /// Outbound channel buffer size.
@@ -502,6 +550,7 @@ impl PeerSession {
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
         let tcp_ao_protected = config.tcp_ao.is_some();
+        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None);
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -570,6 +619,7 @@ impl PeerSession {
             established_at: None,
             last_error: String::new(),
             tcp_ao_info: None,
+            tcp_ao_key_metadata,
             tcp_ao_protected,
             notification_teardown: false,
             received_hard_reset: false,
@@ -611,6 +661,7 @@ impl PeerSession {
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
         let tcp_ao_protected = config.tcp_ao.is_some() || tcp_ao_info.is_some();
+        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, tcp_ao_info.as_ref());
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -691,6 +742,7 @@ impl PeerSession {
             established_at: None,
             last_error: String::new(),
             tcp_ao_info,
+            tcp_ao_key_metadata,
             tcp_ao_protected,
             notification_teardown: false,
             received_hard_reset: false,

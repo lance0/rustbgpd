@@ -508,6 +508,26 @@ message TcpAoState {
   uint64 packets_key_not_found = 7;
   uint64 packets_ao_required = 8;
   uint64 packets_dropped_icmp = 9;
+  // Redacted kernel MKT inventory. Never contains key material, key length,
+  // hashes, fingerprints, or other key-derived identifiers.
+  repeated TcpAoKeyState keys = 10;
+}
+
+message TcpAoKeyState {
+  string peer_address = 1;
+  uint32 prefix_length = 2;
+  uint32 send_id = 3;
+  uint32 recv_id = 4;
+  string algorithm = 5;
+  bool is_current = 6;
+  bool is_rnext = 7;
+  bool preferred = 8;
+  bool deprecated = 9;
+  uint64 packets_good = 10;
+  uint64 packets_bad = 11;
+  // Linux VRF L3-master ifindex (`TCP_AO_KEYF_IFINDEX`), when present.
+  // This is not an IPv6 link-local scope ID.
+  optional uint32 vrf_ifindex = 12;
 }
 
 message DynamicNeighborRange {

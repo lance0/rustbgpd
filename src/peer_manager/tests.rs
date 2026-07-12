@@ -559,6 +559,7 @@ async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_confi
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
+            keys: Vec::new(),
         }),
     })
     .await

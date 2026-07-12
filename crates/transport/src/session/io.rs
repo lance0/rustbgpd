@@ -702,42 +702,57 @@ async fn create_and_connect(
         return Err(err);
     }
 
-    let tcp_ao_info = if config.tcp_ao.is_some() {
-        match crate::socket_opts::get_tcp_ao_info(&stream) {
-            Ok(info) => {
-                info!(
-                    peer = %peer_label,
-                    addr = %config.remote_addr,
-                    current_key = info.current_key,
-                    rnext_key = info.rnext_key,
-                    has_current_key = info.has_current_key,
-                    has_rnext_key = info.has_rnext_key,
-                    ao_required = info.ao_required,
-                    accept_icmps = info.accept_icmps,
-                    pkt_good = info.pkt_good,
-                    pkt_bad = info.pkt_bad,
-                    pkt_key_not_found = info.pkt_key_not_found,
-                    pkt_ao_required = info.pkt_ao_required,
-                    pkt_dropped_icmp = info.pkt_dropped_icmp,
-                    "TCP-AO active-open socket inspected"
-                );
-                Some(info)
-            }
-            Err(err) => {
-                warn!(
-                    peer = %peer_label,
-                    addr = %config.remote_addr,
-                    error = %err,
-                    "failed to inspect TCP-AO active-open socket"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let tcp_ao_info = inspect_active_tcp_ao(&stream, &config, &peer_label);
 
     Ok((stream, tcp_ao_info))
+}
+
+fn inspect_active_tcp_ao(
+    stream: &TcpStream,
+    config: &TransportConfig,
+    peer_label: &str,
+) -> Option<crate::TcpAoInfoSnapshot> {
+    let tcp_ao = config.tcp_ao.as_ref()?;
+    match crate::socket_opts::get_tcp_ao_info_for_config(
+        stream,
+        config.remote_addr.ip(),
+        if config.remote_addr.is_ipv4() {
+            32
+        } else {
+            128
+        },
+        tcp_ao,
+        false,
+    ) {
+        Ok(info) => {
+            info!(
+                peer = %peer_label,
+                addr = %config.remote_addr,
+                current_key = info.current_key,
+                rnext_key = info.rnext_key,
+                has_current_key = info.has_current_key,
+                has_rnext_key = info.has_rnext_key,
+                ao_required = info.ao_required,
+                accept_icmps = info.accept_icmps,
+                pkt_good = info.pkt_good,
+                pkt_bad = info.pkt_bad,
+                pkt_key_not_found = info.pkt_key_not_found,
+                pkt_ao_required = info.pkt_ao_required,
+                pkt_dropped_icmp = info.pkt_dropped_icmp,
+                "TCP-AO active-open socket inspected"
+            );
+            Some(info)
+        }
+        Err(err) => {
+            warn!(
+                peer = %peer_label,
+                addr = %config.remote_addr,
+                error = %err,
+                "failed to inspect TCP-AO active-open socket"
+            );
+            None
+        }
+    }
 }
 
 /// Read from the TCP read half into the buffer. Extracted as a

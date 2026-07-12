@@ -296,6 +296,24 @@ pub struct JsonTcpAoState {
     pub packets_key_not_found: u64,
     pub packets_ao_required: u64,
     pub packets_dropped_icmp: u64,
+    pub keys: Vec<JsonTcpAoKeyState>,
+}
+
+#[derive(Serialize)]
+pub struct JsonTcpAoKeyState {
+    pub peer_address: String,
+    pub prefix_length: u32,
+    pub send_id: u32,
+    pub recv_id: u32,
+    pub algorithm: String,
+    pub is_current: bool,
+    pub is_rnext: bool,
+    pub preferred: bool,
+    pub deprecated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vrf_ifindex: Option<u32>,
+    pub packets_good: u64,
+    pub packets_bad: u64,
 }
 
 #[derive(Serialize)]
@@ -1049,7 +1067,31 @@ mod tests {
             last_error: String::new(),
             authentication: "tcp_ao".to_string(),
             tcp_ao_health: "unavailable".to_string(),
-            tcp_ao: None,
+            tcp_ao: Some(JsonTcpAoState {
+                current_key_id: Some(7),
+                rnext_key_id: Some(9),
+                ao_required: true,
+                accept_icmps: false,
+                packets_good: 12,
+                packets_bad: 0,
+                packets_key_not_found: 0,
+                packets_ao_required: 0,
+                packets_dropped_icmp: 0,
+                keys: vec![JsonTcpAoKeyState {
+                    peer_address: "10.0.0.2".to_string(),
+                    prefix_length: 32,
+                    send_id: 7,
+                    recv_id: 9,
+                    algorithm: "hmac(sha256)".to_string(),
+                    is_current: true,
+                    is_rnext: true,
+                    preferred: true,
+                    deprecated: false,
+                    vrf_ifindex: None,
+                    packets_good: 12,
+                    packets_bad: 0,
+                }],
+            }),
             description: "peer-2".to_string(),
             hold_time: 90,
             send_hold_time: 480,
@@ -1087,6 +1129,8 @@ mod tests {
         assert_eq!(value["role_negotiated"], true);
         assert_eq!(value["authentication"], "tcp_ao");
         assert_eq!(value["tcp_ao_health"], "unavailable");
+        assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
+        assert!(value.to_string().find("secret").is_none());
         assert_eq!(value["otc_routes_blocked"], 3);
         assert_eq!(value["import_policy_routes_permitted"], 8);
         assert_eq!(value["import_policy_routes_denied"], 1);

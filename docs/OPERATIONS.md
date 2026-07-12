@@ -910,14 +910,29 @@ derive TCP-AO identity from their validated accepted socket rather than a
 per-neighbor key configuration. `unavailable` means TCP-AO protection is
 expected but no socket inspection snapshot is available (the peer may be
 disconnected, connecting, or socket inspection may have failed).
-`healthy` means the live snapshot has valid current/RNext keys and no
-authentication error counters; `degraded` means either key-validity flag is
-missing or at least one cumulative socket-lifetime error counter is non-zero.
-When socket
-inspection succeeds, connected sessions also show current/RNext KeyIDs and
-packet verification counters.
-Counters are refreshed from the socket for each query; inspect `last_error` for
-setup or connect failures.
+Persistent disagreement between `TCP_AO_INFO` and `TCP_AO_GET_KEYS` is also
+`unavailable`: rustbgpd clears the whole snapshot instead of publishing an
+inconsistent degraded value. `healthy` means the published live snapshot has valid current/RNext keys, a consistent
+nondeprecated kernel MKT inventory, and no authentication error counters;
+`degraded` means a key-validity flag is missing, an active key is deprecated,
+or at least one cumulative socket-lifetime error counter is non-zero. When socket inspection succeeds, connected sessions
+also show current/RNext KeyIDs,
+packet verification counters, and redacted per-key peer/prefix, directional
+IDs, algorithm, selection flags, rollover metadata, and counters. Key bytes,
+lengths, hashes, and fingerprints are never returned. `TCP_AO_GET_KEYS` does
+copy raw key bytes into a private temporary buffer; rustbgpd compares accepted
+sockets against the configured singleton without logging the bytes and
+zeroizes every temporary on success, error, retry, and unwind.
+
+The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
+an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound
+TCP-AO MKTs (`TCP_AO_KEYF_IFINDEX` clear), so Linux may match them in any L3
+master. Scoped link-local routing remains attached to the TCP socket,
+and configuration validation forbids reusing the same link-local neighbor
+address across interfaces.
+
+Counters and the key inventory are refreshed from the socket for each query;
+inspect `last_error` for setup or connect failures.
 
 What is never collected: the raw daemon config file (the config section is
 the daemon's own secret-redacted effective dump — the same document as
