@@ -118,6 +118,53 @@ fn install_test_negotiated_session(session: &mut PeerSession, negotiated: Negoti
         .collect();
     session.negotiated = Some(negotiated);
 }
+
+#[tokio::test]
+async fn query_state_sorts_both_paths_limit_vectors_by_numeric_family() {
+    let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    for (family, peer_limit, effective_limit) in [
+        ((Afi::BgpLs, Safi::BgpLs), 11_u16, 21_u32),
+        ((Afi::Ipv4, Safi::FlowSpec), 12, 22),
+        ((Afi::Ipv6, Safi::Unicast), 13, 23),
+        ((Afi::Ipv4, Safi::Unicast), 14, 24),
+    ] {
+        negotiated.peer_paths_limits.insert(family, peer_limit);
+        negotiated
+            .effective_add_path_send_limits
+            .insert(family, effective_limit);
+    }
+    session.negotiated = Some(negotiated);
+
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    let state = state.await.unwrap();
+
+    assert_eq!(
+        state.peer_paths_limits,
+        vec![
+            ((Afi::Ipv4, Safi::Unicast), 14),
+            ((Afi::Ipv4, Safi::FlowSpec), 12),
+            ((Afi::Ipv6, Safi::Unicast), 13),
+            ((Afi::BgpLs, Safi::BgpLs), 11),
+        ]
+    );
+    assert_eq!(
+        state.effective_add_path_send_limits,
+        vec![
+            ((Afi::Ipv4, Safi::Unicast), 24),
+            ((Afi::Ipv4, Safi::FlowSpec), 22),
+            ((Afi::Ipv6, Safi::Unicast), 23),
+            ((Afi::BgpLs, Safi::BgpLs), 21),
+        ]
+    );
+}
+
 fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
     let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_tag])
         .expect("fixture BGP-LS NLRI decodes")

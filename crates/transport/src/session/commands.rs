@@ -1,9 +1,17 @@
 use super::{
-    ControlFlow, Event, Message, NotificationCode, PeerCommand, PeerSession, PeerSessionState,
-    RibUpdate, RouteRefreshMessage, SessionNotificationDirection, SessionState, cease_subcode,
-    debug, info, warn,
+    Afi, ControlFlow, Event, Message, NotificationCode, PeerCommand, PeerSession, PeerSessionState,
+    RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection, SessionState,
+    cease_subcode, debug, info, warn,
 };
 use crate::handle::PeerCommandError;
+
+fn sorted_family_limits<T>(
+    limits: impl Iterator<Item = ((Afi, Safi), T)>,
+) -> Vec<((Afi, Safi), T)> {
+    let mut limits: Vec<_> = limits.collect();
+    limits.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
+    limits
+}
 
 impl PeerSession {
     fn refresh_tcp_ao_info(&mut self) {
@@ -76,8 +84,9 @@ impl PeerSession {
                 ControlFlow::Break(())
             }
             PeerCommand::QueryState { reply } => {
-                // TCP_AO_INFO is cumulative for this socket. Refresh at the
-                // query boundary so operators see current verification health.
+                // TCP_AO_INFO is cumulative for this socket. Its in-actor
+                // getsockopt is a bounded, nonblocking kernel-memory read, so
+                // refresh at the query boundary for current operator health.
                 self.refresh_tcp_ao_info();
                 let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
                 // Prefer FSM's negotiated (available at OpenConfirm) over
@@ -100,14 +109,21 @@ impl PeerSession {
                     remote_role: neg.and_then(|n| n.remote_role),
                     role_negotiated: neg.is_some_and(|n| n.role_negotiated),
                     peer_paths_limits: neg
-                        .map(|n| n.peer_paths_limits.iter().map(|(f, v)| (*f, *v)).collect())
+                        .map(|n| {
+                            sorted_family_limits(
+                                n.peer_paths_limits
+                                    .iter()
+                                    .map(|(family, limit)| (*family, *limit)),
+                            )
+                        })
                         .unwrap_or_default(),
                     effective_add_path_send_limits: neg
                         .map(|n| {
-                            n.effective_add_path_send_limits
-                                .iter()
-                                .map(|(f, v)| (*f, *v))
-                                .collect()
+                            sorted_family_limits(
+                                n.effective_add_path_send_limits
+                                    .iter()
+                                    .map(|(family, limit)| (*family, *limit)),
+                            )
                         })
                         .unwrap_or_default(),
                     updates_received: self.updates_received,

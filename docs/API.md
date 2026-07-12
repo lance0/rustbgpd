@@ -263,8 +263,9 @@ when either key-validity flag is absent or any bad, key-not-found,
 unsigned-required, or dropped-ICMP counter is non-zero.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
-surface: `SINGLE_BEST`, `ADD_PATH`, `ORR`, or `PER_CLIENT_BEST`. It is `UNKNOWN`
-when the peer has no active outbound registration; `UNSPECIFIED` remains the
+surface. When multiple mechanisms apply, its primary-label precedence is
+`ADD_PATH` > `PER_CLIENT_BEST` > `ORR` > `SINGLE_BEST`. It is `UNKNOWN` when the
+peer has no active outbound registration; `UNSPECIFIED` remains the
 backward-compatible value returned by older servers. This field is independent
 of the diagnostic `update_group` label.
 

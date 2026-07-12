@@ -410,8 +410,9 @@ impl PeerSession {
                             // following family map reaches the RIB. Seed it
                             // with the strictest effective family limit so it
                             // can never transiently exceed a peer preference;
-                            // PeerAddPathLimits immediately installs exact
-                            // family-local values and resynchronizes.
+                            // PeerAddPathLimits then installs exact family-local
+                            // values and resynchronizes only when that changes
+                            // an effective cap.
                             neg.effective_add_path_send_limits
                                 .values()
                                 .copied()
