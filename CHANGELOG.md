@@ -15,15 +15,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expose one deterministic schema-v1 structure with established-peer
   current/candidate groupability, exact fallback reasons, plan-local group IDs,
   transition and resync rollups, projected shared/private totals, and only
-  conservative published-receipt capacity classes. Session reshape and future
-  negotiation remain explicitly indeterminate; no memory or time estimate is
-  implied. Policy-lint integration and post-renegotiation projection remain in
-  LAN-356.
+  conservative capacity classes: exact labels for published receipt topologies
+  plus a structural, explicitly unmeasured `fully_shared` label for other
+  one-group shapes. Session reshape and future negotiation remain explicitly
+  indeterminate; no memory or time estimate or extrapolation is implied.
+  Policy-lint integration and post-renegotiation projection remain in LAN-356.
   The transaction token covers the negotiated live-session snapshot as well as
-  config, private fallbacks retain policy-content identity, and capacity labels
-  apply only to the exact measured topologies; intervening session changes are
-  rejected at the apply-time re-plan rather than silently changing the accepted
-  impact. The token does not freeze sessions after that re-plan.
+  config, private fallbacks retain policy-content identity, and measured
+  capacity labels apply only to the exact receipt topologies; intervening
+  session changes are rejected at the apply-time re-plan rather than silently
+  changing the accepted impact. The token does not freeze sessions after that
+  re-plan.
 
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths
