@@ -1038,6 +1038,71 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
     );
 }
 
+fn tcp_ao_snapshot(good: u64, bad: u64) -> crate::TcpAoInfoSnapshot {
+    crate::TcpAoInfoSnapshot {
+        has_current_key: true,
+        has_rnext_key: true,
+        ao_required: true,
+        accept_icmps: false,
+        current_key: 7,
+        rnext_key: 9,
+        pkt_good: good,
+        pkt_bad: bad,
+        pkt_key_not_found: 0,
+        pkt_ao_required: 0,
+        pkt_dropped_icmp: 0,
+    }
+}
+
+async fn tcp_ao_query_test_session() -> PeerSession {
+    let mut session = make_test_session(65001, 65002);
+    session.config.tcp_ao = Some(crate::TcpAoConfig {
+        key: "test-secret".to_string(),
+        send_id: 7,
+        recv_id: 9,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: true,
+        deprecated: false,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let (_server, _) = accepted.unwrap();
+    session.test_install_stream(client.unwrap());
+    session
+}
+
+#[tokio::test]
+async fn tcp_ao_query_refreshes_degraded_cumulative_counters() {
+    let mut session = tcp_ao_query_test_session().await;
+    session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(43, 1)));
+    let snapshot = session.tcp_ao_info.unwrap();
+    assert_eq!(snapshot.pkt_good, 43);
+    assert_eq!(snapshot.pkt_bad, 1);
+}
+
+#[tokio::test]
+async fn tcp_ao_query_clears_stale_snapshot_and_recovers() {
+    let mut session = tcp_ao_query_test_session().await;
+    session.tcp_ao_info = Some(tcp_ao_snapshot(12, 0));
+    session.refresh_tcp_ao_info_with(|_| Err(std::io::Error::other("inspection failed")));
+    assert!(session.tcp_ao_info.is_none());
+
+    session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(44, 0)));
+    assert_eq!(session.tcp_ao_info.unwrap().pkt_good, 44);
+}
+
+#[test]
+fn non_tcp_ao_query_does_not_invoke_inspector() {
+    let mut session = make_test_session(65001, 65002);
+    session.tcp_ao_info = Some(tcp_ao_snapshot(12, 0));
+    session.refresh_tcp_ao_info_with(|_| -> std::io::Result<crate::TcpAoInfoSnapshot> {
+        panic!("non-AO session must not inspect TCP_AO_INFO")
+    });
+    assert!(session.tcp_ao_info.is_none());
+}
+
 #[test]
 fn connect_failure_is_retained_for_neighbor_diagnostics() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

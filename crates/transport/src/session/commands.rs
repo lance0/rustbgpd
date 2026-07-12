@@ -1,11 +1,50 @@
 use super::{
     ControlFlow, Event, Message, NotificationCode, PeerCommand, PeerSession, PeerSessionState,
     RibUpdate, RouteRefreshMessage, SessionNotificationDirection, SessionState, cease_subcode,
-    info,
+    debug, info, warn,
 };
 use crate::handle::PeerCommandError;
 
 impl PeerSession {
+    fn refresh_tcp_ao_info(&mut self) {
+        self.refresh_tcp_ao_info_with(crate::socket_opts::get_tcp_ao_info);
+    }
+
+    pub(super) fn refresh_tcp_ao_info_with<F>(&mut self, inspect: F)
+    where
+        F: FnOnce(&tokio::net::TcpStream) -> std::io::Result<crate::TcpAoInfoSnapshot>,
+    {
+        if self.config.tcp_ao.is_none() {
+            self.tcp_ao_info = None;
+            return;
+        }
+        let Some(read_half) = self.read_half.as_ref() else {
+            self.tcp_ao_info = None;
+            return;
+        };
+        match inspect(read_half.as_ref()) {
+            Ok(snapshot) => self.tcp_ao_info = Some(snapshot),
+            Err(error) => {
+                if self.tcp_ao_info.is_some() {
+                    warn!(
+                        peer = %self.peer_label,
+                        %error,
+                        "live TCP-AO inspection became unavailable"
+                    );
+                } else {
+                    debug!(
+                        peer = %self.peer_label,
+                        %error,
+                        "live TCP-AO inspection unavailable"
+                    );
+                }
+                // Never fall back to a connection-time snapshot: a stale
+                // healthy value would be more dangerous than UNAVAILABLE.
+                self.tcp_ao_info = None;
+            }
+        }
+    }
+
     /// Map external commands to FSM events.
     #[expect(
         clippy::too_many_lines,
@@ -37,6 +76,9 @@ impl PeerSession {
                 ControlFlow::Break(())
             }
             PeerCommand::QueryState { reply } => {
+                // TCP_AO_INFO is cumulative for this socket. Refresh at the
+                // query boundary so operators see current verification health.
+                self.refresh_tcp_ao_info();
                 let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
                 // Prefer FSM's negotiated (available at OpenConfirm) over
                 // self.negotiated (set later at SessionEstablished). This is
