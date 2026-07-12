@@ -67,6 +67,6 @@ pub use update::{
     NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate, PlannedGroupability,
     RibCommandError, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
     UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupFamilyImpact,
-    UpdateGroupImpactPlan, UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot,
-    classify_update_group, route_query_key,
+    UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
+    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group, route_query_key,
 };

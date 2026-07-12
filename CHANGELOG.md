@@ -19,6 +19,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   negotiation remain explicitly indeterminate; no memory or time estimate is
   implied. Policy-lint integration and post-renegotiation projection remain in
   LAN-356.
+  The transaction token covers the negotiated live-session snapshot as well as
+  config, private fallbacks retain policy-content identity, and capacity labels
+  apply only to the exact measured topologies; intervening session changes are
+  rejected at apply re-plan rather than silently changing the accepted impact.
 
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths

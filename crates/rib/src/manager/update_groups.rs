@@ -2027,7 +2027,7 @@ impl RibManager {
             chain.as_ref(),
             orf_negotiated || self.peer_orf_filters.contains_key(&peer),
         );
-        match classify_update_group(input) {
+        let fingerprint = match classify_update_group(input) {
             UpdateGroupClassification::PolicyPeerContext => {
                 return GroupMembership::PolicyPeerContext;
             }
@@ -2035,38 +2035,24 @@ impl RibManager {
             UpdateGroupClassification::PerClientBest => return GroupMembership::PerClientBest,
             UpdateGroupClassification::OrrVantage => return GroupMembership::OrrVantage,
             UpdateGroupClassification::OrfInstalled => return GroupMembership::OrfInstalled,
-            UpdateGroupClassification::Groupable(_) => {}
-        }
+            UpdateGroupClassification::Groupable(fingerprint) => fingerprint,
+        };
 
         // Clone released before the &mut intern below; chains are small
         // and this runs at config/session-lifecycle frequency only.
         let chain_idx = chain
             .as_ref()
             .map(|chain| self.update_groups.intern_chain(chain));
-        let sendable = self.peer_sendable_families.get(&peer);
-        let contains = |family: (Afi, Safi)| sendable.is_some_and(|f| f.contains(&family));
-        let mut llgr_families: Vec<(u16, u8)> = self
-            .peer_advertised_llgr_families
-            .get(&peer)
-            .map(|families| {
-                families
-                    .iter()
-                    .map(|&(afi, safi)| (afi as u16, safi as u8))
-                    .collect()
-            })
-            .unwrap_or_default();
-        llgr_families.sort_unstable();
-        llgr_families.dedup();
         let key = GroupKey {
             chain: chain_idx,
-            target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
-            target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
-            sendable_ipv4_unicast: contains((Afi::Ipv4, Safi::Unicast)),
-            sendable_ipv6_unicast: contains((Afi::Ipv6, Safi::Unicast)),
-            sendable_vpnv4: contains((Afi::Ipv4, Safi::MplsVpn)),
-            sendable_vpnv6: contains((Afi::Ipv6, Safi::MplsVpn)),
-            rtc_negotiated: contains((Afi::Ipv4, Safi::RtConstrain)),
-            llgr_families,
+            target_is_ebgp: fingerprint.target_is_ebgp,
+            target_is_rr_client: fingerprint.target_is_rr_client,
+            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
+            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
+            sendable_vpnv4: fingerprint.sendable_vpnv4,
+            sendable_vpnv6: fingerprint.sendable_vpnv6,
+            rtc_negotiated: fingerprint.rtc_negotiated,
+            llgr_families: fingerprint.llgr_families,
         };
         GroupMembership::Grouped(self.update_groups.group_for(key))
     }

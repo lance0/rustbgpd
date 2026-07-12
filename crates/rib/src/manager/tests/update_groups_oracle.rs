@@ -880,6 +880,24 @@ async fn update_group_snapshot_is_side_effect_free_and_runtime_exact() {
     oracle.finish().await;
 }
 
+#[tokio::test]
+async fn runtime_group_key_ignores_non_staging_families() {
+    let mut oracle = Oracle::spawn(false, None);
+    oracle
+        .peer_up_families(
+            A,
+            false,
+            true,
+            None,
+            64,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)],
+        )
+        .await;
+    oracle.peer_up(B, false, true, None, 64).await;
+    assert_eq!(oracle.group_label(A).await, oracle.group_label(B).await);
+    oracle.finish().await;
+}
+
 /// The kitchen-sink exact-stream scenario: initial dump, best change,
 /// best withdraw, split horizon (source inside the group), source-flip
 /// X→Y→X, policy-modified attributes, next-hop-override flags,

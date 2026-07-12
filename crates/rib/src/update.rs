@@ -30,10 +30,28 @@ pub struct UpdateGroupClassifierInput {
     pub orf_installed: bool,
 }
 
+/// Exact runtime grouping key, excluding diagnostics and non-staging families.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent fields of the runtime GroupKey"
+)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UpdateGroupFingerprint {
+    pub policy_fingerprint: Option<String>,
+    pub target_is_ebgp: bool,
+    pub target_is_rr_client: bool,
+    pub sendable_ipv4_unicast: bool,
+    pub sendable_ipv6_unicast: bool,
+    pub sendable_vpnv4: bool,
+    pub sendable_vpnv6: bool,
+    pub rtc_negotiated: bool,
+    pub llgr_families: Vec<(u16, u8)>,
+}
+
 /// Stable classifier result shared by live registration and config planning.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UpdateGroupClassification {
-    Groupable(UpdateGroupClassifierInput),
+    Groupable(UpdateGroupFingerprint),
     PolicyPeerContext,
     AddPathSend,
     PerClientBest,
@@ -73,7 +91,18 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
     } else if input.orf_installed {
         UpdateGroupClassification::OrfInstalled
     } else {
-        UpdateGroupClassification::Groupable(input)
+        let contains = |family| input.sendable_families.contains(&family);
+        UpdateGroupClassification::Groupable(UpdateGroupFingerprint {
+            policy_fingerprint: input.policy_fingerprint,
+            target_is_ebgp: input.target_is_ebgp,
+            target_is_rr_client: input.target_is_rr_client,
+            sendable_ipv4_unicast: contains((1, 1)),
+            sendable_ipv6_unicast: contains((2, 1)),
+            sendable_vpnv4: contains((1, 128)),
+            sendable_vpnv6: contains((2, 128)),
+            rtc_negotiated: contains((1, 132)),
+            llgr_families: input.llgr_families,
+        })
     }
 }
 
@@ -94,7 +123,7 @@ pub struct UpdateGroupSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlannedGroupability {
     Group { id: String },
-    Private { reason: String },
+    Private { reason: String, fingerprint: String },
     Indeterminate { reason: String },
     Absent,
 }
@@ -104,7 +133,7 @@ impl PlannedGroupability {
     pub fn label(&self) -> String {
         match self {
             Self::Group { id } => id.clone(),
-            Self::Private { reason } | Self::Indeterminate { reason } => reason.clone(),
+            Self::Private { reason, .. } | Self::Indeterminate { reason } => reason.clone(),
             Self::Absent => "absent".to_string(),
         }
     }
@@ -173,7 +202,8 @@ mod update_group_classifier_tests {
         let UpdateGroupClassification::Groupable(result) = classify_update_group(input()) else {
             panic!("uniform input must group");
         };
-        assert_eq!(result.sendable_families, vec![(1, 1), (2, 1)]);
+        assert!(result.sendable_ipv4_unicast);
+        assert!(result.sendable_ipv6_unicast);
     }
 
     #[test]
@@ -247,6 +277,15 @@ mod update_group_classifier_tests {
             let result = classify_update_group(value);
             assert_eq!(result.reason(), expected_reason, "scenario {name}");
         }
+    }
+
+    #[test]
+    fn canonical_fingerprint_ignores_non_key_family_and_provenance() {
+        let left = input();
+        let mut right = left.clone();
+        right.sendable_families.push((25, 70));
+        right.policy_provenance = Some("rpol_compiled_ir".to_string());
+        assert_eq!(classify_update_group(left), classify_update_group(right));
     }
 }
 

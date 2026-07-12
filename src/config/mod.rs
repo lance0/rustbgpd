@@ -2650,7 +2650,13 @@ impl RuntimeSnapshotKey {
     /// serialization under this key, so the token changes when any config byte
     /// relevant to a candidate changes (secrets included) but cannot be
     /// reproduced by a caller who does not hold the key.
+    #[cfg(test)]
     pub fn token(&self, config: &Config) -> Result<String, String> {
+        self.token_with_context(config, &[])
+    }
+
+    /// Keyed token additionally bound to a canonical live-runtime context.
+    pub fn token_with_context(&self, config: &Config, context: &[u8]) -> Result<String, String> {
         use std::hash::{BuildHasher, Hasher};
         // Canonical because `toml::Value::Table` is `BTreeMap`-backed (keys
         // sorted) unless toml's `preserve_order` feature is enabled, which it is
@@ -2665,7 +2671,18 @@ impl RuntimeSnapshotKey {
             .map_err(|error| format!("failed to serialize runtime config snapshot: {error}"))?;
         let mut hasher = self.0.build_hasher();
         hasher.write(normalized.as_bytes());
-        Ok(format!("kv1:{:016x}:{}", hasher.finish(), normalized.len()))
+        hasher.write_usize(context.len());
+        hasher.write(context);
+        let digest = hasher.finish();
+        if context.is_empty() {
+            Ok(format!("kv1:{digest:016x}:{}", normalized.len()))
+        } else {
+            Ok(format!(
+                "kv2:{digest:016x}:{}:{}",
+                normalized.len(),
+                context.len()
+            ))
+        }
     }
 }
 

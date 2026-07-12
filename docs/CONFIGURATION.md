@@ -2272,6 +2272,12 @@ re-evaluation, while `remote_route_refresh` is separate and remains false for
 this outbound-only projection. Capacity is a receipt-envelope class
 (`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
 `unknown`), not a byte, memory, or completion-time estimate.
+Only the exact published 1,000-peer uniform and 900-shared/100-private
+topologies receive measured capacity labels; smaller or otherwise different
+shapes are `outside_measured`, not extrapolated. The optimistic transaction
+token is also bound to the live negotiated update-group snapshot, so a session
+flap, capability change, or membership change after Plan makes Apply fail with
+`FAILED_PRECONDITION` and requires a fresh plan.
 For safe deploys, `ApplyConfigTransaction` also supports a confirmed-commit
 mode: add `--confirm-id <id>` (and optionally `--confirm-timeout <seconds>`) to
 the normal apply invocation — `rbgp config apply <config.toml>

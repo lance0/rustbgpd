@@ -134,9 +134,16 @@ impl PeerManager {
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let candidate =
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
+                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let (update_group_impact, live_snapshot_identity) = self
+            .plan_update_group_impact(&candidate)
+            .await
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let runtime_snapshot_token = self
             .snapshot_key
-            .token(&self.current_config)
+            .token_with_context(&self.current_config, live_snapshot_identity.as_bytes())
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         if let Some(expected) = expected_runtime_snapshot_token.filter(|token| !token.is_empty())
             && expected != runtime_snapshot_token
@@ -146,14 +153,6 @@ impl PeerManager {
                 current: runtime_snapshot_token,
             });
         }
-
-        let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
-        let update_group_impact = self
-            .plan_update_group_impact(&candidate)
-            .await
-            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         // Token the resulting live config would carry once this candidate is
         // committed. The apply path returns it so a client can chain a follow-up
         // apply without re-planning; computing it here keeps every token under
@@ -162,7 +161,7 @@ impl PeerManager {
         // the one staged family (FIB), which the candidate already reflects.
         let post_commit_runtime_snapshot_token = self
             .snapshot_key
-            .token(&candidate)
+            .token_with_context(&candidate, live_snapshot_identity.as_bytes())
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
         let classification = crate::config::classify_config_transaction_v1(&diff);

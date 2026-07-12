@@ -58,13 +58,17 @@ fn candidate_input(
     }
 }
 
-fn raw_state(classification: &UpdateGroupClassification) -> PlannedGroupability {
+fn raw_state(
+    classification: &UpdateGroupClassification,
+    private_fingerprint: &str,
+) -> PlannedGroupability {
     match classification {
         UpdateGroupClassification::Groupable(input) => PlannedGroupability::Group {
             id: format!("raw:{input:?}"),
         },
         other => PlannedGroupability::Private {
             reason: other.reason().expect("fallback has a reason").to_string(),
+            fingerprint: private_fingerprint.to_string(),
         },
     }
 }
@@ -95,7 +99,16 @@ fn transition(current: &PlannedGroupability, candidate: &PlannedGroupability) ->
     use PlannedGroupability::{Absent, Group, Indeterminate, Private};
     match (current, candidate) {
         (Group { id: a }, Group { id: b }) if a == b => "no_op",
-        (Private { reason: a }, Private { reason: b }) if a == b => "no_op",
+        (
+            Private {
+                reason: ar,
+                fingerprint: af,
+            },
+            Private {
+                reason: br,
+                fingerprint: bf,
+            },
+        ) if ar == br && af == bf => "no_op",
         (Absent, Absent) => "no_op",
         (Group { .. }, Group { .. }) | (_, Absent) | (Absent, Group { .. }) => "regroup",
         (Private { .. }, Group { .. }) => "shared_migration",
@@ -112,14 +125,9 @@ fn capacity_class(
 ) -> (&'static str, &'static str) {
     if indeterminate > 0 {
         ("unknown", "future session negotiation is not projected")
-    } else if private_views == 0 && shared_groups == 1 {
+    } else if projected_peers == 1_000 && private_views == 0 && shared_groups == 1 {
         ("fully_shared", "one shared group and no private views")
-    } else if private_views == 0 && projected_peers <= 1_000 {
-        (
-            "within_uniform",
-            "inside the measured 1000-peer uniform envelope",
-        )
-    } else if private_views <= 100 && projected_peers <= 1_000 {
+    } else if projected_peers == 1_000 && private_views == 100 && shared_groups == 1 {
         (
             "within_mixed",
             "inside the measured 900-shared/100-private envelope",
@@ -140,7 +148,7 @@ impl PeerManager {
     pub(super) async fn plan_update_group_impact(
         &self,
         candidate: &Config,
-    ) -> Result<UpdateGroupImpactPlan, String> {
+    ) -> Result<(UpdateGroupImpactPlan, String), String> {
         let (reply, recv) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryUpdateGroupSnapshot { reply })
@@ -150,6 +158,7 @@ impl PeerManager {
             .await
             .map_err(|_| "RIB update-group snapshot timed out".to_string())?
             .map_err(|_| "RIB dropped update-group snapshot reply".to_string())?;
+        let snapshot_identity = format!("{snapshot:?}");
 
         let current = by_peer(&self.current_config)?;
         let candidate = by_peer(candidate)?;
@@ -174,17 +183,26 @@ impl PeerManager {
                 || PlannedGroupability::Indeterminate {
                     reason: "indeterminate_session_negotiation".to_string(),
                 },
-                |row| raw_state(&row.classification),
+                |row| {
+                    raw_state(
+                        &row.classification,
+                        row.input
+                            .policy_fingerprint
+                            .as_deref()
+                            .unwrap_or("no-policy"),
+                    )
+                },
             );
             let candidate_state = match (live, current_cfg, candidate_cfg) {
                 (Some(live), Some(current), Some(candidate))
                     if preserves_negotiation(current, candidate) =>
                 {
-                    raw_state(&classify_update_group(candidate_input(
-                        live,
-                        candidate,
-                        self.local_asn,
-                    )))
+                    let input = candidate_input(live, candidate, self.local_asn);
+                    let fingerprint = input
+                        .policy_fingerprint
+                        .clone()
+                        .unwrap_or_else(|| "no-policy".to_string());
+                    raw_state(&classify_update_group(input), &fingerprint)
                 }
                 _ => PlannedGroupability::Indeterminate {
                     reason: "indeterminate_session_negotiation".to_string(),
@@ -207,15 +225,17 @@ impl PeerManager {
             let mut families = live.map_or_else(BTreeSet::new, |row| {
                 row.input.sendable_families.iter().copied().collect()
             });
-            for config in [current_cfg, candidate_cfg].into_iter().flatten() {
-                families.extend(
-                    config
-                        .transport_config
-                        .peer
-                        .families
-                        .iter()
-                        .map(|&(afi, safi)| (afi as u16, safi as u8)),
-                );
+            if live.is_none() {
+                for config in [current_cfg, candidate_cfg].into_iter().flatten() {
+                    families.extend(
+                        config
+                            .transport_config
+                            .peer
+                            .families
+                            .iter()
+                            .map(|&(afi, safi)| (afi as u16, safi as u8)),
+                    );
+                }
             }
             for (afi, safi) in families {
                 rows.push((
@@ -301,13 +321,16 @@ impl PeerManager {
             candidate_private.len(),
             rollup.indeterminate,
         );
-        Ok(UpdateGroupImpactPlan {
-            schema_version: 1,
-            entries,
-            rollup,
-            capacity_class: capacity_class.to_string(),
-            capacity_basis: capacity_basis.to_string(),
-        })
+        Ok((
+            UpdateGroupImpactPlan {
+                schema_version: 1,
+                entries,
+                rollup,
+                capacity_class: capacity_class.to_string(),
+                capacity_basis: capacity_basis.to_string(),
+            },
+            snapshot_identity,
+        ))
     }
 }
 
@@ -325,6 +348,7 @@ mod tests {
         };
         let private = PlannedGroupability::Private {
             reason: "policy_peer_context".to_string(),
+            fingerprint: "policy-a".to_string(),
         };
         let unknown = PlannedGroupability::Indeterminate {
             reason: "indeterminate_session_negotiation".to_string(),
@@ -334,6 +358,11 @@ mod tests {
         assert_eq!(transition(&private, &shared_a), "shared_migration");
         assert_eq!(transition(&shared_a, &private), "private_resync");
         assert_eq!(transition(&shared_a, &unknown), "indeterminate");
+        let changed_private = PlannedGroupability::Private {
+            reason: "policy_peer_context".to_string(),
+            fingerprint: "policy-b".to_string(),
+        };
+        assert_eq!(transition(&private, &changed_private), "private_resync");
     }
 
     #[test]
@@ -369,9 +398,10 @@ mod tests {
     #[test]
     fn uniform_and_mixed_fleet_capacity_goldens() {
         assert_eq!(capacity_class(1_000, 1, 0, 0).0, "fully_shared");
-        assert_eq!(capacity_class(1_000, 2, 0, 0).0, "within_uniform");
+        assert_eq!(capacity_class(1_000, 2, 0, 0).0, "outside_measured");
         assert_eq!(capacity_class(1_000, 1, 100, 0).0, "within_mixed");
         assert_eq!(capacity_class(1_000, 1, 101, 0).0, "outside_measured");
+        assert_eq!(capacity_class(10, 1, 0, 0).0, "outside_measured");
         assert_eq!(capacity_class(10, 1, 0, 1).0, "unknown");
     }
 
@@ -434,9 +464,20 @@ mod tests {
             ("rtc_membership_stable", rtc.clone(), rtc, "no_op"),
         ];
         for (name, current_input, candidate_input, expected) in cases {
-            let current = raw_state(&classify_update_group(current_input));
-            let planned = raw_state(&classify_update_group(candidate_input.clone()));
-            let observed_after_apply = raw_state(&classify_update_group(candidate_input));
+            let current_fingerprint = current_input.policy_fingerprint.clone().unwrap_or_default();
+            let candidate_fingerprint = candidate_input
+                .policy_fingerprint
+                .clone()
+                .unwrap_or_default();
+            let current = raw_state(&classify_update_group(current_input), &current_fingerprint);
+            let planned = raw_state(
+                &classify_update_group(candidate_input.clone()),
+                &candidate_fingerprint,
+            );
+            let observed_after_apply = raw_state(
+                &classify_update_group(candidate_input),
+                &candidate_fingerprint,
+            );
             assert_eq!(transition(&current, &planned), expected, "plan {name}");
             assert_eq!(observed_after_apply, planned, "runtime parity {name}");
         }
