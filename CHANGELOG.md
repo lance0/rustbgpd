@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Neighbor diagnostics expose transport authentication health.** Neighbor
+  API, JSON, and human output identify plaintext, TCP-MD5, and TCP-AO sessions;
+  connected TCP-AO peers include connection-time current/RNext KeyIDs and
+  verification counters. Connect setup failures remain visible in `last_error`,
+  `rbgp doctor` flags configured AO peers on unsupported kernels, and the
+  configuration guide documents directional KeyID cross-mapping.
+
 - **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
   mTLS server identity, and client CA material behind unchanged configured paths
   are staged for every gRPC/gNMI listener and published as one immutable

@@ -245,6 +245,12 @@ attempt without falling back to unauthenticated TCP. Dynamic-range keys are
 config-file-only: runtime range CRUD rejects protected ranges and overlaps.
 Runtime key rotation is not exposed.
 
+`NeighborState.authentication` reports `PLAINTEXT`, `MD5`, or `TCP_AO` from
+the effective transport configuration. For a currently connected TCP-AO
+session, `NeighborState.tcp_ao` contains the connection-time socket inspection:
+current/RNext KeyIDs and Linux verification/error counters. The message is
+cleared on disconnect; counters are not continuously refreshed.
+
 ---
 
 ## ConfigService
