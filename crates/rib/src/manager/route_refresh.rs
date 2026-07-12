@@ -640,6 +640,11 @@ impl RibManager {
         let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
         let cluster_id = self.cluster_id;
         let peer_add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+        let peer_add_path_send_limits = self
+            .peer_add_path_send_limits
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
         let peer_add_path_send_families = self
             .peer_add_path_send_families
             .get(&peer)
@@ -841,6 +846,7 @@ impl RibManager {
                         rtc_filter.as_ref(),
                         orr_ctx,
                         peer_add_path_send_max,
+                        self.peer_add_path_send_limits.get(&peer),
                         &peer_add_path_send_families,
                         export_pol.as_ref(),
                         &mut vpn_announce,
@@ -888,6 +894,7 @@ impl RibManager {
                     llgr.as_ref(),
                     orr_ctx,
                     peer_add_path_send_max,
+                    self.peer_add_path_send_limits.get(&peer),
                     &peer_add_path_send_families,
                     export_pol.as_ref(),
                     &metrics,
@@ -956,10 +963,12 @@ impl RibManager {
             // post-modification attributes and AS_PATH match string.
             let mut export_memo = super::distribution::ExportMemo::default();
             for prefix in &all_prefixes {
-                let prefix_send_max = if peer_add_path_send_max > 0
-                    && peer_add_path_send_families.contains(&prefix_family(prefix))
-                {
-                    peer_add_path_send_max
+                let prefix_family = prefix_family(prefix);
+                let prefix_send_max = if peer_add_path_send_families.contains(&prefix_family) {
+                    peer_add_path_send_limits
+                        .get(&prefix_family)
+                        .copied()
+                        .unwrap_or(peer_add_path_send_max)
                 } else {
                     0
                 };

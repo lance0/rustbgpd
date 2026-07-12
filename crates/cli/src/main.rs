@@ -830,6 +830,9 @@ enum NeighborAction {
         /// Max paths per prefix for Add-Path send
         #[arg(long, default_value = "0")]
         add_path_send_max: u32,
+        /// Experimental Paths-Limit preference for Add-Path receive families
+        #[arg(long, default_value = "0", requires = "add_path_receive")]
+        paths_limit_receive_max: u16,
     },
     /// Delete this neighbor
     Delete,
@@ -1933,6 +1936,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     add_path_receive,
                     add_path_send,
                     add_path_send_max,
+                    paths_limit_receive_max,
                 }),
             ) => {
                 commands::neighbor::add(
@@ -1952,6 +1956,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         add_path_receive,
                         add_path_send,
                         add_path_send_max,
+                        paths_limit_receive_max,
                     },
                     json,
                 )

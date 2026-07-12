@@ -214,6 +214,38 @@ pub fn validate_open(
         .copied()
         .collect();
     let add_path_families = negotiate_add_path(&our_add_path_caps, &peer_add_path_caps);
+    let peer_paths_limits: HashMap<(Afi, Safi), u16> = open
+        .capabilities
+        .iter()
+        .filter_map(|cap| match cap {
+            Capability::PathsLimit(families) => Some(families.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|entry| entry.receive_limit != 0)
+        .fold(HashMap::new(), |mut limits, entry| {
+            limits
+                .entry((entry.afi, entry.safi))
+                .or_insert(entry.receive_limit);
+            limits
+        });
+    let configured_send_max = if config.add_path_send_max == 0 {
+        u32::MAX
+    } else {
+        config.add_path_send_max
+    };
+    let effective_add_path_send_limits = add_path_families
+        .iter()
+        .filter(|(_, mode)| matches!(mode, AddPathMode::Send | AddPathMode::Both))
+        .map(|(family, _)| {
+            let effective = peer_paths_limits
+                .get(family)
+                .map_or(configured_send_max, |limit| {
+                    configured_send_max.min(u32::from(*limit))
+                });
+            (*family, effective)
+        })
+        .collect();
 
     // Negotiate Outbound Route Filtering receive (RFC 5291). We advertise the
     // Receive role for Address-Prefix ORF (type 64); ORF-receive is active for
@@ -253,6 +285,8 @@ pub fn validate_open(
         peer_extended_message,
         extended_nexthop_families,
         add_path_families,
+        peer_paths_limits,
+        effective_add_path_send_limits,
         negotiated_orf_recv,
     })
 }
@@ -496,6 +530,7 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            paths_limit_receive_max: 0,
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,
@@ -1069,6 +1104,54 @@ mod tests {
         let open = peer_open(); // no ExtendedMessage capability
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(!neg.peer_extended_message);
+    }
+
+    #[test]
+    fn paths_limit_caps_only_matching_add_path_send_family() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.add_path_send = true;
+        cfg.add_path_send_max = 8;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::AddPath(vec![
+            AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Receive,
+            },
+            AddPathFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Receive,
+            },
+        ]));
+        open.capabilities.push(Capability::PathsLimit(vec![
+            rustbgpd_wire::PathsLimitFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                receive_limit: 3,
+            },
+            rustbgpd_wire::PathsLimitFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::MplsVpn,
+                receive_limit: 1,
+            },
+        ]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.peer_paths_limits[&(Afi::Ipv4, Safi::Unicast)], 3);
+        assert_eq!(
+            neg.effective_add_path_send_limits[&(Afi::Ipv4, Safi::Unicast)],
+            3
+        );
+        assert_eq!(
+            neg.effective_add_path_send_limits[&(Afi::Ipv6, Safi::Unicast)],
+            8
+        );
+        assert!(
+            !neg.effective_add_path_send_limits
+                .contains_key(&(Afi::Ipv6, Safi::MplsVpn))
+        );
     }
 
     #[test]

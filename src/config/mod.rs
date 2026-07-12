@@ -959,6 +959,7 @@ impl Config {
         peer.add_path_receive = add_path.as_ref().is_some_and(|c| c.receive);
         peer.add_path_send = add_path.as_ref().is_some_and(|c| c.send);
         peer.add_path_send_max = add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0);
+        peer.paths_limit_receive_max = add_path.as_ref().and_then(|c| c.receive_max).unwrap_or(0);
         peer.local_role = Self::resolved_role(neighbor, group);
         peer.strict_role = neighbor
             .strict_role

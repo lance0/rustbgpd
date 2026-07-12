@@ -707,6 +707,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
+                paths_limit_receive_max: 0,
             }),
             state: server_proto::SessionState::Established as i32,
             uptime_seconds: 30,
@@ -732,6 +733,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             messages_received: 9,
             messages_sent: 8,
             route_reflector_client: false,
+            paths_limits: Vec::new(),
         }))
     }
 

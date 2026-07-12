@@ -632,6 +632,7 @@ mod tests {
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
+            paths_limit_receive_max: 0,
             local_role: None,
             strict_role: false,
             prefix_orf_receive: false,

@@ -196,6 +196,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub add_path_send_max: Option<u32>,
     #[serde(default)]
+    pub paths_limit_receive_max: Option<u32>,
+    #[serde(default)]
     pub import_policy: Vec<JsonPolicyStatement>,
     #[serde(default)]
     pub export_policy: Vec<JsonPolicyStatement>,
@@ -230,6 +232,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             add_path_receive: j.add_path_receive,
             add_path_send: j.add_path_send,
             add_path_send_max: j.add_path_send_max,
+            paths_limit_receive_max: j.paths_limit_receive_max,
             import_policy: j.import_policy.into_iter().map(Into::into).collect(),
             export_policy: j.export_policy.into_iter().map(Into::into).collect(),
             import_policy_chain: j.import_policy_chain,
@@ -329,7 +332,8 @@ mod tests {
             "families": ["ipv4_unicast", "ipv6_unicast"],
             "import_policy_chain": ["from-transit"],
             "export_policy_chain": ["to-transit"],
-            "route_reflector_client": true
+            "route_reflector_client": true,
+            "paths_limit_receive_max": 7
         }"#;
         let parsed: JsonPeerGroupDefinition = serde_json::from_str(json).unwrap();
         let proto = proto::PeerGroupDefinition::from(parsed);
@@ -338,6 +342,7 @@ mod tests {
         assert_eq!(proto.import_policy_chain, vec!["from-transit".to_string()]);
         assert_eq!(proto.export_policy_chain, vec!["to-transit".to_string()]);
         assert_eq!(proto.route_reflector_client, Some(true));
+        assert_eq!(proto.paths_limit_receive_max, Some(7));
         assert_eq!(proto.has_md5_password, None);
     }
 

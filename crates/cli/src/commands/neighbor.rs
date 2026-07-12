@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonNeighbor, JsonNeighborDetail};
+use crate::output::{self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
@@ -124,6 +124,17 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
             add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
+            paths_limits: n
+                .paths_limits
+                .iter()
+                .map(|limit| JsonPathsLimit {
+                    family: limit.family.clone(),
+                    configured_receive_max: limit.configured_receive_max,
+                    advertised_receive_max: limit.advertised_receive_max,
+                    received_receive_max: limit.received_receive_max,
+                    effective_send_max: limit.effective_send_max,
+                })
+                .collect(),
             role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
             strict_role: cfg.map(|c| c.strict_role).unwrap_or(false),
             remote_role: n.remote_role.clone(),
@@ -208,6 +219,16 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         if add_path_send_max > 0 {
             println!("Add-Path Send Max:     {add_path_send_max}");
         }
+        for limit in &n.paths_limits {
+            println!(
+                "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
+                limit.family,
+                limit.configured_receive_max,
+                limit.advertised_receive_max,
+                limit.received_receive_max,
+                limit.effective_send_max
+            );
+        }
         println!(
             "State:                 {}",
             output::colored_state_with_stale(n.state, n.stale)
@@ -259,6 +280,7 @@ pub struct AddNeighborOpts {
     pub add_path_receive: bool,
     pub add_path_send: bool,
     pub add_path_send_max: u32,
+    pub paths_limit_receive_max: u16,
 }
 
 pub async fn add(
@@ -290,6 +312,7 @@ pub async fn add(
                 add_path_receive: opts.add_path_receive,
                 add_path_send: opts.add_path_send,
                 add_path_send_max: opts.add_path_send_max,
+                paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
             }),
         })
         .await?;
@@ -461,6 +484,7 @@ mod tests {
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
+                paths_limit_receive_max: 3,
             },
             true,
         )
@@ -474,6 +498,7 @@ mod tests {
         assert!(request.add_path_receive);
         assert!(request.add_path_send);
         assert_eq!(request.add_path_send_max, 4);
+        assert_eq!(request.paths_limit_receive_max, 3);
         assert_eq!(request.remote_asn, 65002);
     }
 

@@ -486,6 +486,7 @@ impl PeerManager {
         peer.add_path_receive = config.add_path_receive;
         peer.add_path_send = config.add_path_send;
         peer.add_path_send_max = config.add_path_send_max;
+        peer.paths_limit_receive_max = config.paths_limit_receive_max;
         peer.local_role = config.local_role;
         peer.strict_role = config.strict_role;
         peer.prefix_orf_receive = config.prefix_orf_receive;
