@@ -21,14 +21,15 @@ use std::sync::Arc;
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
 // `BgpLsRouteKey` joins the same class once ADR-0077 receive wiring lands.
 // Aliased to the std names so the storage type declarations read unchanged.
-use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, PathAttribute, Prefix, Safi};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute,
-    LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
+    FlowSpecRouteKey, LabeledRibRoute, LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey,
+    VpnRibRoute, VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
 
@@ -61,10 +62,10 @@ pub struct AdjRibIn {
     prefix_index: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
-    /// `FlowSpec` routes keyed by `(rule, path_id)`.
-    flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
+    /// `FlowSpec` routes keyed by AFI, rule, and Add-Path ID.
+    flowspec_routes: HashMap<FlowSpecRouteKey, FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
-    flowspec_llgr_stale_local_tags: HashSet<(FlowSpecRule, u32)>,
+    flowspec_llgr_stale_local_tags: HashSet<FlowSpecRouteKey>,
     /// EVPN routes keyed by RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes keyed by opaque RFC 9552 route identity.
@@ -512,19 +513,14 @@ impl AdjRibIn {
 
     /// Insert or replace a `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
-        self.flowspec_llgr_stale_local_tags
-            .remove(&(route.rule.clone(), route.path_id));
-        self.flowspec_routes
-            .insert((route.rule.clone(), route.path_id), route);
+        self.flowspec_llgr_stale_local_tags.remove(&route.key());
+        self.flowspec_routes.insert(route.key(), route);
     }
 
-    /// Withdraw a `FlowSpec` route by rule and path ID. Returns `true` if it existed.
-    pub fn withdraw_flowspec(&mut self, rule: &FlowSpecRule, path_id: u32) -> bool {
-        self.flowspec_llgr_stale_local_tags
-            .remove(&(rule.clone(), path_id));
-        self.flowspec_routes
-            .remove(&(rule.clone(), path_id))
-            .is_some()
+    /// Withdraw a `FlowSpec` route by family-complete key.
+    pub fn withdraw_flowspec(&mut self, key: &FlowSpecRouteKey) -> bool {
+        self.flowspec_llgr_stale_local_tags.remove(key);
+        self.flowspec_routes.remove(key).is_some()
     }
 
     /// Iterate over all `FlowSpec` routes.
@@ -1879,11 +1875,11 @@ impl AdjRibIn {
     }
 
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
-    pub fn iter_flowspec_rule(&self, rule: &FlowSpecRule) -> impl Iterator<Item = &FlowSpecRoute> {
-        let target = rule.clone();
+    pub fn iter_flowspec_key(&self, key: &FlowSpecKey) -> impl Iterator<Item = &FlowSpecRoute> {
+        let target = key.clone();
         self.flowspec_routes
             .values()
-            .filter(move |r| r.rule == target)
+            .filter(move |route| route.selection_key() == target)
     }
 
     /// Return the number of `FlowSpec` routes stored.
@@ -1899,11 +1895,11 @@ impl AdjRibIn {
     /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
     /// across consecutive restarts). Returns the deleted rules so the caller
     /// can withdraw them downstream.
-    pub fn mark_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+    pub fn mark_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
-        let already_stale: Vec<(FlowSpecRule, u32)> = self
+        let already_stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| r.is_stale && r.afi == family.0)
@@ -1911,7 +1907,10 @@ impl AdjRibIn {
             .collect();
         let mut deleted = Vec::new();
         for key in &already_stale {
-            deleted.push(key.0.clone());
+            deleted.push(FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -1926,8 +1925,8 @@ impl AdjRibIn {
     }
 
     /// Remove all stale `FlowSpec` routes, returning their rules.
-    pub fn sweep_stale_flowspec(&mut self) -> Vec<FlowSpecRule> {
-        let stale: Vec<(FlowSpecRule, u32)> = self
+    pub fn sweep_stale_flowspec(&mut self) -> Vec<FlowSpecKey> {
+        let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| r.is_stale)
@@ -1935,7 +1934,10 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(key.0.clone());
+            rules.push(FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -1962,11 +1964,11 @@ impl AdjRibIn {
     }
 
     /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
-    pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+    pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
-        let stale: Vec<(FlowSpecRule, u32)> = self
+        let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| r.is_stale && r.afi == family.0)
@@ -1974,7 +1976,10 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(key.0.clone());
+            rules.push(FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -1987,7 +1992,7 @@ impl AdjRibIn {
     /// get `is_stale=false`, `is_llgr_stale=true`, `LLGR_STALE` community added.
     ///
     /// Returns rules affected (for best-path recalc).
-    pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+    pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
 
         if family.1 != Safi::FlowSpec {
@@ -1995,7 +2000,7 @@ impl AdjRibIn {
         }
 
         // First pass: remove routes with NO_LLGR community
-        let no_llgr_keys: Vec<(FlowSpecRule, u32)> = self
+        let no_llgr_keys: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| {
@@ -2007,7 +2012,13 @@ impl AdjRibIn {
             })
             .map(|(k, _)| k.clone())
             .collect();
-        let mut affected: Vec<FlowSpecRule> = no_llgr_keys.iter().map(|(r, _)| r.clone()).collect();
+        let mut affected: Vec<FlowSpecKey> = no_llgr_keys
+            .iter()
+            .map(|key| FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            })
+            .collect();
         for key in &no_llgr_keys {
             self.flowspec_routes.remove(key);
         }
@@ -2024,17 +2035,15 @@ impl AdjRibIn {
                 {
                     if !comms.contains(&COMMUNITY_LLGR_STALE) {
                         comms.push(COMMUNITY_LLGR_STALE);
-                        self.flowspec_llgr_stale_local_tags
-                            .insert((route.rule.clone(), route.path_id));
+                        self.flowspec_llgr_stale_local_tags.insert(route.key());
                     }
                 } else {
                     route
                         .attributes
                         .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
-                    self.flowspec_llgr_stale_local_tags
-                        .insert((route.rule.clone(), route.path_id));
+                    self.flowspec_llgr_stale_local_tags.insert(route.key());
                 }
-                affected.push(route.rule.clone());
+                affected.push(route.selection_key());
             }
         }
 
@@ -2042,8 +2051,8 @@ impl AdjRibIn {
     }
 
     /// Remove all LLGR-stale `FlowSpec` routes, returning their rules.
-    pub fn sweep_llgr_stale_flowspec(&mut self) -> Vec<FlowSpecRule> {
-        let stale: Vec<(FlowSpecRule, u32)> = self
+    pub fn sweep_llgr_stale_flowspec(&mut self) -> Vec<FlowSpecKey> {
+        let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| r.is_llgr_stale)
@@ -2051,7 +2060,10 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(key.0.clone());
+            rules.push(FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -2061,11 +2073,11 @@ impl AdjRibIn {
     /// Remove LLGR-stale `FlowSpec` routes for a specific family, returning
     /// their rules. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
-    pub fn sweep_llgr_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+    pub fn sweep_llgr_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
-        let stale: Vec<(FlowSpecRule, u32)> = self
+        let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
             .iter()
             .filter(|(_, r)| r.is_llgr_stale && r.afi == family.0)
@@ -2073,7 +2085,10 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(key.0.clone());
+            rules.push(FlowSpecKey {
+                afi: key.afi,
+                rule: key.rule.clone(),
+            });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -2089,7 +2104,7 @@ impl AdjRibIn {
         for route in self.flowspec_routes.values_mut() {
             if route.afi == family.0 {
                 route.is_llgr_stale = false;
-                let key = (route.rule.clone(), route.path_id);
+                let key = route.key();
                 if self.flowspec_llgr_stale_local_tags.contains(&key) {
                     clear_local_llgr.push(key);
                 }
@@ -2109,7 +2124,7 @@ impl AdjRibIn {
         }
     }
 
-    fn clear_local_llgr_stale_flowspec_community(&mut self, keys: &[(FlowSpecRule, u32)]) {
+    fn clear_local_llgr_stale_flowspec_community(&mut self, keys: &[FlowSpecRouteKey]) {
         for key in keys {
             if let Some(route) = self.flowspec_routes.get_mut(key) {
                 remove_llgr_stale_community_attrs(&mut route.attributes);
@@ -2195,8 +2210,9 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        Afi, COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, LabeledNlri, MplsLabelEntry, Origin,
-        PathAttribute, RouteDistinguisher, RtcNlri, Safi, VpnNlri, VpnPrefix,
+        Afi, COMMUNITY_LLGR_STALE, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, LabeledNlri,
+        MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, RtcNlri, Safi, VpnNlri,
+        VpnPrefix,
     };
 
     use super::*;
@@ -3039,9 +3055,22 @@ mod tests {
                 .is_empty()
         );
         let deleted = rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
-        assert_eq!(deleted, vec![gr_rule]);
+        assert_eq!(
+            deleted,
+            vec![FlowSpecKey {
+                afi: Afi::Ipv4,
+                rule: gr_rule,
+            }]
+        );
         assert_eq!(rib.flowspec_len(), 1);
-        let retained = rib.flowspec_routes.get(&(llgr_rule, 0)).unwrap();
+        let retained = rib
+            .flowspec_routes
+            .get(&FlowSpecRouteKey {
+                afi: Afi::Ipv4,
+                rule: llgr_rule,
+                path_id: 0,
+            })
+            .unwrap();
         assert!(retained.is_llgr_stale && !retained.is_stale);
         assert!(
             retained
@@ -3065,7 +3094,13 @@ mod tests {
         rib.insert_flowspec(v6_route);
 
         let swept = rib.sweep_llgr_stale_flowspec_family((Afi::Ipv4, Safi::FlowSpec));
-        assert_eq!(swept, vec![v4_rule]);
+        assert_eq!(
+            swept,
+            vec![FlowSpecKey {
+                afi: Afi::Ipv4,
+                rule: v4_rule,
+            }]
+        );
         assert_eq!(
             rib.flowspec_len(),
             1,

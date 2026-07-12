@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, BgpRole, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -143,7 +143,7 @@ pub struct RibManager {
     peer_local_roles: HashMap<IpAddr, Option<BgpRole>>,
     /// OTC rejections waiting to ride the next reserved outbound envelope to
     /// transport's existing metric/event publisher.
-    pending_otc_blocked: HashMap<IpAddr, Vec<crate::route::Route>>,
+    pending_otc_blocked: HashMap<IpAddr, HashMap<(Prefix, u32), crate::route::Route>>,
     /// RFC 9107 ORR vantage per registered outbound peer (RR clients
     /// configured with `orr_vantage` only).
     peer_orr_vantage: HashMap<IpAddr, IpAddr>,
@@ -179,7 +179,7 @@ pub struct RibManager {
     /// Unicast routes still awaiting replacement during an inbound refresh.
     refresh_stale_routes: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
-    refresh_stale_flowspec: HashMap<IpAddr, HashSet<(Afi, FlowSpecRule, u32)>>,
+    refresh_stale_flowspec: HashMap<IpAddr, HashSet<crate::route::FlowSpecRouteKey>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
     refresh_stale_evpn: HashMap<IpAddr, HashSet<rustbgpd_wire::EvpnRouteKey>>,
     /// BGP-LS routes still awaiting replacement during an inbound refresh.
@@ -544,7 +544,7 @@ pub(super) struct PolicyFilteredRouteKey {
 enum PendingRouteChunk {
     Withdrawn(Vec<(Prefix, u32)>),
     Announced(Vec<crate::route::Route>),
-    FlowSpecWithdrawn(Vec<FlowSpecRule>),
+    FlowSpecWithdrawn(Vec<crate::route::FlowSpecKey>),
     FlowSpecAnnounced(Vec<crate::route::FlowSpecRoute>),
     EvpnWithdrawn(Vec<rustbgpd_wire::EvpnRouteKey>),
     EvpnAnnounced(Vec<crate::route::EvpnRibRoute>),
@@ -566,7 +566,7 @@ struct PendingRoutesReceived {
     flowspec_capacity_hint: usize,
     withdrawn: std::vec::IntoIter<(Prefix, u32)>,
     announced: std::vec::IntoIter<crate::route::Route>,
-    flowspec_withdrawn: std::vec::IntoIter<FlowSpecRule>,
+    flowspec_withdrawn: std::vec::IntoIter<crate::route::FlowSpecKey>,
     flowspec_announced: std::vec::IntoIter<crate::route::FlowSpecRoute>,
     evpn_withdrawn: std::vec::IntoIter<rustbgpd_wire::EvpnRouteKey>,
     evpn_announced: std::vec::IntoIter<crate::route::EvpnRibRoute>,
@@ -579,7 +579,7 @@ impl PendingRoutesReceived {
         announced: Vec<crate::route::Route>,
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
-        flowspec_withdrawn: Vec<FlowSpecRule>,
+        flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) -> Self {
@@ -1334,8 +1334,8 @@ impl RibManager {
             RibUpdate::RpkiCacheUpdate { table } => self.handle_rpki_cache_update(table),
             RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
-            RibUpdate::WithdrawFlowSpec { rule, reply } => {
-                self.handle_withdraw_flowspec(rule, reply);
+            RibUpdate::WithdrawFlowSpec { key, reply } => {
+                self.handle_withdraw_flowspec(key, reply);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => self.handle_withdraw_evpn(key, reply),

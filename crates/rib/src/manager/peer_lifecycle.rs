@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -313,8 +313,10 @@ impl RibManager {
         };
         let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
         let count = rib.len();
-        let fs_affected: HashSet<FlowSpecRule> =
-            rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+        let fs_affected: HashSet<crate::route::FlowSpecKey> = rib
+            .iter_flowspec()
+            .map(crate::route::FlowSpecRoute::selection_key)
+            .collect();
         let evpn_affected: HashSet<EvpnRouteKey> = rib
             .iter_evpn()
             .map(crate::route::EvpnRibRoute::key)
@@ -1097,10 +1099,10 @@ impl RibManager {
             }
         }
 
-        let all_flowspec_rules: HashSet<FlowSpecRule> = self
+        let all_flowspec_rules: HashSet<crate::route::FlowSpecKey> = self
             .loc_rib
             .iter_flowspec()
-            .map(|route| route.rule.clone())
+            .map(crate::route::FlowSpecRoute::selection_key)
             .collect();
         if !all_flowspec_rules.is_empty() {
             Self::stage_flowspec_rules(

@@ -10,8 +10,8 @@ use rustbgpd_policy::{
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
-    AddressPrefixOrf, Afi, BgpRole, FlowSpecRule, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype,
-    Safi, WhenToRefresh,
+    AddressPrefixOrf, Afi, BgpRole, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype, Safi,
+    WhenToRefresh,
 };
 use tracing::{debug, info, warn};
 
@@ -499,7 +499,7 @@ impl RibManager {
         end_of_rib: Vec<(Afi, Safi)>,
         refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
         flowspec_announce: Vec<crate::route::FlowSpecRoute>,
-        flowspec_withdraw: Vec<FlowSpecRule>,
+        flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
         evpn_announce: Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
         bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
@@ -533,7 +533,11 @@ impl RibManager {
         // shape. Single-best group staging applies the same gate before its
         // shared table commit; this central pass covers private single-best,
         // ORR, Add-Path, and per-client-best without duplicating their tails.
-        let mut otc_blocked = self.pending_otc_blocked.remove(&peer).unwrap_or_default();
+        let mut otc_blocked: Vec<crate::route::Route> = self
+            .pending_otc_blocked
+            .remove(&peer)
+            .map(|pending| pending.into_values().collect())
+            .unwrap_or_default();
         let local_role = self.peer_local_roles.get(&peer).copied().flatten();
         if announce
             .iter()
@@ -602,8 +606,8 @@ impl RibManager {
             for route in &flowspec_announce {
                 rib_out.insert_flowspec(route.clone());
             }
-            for rule in &flowspec_withdraw {
-                rib_out.remove_flowspec(rule);
+            for key in &flowspec_withdraw {
+                rib_out.remove_flowspec(key);
             }
             for route in &evpn_announce {
                 rib_out.insert_evpn(route.clone());
@@ -885,7 +889,7 @@ impl RibManager {
         announced: Vec<crate::route::Route>,
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
-        flowspec_withdrawn: Vec<FlowSpecRule>,
+        flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) {
@@ -1432,14 +1436,18 @@ impl RibManager {
                     Cow::Owned(prefixes)
                 }
             };
-            let effective_flowspec_rules: HashSet<FlowSpecRule> = if resync {
-                let mut all: HashSet<FlowSpecRule> = self
+            let effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync {
+                let mut all: HashSet<crate::route::FlowSpecKey> = self
                     .loc_rib
                     .iter_flowspec()
-                    .map(|route| route.rule.clone())
+                    .map(crate::route::FlowSpecRoute::selection_key)
                     .collect();
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(rib_out.iter_flowspec().map(|route| route.rule.clone()));
+                    all.extend(
+                        rib_out
+                            .iter_flowspec()
+                            .map(crate::route::FlowSpecRoute::selection_key),
+                    );
                 }
                 all
             } else {
@@ -1673,7 +1681,8 @@ impl RibManager {
                     }
                     current_policy_filtered_routes
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
-                    group_otc_blocked = group.otc_blocked_for_member(peer, &effective_prefixes);
+                    group_otc_blocked = group
+                        .otc_blocked_for_member(peer, (!resync).then_some(&effective_prefixes));
                 }
                 // Per-member export-policy counters — integer adds, no
                 // per-(prefix × peer) work. A clean pass takes the group
@@ -1687,11 +1696,21 @@ impl RibManager {
                     self.apply_group_policy_counters(peer, &stage.evals);
                 }
             }
-            if !group_otc_blocked.is_empty() {
-                self.pending_otc_blocked
-                    .entry(peer)
-                    .or_default()
-                    .extend(group_otc_blocked);
+            if member_of.is_some() {
+                let pending = self.pending_otc_blocked.entry(peer).or_default();
+                if resync {
+                    pending.clear();
+                } else {
+                    pending.retain(|(prefix, _), _| !effective_prefixes.contains(prefix));
+                }
+                pending.extend(
+                    group_otc_blocked
+                        .into_iter()
+                        .map(|route| ((route.prefix, route.path_id), route)),
+                );
+                if pending.is_empty() {
+                    self.pending_otc_blocked.remove(&peer);
+                }
             }
 
             // Resolve export policy, sendable families, and RR state before

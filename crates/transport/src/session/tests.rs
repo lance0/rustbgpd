@@ -1302,10 +1302,13 @@ async fn session_down_clears_all_known_sets() {
     session.remember_known_path(prefix, 1);
     let fs_prefix =
         rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-    session.known_flowspec.insert(rustbgpd_wire::FlowSpecRule {
-        components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
-            fs_prefix,
-        )],
+    session.known_flowspec.insert(rustbgpd_rib::FlowSpecKey {
+        afi: Afi::Ipv4,
+        rule: rustbgpd_wire::FlowSpecRule {
+            components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                fs_prefix,
+            )],
+        },
     });
     let evpn_key = rustbgpd_wire::EvpnRouteKey::Imet {
         rd: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
@@ -3502,6 +3505,90 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     );
 }
 
+#[tokio::test]
+async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let rule = FlowSpecRule {
+        components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: 6,
+        }])],
+    };
+    let route = |afi| FlowSpecRoute {
+        rule: rule.clone(),
+        afi,
+        peer: "192.0.2.1".parse().unwrap(),
+        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        otc_blocked: vec![],
+        flowspec_announce: vec![route(Afi::Ipv4), route(Afi::Ipv6)],
+        ..empty_outbound_update()
+    });
+    for expected_afi in [Afi::Ipv4, Afi::Ipv6] {
+        let Message::Update(update) = read_single_bgp_message(&mut server).await else {
+            panic!("expected FlowSpec announcement");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.afi, expected_afi);
+        assert_eq!(mp.flowspec_announced, vec![rule.clone()]);
+    }
+
+    session.send_route_update(OutboundRouteUpdate {
+        otc_blocked: vec![],
+        flowspec_withdraw: vec![
+            rustbgpd_rib::FlowSpecKey {
+                afi: Afi::Ipv6,
+                rule: rule.clone(),
+            },
+            rustbgpd_rib::FlowSpecKey {
+                afi: Afi::Ipv4,
+                rule: rule.clone(),
+            },
+        ],
+        ..empty_outbound_update()
+    });
+    for expected_afi in [Afi::Ipv4, Afi::Ipv6] {
+        let Message::Update(update) = read_single_bgp_message(&mut server).await else {
+            panic!("expected FlowSpec withdrawal");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpUnreachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.afi, expected_afi);
+        assert_eq!(mp.flowspec_withdrawn, vec![rule.clone()]);
+    }
+}
+
 /// `FlowSpec`'s structured NLRI encoder is fallible, so batching must use
 /// `try_build` while shrinking both total-message overflow and structured
 /// encoding overflow. Cover v4/v6 announcements and withdrawals, plus the
@@ -3588,7 +3675,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
 
     session.send_route_update(OutboundRouteUpdate {
         otc_blocked: vec![],
-        flowspec_withdraw: routes.iter().map(|route| route.rule.clone()).collect(),
+        flowspec_withdraw: routes.iter().map(FlowSpecRoute::selection_key).collect(),
         ..empty_outbound_update()
     });
     let mut withdrawn = std::collections::HashSet::new();

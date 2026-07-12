@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
@@ -14,8 +14,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::best_path_cmp;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, Route, RtcRibRoute,
-    RtcRibRouteKey, VpnRibRoute,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
+    RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
 };
 
 /// The local RIB storing the best route per prefix.
@@ -35,7 +35,7 @@ pub struct LocRib {
     /// saved at the 2p×100k profile shape.
     routes: HashMap<Prefix, (Route, SystemTime)>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
-    flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
+    flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS Loc-RIB: best route per opaque RFC 9552 identity.
@@ -175,7 +175,7 @@ impl LocRib {
     /// Returns `true` if the selection changed.
     pub fn recompute_flowspec<'a>(
         &mut self,
-        rule: FlowSpecRule,
+        key: FlowSpecKey,
         candidates: impl Iterator<Item = &'a FlowSpecRoute>,
     ) -> bool {
         let best = candidates.min_by(|a, b| flowspec_tiebreak(a, b)).cloned();
@@ -187,7 +187,7 @@ impl LocRib {
                 // `peer`/`path_id` identical. Comparing those two alone
                 // would silently swallow the new action. Mirrors the
                 // `recompute_evpn` payload comparison below.
-                let changed = self.flowspec_routes.get(&rule).is_none_or(|old| {
+                let changed = self.flowspec_routes.get(&key).is_none_or(|old| {
                     old.peer != new_best.peer
                         || old.path_id != new_best.path_id
                         || old.is_stale != new_best.is_stale
@@ -196,18 +196,18 @@ impl LocRib {
                         || old.attributes != new_best.attributes
                 });
                 if changed {
-                    self.flowspec_routes.insert(rule, new_best);
+                    self.flowspec_routes.insert(key, new_best);
                 }
                 changed
             }
-            None => self.flowspec_routes.remove(&rule).is_some(),
+            None => self.flowspec_routes.remove(&key).is_some(),
         }
     }
 
     /// Look up the best `FlowSpec` route for a rule.
     #[must_use]
-    pub fn get_flowspec(&self, rule: &FlowSpecRule) -> Option<&FlowSpecRoute> {
-        self.flowspec_routes.get(rule)
+    pub fn get_flowspec(&self, key: &FlowSpecKey) -> Option<&FlowSpecRoute> {
+        self.flowspec_routes.get(key)
     }
 
     /// Iterate over all best `FlowSpec` routes.
@@ -222,8 +222,8 @@ impl LocRib {
     }
 
     /// Remove the best `FlowSpec` route for a rule. Returns `true` if it existed.
-    pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
-        self.flowspec_routes.remove(rule).is_some()
+    pub fn remove_flowspec(&mut self, key: &FlowSpecKey) -> bool {
+        self.flowspec_routes.remove(key).is_some()
     }
 
     // --- EVPN methods (RFC 7432) ---
@@ -1993,6 +1993,13 @@ mod tests {
         }
     }
 
+    fn flowspec_key(rule: &FlowSpecRule) -> FlowSpecKey {
+        FlowSpecKey {
+            afi: Afi::Ipv4,
+            rule: rule.clone(),
+        }
+    }
+
     fn make_flowspec_route(
         peer_oct: u8,
         router_id_oct: u8,
@@ -2020,8 +2027,8 @@ mod tests {
         let r2 = make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(200)], RouteOrigin::Ibgp);
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&r1, &r2].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
 
@@ -2052,8 +2059,8 @@ mod tests {
         );
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&r1, &r2].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
 
@@ -2066,8 +2073,8 @@ mod tests {
             make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&internal, &external].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&internal, &external].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
 
@@ -2081,8 +2088,8 @@ mod tests {
             make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&r_stale, &r_fresh].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&r_stale, &r_fresh].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         // Fresh route wins despite lower LOCAL_PREF
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
@@ -2107,9 +2114,9 @@ mod tests {
         llgr.is_stale = false;
         llgr.is_llgr_stale = true;
         let mut loc = LocRib::new();
-        loc.recompute_flowspec(rule.clone(), [&gr, &llgr].into_iter());
+        loc.recompute_flowspec(flowspec_key(&rule), [&gr, &llgr].into_iter());
         assert_eq!(
-            loc.get_flowspec(&rule).unwrap().peer,
+            loc.get_flowspec(&flowspec_key(&rule)).unwrap().peer,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             "GR-stale must outrank LLGR-stale"
         );
@@ -2125,9 +2132,9 @@ mod tests {
         llgr.is_stale = false;
         llgr.is_llgr_stale = true;
         let mut loc = LocRib::new();
-        loc.recompute_flowspec(rule.clone(), [&fresh, &llgr].into_iter());
+        loc.recompute_flowspec(flowspec_key(&rule), [&fresh, &llgr].into_iter());
         assert_eq!(
-            loc.get_flowspec(&rule).unwrap().peer,
+            loc.get_flowspec(&flowspec_key(&rule)).unwrap().peer,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             "fresh must outrank LLGR-stale even with lower LocalPref"
         );
@@ -2150,8 +2157,8 @@ mod tests {
         );
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&r1, &r2].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
 
@@ -2163,8 +2170,8 @@ mod tests {
         let r2 = make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
         let mut loc = LocRib::new();
 
-        loc.recompute_flowspec(rule.clone(), [&r1, &r2].into_iter());
-        let best = loc.get_flowspec(&rule).unwrap();
+        loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
+        let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         // Lowest peer IP wins
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
     }
@@ -2308,14 +2315,14 @@ mod tests {
 
         let mut loc = LocRib::new();
         // First install — always a change.
-        assert!(loc.recompute_flowspec(rule.clone(), [&r1].into_iter()));
+        assert!(loc.recompute_flowspec(flowspec_key(&rule), [&r1].into_iter()));
         // Same peer, action flipped from rate-limit to drop — must be detected.
         assert!(
-            loc.recompute_flowspec(rule.clone(), [&r2].into_iter()),
+            loc.recompute_flowspec(flowspec_key(&rule), [&r2].into_iter()),
             "same-peer FlowSpec action change must be detected"
         );
         // Same input again — no change.
-        assert!(!loc.recompute_flowspec(rule.clone(), [&r2.clone()].into_iter()));
+        assert!(!loc.recompute_flowspec(flowspec_key(&rule), [&r2.clone()].into_iter()));
     }
 
     /// Regression: `recompute_evpn` must report change when the same

@@ -167,6 +167,175 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn grouped_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery() {
+    tokio::time::pause();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.20".parse().unwrap();
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: target,
+        session_id: 7,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 7,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+
+    let blocked = with_otc(
+        make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24),
+            Ipv4Addr::new(198, 51, 100, 20),
+        ),
+        64512,
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: blocked.peer,
+        announced: vec![blocked],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    drain_eor(&mut out_rx).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let recovered = out_rx.recv().await.unwrap();
+    assert!(recovered.announce.is_empty());
+    assert_eq!(recovered.otc_blocked.len(), 1);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery() {
+    tokio::time::pause();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.21".parse().unwrap();
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: target,
+        session_id: 8,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 8,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+
+    let blocked = with_otc(
+        make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24),
+            Ipv4Addr::new(198, 51, 100, 21),
+        ),
+        64512,
+    );
+    let blocked_key = (blocked.prefix, blocked.path_id);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: blocked.peer,
+        announced: vec![blocked.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: blocked.peer,
+        announced: vec![],
+        withdrawn: vec![blocked_key],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let permitted = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 22),
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: permitted.peer,
+        announced: vec![permitted.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+
+    drain_eor(&mut out_rx).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let recovered = out_rx.recv().await.unwrap();
+    assert_eq!(recovered.announce.len(), 1);
+    assert_eq!(recovered.announce[0].prefix, permitted.prefix);
+    assert!(
+        recovered.otc_blocked.is_empty(),
+        "withdrawn source must not leak an obsolete OTC diagnostic"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[test]
 fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
     let (_tx, rx) = mpsc::channel(1);

@@ -431,7 +431,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::WithdrawFlowSpec {
-                rule,
+                key: rustbgpd_rib::FlowSpecKey { afi, rule },
                 reply: reply_tx,
             })
             .await

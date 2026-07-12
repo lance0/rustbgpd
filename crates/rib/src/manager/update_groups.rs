@@ -668,11 +668,14 @@ impl GroupRibOut {
     pub(in crate::manager) fn otc_blocked_for_member(
         &self,
         member: IpAddr,
-        prefixes: &HashSet<Prefix>,
+        prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
         self.otc_blocked
             .values()
-            .filter(|route| route.peer != member && prefixes.contains(&route.prefix))
+            .filter(|route| {
+                route.peer != member
+                    && prefixes.is_none_or(|prefixes| prefixes.contains(&route.prefix))
+            })
             .cloned()
             .collect()
     }

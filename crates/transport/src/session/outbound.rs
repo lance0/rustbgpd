@@ -889,28 +889,19 @@ impl PeerSession {
         }
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
         if !update.flowspec_withdraw.is_empty() {
-            let mut v4_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
-            let mut v6_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
-            for rule in &update.flowspec_withdraw {
-                // Determine AFI from the rule's destination prefix component
-                let afi = if rule
-                    .destination_prefix()
-                    .is_some_and(|p| matches!(p, Prefix::V6(_)))
-                {
-                    Afi::Ipv6
-                } else {
-                    Afi::Ipv4
+            let mut fs_withdrawals = [
+                (Afi::Ipv4, Vec::<FlowSpecRule>::new()),
+                (Afi::Ipv6, Vec::<FlowSpecRule>::new()),
+            ];
+            for key in &update.flowspec_withdraw {
+                let Some((_, rules)) = fs_withdrawals.iter_mut().find(|(afi, _)| *afi == key.afi)
+                else {
+                    warn!(afi = ?key.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
+                    continue;
                 };
-                match afi {
-                    Afi::Ipv4 => v4_fs_withdraw.push(rule.clone()),
-                    Afi::Ipv6 => v6_fs_withdraw.push(rule.clone()),
-                    Afi::L2Vpn | Afi::BgpLs => unreachable!(
-                        "FlowSpec rule determined IPv4/IPv6 AFI from its destination_prefix \
-                         just above; non-IP AFIs are not reachable here"
-                    ),
-                }
+                rules.push(key.rule.clone());
             }
-            for (afi, rules) in [(Afi::Ipv4, v4_fs_withdraw), (Afi::Ipv6, v6_fs_withdraw)] {
+            for (afi, rules) in fs_withdrawals {
                 if rules.is_empty() {
                     continue;
                 }

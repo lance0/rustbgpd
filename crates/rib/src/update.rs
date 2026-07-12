@@ -5,8 +5,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
 use rustbgpd_wire::{
-    AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi,
-    WhenToRefresh,
+    AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi, WhenToRefresh,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -343,7 +342,7 @@ pub struct OutboundRouteUpdate {
     /// `FlowSpec` routes to announce (RFC 8955).
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.
-    pub flowspec_withdraw: Vec<FlowSpecRule>,
+    pub flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
     /// EVPN routes to announce (RFC 7432).
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
@@ -702,7 +701,7 @@ pub enum RibUpdate {
         /// `FlowSpec` routes announced (RFC 8955).
         flowspec_announced: Vec<FlowSpecRoute>,
         /// `FlowSpec` rules withdrawn.
-        flowspec_withdrawn: Vec<FlowSpecRule>,
+        flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         /// EVPN routes announced (RFC 7432).
         evpn_announced: Vec<EvpnRibRoute>,
         /// EVPN route keys withdrawn.
@@ -1234,8 +1233,8 @@ pub enum RibUpdate {
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {
-        /// The `FlowSpec` rule to withdraw.
-        rule: FlowSpecRule,
+        /// Family-complete `FlowSpec` identity to withdraw.
+        key: crate::route::FlowSpecKey,
         /// Completion reply.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },

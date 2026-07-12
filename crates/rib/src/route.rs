@@ -341,6 +341,30 @@ pub struct FlowSpecRoute {
     pub path_id: u32,
 }
 
+/// Family-complete `FlowSpec` selection and advertised-state identity.
+///
+/// RFC 8955/8956 rules do not necessarily contain a destination prefix, so
+/// their AFI cannot be recovered from the rule payload. Carry it explicitly at
+/// every RIB and withdrawal boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowSpecKey {
+    /// IPv4 or IPv6 `FlowSpec` address family.
+    pub afi: Afi,
+    /// Structured `FlowSpec` NLRI.
+    pub rule: FlowSpecRule,
+}
+
+/// Family-complete Adj-RIB-In `FlowSpec` identity including Add-Path ID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowSpecRouteKey {
+    /// IPv4 or IPv6 `FlowSpec` address family.
+    pub afi: Afi,
+    /// Structured `FlowSpec` NLRI.
+    pub rule: FlowSpecRule,
+    /// Add-Path identifier, or zero without Add-Path.
+    pub path_id: u32,
+}
+
 /// A single BGP-LS route stored by the ADR-0077 receive/API slice.
 ///
 /// The route remains opaque: rustbgpd stores and exposes RFC 9552 identity and
@@ -932,6 +956,26 @@ impl RtcRibRoute {
 }
 
 impl FlowSpecRoute {
+    /// Selection / Adj-RIB-Out identity, preserving AFI even when the rule has
+    /// no destination-prefix component.
+    #[must_use]
+    pub fn selection_key(&self) -> FlowSpecKey {
+        FlowSpecKey {
+            afi: self.afi,
+            rule: self.rule.clone(),
+        }
+    }
+
+    /// Adj-RIB-In identity including Add-Path ID.
+    #[must_use]
+    pub fn key(&self) -> FlowSpecRouteKey {
+        FlowSpecRouteKey {
+            afi: self.afi,
+            rule: self.rule.clone(),
+            path_id: self.path_id,
+        }
+    }
+
     /// Extract the ORIGIN attribute value, defaulting to `Incomplete`.
     #[must_use]
     pub fn origin(&self) -> Origin {

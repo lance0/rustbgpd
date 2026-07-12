@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
 use super::helpers::{ERR_REFRESH_TIMEOUT, afi_safi_label, gauge_val, prefix_family};
 use super::{PolicyFilteredRouteKey, RibManager};
 use crate::adj_rib_out::AdjRibOut;
-use crate::route::BgpLsFamily;
+use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
@@ -105,13 +105,13 @@ impl RibManager {
                 awaiting.remove(&(afi, safi));
             }
 
-            let fs_affected: HashSet<FlowSpecRule> = self
+            let fs_affected: HashSet<FlowSpecKey> = self
                 .ribs
                 .get(&peer)
                 .map(|rib| {
                     rib.iter_flowspec()
                         .filter(|route| route.afi == afi)
-                        .map(|route| route.rule.clone())
+                        .map(FlowSpecRoute::selection_key)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -291,13 +291,13 @@ impl RibManager {
                 awaiting.remove(&(afi, safi));
             }
 
-            let fs_affected: HashSet<FlowSpecRule> = self
+            let fs_affected: HashSet<FlowSpecKey> = self
                 .ribs
                 .get(&peer)
                 .map(|rib| {
                     rib.iter_flowspec()
                         .filter(|route| route.afi == afi)
-                        .map(|route| route.rule.clone())
+                        .map(FlowSpecRoute::selection_key)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -498,12 +498,12 @@ impl RibManager {
         if let Some(rib) = self.ribs.get(&peer) {
             if safi == Safi::FlowSpec {
                 let stale = self.refresh_stale_flowspec.entry(peer).or_default();
-                stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
+                stale.retain(|key| key.afi != afi);
                 for route in rib
                     .iter_flowspec()
                     .filter(|route| route.afi == afi && !route.is_stale && !route.is_llgr_stale)
                 {
-                    if stale.insert((route.afi, route.rule.clone(), route.path_id)) {
+                    if stale.insert(route.key()) {
                         stale_count += 1;
                     }
                 }
@@ -689,11 +689,11 @@ impl RibManager {
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
 
         if safi == Safi::FlowSpec {
-            let flow_rules: HashSet<FlowSpecRule> = self
+            let flow_rules: HashSet<FlowSpecKey> = self
                 .loc_rib
                 .iter_flowspec()
                 .filter(|route| route.afi == afi)
-                .map(|route| route.rule.clone())
+                .map(FlowSpecRoute::selection_key)
                 .collect();
             if !flow_rules.is_empty() {
                 Self::stage_flowspec_rules(
@@ -1266,14 +1266,14 @@ impl RibManager {
                     .collect()
             })
             .unwrap_or_default();
-        let stale_flowspec_keys: Vec<(FlowSpecRule, u32)> = self
+        let stale_flowspec_keys: Vec<FlowSpecRouteKey> = self
             .refresh_stale_flowspec
             .get(&peer)
             .map(|stale| {
                 stale
                     .iter()
-                    .filter(|(stale_afi, _, _)| *stale_afi == afi && safi == Safi::FlowSpec)
-                    .map(|(_, rule, path_id)| (rule.clone(), *path_id))
+                    .filter(|key| key.afi == afi && safi == Safi::FlowSpec)
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
@@ -1351,9 +1351,12 @@ impl RibManager {
                     affected.insert(*prefix);
                 }
             }
-            for (rule, path_id) in &stale_flowspec_keys {
-                if rib.withdraw_flowspec(rule, *path_id) {
-                    fs_affected.insert(rule.clone());
+            for key in &stale_flowspec_keys {
+                if rib.withdraw_flowspec(key) {
+                    fs_affected.insert(FlowSpecKey {
+                        afi: key.afi,
+                        rule: key.rule.clone(),
+                    });
                 }
             }
             for key in &stale_evpn_keys {
@@ -1421,7 +1424,7 @@ impl RibManager {
 
         let clear_flowspec_stale_entry =
             if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
-                stale.retain(|(stale_afi, _, _)| !(*stale_afi == afi && safi == Safi::FlowSpec));
+                stale.retain(|key| !(key.afi == afi && safi == Safi::FlowSpec));
                 stale.is_empty()
             } else {
                 false

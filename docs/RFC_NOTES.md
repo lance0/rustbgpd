@@ -47,6 +47,9 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   the established `bgp_otc_routes_blocked_total` / `OTC_ROUTE_BLOCKED`
   diagnostic publication. The RIB passes rejected route context explicitly,
   so metrics/events and export-explain reflect the same pre-commit decision.
+  Backpressured grouped peers retain at most one pending diagnostic per route;
+  resync rebuilds that residue from current denials so withdrawn sources do
+  not leak stale events into an unrelated later update.
 - RFC 9234 section 5 applies only to IPv4/IPv6 unicast SAFI 1 here. FlowSpec,
   EVPN, VPN, labeled-unicast, RTC, and BGP-LS are not subject to the OTC gate.
 
@@ -81,6 +84,14 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   capability negotiated in OPEN.
 - Structural decode (can I read these bytes?) separated from semantic
   validation (is the attribute set RFC-compliant?). See ADR-0012.
+- Outbound IPv4/IPv6 unicast and IPv4/IPv6 FlowSpec announcements and
+  withdrawals are chunked by the peer's negotiated 4096/65535-byte message
+  limit. Structured FlowSpec construction is fallible; an individually
+  unencodable NLRI fails the session rather than partially committing a batch.
+- FlowSpec identity is `(AFI, rule)` throughout Adj-RIB-In, Loc-RIB,
+  Adj-RIB-Out, recompute, distribution, and withdrawal. AFI is never inferred
+  from an optional destination-prefix component: legal destination-less IPv4
+  and IPv6 rules remain distinct.
 
 ### §4.4 — KEEPALIVE Message
 
