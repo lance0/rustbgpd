@@ -178,6 +178,14 @@ The script records the observed governor, CPU model, kernel, rustc version,
 commit SHAs, logs, and raw Criterion artifact path. Treat unpinned runs as
 directional only.
 
+When a pull request claims a durable performance gain, check in a receipt under
+`docs/perf/` with the exact refs, environment, command, sampling parameters,
+confidence bounds, and correctness fence. Also check in a compact
+machine-readable CSV or JSON summary and index the receipt from
+[`RECEIPTS.md`](RECEIPTS.md). A PR description or raw files left only under
+`target/criterion/` are useful review evidence, but they are not a durable
+project receipt.
+
 ## Manual CI Workflow
 
 `.github/workflows/bench.yml` exposes the same comparison as a manual
