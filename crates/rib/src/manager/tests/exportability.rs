@@ -361,32 +361,48 @@ fn rejection_pruning_follows_sparse_overlay_liveness() {
     // The rejected overlay records the outbound single-best identity, not
     // the source's inbound Add-Path ID.
     let key = ExactExportKey::Unicast(route.prefix, 0);
+    let mut bgpls = make_bgpls_route(Ipv4Addr::new(198, 51, 100, 5), 0x55, 100);
+    bgpls.path_id = 77;
+    let bgpls_inbound_key = bgpls.key();
+    let bgpls_key = ExactExportKey::BgpLs(bgpls_inbound_key.clone()).nlri_identity();
     let mut manager = test_manager();
     let mut rib = AdjRibIn::new(source);
     rib.insert(route.clone());
+    rib.insert_bgpls(bgpls);
     manager.ribs.insert(source, rib);
+    manager.register_unicast_announcer(source, route.prefix);
     manager
         .peer_unexportable
-        .insert(target, HashSet::from([key.clone()]));
+        .insert(target, HashSet::from([key.clone(), bgpls_key.clone()]));
 
     manager.prune_exact_export_rejections();
     assert!(manager.peer_unexportable[&target].contains(&key));
+    assert!(manager.peer_unexportable[&target].contains(&bgpls_key));
 
-    manager.forget_exact_export_rejections([ExactExportKey::Unicast(route.prefix, 42)]);
+    manager.retire_exact_export_rejections([ExactExportKey::Unicast(route.prefix, 42)]);
     assert!(
-        !manager.peer_unexportable.contains_key(&target),
-        "targeted withdrawal cleanup must normalize inbound and outbound path IDs"
+        manager.peer_unexportable[&target].contains(&key),
+        "a surviving source path must retain the outbound rejection"
     );
-    manager
-        .peer_unexportable
-        .insert(target, HashSet::from([key]));
+    manager.retire_exact_export_rejections([ExactExportKey::BgpLs(bgpls_inbound_key.clone())]);
+    assert!(
+        manager.peer_unexportable[&target].contains(&bgpls_key),
+        "opaque-family liveness must ignore the inbound Add-Path ID"
+    );
 
     manager
         .ribs
         .get_mut(&source)
         .unwrap()
         .withdraw(&route.prefix, 42);
-    manager.prune_exact_export_rejections();
+    manager.retire_exact_export_rejections([ExactExportKey::Unicast(route.prefix, 42)]);
+    assert!(!manager.peer_unexportable[&target].contains(&key));
+    manager
+        .ribs
+        .get_mut(&source)
+        .unwrap()
+        .withdraw_bgpls(&bgpls_inbound_key);
+    manager.retire_exact_export_rejections([ExactExportKey::BgpLs(bgpls_inbound_key)]);
     assert!(!manager.peer_unexportable.contains_key(&target));
 }
 
@@ -417,6 +433,43 @@ async fn peer_up_with_encoder(
         orr_vantage: None,
         add_path_send_families: Vec::new(),
         add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+async fn add_path_peer_up_with_encoder(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    encoder: Arc<dyn ExactExportEncoder>,
+    send_max: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 8,
+        encoder,
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 8,
+        peer,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: send_max,
         negotiated_orf_recv: Vec::new(),
         negotiated_llgr_families: Vec::new(),
     })
@@ -565,6 +618,82 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     let counts = result.await.unwrap();
     assert!(counts[&classic].is_empty());
     assert_eq!(counts[&extended], vec![((Afi::Ipv4, Safi::Unicast), 1)]);
+
+    // Remove the non-best source, then the remaining best. The grouped table
+    // owes a withdrawal only to the extended peer; the classic member's
+    // rejected overlay must suppress a duplicate wire withdrawal before the
+    // targeted retirement pass clears the now-dead identity.
+    for source in [source_a, source_b] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: Vec::new(),
+            withdrawn: vec![(Prefix::V4(prefix), 0)],
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let _ = advertised_count(&tx, classic).await;
+    }
+    let extended_withdraw = extended_rx.recv().await.unwrap();
+    assert_eq!(extended_withdraw.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    if let Ok(Some(classic_update)) =
+        tokio::time::timeout(Duration::from_millis(25), classic_rx.recv()).await
+    {
+        assert!(
+            classic_update.withdraw.is_empty(),
+            "a route rejected before commit must never receive a duplicate withdrawal"
+        );
+    }
+    assert_eq!(advertised_count(&tx, classic).await, 0);
+    assert_eq!(advertised_count(&tx, extended).await, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
+    let encoder = MockExactExportEncoder::accepting(41);
+    encoder.set_profile(41, [ExactExportKey::Unicast(Prefix::V4(prefix), 2)]);
+    let _out_rx = add_path_peer_up_with_encoder(&tx, target, encoder, 3).await;
+
+    for (source, local_pref) in [
+        (Ipv4Addr::new(198, 51, 100, 20), 300),
+        (Ipv4Addr::new(198, 51, 100, 21), 200),
+        (Ipv4Addr::new(198, 51, 100, 22), 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: vec![make_route_with_lp(prefix, source, local_pref)],
+            withdrawn: Vec::new(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+        })
+        .await
+        .unwrap();
+    }
+    let _ = advertised_count(&tx, target).await;
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known peer");
+    let rejected = explain
+        .candidates
+        .iter()
+        .find(|candidate| candidate.route.peer == IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21)))
+        .expect("rank-two candidate");
+    assert_eq!(rejected.advertised_path_id, 0);
 
     drop(tx);
     handle.await.unwrap();

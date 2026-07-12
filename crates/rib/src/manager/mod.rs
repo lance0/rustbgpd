@@ -368,6 +368,10 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// Withdrawn NLRI identities accumulated across the currently-draining
+    /// batch. Retired only after distribution so the exact overlay can
+    /// suppress any rejected-only wire withdrawal first.
+    pending_exact_export_withdrawals: HashSet<ExactExportKey>,
     /// Best-path changes accumulated across the chunks of the
     /// currently-draining route batch and distributed in a single
     /// `distribute_changes` call when the batch is exhausted. Deferring
@@ -937,6 +941,7 @@ impl RibManager {
             rx,
             query_rx,
             pending_route_batches: VecDeque::new(),
+            pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
             test_ingest_stall,
@@ -1125,10 +1130,13 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", "bgpls") {
-                    self.forget_exact_export_rejections(
-                        withdrawn.iter().cloned().map(ExactExportKey::BgpLs),
-                    );
+                    let retired = withdrawn
+                        .iter()
+                        .cloned()
+                        .map(ExactExportKey::BgpLs)
+                        .collect::<Vec<_>>();
                     self.handle_bgpls_routes_received(peer, announced, withdrawn);
+                    self.retire_exact_export_rejections(retired);
                 }
             }
             RibUpdate::VpnRoutesReceived {
@@ -1138,10 +1146,13 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", "vpn") {
-                    self.forget_exact_export_rejections(
-                        withdrawn.iter().cloned().map(ExactExportKey::Vpn),
-                    );
+                    let retired = withdrawn
+                        .iter()
+                        .cloned()
+                        .map(ExactExportKey::Vpn)
+                        .collect::<Vec<_>>();
                     self.handle_vpn_routes_received(peer, announced, withdrawn);
+                    self.retire_exact_export_rejections(retired);
                 }
             }
             RibUpdate::LabeledRoutesReceived {
@@ -1152,10 +1163,13 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", "labeled")
                 {
-                    self.forget_exact_export_rejections(
-                        withdrawn.iter().copied().map(ExactExportKey::Labeled),
-                    );
+                    let retired = withdrawn
+                        .iter()
+                        .copied()
+                        .map(ExactExportKey::Labeled)
+                        .collect::<Vec<_>>();
                     self.handle_labeled_routes_received(peer, announced, withdrawn);
+                    self.retire_exact_export_rejections(retired);
                 }
             }
             RibUpdate::RtcRoutesReceived {
@@ -1165,10 +1179,13 @@ impl RibManager {
                 withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", "rtc") {
-                    self.forget_exact_export_rejections(
-                        withdrawn.iter().cloned().map(ExactExportKey::Rtc),
-                    );
+                    let retired = withdrawn
+                        .iter()
+                        .cloned()
+                        .map(ExactExportKey::Rtc)
+                        .collect::<Vec<_>>();
                     self.handle_rtc_routes_received(peer, announced, withdrawn);
+                    self.retire_exact_export_rejections(retired);
                 }
             }
             RibUpdate::PeerDown { peer, session_id } => {
@@ -1302,8 +1319,8 @@ impl RibManager {
                 path_id,
                 reply,
             } => {
-                self.forget_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
                 self.handle_withdraw_injected(prefix, path_id, reply);
+                self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
             }
             RibUpdate::QueryReceivedRoutes { peer, reply } => {
                 self.handle_query_received_routes(peer, reply);
@@ -1493,13 +1510,14 @@ impl RibManager {
             RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { key, reply } => {
-                self.forget_exact_export_rejections([ExactExportKey::FlowSpec(key.clone())]);
+                let retired = ExactExportKey::FlowSpec(key.clone());
                 self.handle_withdraw_flowspec(key, reply);
+                self.retire_exact_export_rejections([retired]);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {
-                self.forget_exact_export_rejections([ExactExportKey::Evpn(key)]);
                 self.handle_withdraw_evpn(key, reply);
+                self.retire_exact_export_rejections([ExactExportKey::Evpn(key)]);
             }
             RibUpdate::QueryFlowSpecRoutes { reply } => {
                 self.handle_query_flowspec_routes(reply);
@@ -1565,8 +1583,15 @@ impl RibManager {
         if self.peer_unexportable.is_empty() {
             return;
         }
-        let live = self
-            .ribs
+        let live = self.live_exact_export_nlri();
+        self.peer_unexportable.retain(|_, rejected| {
+            rejected.retain(|key| live.contains(&key.nlri_identity()));
+            !rejected.is_empty()
+        });
+    }
+
+    fn live_exact_export_nlri(&self) -> HashSet<ExactExportKey> {
+        self.ribs
             .values()
             .flat_map(|rib| {
                 rib.iter()
@@ -1596,14 +1621,56 @@ impl RibManager {
                             .map(|route| ExactExportKey::Rtc(route.key()).nlri_identity()),
                     )
             })
-            .collect::<HashSet<_>>();
-        self.peer_unexportable.retain(|_, rejected| {
-            rejected.retain(|key| live.contains(&key.nlri_identity()));
-            !rejected.is_empty()
-        });
+            .collect()
     }
 
-    fn forget_exact_export_rejections(
+    fn exact_export_nlri_is_live(&self, key: &ExactExportKey) -> bool {
+        match key {
+            ExactExportKey::Unicast(prefix, _) => {
+                self.unicast_prefix_peers.get(prefix).is_some_and(|peers| {
+                    peers.iter().any(|peer| {
+                        self.ribs
+                            .get(peer)
+                            .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
+                    })
+                })
+            }
+            ExactExportKey::FlowSpec(key) => self.ribs.values().any(|rib| {
+                rib.iter_flowspec()
+                    .any(|route| route.selection_key() == *key)
+            }),
+            ExactExportKey::Evpn(key) => self
+                .ribs
+                .values()
+                .any(|rib| rib.iter_evpn().any(|route| route.key() == *key)),
+            ExactExportKey::BgpLs(key) => self.ribs.values().any(|rib| {
+                rib.iter_bgpls().any(|route| {
+                    ExactExportKey::BgpLs(route.key()).nlri_identity()
+                        == ExactExportKey::BgpLs(key.clone()).nlri_identity()
+                })
+            }),
+            ExactExportKey::Vpn(key) => self
+                .ribs
+                .values()
+                .any(|rib| rib.iter_vpn_for_nlri(&key.nlri_key).next().is_some()),
+            ExactExportKey::Labeled(key) => self
+                .ribs
+                .values()
+                .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some()),
+            ExactExportKey::Rtc(key) => self.ribs.values().any(|rib| {
+                rib.iter_rtc().any(|route| {
+                    ExactExportKey::Rtc(route.key()).nlri_identity()
+                        == ExactExportKey::Rtc(key.clone()).nlri_identity()
+                })
+            }),
+        }
+    }
+
+    /// Retire withdrawn overlay identities after distribution had the first
+    /// chance to suppress a rejected-only wire withdrawal. A surviving source
+    /// path keeps the overlay; the distribution pass has already refreshed its
+    /// exact accept/reject state.
+    fn retire_exact_export_rejections(
         &mut self,
         withdrawn: impl IntoIterator<Item = ExactExportKey>,
     ) {
@@ -1617,8 +1684,23 @@ impl RibManager {
         if withdrawn.is_empty() {
             return;
         }
+        if !self.peer_unexportable.values().any(|rejected| {
+            rejected
+                .iter()
+                .any(|key| withdrawn.contains(&key.nlri_identity()))
+        }) {
+            return;
+        }
+        let live = withdrawn
+            .iter()
+            .filter(|key| self.exact_export_nlri_is_live(key))
+            .cloned()
+            .collect::<HashSet<_>>();
         self.peer_unexportable.retain(|_, rejected| {
-            rejected.retain(|key| !withdrawn.contains(&key.nlri_identity()));
+            rejected.retain(|key| {
+                let identity = key.nlri_identity();
+                !withdrawn.contains(&identity) || live.contains(&identity)
+            });
             !rejected.is_empty()
         });
     }
@@ -2150,9 +2232,6 @@ impl RibManager {
                 orr_ctx,
                 per_client_best,
             );
-            if add_path_send_max > 0 {
-                return explanation;
-            }
             return self.apply_exact_export_overlay_to_explain(
                 peer,
                 &ExactExportKey::Unicast(prefix, explanation.path_id),
@@ -2339,9 +2418,6 @@ impl RibManager {
         );
         let explanation =
             trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64));
-        if add_path_send_max > 0 {
-            return explanation;
-        }
         self.apply_exact_export_overlay_to_explain(
             peer,
             &ExactExportKey::Vpn(crate::route::VpnRibRouteKey {
@@ -2412,7 +2488,7 @@ impl RibManager {
         // deliberate — operators trust explain only if it produces
         // the same selection that distribution would, modulo state
         // changes between the two calls.
-        let mut advertised: Vec<(IpAddr, u32)> = Vec::new();
+        let mut advertised: Vec<(IpAddr, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
             let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
@@ -2525,8 +2601,18 @@ impl RibManager {
                     if evaluate_chain(export_pol, &ctx).action != PolicyAction::Permit {
                         continue;
                     }
-                    advertised.push((cand.peer, cand.path_id));
+                    let outbound_rank = next_rank;
                     next_rank += 1;
+                    if self
+                        .peer_unexportable
+                        .get(&peer_addr)
+                        .is_some_and(|rejected| {
+                            rejected.contains(&ExactExportKey::Unicast(prefix, outbound_rank))
+                        })
+                    {
+                        continue;
+                    }
+                    advertised.push((cand.peer, cand.path_id, outbound_rank));
                 }
             }
         }
@@ -2537,9 +2623,8 @@ impl RibManager {
         // peers commonly carrying tens of paths per prefix this is
         // a meaningful difference at scale.
         let advertised_rank: HashMap<(IpAddr, u32), u32> = advertised
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, key)| u32::try_from(idx + 1).ok().map(|rank| (*key, rank)))
+            .into_iter()
+            .map(|(peer, inbound_path_id, outbound_rank)| ((peer, inbound_path_id), outbound_rank))
             .collect();
 
         let candidates: Vec<BestPathCandidate> = if let Some(ref best_route) = best {
