@@ -2295,6 +2295,60 @@ impl RibManager {
             .unwrap_or_default();
         let _ = reply.send(label);
     }
+
+    /// Answer the neighbor API's combined outbound-state query atomically.
+    pub(super) fn handle_query_peer_outbound_state(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<crate::update::PeerOutboundState>,
+    ) {
+        use crate::update::PeerOutboundState;
+
+        let update_group = self
+            .update_groups
+            .membership(peer)
+            .map(GroupMembership::label)
+            .unwrap_or_default();
+        let orr_resolved = self
+            .peer_orr_vantage
+            .get(&peer)
+            .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
+        let effective_distribution_mode = classify_effective_distribution_mode(
+            self.outbound_peers.contains_key(&peer),
+            self.peer_has_any_add_path_send(peer),
+            self.peer_per_client_best.contains(&peer),
+            orr_resolved,
+        );
+        let _ = reply.send(PeerOutboundState {
+            update_group,
+            effective_distribution_mode,
+        });
+    }
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "pure classifier mirrors four independent live RIB membership predicates"
+)]
+fn classify_effective_distribution_mode(
+    registered: bool,
+    add_path: bool,
+    per_client_best: bool,
+    orr_resolved: bool,
+) -> crate::update::EffectiveDistributionMode {
+    use crate::update::EffectiveDistributionMode;
+
+    if !registered {
+        EffectiveDistributionMode::Unknown
+    } else if add_path {
+        EffectiveDistributionMode::AddPath
+    } else if per_client_best {
+        EffectiveDistributionMode::PerClientBest
+    } else if orr_resolved {
+        EffectiveDistributionMode::Orr
+    } else {
+        EffectiveDistributionMode::SingleBest
+    }
 }
 
 #[cfg(test)]
@@ -2307,6 +2361,32 @@ mod tests {
 
     use super::*;
     use crate::test_support::make_route;
+
+    #[test]
+    fn effective_distribution_mode_precedence_is_deterministic() {
+        use crate::EffectiveDistributionMode;
+
+        assert_eq!(
+            classify_effective_distribution_mode(false, true, true, true),
+            EffectiveDistributionMode::Unknown
+        );
+        assert_eq!(
+            classify_effective_distribution_mode(true, true, true, true),
+            EffectiveDistributionMode::AddPath
+        );
+        assert_eq!(
+            classify_effective_distribution_mode(true, false, true, true),
+            EffectiveDistributionMode::PerClientBest
+        );
+        assert_eq!(
+            classify_effective_distribution_mode(true, false, false, true),
+            EffectiveDistributionMode::Orr
+        );
+        assert_eq!(
+            classify_effective_distribution_mode(true, false, false, false),
+            EffectiveDistributionMode::SingleBest
+        );
+    }
 
     const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1));
     const OTHER1: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 2));

@@ -737,6 +737,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             messages_sent: 8,
             route_reflector_client: false,
             paths_limits: Vec::new(),
+            effective_distribution_mode: server_proto::EffectiveDistributionMode::AddPath.into(),
         }))
     }
 

@@ -258,8 +258,12 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
-    /// Connection-time TCP-AO inspection for the currently owned stream.
+    /// Latest query-time TCP-AO inspection for the currently owned stream.
     tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+    /// Durable protection identity for this session. Unlike `tcp_ao_info`,
+    /// inspection failure never clears this bit, so a protected accepted
+    /// session keeps retrying read-only inspection on later queries.
+    tcp_ao_protected: bool,
     /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
     /// RFC 8538: only preserves routes when Notification GR was negotiated.
     notification_teardown: bool,
@@ -492,6 +496,7 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let tcp_ao_protected = config.tcp_ao.is_some();
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -554,6 +559,7 @@ impl PeerSession {
             established_at: None,
             last_error: String::new(),
             tcp_ao_info: None,
+            tcp_ao_protected,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -593,6 +599,7 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let tcp_ao_protected = config.tcp_ao.is_some() || tcp_ao_info.is_some();
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -667,6 +674,7 @@ impl PeerSession {
             established_at: None,
             last_error: String::new(),
             tcp_ao_info,
+            tcp_ao_protected,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,

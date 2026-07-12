@@ -853,7 +853,8 @@ pub enum PeerManagerCommand {
         stream: TcpStream,
         /// Remote peer socket address, including IPv6 scope for link-local.
         peer_addr: std::net::SocketAddr,
-        /// Connection-time TCP-AO inspection tied to this accepted stream.
+        /// Initial TCP-AO inspection tied to this accepted stream. The session
+        /// refreshes it when state is queried.
         tcp_ao_info: Option<rustbgpd_transport::TcpAoInfoSnapshot>,
     },
     /// Reconcile peers after config reload (add/remove/change).
@@ -1821,9 +1822,13 @@ pub struct PeerInfo {
     pub uptime_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
-    /// Configured transport authentication: plaintext, MD5, or `tcp_ao`.
+    /// Effective transport authentication: plaintext, MD5, or `tcp_ao`.
+    /// Protected accepted dynamic sessions derive this from durable live
+    /// transport identity rather than a per-neighbor key configuration.
     pub authentication: String,
-    /// Connection-time TCP-AO health for the currently owned stream.
+    /// Query-time TCP-AO inspection snapshot for the currently owned stream,
+    /// including `KeyID` validity flags and cumulative verification counters.
+    /// Health classification is derived at the protobuf/API boundary.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,

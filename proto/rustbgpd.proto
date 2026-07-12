@@ -395,7 +395,13 @@ message PathsLimitState {
   uint32 configured_receive_max = 2;
   uint32 advertised_receive_max = 3;
   uint32 received_receive_max = 4;
+  // Legacy raw effective send cap: 0 = inactive, UINT32_MAX = unlimited,
+  // any other value = finite. Preserved for rolling compatibility.
   uint32 effective_send_max = 5;
+  // Normalized effective send cap. Presence means Add-Path send is active:
+  // 0 = unlimited, non-zero = finite. Absence means inactive. New clients
+  // fall back to effective_send_max when reading an older server.
+  optional uint32 effective_send_limit = 6;
 }
 
 message NeighborState {
@@ -456,13 +462,25 @@ message NeighborState {
   repeated PathsLimitState paths_limits = 26;
   // Configured transport authentication for this session.
   AuthenticationMode authentication = 27;
-  // Best-effort connection-time Linux TCP-AO inspection; absent when not AO
-  // or when no snapshot is available (including disconnect or inspection failure).
+  // Best-effort query-time Linux TCP-AO inspection; absent when not AO or when
+  // no live snapshot is available (including disconnect or inspection failure).
   TcpAoState tcp_ao = 28;
-  // Health derived from the configured mode and connection-time inspection.
+  // Health derived from the configured mode and query-time inspection.
   // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available
   // (disconnected, still connecting, or inspection failed).
   TcpAoHealth tcp_ao_health = 29;
+  // Effective live unicast distribution mode reported by the RIB. This is
+  // UNKNOWN while the peer has no active outbound registration.
+  EffectiveDistributionMode effective_distribution_mode = 30;
+}
+
+enum EffectiveDistributionMode {
+  EFFECTIVE_DISTRIBUTION_MODE_UNSPECIFIED = 0;
+  EFFECTIVE_DISTRIBUTION_MODE_UNKNOWN = 1;
+  EFFECTIVE_DISTRIBUTION_MODE_SINGLE_BEST = 2;
+  EFFECTIVE_DISTRIBUTION_MODE_ADD_PATH = 3;
+  EFFECTIVE_DISTRIBUTION_MODE_ORR = 4;
+  EFFECTIVE_DISTRIBUTION_MODE_PER_CLIENT_BEST = 5;
 }
 
 enum AuthenticationMode {

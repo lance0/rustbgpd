@@ -562,8 +562,10 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 **TCP-AO (RFC 5925):** Staged via ADR-0062. Static-neighbor `tcp_ao` TOML is
 validated and installed on Linux startup sockets: active-open sessions install
 the key before `connect()`, and the passive BGP listener installs configured
-peer keys before `listen()`. Runtime key rotation, dynamic-neighbor wildcard
-MKTs, multi-key rollover, and protected interop smoke remain follow-up work.
+static-peer and direct dynamic-prefix MKTs before `listen()`. Accepted protected
+sockets are validated fail-closed, live KeyIDs/counters are queryable through
+the neighbor API/CLI, and M43 covers BIRD interop. Runtime key rotation and
+multi-key rollover remain follow-up work.
 
 **GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and checks inbound TTL >= 254. Simple, effective, and prevents most remote session hijacking.
 
@@ -672,7 +674,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | LLGR (two-phase GR timer) | 9494 | post-v0.3.0 | FRR | Implemented; GR-stale → LLGR-stale promotion, configurable stale time |
-| TCP-AO | 5925 | Post-v1 | — | Static-neighbor startup install; dynamic / rollover follow-ups deferred |
+| TCP-AO | 5925 | Post-v1 | BIRD | Static and direct dynamic-prefix startup install; fail-closed accept validation and live API/CLI health; rollover deferred |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |

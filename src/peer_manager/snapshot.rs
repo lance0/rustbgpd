@@ -14,7 +14,7 @@ use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
 /// `query_state` either timed out (peer parked on TCP write) or its task
 /// has already exited; in both cases we surface `state = Idle, stale =
 /// true` so consumers know the field isn't authoritative.
-fn build_peer_info(
+pub(super) fn build_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeer,
     session_state: Option<&PeerSessionState>,
@@ -67,7 +67,9 @@ fn build_peer_info(
         flap_count: session_state.map_or(0, |s| s.flap_count),
         uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
         last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
-        authentication: if managed.transport_config.tcp_ao.is_some() {
+        authentication: if session_state
+            .map_or(managed.tcp_ao_protected, |state| state.tcp_ao_protected)
+        {
             "tcp_ao"
         } else if managed.transport_config.md5_password.is_some() {
             "md5"

@@ -74,26 +74,12 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         .into_inner();
 
     let cfg = n.config.as_ref();
-    // Unicast distribution mode, mirroring the RIB's mode ladder
-    // (negotiated Add-Path send outranks the per-client-best fallback).
-    // An ORR vantage is not on the runtime NeighborConfig surface, so
-    // it is recognized via the update-group ungrouped reason.
-    //
-    // LAN-211 #6: this reads the *configured* add_path_send/per_client_best
-    // bits echoed on NeighborConfig, so a peer that configured Add-Path but
-    // never negotiated it still prints "add-path". A negotiated/effective
-    // mode is not surfaced on NeighborState (update_group is a shadow-mode
-    // grouping string, "group:N" when grouped), so fixing this needs new
-    // plumbing; deferred.
-    let distribution_mode = if cfg.map(|c| c.add_path_send).unwrap_or(false) {
-        "add-path"
-    } else if cfg.map(|c| c.per_client_best).unwrap_or(false) {
-        "per-client-best"
-    } else if n.update_group == "orr_vantage" {
-        "orr"
-    } else {
-        "single-best"
-    };
+    let distribution_mode = effective_distribution_mode_label(
+        n.effective_distribution_mode,
+        cfg.map(|c| c.add_path_send).unwrap_or(false),
+        cfg.map(|c| c.per_client_best).unwrap_or(false),
+        &n.update_group,
+    );
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -140,12 +126,18 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             paths_limits: n
                 .paths_limits
                 .iter()
-                .map(|limit| JsonPathsLimit {
-                    family: limit.family.clone(),
-                    configured_receive_max: limit.configured_receive_max,
-                    advertised_receive_max: limit.advertised_receive_max,
-                    received_receive_max: limit.received_receive_max,
-                    effective_send_max: limit.effective_send_max,
+                .map(|limit| {
+                    let (effective_send_active, effective_send_max) =
+                        normalized_effective_send(limit);
+                    JsonPathsLimit {
+                        family: limit.family.clone(),
+                        configured_receive_max: limit.configured_receive_max,
+                        advertised_receive_max: limit.advertised_receive_max,
+                        received_receive_max: limit.received_receive_max,
+                        effective_send_max: limit.effective_send_max,
+                        effective_send_limit: effective_send_active.then_some(effective_send_max),
+                        effective_send_active,
+                    }
                 })
                 .collect(),
             role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
@@ -233,13 +225,16 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             println!("Add-Path Send Max:     {add_path_send_max}");
         }
         for limit in &n.paths_limits {
+            let (effective_send_active, effective_send_max) = normalized_effective_send(limit);
+            let effective_send =
+                paths_limit_effective_send_label(effective_send_active, effective_send_max);
             println!(
                 "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
                 limit.family,
                 limit.configured_receive_max,
                 limit.advertised_receive_max,
                 limit.received_receive_max,
-                limit.effective_send_max
+                effective_send
             );
         }
         println!(
@@ -321,6 +316,53 @@ fn tcp_ao_health_label(value: i32) -> &'static str {
         Ok(crate::proto::TcpAoHealth::Healthy) => "healthy",
         Ok(crate::proto::TcpAoHealth::Degraded) => "degraded",
         Ok(crate::proto::TcpAoHealth::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn effective_distribution_mode_label(
+    value: i32,
+    legacy_add_path_send: bool,
+    legacy_per_client_best: bool,
+    legacy_update_group: &str,
+) -> &'static str {
+    match crate::proto::EffectiveDistributionMode::try_from(value) {
+        Ok(crate::proto::EffectiveDistributionMode::SingleBest) => "single-best",
+        Ok(crate::proto::EffectiveDistributionMode::AddPath) => "add-path",
+        Ok(crate::proto::EffectiveDistributionMode::Orr) => "orr",
+        Ok(crate::proto::EffectiveDistributionMode::PerClientBest) => "per-client-best",
+        Ok(crate::proto::EffectiveDistributionMode::Unknown) | Err(_) => "unknown",
+        Ok(crate::proto::EffectiveDistributionMode::Unspecified) => {
+            if legacy_add_path_send {
+                "add-path"
+            } else if legacy_per_client_best {
+                "per-client-best"
+            } else if legacy_update_group == "orr_vantage" {
+                "orr"
+            } else {
+                "single-best"
+            }
+        }
+    }
+}
+
+fn paths_limit_effective_send_label(active: bool, max: u32) -> String {
+    if !active {
+        "inactive".to_string()
+    } else if max == 0 {
+        "unlimited".to_string()
+    } else {
+        max.to_string()
+    }
+}
+
+fn normalized_effective_send(limit: &crate::proto::PathsLimitState) -> (bool, u32) {
+    if let Some(normalized) = limit.effective_send_limit {
+        return (true, normalized);
+    }
+    match limit.effective_send_max {
+        0 => (false, 0),
+        u32::MAX => (true, 0),
+        finite => (true, finite),
     }
 }
 
@@ -519,6 +561,79 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn effective_distribution_mode_is_live_and_backward_compatible() {
+        assert_eq!(
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::AddPath as i32,
+                false,
+                false,
+                ""
+            ),
+            "add-path"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::PerClientBest as i32,
+                false,
+                false,
+                ""
+            ),
+            "per-client-best"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(0, true, false, ""),
+            "add-path"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(0, false, true, ""),
+            "per-client-best"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(0, false, false, "orr_vantage"),
+            "orr"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::Unknown as i32,
+                true,
+                true,
+                "orr_vantage"
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(i32::MAX, true, true, "orr_vantage"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn paths_limit_effective_send_distinguishes_inactive_and_unlimited() {
+        assert_eq!(paths_limit_effective_send_label(false, 0), "inactive");
+        assert_eq!(paths_limit_effective_send_label(true, 0), "unlimited");
+        assert_eq!(paths_limit_effective_send_label(true, 4), "4");
+    }
+
+    #[test]
+    fn paths_limit_new_and_legacy_servers_normalize_bidirectionally() {
+        let row = |raw, normalized| crate::proto::PathsLimitState {
+            effective_send_max: raw,
+            effective_send_limit: normalized,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            normalized_effective_send(&row(u32::MAX, Some(0))),
+            (true, 0)
+        );
+        assert_eq!(normalized_effective_send(&row(4, Some(4))), (true, 4));
+        assert_eq!(normalized_effective_send(&row(0, None)), (false, 0));
+        assert_eq!(normalized_effective_send(&row(u32::MAX, None)), (true, 0));
+        assert_eq!(normalized_effective_send(&row(3, None)), (true, 3));
+        assert_eq!(normalized_effective_send(&row(0, Some(0))), (true, 0));
+    }
 
     #[tokio::test]
     async fn add_sends_route_server_and_add_path_fields() {
