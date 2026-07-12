@@ -2645,7 +2645,7 @@ mod tests {
     };
     use rustbgpd_api::rib_service::FibTableControlError;
     use rustbgpd_policy::PolicyAction;
-    use std::collections::{BTreeSet, HashMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
     use tokio::sync::Mutex;
 
     fn base_toml(extra: &str) -> String {
@@ -7114,5 +7114,507 @@ families = ["ipv4_unicast"]
             Some(impact.clone()),
         );
         assert_eq!(response.update_group_impact, Some(impact));
+    }
+
+    fn update_group_equivalence_toml(candidate: bool) -> String {
+        let peer_groups = if candidate {
+            r#"
+[peer_groups.ga]
+export_policy_chain = ["new-shared"]
+[peer_groups.gb]
+export_policy_chain = ["b-private"]
+[peer_groups.gc]
+export_policy_chain = ["new-shared"]
+[peer_groups.gd]
+export_policy_chain = ["stable"]
+[peer_groups.ge]
+export_policy_chain = ["stable"]
+"#
+        } else {
+            r#"
+[peer_groups.ga]
+export_policy_chain = ["old-shared"]
+[peer_groups.gb]
+export_policy_chain = ["old-shared"]
+[peer_groups.gc]
+export_policy_chain = ["c-distinct"]
+[peer_groups.gd]
+export_policy_chain = ["d-private"]
+[peer_groups.ge]
+export_policy_chain = ["stable"]
+"#
+        };
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy.neighbor_sets.peer-context]
+addresses = ["10.0.0.12"]
+
+[policy.definitions.old-shared]
+default_action = "permit"
+
+[policy.definitions.c-distinct]
+default_action = "deny"
+
+[policy.definitions.d-private]
+default_action = "permit"
+[[policy.definitions.d-private.statements]]
+match_neighbor_set = "peer-context"
+action = "deny"
+
+[policy.definitions.stable]
+default_action = "permit"
+[[policy.definitions.stable.statements]]
+prefix = "203.0.113.0/24"
+action = "deny"
+
+[policy.definitions.new-shared]
+default_action = "permit"
+[[policy.definitions.new-shared.statements]]
+prefix = "198.51.100.0/24"
+action = "deny"
+
+[policy.definitions.b-private]
+default_action = "permit"
+[[policy.definitions.b-private.statements]]
+match_neighbor_set = "peer-context"
+action = "deny"
+
+{peer_groups}
+
+[[neighbors]]
+address = "10.0.0.11"
+remote_asn = 65001
+families = ["ipv4_unicast", "ipv6_unicast"]
+peer_group = "ga"
+
+[[neighbors]]
+address = "10.0.0.12"
+remote_asn = 65001
+families = ["ipv4_unicast", "ipv6_unicast"]
+peer_group = "gb"
+
+[[neighbors]]
+address = "10.0.0.13"
+remote_asn = 65001
+families = ["ipv4_unicast", "ipv6_unicast"]
+peer_group = "gc"
+
+[[neighbors]]
+address = "10.0.0.14"
+remote_asn = 65001
+families = ["ipv4_unicast", "ipv6_unicast"]
+peer_group = "gd"
+
+[[neighbors]]
+address = "10.0.0.15"
+remote_asn = 65001
+families = ["ipv4_unicast", "ipv6_unicast"]
+peer_group = "ge"
+"#
+        )
+    }
+
+    async fn query_real_update_group_snapshot(
+        rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    ) -> rustbgpd_rib::UpdateGroupSnapshot {
+        let (reply, receive) = oneshot::channel();
+        rib_tx
+            .send(rustbgpd_rib::RibUpdate::QueryUpdateGroupSnapshot { reply })
+            .await
+            .expect("real RIB must accept update-group snapshot query");
+        receive
+            .await
+            .expect("real RIB must return update-group snapshot")
+    }
+
+    fn candidate_state_for_peer(
+        impact: &rustbgpd_rib::UpdateGroupImpactPlan,
+        peer: std::net::IpAddr,
+    ) -> rustbgpd_rib::PlannedGroupability {
+        let mut states = impact
+            .entries
+            .iter()
+            .filter(|row| row.peer == peer)
+            .map(|row| &row.candidate);
+        let first = states
+            .next()
+            .expect("peer must have at least one planned family")
+            .clone();
+        assert!(
+            states.all(|state| state == &first),
+            "one candidate state across peer families"
+        );
+        first
+    }
+
+    fn planned_families(
+        impact: &rustbgpd_rib::UpdateGroupImpactPlan,
+        peer: std::net::IpAddr,
+    ) -> BTreeSet<(u16, u8)> {
+        impact
+            .entries
+            .iter()
+            .filter(|row| row.peer == peer)
+            .map(|row| (row.afi, row.safi))
+            .collect()
+    }
+
+    fn planned_group_id(state: &rustbgpd_rib::PlannedGroupability) -> Option<&str> {
+        match state {
+            rustbgpd_rib::PlannedGroupability::Group { id } => Some(id),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end oracle keeps the real plan, apply, persistence, RIB, and re-plan assertions in one auditable scenario"
+    )]
+    async fn config_transaction_plan_matches_real_post_apply_update_groups() {
+        use rustbgpd_rib::{
+            PlannedGroupability, UpdateGroupClassification, UpdateGroupImpactRollup,
+        };
+        use rustbgpd_wire::{Afi, Safi};
+
+        let current_toml = update_group_equivalence_toml(false);
+        let candidate_toml = update_group_equivalence_toml(true);
+        let current = Config::load_toml_with_diagnostics(&current_toml, "current parity config")
+            .expect("current parity config must parse");
+        let resolved = current
+            .resolved_neighbors()
+            .expect("current parity neighbors must resolve");
+        assert_eq!(resolved.len(), 5);
+
+        let (rib_tx, rib_rx) = mpsc::channel(128);
+        let (_query_tx, query_rx) = mpsc::channel(1);
+        let rib_manager =
+            rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
+        let rib_task = tokio::spawn(rib_manager.run());
+
+        let (peer_tx, peer_rx) = mpsc::channel(64);
+        let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let mut peer_manager = crate::peer_manager::PeerManager::new_with_config(
+            peer_rx,
+            internal_rx,
+            current.global.asn,
+            current.global.router_id.parse().unwrap(),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx.clone(),
+            None,
+            None,
+            current.clone(),
+        );
+
+        let mut session_acks = BTreeMap::new();
+        let mut outbound_receivers = Vec::new();
+        for (index, neighbor) in resolved.into_iter().enumerate() {
+            let peer = neighbor.transport_config.remote_addr.ip();
+            let session_id = u64::try_from(index + 1).unwrap();
+            session_acks.insert(
+                peer,
+                peer_manager.install_established_policy_test_peer(neighbor.clone(), session_id),
+            );
+            let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+            rib_tx
+                .send(rustbgpd_rib::RibUpdate::PeerUp {
+                    peer,
+                    session_id,
+                    peer_asn: neighbor.transport_config.peer.remote_asn,
+                    peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+                    outbound_tx,
+                    export_policy: neighbor.export_policy,
+                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+                    is_ebgp: false,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    add_path_send_families: Vec::new(),
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(),
+                    negotiated_llgr_families: Vec::new(),
+                })
+                .await
+                .expect("real RIB must accept PeerUp");
+            let initial = outbound_rx
+                .recv()
+                .await
+                .expect("real RIB must emit initial EoR");
+            assert!(initial.announce.is_empty());
+            assert!(initial.withdraw.is_empty());
+            assert_eq!(
+                initial
+                    .end_of_rib
+                    .iter()
+                    .map(|(afi, safi)| (*afi as u16, *safi as u8))
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([(1, 1), (2, 1)])
+            );
+            outbound_receivers.push(outbound_rx);
+        }
+        let peer_task = tokio::spawn(peer_manager.run());
+
+        let before = query_real_update_group_snapshot(&rib_tx).await;
+        assert_eq!(before.peers.len(), 5, "all real PeerUp rows are visible");
+
+        let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new())
+            .await
+            .expect("real PlanConfigTransaction flow must succeed");
+        assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
+        assert_eq!(planned.update_group_impact.entries.len(), 10);
+        assert_eq!(
+            planned.update_group_impact.rollup,
+            UpdateGroupImpactRollup {
+                affected_peers: 4,
+                affected_families: 8,
+                no_op: 2,
+                regroup: 4,
+                shared_migration: 2,
+                private_resync: 2,
+                indeterminate: 0,
+                projected_shared_groups: 2,
+                projected_private_views: 1,
+                local_resyncs: 8,
+                remote_route_refreshes: 0,
+            }
+        );
+        assert!(
+            planned
+                .update_group_impact
+                .entries
+                .iter()
+                .all(|row| !row.remote_route_refresh)
+        );
+
+        let peers = (11_u8..=15)
+            .map(|last| std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last)))
+            .collect::<Vec<_>>();
+        let expected_transitions = [
+            "regroup",
+            "private_resync",
+            "regroup",
+            "shared_migration",
+            "no_op",
+        ];
+        for (&peer, expected) in peers.iter().zip(expected_transitions) {
+            let rows = planned
+                .update_group_impact
+                .entries
+                .iter()
+                .filter(|row| row.peer == peer)
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|row| row.transition == expected));
+            assert_eq!(
+                planned_families(&planned.update_group_impact, peer),
+                BTreeSet::from([(1, 1), (2, 1)])
+            );
+        }
+
+        let peer_a = candidate_state_for_peer(&planned.update_group_impact, peers[0]);
+        let peer_b = candidate_state_for_peer(&planned.update_group_impact, peers[1]);
+        let peer_c = candidate_state_for_peer(&planned.update_group_impact, peers[2]);
+        let peer_d = candidate_state_for_peer(&planned.update_group_impact, peers[3]);
+        let peer_e = candidate_state_for_peer(&planned.update_group_impact, peers[4]);
+        assert_eq!(planned_group_id(&peer_a), planned_group_id(&peer_c));
+        assert_eq!(planned_group_id(&peer_d), planned_group_id(&peer_e));
+        assert_ne!(planned_group_id(&peer_a), planned_group_id(&peer_d));
+        let planned_private_fingerprint = match &peer_b {
+            PlannedGroupability::Private {
+                reason,
+                fingerprint,
+            } => {
+                assert_eq!(reason, "policy_peer_context");
+                fingerprint.clone()
+            }
+            other => panic!("peer B must plan private, got {other:?}"),
+        };
+
+        let persisted = Arc::new(Mutex::new(None));
+        let persisted_task = Arc::clone(&persisted);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let persist_task = tokio::spawn(async move {
+            let event = config_rx
+                .recv()
+                .await
+                .expect("ApplyConfigTransaction must persist the candidate");
+            let ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            } = event
+            else {
+                panic!("expected persisted config transaction event");
+            };
+            *persisted_task.lock().await = Some(candidate_toml);
+            let _ = ack.send(Ok(()));
+        });
+
+        let expected_apply_impact =
+            rustbgpd_api::update_group_impact_to_proto(planned.update_group_impact.clone());
+        let response = apply_config_transaction(
+            deps(None, peer_tx.clone(), Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: planned.runtime_snapshot_token.clone(),
+                client_request_id: "plan-apply-parity".to_string(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .expect("real ApplyConfigTransaction flow must succeed");
+        persist_task.await.unwrap();
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(response.update_group_impact, Some(expected_apply_impact));
+        assert_eq!(
+            persisted.lock().await.as_deref(),
+            Some(candidate_toml.as_str())
+        );
+
+        let after = query_real_update_group_snapshot(&rib_tx).await;
+        let live = after
+            .peers
+            .iter()
+            .map(|row| (row.peer, row))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(live.len(), 5);
+
+        for &peer in &peers {
+            let row = live[&peer];
+            assert_eq!(
+                row.input
+                    .sendable_families
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                planned_families(&planned.update_group_impact, peer),
+                "planned family rows must match the real negotiated snapshot"
+            );
+        }
+
+        for &peer in &[peers[0], peers[2], peers[3], peers[4]] {
+            assert!(matches!(
+                live[&peer].classification,
+                UpdateGroupClassification::Groupable(_)
+            ));
+            assert!(live[&peer].runtime_membership.starts_with("group:"));
+        }
+        assert_eq!(
+            live[&peers[1]].classification.reason(),
+            Some("policy_peer_context")
+        );
+        assert_eq!(live[&peers[1]].runtime_membership, "policy_peer_context");
+        assert_eq!(
+            planned_private_fingerprint,
+            format!("{:?}", live[&peers[1]].input),
+            "planned private fingerprint must equal the real post-apply classifier input"
+        );
+
+        for receiver in &mut outbound_receivers {
+            assert!(!receiver.is_closed(), "real RIB outbound stream stays live");
+            while receiver.try_recv().is_ok() {}
+        }
+
+        for left in 0..peers.len() {
+            for right in (left + 1)..peers.len() {
+                let left_plan = candidate_state_for_peer(&planned.update_group_impact, peers[left]);
+                let right_plan =
+                    candidate_state_for_peer(&planned.update_group_impact, peers[right]);
+                if let (Some(left_id), Some(right_id)) =
+                    (planned_group_id(&left_plan), planned_group_id(&right_plan))
+                {
+                    assert_eq!(
+                        left_id == right_id,
+                        live[&peers[left]].runtime_membership
+                            == live[&peers[right]].runtime_membership,
+                        "plan-local group equality must equal real runtime partition equality"
+                    );
+                }
+            }
+        }
+
+        let live_shared_groups = live
+            .values()
+            .filter(|row| matches!(row.classification, UpdateGroupClassification::Groupable(_)))
+            .map(|row| row.runtime_membership.as_str())
+            .collect::<BTreeSet<_>>();
+        let live_private_views = live
+            .values()
+            .filter(|row| row.classification.reason().is_some())
+            .count();
+        assert_eq!(live_shared_groups.len(), 2);
+        assert_eq!(live_private_views, 1);
+        assert_eq!(
+            u32::try_from(live_shared_groups.len()).unwrap(),
+            planned.update_group_impact.rollup.projected_shared_groups
+        );
+        assert_eq!(
+            u32::try_from(live_private_views).unwrap(),
+            planned.update_group_impact.rollup.projected_private_views
+        );
+
+        for (index, peer) in peers.iter().enumerate() {
+            let acks = &session_acks[peer];
+            if index < 4 {
+                assert_eq!(acks.state_queries(), 1, "changed peer {peer}");
+                assert_eq!(acks.export_updates(), 1, "changed peer {peer}");
+            } else {
+                assert_eq!(acks.state_queries(), 0, "stable peer {peer}");
+                assert_eq!(acks.export_updates(), 0, "stable peer {peer}");
+            }
+            assert_eq!(acks.import_updates(), 0, "export-only peer {peer}");
+            assert_eq!(acks.route_refreshes(), 0, "export-only peer {peer}");
+        }
+
+        let replanned = plan_candidate(&peer_tx, candidate_toml, String::new())
+            .await
+            .expect("re-plan of committed candidate must succeed");
+        assert_eq!(replanned.status, RuntimeConfigTransactionStatus::Noop);
+        assert_eq!(replanned.update_group_impact.entries.len(), 10);
+        assert!(
+            replanned
+                .update_group_impact
+                .entries
+                .iter()
+                .all(|row| row.transition == "no_op")
+        );
+        assert_eq!(
+            replanned.update_group_impact.rollup,
+            UpdateGroupImpactRollup {
+                no_op: 10,
+                projected_shared_groups: 2,
+                projected_private_views: 1,
+                ..UpdateGroupImpactRollup::default()
+            }
+        );
+
+        drop(peer_tx);
+        peer_task.await.unwrap();
+        for (peer, acks) in &session_acks {
+            tokio::time::timeout(std::time::Duration::from_secs(1), acks.wait_for_exit())
+                .await
+                .unwrap_or_else(|_| panic!("Established test session {peer} did not exit"));
+        }
+        drop(rib_tx);
+        rib_task.await.unwrap();
+        drop(outbound_receivers);
     }
 }

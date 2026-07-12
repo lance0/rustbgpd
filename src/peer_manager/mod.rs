@@ -37,6 +37,8 @@ mod notifications;
 mod policy;
 mod reconcile;
 mod snapshot;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod update_group_plan;
 
 use dynamic::{AcceptedDynamicRange, DeadLetteredPending, DynamicRange};
