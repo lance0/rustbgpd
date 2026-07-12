@@ -64,6 +64,9 @@ pub use route::{
 pub use update::{
     AdjRibOutCounts, BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision,
     ExplainReason, ExportGateStep, ExportGateVerdict, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate, RibCommandError, RibUpdate,
-    RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, route_query_key,
+    NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate, PlannedGroupability,
+    RibCommandError, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupFamilyImpact,
+    UpdateGroupImpactPlan, UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot,
+    classify_update_group, route_query_key,
 };

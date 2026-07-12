@@ -129,7 +129,7 @@ impl PeerManager {
         runtime_config_diff_from_config_diff(&diff)
     }
 
-    pub(super) fn plan_config_transaction(
+    pub(super) async fn plan_config_transaction(
         &self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
@@ -150,6 +150,10 @@ impl PeerManager {
         let candidate =
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
                 .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let update_group_impact = self
+            .plan_update_group_impact(&candidate)
+            .await
+            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
         // Token the resulting live config would carry once this candidate is
         // committed. The apply path returns it so a client can chain a follow-up
         // apply without re-planning; computing it here keeps every token under
@@ -187,6 +191,7 @@ impl PeerManager {
             unsupported_sections: classification.unsupported_sections,
             restart_required_sections: classification.restart_required_sections,
             human_text,
+            update_group_impact,
         })
     }
 

@@ -394,6 +394,8 @@ pub struct RuntimeConfigTransactionPlan {
     pub unsupported_sections: Vec<String>,
     pub restart_required_sections: Vec<String>,
     pub human_text: String,
+    /// Side-effect-free update-group projection from the same runtime snapshot.
+    pub update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan,
 }
 
 /// Validate-only transaction planning error returned by the peer manager.
