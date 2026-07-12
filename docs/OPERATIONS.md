@@ -906,8 +906,9 @@ authentication mode and an explicit TCP-AO health state. `unavailable` means
 TCP-AO is configured but no socket inspection snapshot is available (the peer
 may be disconnected, connecting, or socket inspection may have failed).
 `healthy` means the connection-time snapshot has no authentication error
-counters; `degraded` means at least one error counter is non-zero. Connected
-sessions also show current/RNext KeyIDs and packet verification counters.
+counters; `degraded` means at least one error counter is non-zero. When socket
+inspection succeeds, connected sessions also show current/RNext KeyIDs and
+packet verification counters.
 Counters are captured when the socket connects and are not continuously
 refreshed; inspect `last_error` for setup or connect failures.
 
