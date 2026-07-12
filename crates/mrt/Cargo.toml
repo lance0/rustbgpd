@@ -18,9 +18,9 @@ tokio.workspace = true
 tracing.workspace = true
 rustbgpd-wire = { workspace = true }
 rustbgpd-rib = { workspace = true }
-flate2 = "1"
+flate2.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tempfile = "3"
+tempfile.workspace = true
