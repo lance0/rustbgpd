@@ -160,7 +160,14 @@ impl PeerManager {
                 .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         let update_group_impact = self
             .plan_update_group_impact(&candidate, live_snapshot)
-            .map_err(RuntimeConfigTransactionPlanError::Internal)?;
+            .map_err(|error| match error {
+                super::update_group_plan::UpdateGroupImpactPlanError::InvalidCandidate(message) => {
+                    RuntimeConfigTransactionPlanError::InvalidCandidate(message)
+                }
+                super::update_group_plan::UpdateGroupImpactPlanError::Internal(message) => {
+                    RuntimeConfigTransactionPlanError::Internal(message)
+                }
+            })?;
         // Token the resulting live config would carry once this candidate is
         // committed. The apply path returns it so a client can chain a follow-up
         // apply without re-planning; computing it here keeps every token under

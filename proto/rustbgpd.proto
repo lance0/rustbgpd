@@ -219,6 +219,8 @@ message UpdateGroupImpactPlan {
 
 message UpdateGroupFamilyImpact {
   string peer = 1;
+  // Negotiated address-family identifiers. Both are zero only for the single
+  // synthetic indeterminate row emitted when no negotiated family is known.
   uint32 afi = 2;
   uint32 safi = 3;
   string current = 4;

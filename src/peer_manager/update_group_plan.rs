@@ -12,6 +12,12 @@ use tokio::sync::oneshot;
 use super::{PeerManager, RIB_REPLY_TIMEOUT};
 use crate::config::{Config, ResolvedNeighbor};
 
+#[derive(Debug)]
+pub(super) enum UpdateGroupImpactPlanError {
+    InvalidCandidate(String),
+    Internal(String),
+}
+
 fn by_peer(config: &Config) -> Result<BTreeMap<IpAddr, ResolvedNeighbor>, String> {
     config
         .resolved_neighbors()
@@ -191,9 +197,10 @@ impl PeerManager {
         &self,
         candidate: &Config,
         snapshot: UpdateGroupSnapshot,
-    ) -> Result<UpdateGroupImpactPlan, String> {
-        let current = by_peer(&self.current_config)?;
-        let candidate = by_peer(candidate)?;
+    ) -> Result<UpdateGroupImpactPlan, UpdateGroupImpactPlanError> {
+        let current =
+            by_peer(&self.current_config).map_err(UpdateGroupImpactPlanError::Internal)?;
+        let candidate = by_peer(candidate).map_err(UpdateGroupImpactPlanError::InvalidCandidate)?;
         let live = snapshot
             .peers
             .into_iter()
