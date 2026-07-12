@@ -207,7 +207,7 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "RIB route-bearing envelope omitted its exact export snapshot — sending Cease/Out-of-Resources and tearing down"
                 );
-                self.trigger_outbound_saturation_teardown();
+                self.trigger_outbound_out_of_resources_teardown();
                 return;
             }
         };
@@ -216,7 +216,7 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "RIB outbound envelope carries an exact export snapshot from the wrong encoder — sending Cease/Out-of-Resources and tearing down"
             );
-            self.trigger_outbound_saturation_teardown();
+            self.trigger_outbound_out_of_resources_teardown();
             return;
         };
         if rustbgpd_rib::ExactExportSnapshot::owner_id(export)
@@ -226,7 +226,7 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "RIB outbound envelope carries an exact export snapshot owned by another session — sending Cease/Out-of-Resources and tearing down"
             );
-            self.trigger_outbound_saturation_teardown();
+            self.trigger_outbound_out_of_resources_teardown();
             return;
         }
         debug_assert_eq!(
