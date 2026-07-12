@@ -17,8 +17,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and retains Linux's cumulative-per-socket degraded semantics. The API and
   CLI report the RIB's live effective distribution mode independently of
   update-group diagnostic labels. Paths-Limit rows use stable numeric AFI/SAFI
-  order and an explicit active bit, allowing active unlimited, inactive, and
-  finite effective send caps to render without a zero-value ambiguity.
+  order and an optional normalized limit, allowing active unlimited, inactive,
+  and finite effective send caps to render without a zero-value ambiguity while
+  preserving the legacy raw sentinel for rolling clients.
   (LAN-225, LAN-364, LAN-366)
 
 - **Neighbor diagnostics expose transport authentication health.** Neighbor

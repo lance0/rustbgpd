@@ -1038,6 +1038,8 @@ after confirming peer support. `rbgp neighbor <address>` reports configured,
 advertised, received, and effective values per family in stable numeric
 AFI/SAFI order. Effective send renders as `inactive`, `unlimited`, or a finite
 cap; JSON carries `effective_send_active` so zero is never ambiguous.
+The protobuf preserves the legacy raw `effective_send_max` sentinel for rolling
+clients and adds optional `effective_send_limit` as the normalized active view.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by

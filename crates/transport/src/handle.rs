@@ -447,7 +447,8 @@ pub struct PeerSessionState {
     pub uptime_secs: u64,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
-    /// Connection-time TCP-AO socket inspection. Cleared on disconnect.
+    /// Query-time TCP-AO socket inspection. Refreshed by `QueryState` and
+    /// cleared on disconnect or inspection failure.
     pub tcp_ao_info: Option<Box<crate::TcpAoInfoSnapshot>>,
     /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
     pub otc_routes_blocked: u64,

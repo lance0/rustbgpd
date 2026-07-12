@@ -258,7 +258,7 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
-    /// Connection-time TCP-AO inspection for the currently owned stream.
+    /// Latest query-time TCP-AO inspection for the currently owned stream.
     tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
     /// RFC 8538: only preserves routes when Notification GR was negotiated.

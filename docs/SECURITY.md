@@ -199,8 +199,10 @@ listener-wide `ao_required` bit. Protected accepted sockets are discarded unless
 `TCP_AO_INFO` confirms the expected current/RNext IDs and clean authentication
 counters. Protected
 ranges must be disjoint from all other ranges and static peers; reload and
-runtime CRUD cannot mutate them. Runtime key rotation, multi-key rollover, and
-public API/CLI/metrics exposure of accepted-socket inspection remain deferred.
+runtime CRUD cannot mutate them. Neighbor API/CLI queries refresh read-only
+TCP-AO KeyIDs and cumulative verification counters from the live connected
+socket without exposing key material. Runtime key rotation, multi-key rollover,
+and metrics exposure of per-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -298,8 +300,7 @@ the roadmap:
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
 - TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
-  multi-key rollover, and public accepted-socket inspection for BGP session
-  protection
+  multi-key rollover, and per-socket metrics for BGP session protection
 
 ## Current gaps
 

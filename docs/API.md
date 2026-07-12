@@ -265,10 +265,11 @@ when the peer has no active outbound registration; `UNSPECIFIED` remains the
 backward-compatible value returned by older servers. This field is independent
 of the diagnostic `update_group` label.
 
-`NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Each row's
-`effective_send_active` distinguishes an inactive family from active unlimited
-Add-Path send: when active, `effective_send_max = 0` means unlimited; when
-inactive, the zero is only a placeholder.
+`NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Legacy field
+`effective_send_max` retains raw semantics (`UINT32_MAX` unlimited, zero
+inactive). Optional `effective_send_limit` is the normalized view: presence
+means active, with zero unlimited and non-zero finite; absence means inactive.
+New clients fall back to the legacy field when reading an older server.
 
 ---
 
