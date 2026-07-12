@@ -716,6 +716,21 @@ pub(crate) fn get_tcp_ao_info_for_config(
 }
 
 #[cfg(target_os = "linux")]
+fn tcp_ao_secret_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    // Mirror the bearer-token comparison contract: include the length in the
+    // accumulated difference and walk the longer input so neither the first
+    // mismatching byte nor a length mismatch short-circuits comparison.
+    let max_len = lhs.len().max(rhs.len());
+    let mut diff = lhs.len() ^ rhs.len();
+    for index in 0..max_len {
+        let left = lhs.get(index).copied().unwrap_or(0);
+        let right = rhs.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[cfg(target_os = "linux")]
 fn annotate_tcp_ao_config(
     info: &mut TcpAoInfoSnapshot,
     keys: &[TcpAoGetSockOpt],
@@ -741,7 +756,7 @@ fn annotate_tcp_ao_config(
                 && state.vrf_ifindex.is_none()
                 && raw.keyflags == 0
                 && usize::from(raw.keylen) == config.key.len()
-                && raw.key[..usize::from(raw.keylen)] == config.key.as_bytes()[..]
+                && tcp_ao_secret_eq(&raw.key[..usize::from(raw.keylen)], config.key.as_bytes())
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
@@ -1221,6 +1236,14 @@ mod tests {
         assert!(raw.alg_name.iter().all(|byte| *byte == 0));
         assert!(raw.key.iter().all(|byte| *byte == 0));
         assert_eq!(raw.keylen, 0);
+    }
+
+    #[test]
+    fn tcp_ao_secret_comparison_covers_content_and_length() {
+        assert!(tcp_ao_secret_eq(b"shared secret", b"shared secret"));
+        assert!(!tcp_ao_secret_eq(b"shared secret", b"shared secreu"));
+        assert!(!tcp_ao_secret_eq(b"shared secret", b"shared secret!"));
+        assert!(!tcp_ao_secret_eq(b"shared secret!", b"shared secret"));
     }
 
     #[test]
