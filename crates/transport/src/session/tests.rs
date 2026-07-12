@@ -7,9 +7,9 @@ use rustbgpd_policy::{
 };
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
-    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, MplsLabelEntry, NumericMatch,
-    OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin, PathAttribute,
-    RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
+    Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
+    NumericMatch, OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin,
+    PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
     bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
 };
 use std::collections::HashMap;
@@ -3251,6 +3251,295 @@ async fn send_route_update_splits_oversized_ipv4_mp_unreach_across_updates() {
     }
     assert!(updates >= 2, "oversized MP_UNREACH set was not split");
     assert_eq!(seen.len(), count as usize);
+}
+
+/// IPv6 unicast previously bypassed every size-aware sender: one large
+/// `MP_REACH/MP_UNREACH` group reached `enqueue_bulk` after the RIB had already
+/// committed the complete logical batch. Pin both directions at the standard
+/// limit, then prove that the same announcement legitimately stays whole for
+/// a peer advertising Extended Messages.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one standard announce/withdraw plus extended-limit parity receipt"
+)]
+async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]);
+    let count: u32 = 700;
+    let prefix = |i: u32| {
+        Ipv6Prefix::new(
+            Ipv6Addr::from(0x2001_0db8_0001_0000_0000_0000_0000_0000_u128 + u128::from(i)),
+            128,
+        )
+    };
+    let routes: Vec<Route> = (0..count)
+        .map(|i| Route {
+            prefix: Prefix::V6(prefix(i)),
+            next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            attributes: Arc::clone(&attrs),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        announce: routes.clone().into(),
+        next_hop_override: vec![None; count as usize].into(),
+        ..empty_outbound_update()
+    });
+
+    let mut announced = std::collections::HashSet::new();
+    let mut announce_updates = 0;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= 4096, "IPv6 UPDATE is {} bytes", raw.len());
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mp = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        });
+        if let Some(mp) = mp {
+            for entry in &mp.announced {
+                assert!(announced.insert(entry.prefix));
+            }
+            announce_updates += 1;
+        }
+    }
+    assert!(announce_updates >= 2);
+    assert_eq!(announced.len(), count as usize);
+
+    session.send_route_update(OutboundRouteUpdate {
+        withdraw: (0..count).map(|i| (Prefix::V6(prefix(i)), 0)).collect(),
+        ..empty_outbound_update()
+    });
+    let mut withdrawn = std::collections::HashSet::new();
+    let mut withdraw_updates = 0;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= 4096, "IPv6 withdrawal is {} bytes", raw.len());
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        if let Some(mp) = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        }) {
+            for entry in &mp.withdrawn {
+                assert!(withdrawn.insert(entry.prefix));
+            }
+            withdraw_updates += 1;
+        }
+    }
+    assert!(withdraw_updates >= 2);
+    assert_eq!(withdrawn.len(), count as usize);
+
+    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    session.send_route_update(OutboundRouteUpdate {
+        announce: routes.into(),
+        next_hop_override: vec![None; count as usize].into(),
+        ..empty_outbound_update()
+    });
+    let raw = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    .unwrap();
+    assert!(raw.len() > 4096 && raw.len() <= 65_535);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_single_raw_bgp_message(&mut server)
+        )
+        .await
+        .is_err(),
+        "Extended Message peer should receive this group in one UPDATE"
+    );
+}
+
+/// `FlowSpec`'s structured NLRI encoder is fallible, so batching must use
+/// `try_build` while shrinking both total-message overflow and structured
+/// encoding overflow. Cover v4/v6 announcements and withdrawals, plus the
+/// Extended Message ceiling, without dropping or duplicating a rule.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "dual-family reach/unreach chunk receipt"
+)]
+async fn send_route_update_chunks_flowspec_without_infallible_build() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let count: u32 = 500;
+    let rule = |afi: Afi, i: u32| FlowSpecRule {
+        components: vec![FlowSpecComponent::DestinationPrefix(match afi {
+            Afi::Ipv4 => {
+                FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000_u32 + i), 32))
+            }
+            Afi::Ipv6 => FlowSpecPrefix::V6(Ipv6PrefixOffset {
+                prefix: Ipv6Prefix::new(
+                    Ipv6Addr::from(0x2001_0db8_0002_0000_0000_0000_0000_0000_u128 + u128::from(i)),
+                    128,
+                ),
+                offset: 0,
+            }),
+            Afi::L2Vpn | Afi::BgpLs => unreachable!(),
+        })],
+    };
+    let routes: Vec<FlowSpecRoute> = [Afi::Ipv4, Afi::Ipv6]
+        .into_iter()
+        .flat_map(|afi| {
+            (0..count).map(move |i| FlowSpecRoute {
+                rule: rule(afi, i),
+                afi,
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                attributes: vec![PathAttribute::Origin(Origin::Igp)],
+                received_at: Instant::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+            })
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        flowspec_announce: routes.clone(),
+        ..empty_outbound_update()
+    });
+    let mut announced = std::collections::HashSet::new();
+    let mut announce_updates = 0;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= 4096, "FlowSpec UPDATE is {} bytes", raw.len());
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        if let Some(mp) = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        }) {
+            for rule in &mp.flowspec_announced {
+                assert!(announced.insert(rule.clone()));
+            }
+            announce_updates += 1;
+        }
+    }
+    assert!(announce_updates >= 3, "both family groups must be emitted");
+    assert_eq!(announced.len(), (count * 2) as usize);
+
+    session.send_route_update(OutboundRouteUpdate {
+        flowspec_withdraw: routes.iter().map(|route| route.rule.clone()).collect(),
+        ..empty_outbound_update()
+    });
+    let mut withdrawn = std::collections::HashSet::new();
+    let mut withdraw_updates = 0;
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= 4096);
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        if let Some(mp) = parsed.attributes.iter().find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        }) {
+            for rule in &mp.flowspec_withdrawn {
+                assert!(withdrawn.insert(rule.clone()));
+            }
+            withdraw_updates += 1;
+        }
+    }
+    assert!(withdraw_updates >= 3);
+    assert_eq!(withdrawn.len(), (count * 2) as usize);
+
+    session.negotiated.as_mut().unwrap().peer_extended_message = true;
+    session.send_route_update(OutboundRouteUpdate {
+        flowspec_announce: routes,
+        ..empty_outbound_update()
+    });
+    let first = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    .unwrap();
+    let second = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    .unwrap();
+    assert!(first.len() <= 65_535 && second.len() <= 65_535);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_single_raw_bgp_message(&mut server)
+        )
+        .await
+        .is_err(),
+        "one Extended Message UPDATE per FlowSpec family expected"
+    );
 }
 #[tokio::test]
 async fn send_route_update_uses_ipv6_specific_next_hop_override() {

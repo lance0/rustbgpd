@@ -503,34 +503,41 @@ impl PeerSession {
                 }
             }
         }
-        // Send IPv6 withdrawals via `MP_UNREACH_NLRI`
+        // Send IPv6 withdrawals via `MP_UNREACH_NLRI`, chunked to the
+        // negotiated message ceiling just like IPv4. A large Add-Path
+        // withdrawal set must not be handed to `enqueue_bulk` as one
+        // oversized message after the RIB has already committed it.
         if !v6_withdraw.is_empty() {
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::Ipv6,
-                safi: Safi::Unicast,
-                withdrawn: v6_withdraw,
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: vec![],
-                bgpls_withdrawn: vec![],
-                labeled_withdrawn: vec![],
-                vpn_withdrawn: vec![],
-                rtc_withdrawn: vec![],
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path_ipv6_send,
-                Ipv4UnicastMode::Body,
-            );
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
+            let max_len = usize::from(self.outbound_max_message_len());
+            if !self.send_mp_chunked(
+                &v6_withdraw,
+                max_len,
+                "IPv6 unicast",
+                "withdrawal",
+                |chunk| {
+                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        withdrawn: chunk.to_vec(),
+                        flowspec_withdrawn: vec![],
+                        evpn_withdrawn: vec![],
+                        bgpls_withdrawn: vec![],
+                        labeled_withdrawn: vec![],
+                        vpn_withdrawn: vec![],
+                        rtc_withdrawn: vec![],
+                    })];
+                    UpdateMessage::try_build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        add_path_ipv6_send,
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            ) {
                 return;
             }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
         }
         // Split announcements by address family, filtering by negotiated families
         let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
@@ -832,36 +839,43 @@ impl PeerSession {
                 });
             }
         }
-        for group in v6_groups {
-            let mut attrs = group.attrs.as_ref().clone();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi: Afi::Ipv6,
-                safi: Safi::Unicast,
-                next_hop: group.next_hop,
-                link_local_next_hop: group.link_local_next_hop,
-                announced: group.prefixes,
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: vec![],
-                labeled_announced: vec![],
-                vpn_announced: vec![],
-                rtc_announced: vec![],
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path_ipv6_send,
-                Ipv4UnicastMode::Body,
-            );
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
+        let max_len = usize::from(self.outbound_max_message_len());
+        for group in &v6_groups {
+            let base_attrs = group.attrs.as_ref();
+            let next_hop = group.next_hop;
+            let link_local_next_hop = group.link_local_next_hop;
+            if !self.send_mp_chunked(
+                &group.prefixes,
+                max_len,
+                "IPv6 unicast",
+                "announcement",
+                |chunk| {
+                    let mut attrs = base_attrs.clone();
+                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        next_hop,
+                        link_local_next_hop,
+                        announced: chunk.to_vec(),
+                        flowspec_announced: vec![],
+                        evpn_announced: vec![],
+                        bgpls_announced: vec![],
+                        labeled_announced: vec![],
+                        vpn_announced: vec![],
+                        rtc_announced: vec![],
+                    }));
+                    UpdateMessage::try_build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        add_path_ipv6_send,
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            ) {
                 return;
             }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
         }
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
         if !update.flowspec_withdraw.is_empty() {
@@ -890,32 +904,30 @@ impl PeerSession {
                 if rules.is_empty() {
                     continue;
                 }
-                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                    afi,
-                    safi: Safi::FlowSpec,
-                    withdrawn: vec![],
-                    flowspec_withdrawn: rules,
-                    evpn_withdrawn: vec![],
-                    bgpls_withdrawn: vec![],
-                    labeled_withdrawn: vec![],
-                    vpn_withdrawn: vec![],
-                    rtc_withdrawn: vec![],
-                })];
-                let msg = UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    false,
-                    Ipv4UnicastMode::Body,
-                );
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec withdrawal UPDATE");
+                let max_len = usize::from(self.outbound_max_message_len());
+                if !self.send_mp_chunked(&rules, max_len, "FlowSpec", "withdrawal", |chunk| {
+                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                        afi,
+                        safi: Safi::FlowSpec,
+                        withdrawn: vec![],
+                        flowspec_withdrawn: chunk.to_vec(),
+                        evpn_withdrawn: vec![],
+                        bgpls_withdrawn: vec![],
+                        labeled_withdrawn: vec![],
+                        vpn_withdrawn: vec![],
+                        rtc_withdrawn: vec![],
+                    })];
+                    UpdateMessage::try_build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        false,
+                        Ipv4UnicastMode::Body,
+                    )
+                }) {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
         // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE
@@ -1338,35 +1350,34 @@ impl PeerSession {
                     fs_groups.push((fs_route.afi, attrs, vec![fs_route.rule.clone()]));
                 }
             }
-            for (afi, mut attrs, rules) in fs_groups {
-                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                    afi,
-                    safi: Safi::FlowSpec,
-                    next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED), // NH len = 0 for FlowSpec
-                    link_local_next_hop: None,
-                    announced: vec![],
-                    flowspec_announced: rules,
-                    evpn_announced: vec![],
-                    bgpls_announced: vec![],
-                    labeled_announced: vec![],
-                    vpn_announced: vec![],
-                    rtc_announced: vec![],
-                }));
-                let msg = UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    false,
-                    Ipv4UnicastMode::Body,
-                );
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.enqueue_bulk(&wire_msg) {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec announce UPDATE");
+            let max_len = usize::from(self.outbound_max_message_len());
+            for (afi, attrs, rules) in &fs_groups {
+                if !self.send_mp_chunked(rules, max_len, "FlowSpec", "announcement", |chunk| {
+                    let mut attrs = attrs.clone();
+                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                        afi: *afi,
+                        safi: Safi::FlowSpec,
+                        next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED), // NH len = 0 for FlowSpec
+                        link_local_next_hop: None,
+                        announced: vec![],
+                        flowspec_announced: chunk.to_vec(),
+                        evpn_announced: vec![],
+                        bgpls_announced: vec![],
+                        labeled_announced: vec![],
+                        vpn_announced: vec![],
+                        rtc_announced: vec![],
+                    }));
+                    UpdateMessage::try_build(
+                        &[],
+                        &[],
+                        &attrs,
+                        four_octet_as,
+                        false,
+                        Ipv4UnicastMode::Body,
+                    )
+                }) {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
         if peer_err {
@@ -1506,6 +1517,66 @@ impl PeerSession {
             }
             if let Err(e) = self.enqueue_bulk(&Message::Update(msg)) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send IPv4 {kind} UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+
+    /// Fallible size-aware sender for `MP_REACH/MP_UNREACH` families whose
+    /// structured NLRI codec can reject an individual entry (notably
+    /// `FlowSpec`). Both an encoded-size overflow and a structured-build error
+    /// shrink a multi-entry probe. A single entry that still fails is the
+    /// existing wire/RIB invariant breach: tear the session down so it cannot
+    /// remain Established with logical Adj-RIB-Out ahead of the wire. LAN-361
+    /// will move that single-entry decision before the RIB commit.
+    fn send_mp_chunked<E, F>(
+        &mut self,
+        entries: &[E],
+        max_len: usize,
+        family: &'static str,
+        kind: &'static str,
+        mut build: F,
+    ) -> bool
+    where
+        F: FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
+    {
+        let mut chunk_size = entries.len().min(max_len / 2).max(1);
+        let mut idx = 0;
+        while idx < entries.len() {
+            let end = (idx + chunk_size).min(entries.len());
+            let candidate = build(&entries[idx..end]);
+            let needs_smaller = candidate
+                .as_ref()
+                .map_or(true, |message| message.encoded_len() > max_len);
+            if needs_smaller {
+                if chunk_size > 1 {
+                    chunk_size = (chunk_size / 2).max(1);
+                    continue;
+                }
+                match candidate {
+                    Ok(message) => warn!(
+                        peer = %self.peer_label,
+                        size = message.encoded_len(),
+                        max = max_len,
+                        "single {family} {kind} exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
+                    ),
+                    Err(error) => warn!(
+                        peer = %self.peer_label,
+                        %error,
+                        max = max_len,
+                        "single {family} {kind} cannot be encoded — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
+                    ),
+                }
+                self.trigger_outbound_saturation_teardown();
+                return false;
+            }
+            let message = candidate.expect("successful MP build checked above");
+            if let Err(error) = self.enqueue_bulk(&Message::Update(message)) {
+                warn!(peer = %self.peer_label, %error, "failed to send {family} {kind} UPDATE");
                 return false;
             }
             self.updates_sent += 1;
