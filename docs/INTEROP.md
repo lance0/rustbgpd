@@ -1903,12 +1903,13 @@ is missing. Prioritized by risk.
 ### Experimental Paths-Limit validation
 
 The code-76 tuple codec, negotiation, family-local initial/incremental export,
-withdraw re-ranking, and route-refresh replay are covered in-tree. A real-peer
-receipt remains deferred: FRR has draft-04 source and topotest coverage, but the
-stock FRR 10.3.1 image used by M17 does not expose a stable configuration and
-inspection surface that this repository can assert without a dedicated image
-or version-specific CLI assumptions. Until that bounded M-slot is added,
-rustbgpd makes no cross-vendor interoperability claim for Paths-Limit.
+withdraw re-ranking, and route-refresh replay are covered in-tree. A dedicated
+bounded M-slot remains deferred so the experimental extension does not dilute
+M17's stable RFC 7911 receipt. That follow-up will configure FRR 10.3.1 with
+`addpath-rx-paths-limit`, assert the `pathsLimit` fields in
+`show bgp neighbor json`, and verify received path counts for unequal IPv4 and
+IPv6 limits. Until that receipt lands, rustbgpd makes no cross-vendor
+interoperability claim for Paths-Limit.
 
 ### P1.5 — EVPN Route Reflector validation depth
 
