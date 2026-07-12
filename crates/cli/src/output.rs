@@ -273,9 +273,20 @@ pub struct JsonNeighborDetail {
     pub add_path_send: bool,
     #[serde(skip_serializing_if = "is_zero")]
     pub add_path_send_max: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths_limits: Vec<JsonPathsLimit>,
     /// Update-group membership: `group:N` or the ungrouped reason.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub update_group: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonPathsLimit {
+    pub family: String,
+    pub configured_receive_max: u32,
+    pub advertised_receive_max: u32,
+    pub received_receive_max: u32,
+    pub effective_send_max: u32,
 }
 
 #[cfg(test)]
@@ -1017,6 +1028,7 @@ mod tests {
             add_path_receive: true,
             add_path_send: true,
             add_path_send_max: 4,
+            paths_limits: Vec::new(),
             update_group: "group:0".to_string(),
         };
 

@@ -401,8 +401,17 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         paths_limit_receive_max: u32::from(info.paths_limit_receive_max),
     };
 
-    let paths_limits = info
-        .families
+    let mut paths_limit_families = info.families.clone();
+    for (family, _) in info
+        .peer_paths_limits
+        .iter()
+        .chain(info.effective_add_path_send_limits.iter())
+    {
+        if !paths_limit_families.contains(family) {
+            paths_limit_families.push(*family);
+        }
+    }
+    let paths_limits = paths_limit_families
         .iter()
         .filter_map(|family| {
             let received = info
@@ -415,7 +424,11 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                 .iter()
                 .find_map(|(candidate, value)| (candidate == family).then_some(*value))
                 .unwrap_or(0);
-            let advertised = if info.add_path_receive {
+            let advertised = if info.add_path_receive
+                && matches!(
+                    family.1,
+                    Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast
+                ) {
                 u32::from(info.paths_limit_receive_max)
             } else {
                 0

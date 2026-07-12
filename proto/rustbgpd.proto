@@ -345,6 +345,16 @@ message NeighborConfig {
   // route_server_client; families with negotiated Add-Path send use
   // Add-Path instead.
   bool per_client_best = 17;
+  // Experimental Paths-Limit preference advertised for Add-Path receive families.
+  uint32 paths_limit_receive_max = 18;
+}
+
+message PathsLimitState {
+  string family = 1;
+  uint32 configured_receive_max = 2;
+  uint32 advertised_receive_max = 3;
+  uint32 received_receive_max = 4;
+  uint32 effective_send_max = 5;
 }
 
 message NeighborState {
@@ -401,6 +411,8 @@ message NeighborState {
   // client. Read-only state: RR-client is configured via TOML or
   // peer-group, not on the runtime neighbor-add gRPC surface.
   bool route_reflector_client = 25;
+  // Experimental Paths-Limit values, one row per relevant family.
+  repeated PathsLimitState paths_limits = 26;
 }
 
 message DynamicNeighborRange {

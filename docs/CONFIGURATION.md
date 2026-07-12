@@ -1011,6 +1011,7 @@ remote_asn = 65002
 receive = true    # accept multiple paths per prefix from this peer
 send = true       # advertise multiple paths per prefix to this peer
 send_max = 4      # limit to top 4 candidates (omit for unlimited)
+receive_max = 3   # experimental Paths-Limit preference sent to this peer
 ```
 
 | Field      | Type    | Required | Default | Description                                |
@@ -1018,10 +1019,21 @@ send_max = 4      # limit to top 4 candidates (omit for unlimited)
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
+| `receive_max` | integer | no    | —       | Experimental preferred maximum received paths per family (1..=65535) |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
 If both are enabled, `Both` is advertised.
+
+`receive_max` enables the experimental Paths-Limit capability (code 76,
+draft-abraitis-idr-addpath-paths-limit-04). rustbgpd advertises the value only
+for families where Add-Path receive is enabled. A remote Paths-Limit tuple caps
+the corresponding outbound Add-Path family at the smaller of `send_max` and
+the peer's value; it does not affect other families and never rejects excess
+inbound paths. Zero tuples and tuples without matching Add-Path negotiation are
+ignored. Because the draft expired without IETF adoption, deploy this only
+after confirming peer support. `rbgp neighbor <address>` reports configured,
+advertised, received, and effective values per family.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by

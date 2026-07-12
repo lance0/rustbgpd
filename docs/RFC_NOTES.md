@@ -541,6 +541,13 @@ implemented per ADR-0040.
 
 ## RFC 7911 — Add-Path
 
+### Experimental Paths-Limit
+
+Capability code 76 implements the tuple format from the expired
+`draft-abraitis-idr-addpath-paths-limit-04`. Each AFI/SAFI receiver preference
+is applied only to the matching negotiated Add-Path send direction. This is an
+experimental interoperability feature, not an adopted IETF standard.
+
 - Capability code 69. Per-family Send/Receive/Both modes.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
 - Multi-path send: rank-based path IDs (best=1, second=2, ...).
