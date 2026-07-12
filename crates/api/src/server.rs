@@ -620,14 +620,17 @@ fn tcp_audit_context(
     access_mode: AccessMode,
     max_tier: AuthTier,
     role_config: RuntimeAuthzConfig,
-    auth_token: Option<&str>,
+    bearer_enabled: bool,
     tls_enabled: bool,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
-    let auth_enabled = auth_token.is_some();
+    // `bearer_enabled` reflects the resolved credential generation —
+    // static token *or* the dynamic credential store. TCP listeners are
+    // always fed by the dynamic store (`.with_dynamic_bearer` below), so
+    // the audit label must key off this flag, not a static token.
     let (authn, principal) = if tls_enabled {
         (GrpcAuthnKind::Mtls, "mtls-unresolved".to_string())
-    } else if auth_enabled {
+    } else if bearer_enabled {
         (
             GrpcAuthnKind::BearerToken,
             configured_principal.unwrap_or("bearer-token").to_string(),
@@ -642,8 +645,7 @@ fn tcp_audit_context(
         authn,
         principal,
     )
-    .with_role_enforcement(role_config.enforcement, role_config.roles)
-    .with_bearer_token(auth_token);
+    .with_role_enforcement(role_config.enforcement, role_config.roles);
     if tls_enabled {
         context.with_mtls_peer_principal()
     } else {
@@ -1104,7 +1106,7 @@ async fn run_tcp_listener(
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
-        None,
+        auth_enabled,
         tls_enabled,
         principal.as_deref(),
     );
@@ -1708,7 +1710,7 @@ mod tests {
             AccessMode::ReadOnly,
             AuthTier::SensitiveRead,
             legacy_authz(),
-            None,
+            true,
             false,
             Some("test"),
         )
@@ -1795,7 +1797,7 @@ mod tests {
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             legacy_authz(),
-            Some("secret"),
+            true,
             false,
             Some("automation.example"),
         );
@@ -1805,13 +1807,34 @@ mod tests {
     }
 
     #[test]
+    fn tcp_audit_context_dynamic_bearer_keeps_configured_principal() {
+        // Regression: a bearer listener whose token is served by the
+        // dynamic credential store has no static token, yet is still
+        // bearer-authenticated (`bearer_enabled = true`). It must carry
+        // the configured principal so tier role-mapping resolves — not
+        // the "unauthenticated" placeholder, which denies every RPC as
+        // principal_unmapped.
+        let context = tcp_audit_context(
+            "127.0.0.1:50051".parse().unwrap(),
+            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
+            legacy_authz(),
+            true,
+            false,
+            Some("rustbgpd://operator/ci"),
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::BearerToken);
+        assert_eq!(context.principal(), "rustbgpd://operator/ci");
+    }
+
+    #[test]
     fn tcp_audit_context_uses_mtls_fallback_until_request_cert_available() {
         let context = tcp_audit_context(
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::Mutating,
             legacy_authz(),
-            Some("secret"),
+            true,
             true,
             Some("automation.example"),
         );
