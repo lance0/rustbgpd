@@ -3421,6 +3421,30 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     .await
     .unwrap();
     assert!(raw.len() > 4096 && raw.len() <= 65_535);
+    let mut buf = Bytes::from(raw);
+    let Message::Update(update) =
+        rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN).unwrap()
+    else {
+        panic!("expected Extended Message IPv6 announcement UPDATE");
+    };
+    let parsed = update.parse(true, false, &[]).unwrap();
+    let extended_announced = parsed
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            PathAttribute::MpReachNlri(mp) => Some(&mp.announced),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(extended_announced.len(), count as usize);
+    assert_eq!(
+        extended_announced
+            .iter()
+            .map(|entry| entry.prefix)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        count as usize
+    );
     assert!(
         tokio::time::timeout(
             Duration::from_millis(200),
@@ -3429,6 +3453,52 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
         .await
         .is_err(),
         "Extended Message peer should receive this group in one UPDATE"
+    );
+
+    session.send_route_update(OutboundRouteUpdate {
+        otc_blocked: vec![],
+        withdraw: (0..count).map(|i| (Prefix::V6(prefix(i)), 0)).collect(),
+        ..empty_outbound_update()
+    });
+    let raw = tokio::time::timeout(
+        Duration::from_secs(1),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    .unwrap();
+    assert!(raw.len() > 4096 && raw.len() <= 65_535);
+    let mut buf = Bytes::from(raw);
+    let Message::Update(update) =
+        rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN).unwrap()
+    else {
+        panic!("expected Extended Message IPv6 withdrawal UPDATE");
+    };
+    let parsed = update.parse(true, false, &[]).unwrap();
+    let extended_withdrawn = parsed
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            PathAttribute::MpUnreachNlri(mp) => Some(&mp.withdrawn),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(extended_withdrawn.len(), count as usize);
+    assert_eq!(
+        extended_withdrawn
+            .iter()
+            .map(|entry| entry.prefix)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        count as usize
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_single_raw_bgp_message(&mut server)
+        )
+        .await
+        .is_err(),
+        "Extended Message peer should receive this withdrawal in one UPDATE"
     );
 }
 
