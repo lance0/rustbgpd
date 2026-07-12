@@ -428,6 +428,7 @@ impl PeerSession {
                         .collect();
 
                     self.negotiated = Some(*neg);
+                    self.publish_export_profile();
                     self.established_at = Some(Instant::now());
 
                     // Emit BMP Peer Up event — reliable (awaited): losing

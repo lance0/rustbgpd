@@ -1,11 +1,14 @@
-use super::{
-    Afi, AsPath, AsPathSegment, BgpLsRibRoute, BgpLsRouteKey, BgpRole, EvpnRibRoute, EvpnRoute,
-    EvpnRouteKey, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
-    Ipv6Addr, LabeledRibRoute, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate,
-    PathAttribute, PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage,
-    RouteRefreshSubtype, RtcRibRoute, Safi, UpdateMessage, VpnRibRoute, debug, info,
-    is_ipv6_link_local, is_private_asn, warn,
+use super::export::{
+    ExportWithdrawal, PreparedUnicastAttributes, PreparedUnicastCandidate, PreparedWithdrawal,
+    ReachNlri, SessionExportProfile, UnreachNlri, has_otc,
 };
+use super::{
+    Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
+    Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
+    RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug, info, warn,
+};
+#[cfg(test)]
+use super::{FlowSpecRoute, LabeledRibRoute, RtcRibRoute, VpnRibRoute};
 use std::sync::Arc;
 
 // The per-batch outbound maps (`PreparedAttrCacheKey` cache + the
@@ -21,15 +24,6 @@ use std::sync::Arc;
 // capped. A peer able to craft colliding attribute sets already has
 // strictly higher-impact vectors (churn flood, hijack).
 use rustc_hash::FxHashMap as HashMap;
-fn has_otc(attrs: &[PathAttribute]) -> bool {
-    attrs.iter().any(|attr| match attr {
-        PathAttribute::OnlyToCustomer(_) => true,
-        PathAttribute::Unknown(raw) => {
-            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-        }
-        _ => false,
-    })
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NextHopOverrideKey {
     None,
@@ -56,11 +50,6 @@ struct PreparedAttrCacheKey {
     local_ipv4: Ipv4Addr,
     nh_override: NextHopOverrideKey,
 }
-#[derive(Clone)]
-struct PreparedAttrCacheValue {
-    with_next_hop: Arc<Vec<PathAttribute>>,
-    without_next_hop: Arc<Vec<PathAttribute>>,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct AttrGroupKey {
     attrs_ptr: usize,
@@ -78,128 +67,6 @@ struct MpGroup {
     prefixes: Vec<NlriEntry>,
 }
 impl PeerSession {
-    fn usable_ipv4_extended_nexthop_ipv6(&self, candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
-        // The link-local relaxation is only valid for IPv4-over-IPv6 ENHE on a
-        // configured scoped peer. IPv6 unicast keeps using
-        // `usable_ipv6_unicast_next_hop`, which rejects link-local primaries.
-        candidate.filter(|addr| {
-            rustbgpd_wire::is_valid_ipv6_nexthop(addr)
-                || (self.is_scoped_link_local_peer() && is_ipv6_link_local(addr))
-        })
-    }
-    fn usable_ipv6_unicast_next_hop(candidate: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
-        candidate.filter(rustbgpd_wire::is_valid_ipv6_nexthop)
-    }
-    fn ipv4_mp_reach_link_local_next_hop(
-        &self,
-        next_hop: IpAddr,
-        route: &Route,
-    ) -> Option<Ipv6Addr> {
-        match next_hop {
-            IpAddr::V6(v6) if self.is_scoped_link_local_peer() && is_ipv6_link_local(&v6) => {
-                Some(v6)
-            }
-            _ if next_hop == route.next_hop => route.link_local_next_hop,
-            _ => None,
-        }
-    }
-    fn route_link_local_next_hop_for_selected_primary(
-        next_hop: IpAddr,
-        route: &Route,
-    ) -> Option<Ipv6Addr> {
-        if next_hop == route.next_hop {
-            route.link_local_next_hop
-        } else {
-            None
-        }
-    }
-    fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
-        self.negotiated.as_ref().is_some_and(|neg| {
-            neg.peer_llgr_capable
-                && neg
-                    .peer_llgr_families
-                    .iter()
-                    .any(|f| (f.afi, f.safi) == family)
-        })
-    }
-    /// RFC 9494 §4.6 outbound form for an LLGR-stale route toward a peer
-    /// that did NOT advertise the LLGR capability for the family. The RIB
-    /// staging gate suppresses such routes toward eBGP peers entirely, so
-    /// the only LLGR-stale routes that legitimately arrive here for a
-    /// non-LLGR peer are iBGP — permitted by the §4.6 intra-AS exception
-    /// only with `NO_EXPORT` attached and `LOCAL_PREF` set to zero. The
-    /// `LLGR_STALE` community itself "MUST NOT be removed when the route
-    /// is further advertised", so it rides through unchanged (toward
-    /// LLGR peers too). This lives beside the other per-peer attribute
-    /// rewrites (eBGP `LOCAL_PREF` strip, `ORIGINATOR_ID`/`CLUSTER_LIST`,
-    /// `GShut` attach) rather than at RIB staging.
-    ///
-    /// Detection is by the `LLGR_STALE` community rather than the RIB's
-    /// `is_llgr_stale` flag — deliberately: the community is the superset.
-    /// A route *received* already tagged by an upstream LLGR helper carries
-    /// only the community (the local flag is never set for it), yet §4.6
-    /// applies to it all the same. For locally promoted routes the flag and
-    /// community are coupled by construction (promotion injects the
-    /// community; the flag is never set anywhere else), and that coupling
-    /// is pinned by `llgr_stale_flag_implies_community_across_mutations` in
-    /// `rustbgpd-rib::adj_rib_in`.
-    fn apply_llgr_stale_export_form(
-        &self,
-        attrs: &mut Vec<PathAttribute>,
-        family: (Afi, Safi),
-        is_ebgp: bool,
-    ) {
-        if is_ebgp || self.peer_accepts_llgr_stale(family) {
-            return;
-        }
-        let is_llgr_stale = attrs.iter().any(|attr| {
-            matches!(attr, PathAttribute::Communities(comms)
-                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
-        });
-        if !is_llgr_stale {
-            return;
-        }
-        let mut has_local_pref = false;
-        for attr in attrs.iter_mut() {
-            match attr {
-                PathAttribute::LocalPref(local_pref) => {
-                    *local_pref = 0;
-                    has_local_pref = true;
-                }
-                PathAttribute::Communities(comms)
-                    if !comms.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT) =>
-                {
-                    comms.push(rustbgpd_wire::COMMUNITY_NO_EXPORT);
-                }
-                _ => {}
-            }
-        }
-        if !has_local_pref {
-            attrs.push(PathAttribute::LocalPref(0));
-        }
-    }
-    /// RFC 8326 initiator: when `advertise_graceful_shutdown` is set
-    /// (via gRPC `SetGracefulShutdown`), ensure every outbound update
-    /// carries the `GRACEFUL_SHUTDOWN` community. If the route already
-    /// has a `Communities` attribute, the value is folded in; otherwise
-    /// a new `Communities` attribute is added. Idempotent — re-applying
-    /// to an already-tagged route is a no-op.
-    fn attach_graceful_shutdown_if_enabled(&self, attrs: &mut Vec<PathAttribute>) {
-        if !self.advertise_graceful_shutdown {
-            return;
-        }
-        for attr in attrs.iter_mut() {
-            if let PathAttribute::Communities(comms) = attr {
-                if !comms.contains(&rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN) {
-                    comms.push(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN);
-                }
-                return;
-            }
-        }
-        attrs.push(PathAttribute::Communities(vec![
-            rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
-        ]));
-    }
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
         match origin {
             rustbgpd_rib::RouteOrigin::Ebgp => 0,
@@ -225,28 +92,16 @@ impl PeerSession {
         }
     }
     fn prepared_outbound_attributes_cached<'a>(
-        &'a self,
-        cache: &'a mut HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue>,
+        profile: &'a SessionExportProfile,
+        cache: &'a mut HashMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
         route: &Route,
-        is_ebgp: bool,
         local_ipv4: Ipv4Addr,
         nh_override: Option<&rustbgpd_policy::NextHopAction>,
-    ) -> &'a PreparedAttrCacheValue {
+    ) -> &'a PreparedUnicastAttributes {
+        let is_ebgp = profile.is_ebgp();
         let key = Self::prepared_attr_cache_key(route, is_ebgp, local_ipv4, nh_override);
         cache.entry(key).or_insert_with(|| {
-            let with_next_hop =
-                Arc::new(self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, nh_override));
-            let without_next_hop = Arc::new(
-                with_next_hop
-                    .iter()
-                    .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
-                    .cloned()
-                    .collect(),
-            );
-            PreparedAttrCacheValue {
-                with_next_hop,
-                without_next_hop,
-            }
+            profile.prepare_unicast_attribute_bundle(route, local_ipv4, nh_override)
         })
     }
     pub(super) fn otc_egress_blocks_unicast(&self, route: &Route) -> bool {
@@ -323,85 +178,18 @@ impl PeerSession {
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+        // Production only reads the profile published by lifecycle/runtime
+        // seams, so its generation remains stable between real changes.
+        #[cfg(test)]
+        self.publish_export_profile();
+        let export = self.export_encoder.snapshot();
         for route in &update.otc_blocked {
             self.record_otc_egress_block(route);
         }
-        let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
-        let is_ebgp = self
-            .negotiated
-            .as_ref()
-            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
         let peer_err = self
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_enhanced_route_refresh);
-        // Check if Add-Path send is negotiated (we can send path IDs to this peer)
-        let add_path_ipv4_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv4, Safi::Unicast))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
-        let add_path_ipv6_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv6, Safi::Unicast))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
-        // VPNv4/VPNv6 (SAFI 128) negotiate Add-Path per family (RFC 7911);
-        // when send is negotiated, EVERY VPN NLRI to this peer carries the
-        // 4-octet path ID — announcements and withdrawals alike.
-        let add_path_vpnv4_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv4, Safi::MplsVpn))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
-        let add_path_vpnv6_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv6, Safi::MplsVpn))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
-        // Labeled-unicast (SAFI 4) negotiates Add-Path per family the same
-        // way; when send is negotiated, EVERY labeled NLRI to this peer
-        // carries the 4-octet path ID — announcements and withdrawals alike.
-        let add_path_labeled_v4_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv4, Safi::LabeledUnicast))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
-        let add_path_labeled_v6_send = self.negotiated.as_ref().is_some_and(|n| {
-            n.add_path_families
-                .get(&(Afi::Ipv6, Safi::LabeledUnicast))
-                .is_some_and(|m| {
-                    matches!(
-                        m,
-                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
-                    )
-                })
-        });
         // ROUTE-REFRESH *requests* toward the peer (RFC 2918), asked for by
         // the RIB manager (outbound-registration failover: the survivor's
         // Adj-RIB-In must be re-learned from the peer). The manager only
@@ -468,130 +256,78 @@ impl PeerSession {
                     .record_message_sent(&self.peer_label, "route_refresh");
             }
         }
-        let use_extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
-        // Extract TCP local addresses for NEXT_HOP rewrite
-        let local_addr = self
-            .read_half
-            .as_ref()
-            .and_then(|h| h.local_addr().ok())
-            .map(|a| a.ip());
-        let local_ipv4 = local_addr
-            .and_then(|a| match a {
-                IpAddr::V4(v4) => Some(v4),
-                IpAddr::V6(_) => None,
-            })
-            .unwrap_or(self.config.peer.local_router_id);
-        let local_ipv6 = local_addr.and_then(|a| match a {
-            IpAddr::V6(v6) => Some(v6),
-            IpAddr::V4(_) => None,
-        });
-        let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue> =
+        let use_extended_nexthop_ipv4 = export.use_extended_nexthop_ipv4();
+        let local_ipv4 = export.local_ipv4();
+        let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedUnicastAttributes> =
             HashMap::default();
         // Split withdrawals by address family, filtering by negotiated families
-        let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v4_body_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v4_mp_withdraw: Vec<NlriEntry> = Vec::new();
+        let mut v4_mp_wire = None;
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
+        let mut v6_wire = None;
         for &(ref prefix, path_id) in &update.withdraw {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
-            match prefix {
-                Prefix::V4(v4) => v4_withdraw.push(Ipv4NlriEntry {
-                    path_id,
-                    prefix: *v4,
-                }),
-                v6 @ Prefix::V6(_) => v6_withdraw.push(NlriEntry {
-                    path_id,
-                    prefix: *v6,
-                }),
+            match export.prepare_withdrawal(ExportWithdrawal::Unicast {
+                prefix: *prefix,
+                path_id,
+            }) {
+                Ok(PreparedWithdrawal::Ipv4Body(entry)) => v4_body_withdraw.push(entry),
+                Ok(PreparedWithdrawal::Unicast(prepared)) => {
+                    let wire = (prepared.afi, prepared.safi, prepared.ipv4_mode);
+                    if prepared.afi == Afi::Ipv4 {
+                        v4_mp_wire = Some(wire);
+                        v4_mp_withdraw.push(prepared.nlri);
+                    } else {
+                        v6_wire = Some(wire);
+                        v6_withdraw.push(prepared.nlri);
+                    }
+                }
+                Ok(_) => unreachable!("unicast withdrawal must prepare as unicast"),
+                Err(error) => warn!(
+                    peer = %self.peer_label,
+                    %prefix,
+                    %error,
+                    "not sending unicast withdrawal: exact export preparation failed"
+                ),
             }
         }
-        // Send IPv4 withdrawals via body NLRI or IPv4 MP_UNREACH_NLRI,
-        // depending on Extended Next Hop negotiation.
-        if !v4_withdraw.is_empty() {
-            if self.is_scoped_link_local_peer() && !use_extended_nexthop_ipv4 {
-                warn!(
-                    peer = %self.peer_label,
-                    "not sending IPv4 withdrawals to scoped link-local peer without negotiated Extended Next Hop"
-                );
-            } else {
-                let max_len = usize::from(self.outbound_max_message_len());
-                let ok = if use_extended_nexthop_ipv4 {
-                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
-                        let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                            afi: Afi::Ipv4,
-                            safi: Safi::Unicast,
-                            withdrawn: chunk
-                                .iter()
-                                .map(|entry| NlriEntry {
-                                    path_id: entry.path_id,
-                                    prefix: Prefix::V4(entry.prefix),
-                                })
-                                .collect(),
-                            flowspec_withdrawn: vec![],
-                            evpn_withdrawn: vec![],
-                            bgpls_withdrawn: vec![],
-                            labeled_withdrawn: vec![],
-                            vpn_withdrawn: vec![],
-                            rtc_withdrawn: vec![],
-                        })];
-                        UpdateMessage::build(
-                            &[],
-                            &[],
-                            &attrs,
-                            four_octet_as,
-                            add_path_ipv4_send,
-                            Ipv4UnicastMode::MpReach,
-                        )
-                    })
-                } else {
-                    self.send_v4_chunked(&v4_withdraw, max_len, "withdraw", |chunk| {
-                        UpdateMessage::build(
-                            &[],
-                            chunk,
-                            &[],
-                            four_octet_as,
-                            add_path_ipv4_send,
-                            Ipv4UnicastMode::Body,
-                        )
-                    })
-                };
-                if !ok {
-                    return;
-                }
+        if !v4_body_withdraw.is_empty() {
+            let max_len = export.max_message_len();
+            if !self.send_v4_chunked(&v4_body_withdraw, max_len, "withdraw", |chunk| {
+                export
+                    .build_ipv4_body(&[], chunk, &[])
+                    .expect("IPv4 body withdrawal construction was previously infallible")
+            }) {
+                return;
+            }
+        }
+        if let Some((afi, safi, ipv4_mode)) = v4_mp_wire {
+            let max_len = export.max_message_len();
+            if !self.send_mp_chunked(
+                &v4_mp_withdraw,
+                max_len,
+                "IPv4 unicast",
+                "withdrawal",
+                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
+            ) {
+                return;
             }
         }
         // Send IPv6 withdrawals via `MP_UNREACH_NLRI`, chunked to the
         // negotiated message ceiling just like IPv4. A large Add-Path
         // withdrawal set must not be handed to `enqueue_bulk` as one
         // oversized message after the RIB has already committed it.
-        if !v6_withdraw.is_empty() {
-            let max_len = usize::from(self.outbound_max_message_len());
+        if let Some((afi, safi, ipv4_mode)) = v6_wire {
+            let max_len = export.max_message_len();
             if !self.send_mp_chunked(
                 &v6_withdraw,
                 max_len,
                 "IPv6 unicast",
                 "withdrawal",
-                |chunk| {
-                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                        afi: Afi::Ipv6,
-                        safi: Safi::Unicast,
-                        withdrawn: chunk.to_vec(),
-                        flowspec_withdrawn: vec![],
-                        evpn_withdrawn: vec![],
-                        bgpls_withdrawn: vec![],
-                        labeled_withdrawn: vec![],
-                        vpn_withdrawn: vec![],
-                        rtc_withdrawn: vec![],
-                    })];
-                    UpdateMessage::try_build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        add_path_ipv6_send,
-                        Ipv4UnicastMode::Body,
-                    )
-                },
+                |chunk| export.build_mp_unreach(afi, safi, UnreachNlri::Unicast(chunk), ipv4_mode),
             ) {
                 return;
             }
@@ -619,46 +355,41 @@ impl PeerSession {
         // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI,
         // depending on Extended Next Hop negotiation.
         if use_extended_nexthop_ipv4 {
-            let ebgp_ipv6_nh = self
-                .usable_ipv4_extended_nexthop_ipv6(self.config.local_ipv6_nexthop.or(local_ipv6));
             let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
             let mut v4_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override_ref) in &v4_routes {
                 let nh_override = *nh_override_ref;
-                let attrs = Arc::clone(
-                    &self
-                        .prepared_outbound_attributes_cached(
-                            &mut prepared_attr_cache,
-                            route,
-                            is_ebgp,
-                            local_ipv4,
-                            nh_override,
-                        )
-                        .without_next_hop,
-                );
-                let force_nh_self =
-                    matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
-                let next_hop = match nh_override {
-                    Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
-                    _ if force_nh_self => local_addr.unwrap_or(IpAddr::V4(local_ipv4)),
-                    _ if is_ebgp && !self.config.route_server_client => {
-                        let Some(v6) = ebgp_ipv6_nh else {
+                let cached_attrs = Self::prepared_outbound_attributes_cached(
+                    &export,
+                    &mut prepared_attr_cache,
+                    route,
+                    local_ipv4,
+                    nh_override,
+                )
+                .clone();
+                let prepared =
+                    match export.finish_unicast_candidate(route, nh_override, cached_attrs) {
+                        Ok(PreparedUnicastCandidate::Mp {
+                            next_hop,
+                            link_local_next_hop,
+                            attrs,
+                            entry,
+                            ..
+                        }) => (attrs, next_hop, link_local_next_hop, entry),
+                        Ok(PreparedUnicastCandidate::Ipv4Body { .. }) => {
+                            unreachable!("ENHE profile must prepare IPv4 as MP_REACH")
+                        }
+                        Err(error) => {
                             warn!(
                                 peer = %self.peer_label,
                                 prefix = %route.prefix,
-                                "cannot send IPv4 route with Extended Next Hop: no usable local IPv6 next-hop"
+                                %error,
+                                "cannot prepare IPv4 route with Extended Next Hop"
                             );
                             continue;
-                        };
-                        IpAddr::V6(v6)
-                    }
-                    _ => route.next_hop,
-                };
-                let entry = NlriEntry {
-                    path_id: route.path_id,
-                    prefix: route.prefix,
-                };
-                let link_local_next_hop = self.ipv4_mp_reach_link_local_next_hop(next_hop, route);
+                        }
+                    };
+                let (attrs, next_hop, link_local_next_hop, entry) = prepared;
                 let key = AttrGroupKey {
                     attrs_ptr: Arc::as_ptr(&attrs) as usize,
                     next_hop: Some(next_hop),
@@ -676,39 +407,28 @@ impl PeerSession {
                     });
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for group in &v4_groups {
                 let base_attrs = group.attrs.as_ref();
                 let next_hop = group.next_hop;
                 let link_local_next_hop = group.link_local_next_hop;
                 if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                    let mut attrs = base_attrs.clone();
-                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                        afi: Afi::Ipv4,
-                        safi: Safi::Unicast,
-                        next_hop,
-                        link_local_next_hop,
-                        announced: chunk.to_vec(),
-                        flowspec_announced: vec![],
-                        evpn_announced: vec![],
-                        bgpls_announced: vec![],
-                        labeled_announced: vec![],
-                        vpn_announced: vec![],
-                        rtc_announced: vec![],
-                    }));
-                    UpdateMessage::build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        add_path_ipv4_send,
-                        Ipv4UnicastMode::MpReach,
-                    )
+                    export
+                        .build_mp_reach(
+                            Afi::Ipv4,
+                            Safi::Unicast,
+                            next_hop,
+                            link_local_next_hop,
+                            base_attrs,
+                            ReachNlri::Unicast(chunk),
+                            Ipv4UnicastMode::MpReach,
+                        )
+                        .expect("IPv4 MP_REACH construction was previously infallible")
                 }) {
                     return;
                 }
             }
-        } else if self.is_scoped_link_local_peer() {
+        } else if export.is_scoped_link_local_peer() {
             if !v4_routes.is_empty() {
                 warn!(
                     peer = %self.peer_label,
@@ -719,22 +439,17 @@ impl PeerSession {
             let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
             let mut v4_groups: Vec<V4BodyGroup> = Vec::new();
             for (route, nh_override) in &v4_routes {
-                let attrs = Arc::clone(
-                    &self
-                        .prepared_outbound_attributes_cached(
-                            &mut prepared_attr_cache,
-                            route,
-                            is_ebgp,
-                            local_ipv4,
-                            *nh_override,
-                        )
-                        .with_next_hop,
-                );
-                if let Prefix::V4(v4) = route.prefix {
-                    let entry = Ipv4NlriEntry {
-                        path_id: route.path_id,
-                        prefix: v4,
-                    };
+                let cached_attrs = Self::prepared_outbound_attributes_cached(
+                    &export,
+                    &mut prepared_attr_cache,
+                    route,
+                    local_ipv4,
+                    *nh_override,
+                )
+                .clone();
+                if let Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) =
+                    export.finish_unicast_candidate(route, *nh_override, cached_attrs)
+                {
                     let key = AttrGroupKey {
                         attrs_ptr: Arc::as_ptr(&attrs) as usize,
                         next_hop: None,
@@ -751,18 +466,13 @@ impl PeerSession {
                     }
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for group in &v4_groups {
                 let attrs = group.attrs.as_ref();
                 if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                    UpdateMessage::build(
-                        chunk,
-                        &[],
-                        attrs,
-                        four_octet_as,
-                        add_path_ipv4_send,
-                        Ipv4UnicastMode::Body,
-                    )
+                    export
+                        .build_ipv4_body(chunk, &[], attrs)
+                        .expect("IPv4 body announcement construction was previously infallible")
                 }) {
                     return;
                 }
@@ -772,68 +482,46 @@ impl PeerSession {
         // The RIB already filters unsendable families via sendable_families, so
         // v6_routes should be empty here for eBGP peers without a valid IPv6 NH.
         // The is_family_negotiated filter above is retained as a safety net.
-        let ebgp_ipv6_nh: Option<Ipv6Addr> =
-            Self::usable_ipv6_unicast_next_hop(self.config.local_ipv6_nexthop.or(local_ipv6));
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
         let mut v6_groups: Vec<MpGroup> = Vec::new();
         for (route, nh_override_ref) in &v6_routes {
             let nh_override = *nh_override_ref;
-            let attrs = Arc::clone(
-                &self
-                    .prepared_outbound_attributes_cached(
-                        &mut prepared_attr_cache,
-                        route,
-                        is_ebgp,
-                        local_ipv4,
-                        nh_override,
-                    )
-                    .with_next_hop,
-            );
-            let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
-            let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override {
-                // Policy explicitly set a next-hop — use it
-                *addr
-            } else if is_ebgp && !self.config.route_server_client {
-                // Non-transparent eBGP uses next-hop-self unless policy set
-                // an explicit next-hop. If no usable local IPv6 next-hop is
-                // available, drop the route rather than advertising the peer's
-                // original next-hop by mistake.
-                let Some(v6) = ebgp_ipv6_nh else {
-                    debug_assert!(
-                        false,
-                        "RIB sent IPv6 route to eBGP peer with no valid IPv6 next-hop and no explicit policy override"
-                    );
+            let cached_attrs = Self::prepared_outbound_attributes_cached(
+                &export,
+                &mut prepared_attr_cache,
+                route,
+                local_ipv4,
+                nh_override,
+            )
+            .clone();
+            let prepared = match export.finish_unicast_candidate(route, nh_override, cached_attrs) {
+                Ok(PreparedUnicastCandidate::Mp {
+                    next_hop,
+                    link_local_next_hop,
+                    attrs,
+                    entry,
+                    ..
+                }) => (attrs, next_hop, link_local_next_hop, entry),
+                Ok(PreparedUnicastCandidate::Ipv4Body { .. }) => {
+                    unreachable!("IPv6 must prepare as MP_REACH")
+                }
+                Err(error) => {
                     warn!(
                         peer = %self.peer_label,
                         prefix = %route.prefix,
-                        "dropping IPv6 route: no usable local IPv6 next-hop and no explicit export next-hop override"
+                        %error,
+                        "dropping IPv6 route: exact export preparation failed"
                     );
                     continue;
-                };
-                IpAddr::V6(v6)
-            } else if force_nh_self {
-                // For next-hop-self on non-eBGP paths, use local IPv6 address
-                // when available; otherwise leave the stored next-hop in place.
-                if let Some(v6) = ebgp_ipv6_nh {
-                    IpAddr::V6(v6)
-                } else {
-                    route.next_hop
                 }
-            } else {
-                route.next_hop
             };
-            let nlri_entry = NlriEntry {
-                path_id: route.path_id,
-                prefix: route.prefix,
-            };
+            let (attrs, nh, link_local_next_hop, nlri_entry) = prepared;
             let key = AttrGroupKey {
                 attrs_ptr: Arc::as_ptr(&attrs) as usize,
                 next_hop: Some(nh),
-                link_local_next_hop: Self::route_link_local_next_hop_for_selected_primary(
-                    nh, route,
-                ),
+                link_local_next_hop,
             };
             if let Some(&idx) = v6_group_index.get(&key) {
                 v6_groups[idx].prefixes.push(nlri_entry);
@@ -842,14 +530,12 @@ impl PeerSession {
                 v6_groups.push(MpGroup {
                     attrs,
                     next_hop: nh,
-                    link_local_next_hop: Self::route_link_local_next_hop_for_selected_primary(
-                        nh, route,
-                    ),
+                    link_local_next_hop,
                     prefixes: vec![nlri_entry],
                 });
             }
         }
-        let max_len = usize::from(self.outbound_max_message_len());
+        let max_len = export.max_message_len();
         for group in &v6_groups {
             let base_attrs = group.attrs.as_ref();
             let next_hop = group.next_hop;
@@ -860,26 +546,13 @@ impl PeerSession {
                 "IPv6 unicast",
                 "announcement",
                 |chunk| {
-                    let mut attrs = base_attrs.clone();
-                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                        afi: Afi::Ipv6,
-                        safi: Safi::Unicast,
+                    export.build_mp_reach(
+                        Afi::Ipv6,
+                        Safi::Unicast,
                         next_hop,
                         link_local_next_hop,
-                        announced: chunk.to_vec(),
-                        flowspec_announced: vec![],
-                        evpn_announced: vec![],
-                        bgpls_announced: vec![],
-                        labeled_announced: vec![],
-                        vpn_announced: vec![],
-                        rtc_announced: vec![],
-                    }));
-                    UpdateMessage::try_build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        add_path_ipv6_send,
+                        base_attrs,
+                        ReachNlri::Unicast(chunk),
                         Ipv4UnicastMode::Body,
                     )
                 },
@@ -889,43 +562,39 @@ impl PeerSession {
         }
         // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
         if !update.flowspec_withdraw.is_empty() {
-            let mut fs_withdrawals = [
-                (Afi::Ipv4, Vec::<FlowSpecRule>::new()),
-                (Afi::Ipv6, Vec::<FlowSpecRule>::new()),
-            ];
+            type FlowSpecWithdrawalGroup = Option<(Afi, Safi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
+            // Preserve the established deterministic wire order: IPv4, then IPv6.
+            let mut fs_withdrawals: [FlowSpecWithdrawalGroup; 2] = [None, None];
             for key in &update.flowspec_withdraw {
-                let Some((_, rules)) = fs_withdrawals.iter_mut().find(|(afi, _)| *afi == key.afi)
+                let PreparedWithdrawal::FlowSpec(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::FlowSpec(key))
+                    .expect("FlowSpec withdrawal preparation is infallible")
                 else {
-                    warn!(afi = ?key.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
-                    continue;
+                    unreachable!("FlowSpec key must prepare as FlowSpec")
                 };
-                rules.push(key.rule.clone());
-            }
-            for (afi, rules) in fs_withdrawals {
-                if rules.is_empty() {
-                    continue;
+                let slot = match prepared.afi {
+                    Afi::Ipv4 => &mut fs_withdrawals[0],
+                    Afi::Ipv6 => &mut fs_withdrawals[1],
+                    Afi::L2Vpn | Afi::BgpLs => {
+                        warn!(afi = ?prepared.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
+                        continue;
+                    }
+                };
+                if let Some((_, _, _, rules)) = slot {
+                    rules.push(prepared.nlri);
+                } else {
+                    *slot = Some((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
-                let max_len = usize::from(self.outbound_max_message_len());
+            }
+            for (afi, safi, ipv4_mode, rules) in fs_withdrawals.into_iter().flatten() {
+                let max_len = export.max_message_len();
                 if !self.send_mp_chunked(&rules, max_len, "FlowSpec", "withdrawal", |chunk| {
-                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                        afi,
-                        safi: Safi::FlowSpec,
-                        withdrawn: vec![],
-                        flowspec_withdrawn: chunk.to_vec(),
-                        evpn_withdrawn: vec![],
-                        bgpls_withdrawn: vec![],
-                        labeled_withdrawn: vec![],
-                        vpn_withdrawn: vec![],
-                        rtc_withdrawn: vec![],
-                    })];
-                    UpdateMessage::try_build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        false,
-                        Ipv4UnicastMode::Body,
-                    )
+                    export.build_mp_unreach(afi, safi, UnreachNlri::FlowSpec(chunk), ipv4_mode)
                 }) {
                     return;
                 }
@@ -937,13 +606,21 @@ impl PeerSession {
         // can otherwise exceed the limit and `enqueue_bulk` returns
         // `MessageTooLong`, dropping the rest of the update.
         if !update.evpn_withdraw.is_empty() {
-            let routes: Vec<EvpnRoute> = update
-                .evpn_withdraw
-                .iter()
-                .map(|key| evpn_route_from_key(*key))
-                .collect();
-            let max_len = usize::from(self.outbound_max_message_len());
-            if !self.send_evpn_unreach_chunked(&routes, four_octet_as, max_len) {
+            let mut routes = Vec::with_capacity(update.evpn_withdraw.len());
+            let mut wire = None;
+            for key in &update.evpn_withdraw {
+                let PreparedWithdrawal::Evpn(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Evpn(key))
+                    .expect("EVPN withdrawal preparation is infallible")
+                else {
+                    unreachable!("EVPN key must prepare as EVPN")
+                };
+                wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
+                routes.push(prepared.nlri);
+            }
+            let max_len = export.max_message_len();
+            let (afi, safi, ipv4_mode) = wire.expect("non-empty EVPN withdrawal batch");
+            if !self.send_evpn_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -951,48 +628,49 @@ impl PeerSession {
         // chunked so the RIB never commits a route that transport could not
         // enqueue.
         if !update.bgpls_withdraw.is_empty() {
-            let mut base_routes = Vec::new();
-            let mut vpn_routes = Vec::new();
+            let mut groups = Vec::<(
+                Afi,
+                Safi,
+                Ipv4UnicastMode,
+                Vec<rustbgpd_wire::bgpls::BgpLsNlri>,
+            )>::new();
             for key in &update.bgpls_withdraw {
-                let nlri = bgpls_nlri_from_key(key);
-                match key.family {
-                    rustbgpd_rib::BgpLsFamily::LinkState
-                        if self
-                            .negotiated_families
-                            .contains(&(Afi::BgpLs, Safi::BgpLs)) =>
-                    {
-                        base_routes.push(nlri);
-                    }
-                    rustbgpd_rib::BgpLsFamily::LinkStateVpn
-                        if self
-                            .negotiated_families
-                            .contains(&(Afi::BgpLs, Safi::BgpLsVpn)) =>
-                    {
-                        vpn_routes.push(nlri);
-                    }
-                    _ => {}
+                let PreparedWithdrawal::BgpLs(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::BgpLs(key))
+                    .expect("BGP-LS withdrawal preparation is infallible")
+                else {
+                    unreachable!("BGP-LS key must prepare as BGP-LS")
+                };
+                if !self
+                    .negotiated_families
+                    .contains(&(prepared.afi, prepared.safi))
+                {
+                    continue;
+                }
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
-            if !base_routes.is_empty()
-                && !self.send_bgpls_unreach_chunked(
-                    Safi::BgpLs,
-                    &base_routes,
-                    four_octet_as,
-                    max_len,
-                )
-            {
-                return;
-            }
-            if !vpn_routes.is_empty()
-                && !self.send_bgpls_unreach_chunked(
-                    Safi::BgpLsVpn,
-                    &vpn_routes,
-                    four_octet_as,
-                    max_len,
-                )
-            {
-                return;
+            let max_len = export.max_message_len();
+            groups.sort_by_key(|(_, safi, _, _)| match safi {
+                Safi::BgpLs => 0,
+                Safi::BgpLsVpn => 1,
+                _ => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self.send_bgpls_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
+                {
+                    return;
+                }
             }
         }
         // Send VPNv4/VPNv6 withdrawals via MP_UNREACH_NLRI, grouped by AFI
@@ -1000,41 +678,40 @@ impl PeerSession {
         // compatibility field instead of a label stack, so the rebuilt NLRI
         // carries no labels (the withdraw encoder ignores them).
         if !update.vpn_withdraw.is_empty() {
-            let mut v4_routes = Vec::new();
-            let mut v6_routes = Vec::new();
+            let mut groups =
+                Vec::<(Afi, Safi, Ipv4UnicastMode, Vec<rustbgpd_wire::VpnNlriEntry>)>::new();
             for key in &update.vpn_withdraw {
-                let entry = rustbgpd_wire::VpnNlriEntry {
-                    path_id: key.path_id,
-                    nlri: rustbgpd_wire::VpnNlri {
-                        labels: vec![],
-                        route_distinguisher: key.nlri_key.route_distinguisher,
-                        prefix: key.nlri_key.prefix,
-                    },
+                let PreparedWithdrawal::Vpn(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Vpn(key))
+                    .expect("VPN withdrawal preparation is infallible")
+                else {
+                    unreachable!("VPN key must prepare as VPN")
                 };
-                let family = key.afi_safi();
+                let family = (prepared.afi, prepared.safi);
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                match family.0 {
-                    Afi::Ipv4 => v4_routes.push(entry),
-                    Afi::Ipv6 => v6_routes.push(entry),
-                    Afi::L2Vpn | Afi::BgpLs => {}
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
-            for (afi, routes, add_path) in [
-                (Afi::Ipv4, v4_routes, add_path_vpnv4_send),
-                (Afi::Ipv6, v6_routes, add_path_vpnv6_send),
-            ] {
-                if !routes.is_empty()
-                    && !self.send_vpn_unreach_chunked(
-                        afi,
-                        &routes,
-                        four_octet_as,
-                        add_path,
-                        max_len,
-                    )
-                {
+            let max_len = export.max_message_len();
+            groups.sort_by_key(|(afi, _, _, _)| match afi {
+                Afi::Ipv4 => 0,
+                Afi::Ipv6 => 1,
+                Afi::L2Vpn | Afi::BgpLs => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len) {
                     return;
                 }
             }
@@ -1045,39 +722,45 @@ impl PeerSession {
         // rebuilt NLRI carries no labels (the withdraw encoder ignores
         // them).
         if !update.labeled_withdraw.is_empty() {
-            let mut v4_routes = Vec::new();
-            let mut v6_routes = Vec::new();
+            let mut groups = Vec::<(
+                Afi,
+                Safi,
+                Ipv4UnicastMode,
+                Vec<rustbgpd_wire::LabeledNlriEntry>,
+            )>::new();
             for key in &update.labeled_withdraw {
-                let entry = rustbgpd_wire::LabeledNlriEntry {
-                    path_id: key.path_id,
-                    nlri: rustbgpd_wire::LabeledNlri {
-                        labels: vec![],
-                        prefix: key.prefix,
-                    },
+                let PreparedWithdrawal::Labeled(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Labeled(key))
+                    .expect("labeled withdrawal preparation is infallible")
+                else {
+                    unreachable!("labeled key must prepare as labeled unicast")
                 };
-                let family = key.afi_safi();
+                let family = (prepared.afi, prepared.safi);
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                match family.0 {
-                    Afi::Ipv4 => v4_routes.push(entry),
-                    Afi::Ipv6 => v6_routes.push(entry),
-                    Afi::L2Vpn | Afi::BgpLs => {}
+                if let Some((_, _, _, routes)) = groups.iter_mut().find(|(afi, safi, mode, _)| {
+                    (*afi, *safi, *mode) == (prepared.afi, prepared.safi, prepared.ipv4_mode)
+                }) {
+                    routes.push(prepared.nlri);
+                } else {
+                    groups.push((
+                        prepared.afi,
+                        prepared.safi,
+                        prepared.ipv4_mode,
+                        vec![prepared.nlri],
+                    ));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
-            for (afi, routes, add_path) in [
-                (Afi::Ipv4, v4_routes, add_path_labeled_v4_send),
-                (Afi::Ipv6, v6_routes, add_path_labeled_v6_send),
-            ] {
-                if !routes.is_empty()
-                    && !self.send_labeled_unreach_chunked(
-                        afi,
-                        &routes,
-                        four_octet_as,
-                        add_path,
-                        max_len,
-                    )
+            let max_len = export.max_message_len();
+            groups.sort_by_key(|(afi, _, _, _)| match afi {
+                Afi::Ipv4 => 0,
+                Afi::Ipv6 => 1,
+                Afi::L2Vpn | Afi::BgpLs => 2,
+            });
+            for (afi, safi, ipv4_mode, routes) in groups {
+                if !self
+                    .send_labeled_unreach_chunked(afi, safi, ipv4_mode, &routes, &export, max_len)
                 {
                     return;
                 }
@@ -1091,10 +774,21 @@ impl PeerSession {
                 .negotiated_families
                 .contains(&(Afi::Ipv4, Safi::RtConstrain))
         {
-            let routes: Vec<rustbgpd_wire::RtcNlri> =
-                update.rtc_withdraw.iter().map(|key| key.nlri).collect();
-            let max_len = usize::from(self.outbound_max_message_len());
-            if !self.send_rtc_unreach_chunked(&routes, four_octet_as, max_len) {
+            let mut routes = Vec::with_capacity(update.rtc_withdraw.len());
+            let mut wire = None;
+            for key in &update.rtc_withdraw {
+                let PreparedWithdrawal::Rtc(prepared) = export
+                    .prepare_withdrawal(ExportWithdrawal::Rtc(key))
+                    .expect("RTC withdrawal preparation is infallible")
+                else {
+                    unreachable!("RTC key must prepare as RTC")
+                };
+                wire = Some((prepared.afi, prepared.safi, prepared.ipv4_mode));
+                routes.push(prepared.nlri);
+            }
+            let max_len = export.max_message_len();
+            let (afi, safi, ipv4_mode) = wire.expect("non-empty RTC withdrawal batch");
+            if !self.send_rtc_unreach_chunked(&export, afi, safi, ipv4_mode, &routes, max_len) {
                 return;
             }
         }
@@ -1107,24 +801,21 @@ impl PeerSession {
             )]
             let mut evpn_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<EvpnRoute>)> = Vec::new();
             for evpn_route in &update.evpn_announce {
-                let attrs = self.prepare_outbound_attributes_evpn(evpn_route, is_ebgp);
-                // Determine the next-hop for the reflected route. In RR mode
-                // we preserve the originating VTEP's loopback as next-hop so
-                // downstream VTEPs can build the VXLAN tunnel correctly.
-                let nh = evpn_route.next_hop;
+                let prepared = export.prepare_evpn_candidate(evpn_route);
+                let attrs = prepared.attrs;
+                let nh = prepared.next_hop;
                 if let Some(group) = evpn_groups
                     .iter_mut()
                     .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
                 {
-                    group.2.push(evpn_route.route.clone());
+                    group.2.push(prepared.nlri);
                 } else {
-                    evpn_groups.push((nh, attrs, vec![evpn_route.route.clone()]));
+                    evpn_groups.push((nh, attrs, vec![prepared.nlri]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for (next_hop, attrs, routes) in evpn_groups {
-                if !self.send_evpn_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len)
-                {
+                if !self.send_evpn_reach_chunked(&export, next_hop, &attrs, &routes, max_len) {
                     return;
                 }
             }
@@ -1147,29 +838,25 @@ impl PeerSession {
                 if !self.negotiated_families.contains(&(Afi::BgpLs, safi)) {
                     continue;
                 }
-                let attrs = self.prepare_outbound_attributes_bgpls(bgpls_route, is_ebgp);
-                let nh = bgpls_route.next_hop;
+                let prepared = export.prepare_bgpls_candidate(bgpls_route);
+                let attrs = prepared.attrs;
+                let nh = prepared.next_hop;
                 if let Some(group) = bgpls_groups.iter_mut().find(|(family, g_nh, g_attrs, _)| {
                     *family == bgpls_route.family && *g_nh == nh && *g_attrs == attrs
                 }) {
-                    group.3.push(bgpls_route.nlri.clone());
+                    group.3.push(prepared.nlri);
                 } else {
-                    bgpls_groups.push((
-                        bgpls_route.family,
-                        nh,
-                        attrs,
-                        vec![bgpls_route.nlri.clone()],
-                    ));
+                    bgpls_groups.push((bgpls_route.family, nh, attrs, vec![prepared.nlri]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for (family, next_hop, attrs, routes) in bgpls_groups {
                 if !self.send_bgpls_reach_chunked(
                     family.to_afi_safi().1,
                     next_hop,
                     &attrs,
                     &routes,
-                    four_octet_as,
+                    &export,
                     max_len,
                 ) {
                     return;
@@ -1197,16 +884,11 @@ impl PeerSession {
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                let attrs = self.prepare_outbound_attributes_vpn(vpn_route, is_ebgp);
-                let nh = vpn_route.next_hop;
-                // RFC 4659 two-address IPv6 next-hop: the link-local half
-                // is grouped alongside the global next-hop so it survives
-                // reflection (LAN-217).
-                let ll = vpn_route.link_local_next_hop;
-                let entry = rustbgpd_wire::VpnNlriEntry {
-                    path_id: vpn_route.path_id,
-                    nlri: vpn_route.nlri.clone(),
-                };
+                let prepared = export.prepare_vpn_candidate(vpn_route);
+                let attrs = prepared.attrs;
+                let nh = prepared.next_hop;
+                let ll = prepared.link_local_next_hop;
+                let entry = prepared.nlri;
                 if let Some(group) =
                     vpn_groups
                         .iter_mut()
@@ -1219,20 +901,15 @@ impl PeerSession {
                     vpn_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in vpn_groups {
-                let add_path = match afi {
-                    Afi::Ipv4 => add_path_vpnv4_send,
-                    _ => add_path_vpnv6_send,
-                };
                 if !self.send_vpn_reach_chunked(
                     afi,
                     next_hop,
                     link_local_next_hop,
                     &attrs,
                     &routes,
-                    four_octet_as,
-                    add_path,
+                    &export,
                     max_len,
                 ) {
                     return;
@@ -1260,16 +937,11 @@ impl PeerSession {
                 if !self.negotiated_families.contains(&family) {
                     continue;
                 }
-                let attrs = self.prepare_outbound_attributes_labeled(labeled_route, is_ebgp);
-                let nh = labeled_route.next_hop;
-                // RFC 8950 two-address IPv6 next-hop: the link-local half
-                // is grouped alongside the global next-hop so it survives
-                // reflection (LAN-190).
-                let ll = labeled_route.link_local_next_hop;
-                let entry = rustbgpd_wire::LabeledNlriEntry {
-                    path_id: labeled_route.path_id,
-                    nlri: labeled_route.nlri.clone(),
-                };
+                let prepared = export.prepare_labeled_candidate(labeled_route);
+                let attrs = prepared.attrs;
+                let nh = prepared.next_hop;
+                let ll = prepared.link_local_next_hop;
+                let entry = prepared.nlri;
                 if let Some(group) =
                     labeled_groups
                         .iter_mut()
@@ -1282,20 +954,15 @@ impl PeerSession {
                     labeled_groups.push((family, nh, ll, attrs, vec![entry]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for ((afi, _), next_hop, link_local_next_hop, attrs, routes) in labeled_groups {
-                let add_path = match afi {
-                    Afi::Ipv4 => add_path_labeled_v4_send,
-                    _ => add_path_labeled_v6_send,
-                };
                 if !self.send_labeled_reach_chunked(
                     afi,
                     next_hop,
                     link_local_next_hop,
                     &attrs,
                     &routes,
-                    four_octet_as,
-                    add_path,
+                    &export,
                     max_len,
                 ) {
                     return;
@@ -1315,24 +982,21 @@ impl PeerSession {
             let mut rtc_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<rustbgpd_wire::RtcNlri>)> =
                 Vec::new();
             for rtc_route in &update.rtc_announce {
-                let attrs = self.prepare_outbound_attributes_rtc(rtc_route, is_ebgp);
-                let nh = if rtc_route.next_hop.is_unspecified() {
-                    local_addr.unwrap_or(IpAddr::V4(local_ipv4))
-                } else {
-                    rtc_route.next_hop
-                };
+                let prepared = export.prepare_rtc_candidate(rtc_route);
+                let attrs = prepared.attrs;
+                let nh = prepared.next_hop;
                 if let Some(group) = rtc_groups
                     .iter_mut()
                     .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
                 {
-                    group.2.push(rtc_route.nlri);
+                    group.2.push(prepared.nlri);
                 } else {
-                    rtc_groups.push((nh, attrs, vec![rtc_route.nlri]));
+                    rtc_groups.push((nh, attrs, vec![prepared.nlri]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for (next_hop, attrs, routes) in rtc_groups {
-                if !self.send_rtc_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len) {
+                if !self.send_rtc_reach_chunked(&export, next_hop, &attrs, &routes, max_len) {
                     return;
                 }
             }
@@ -1341,39 +1005,27 @@ impl PeerSession {
         if !update.flowspec_announce.is_empty() {
             let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
             for fs_route in &update.flowspec_announce {
-                let attrs = self.prepare_outbound_attributes_flowspec(fs_route, is_ebgp);
+                let prepared = export.prepare_flowspec_candidate(fs_route);
+                let attrs = prepared.attrs;
                 if let Some(group) = fs_groups
                     .iter_mut()
-                    .find(|(a, ga, _)| *a == fs_route.afi && *ga == attrs)
+                    .find(|(a, ga, _)| *a == prepared.afi && *ga == attrs)
                 {
-                    group.2.push(fs_route.rule.clone());
+                    group.2.push(prepared.nlri);
                 } else {
-                    fs_groups.push((fs_route.afi, attrs, vec![fs_route.rule.clone()]));
+                    fs_groups.push((prepared.afi, attrs, vec![prepared.nlri]));
                 }
             }
-            let max_len = usize::from(self.outbound_max_message_len());
+            let max_len = export.max_message_len();
             for (afi, attrs, rules) in &fs_groups {
                 if !self.send_mp_chunked(rules, max_len, "FlowSpec", "announcement", |chunk| {
-                    let mut attrs = attrs.clone();
-                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                        afi: *afi,
-                        safi: Safi::FlowSpec,
-                        next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED), // NH len = 0 for FlowSpec
-                        link_local_next_hop: None,
-                        announced: vec![],
-                        flowspec_announced: chunk.to_vec(),
-                        evpn_announced: vec![],
-                        bgpls_announced: vec![],
-                        labeled_announced: vec![],
-                        vpn_announced: vec![],
-                        rtc_announced: vec![],
-                    }));
-                    UpdateMessage::try_build(
-                        &[],
-                        &[],
-                        &attrs,
-                        four_octet_as,
-                        false,
+                    export.build_mp_reach(
+                        *afi,
+                        Safi::FlowSpec,
+                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                        None,
+                        attrs,
+                        ReachNlri::FlowSpec(chunk),
                         Ipv4UnicastMode::Body,
                     )
                 }) {
@@ -1420,31 +1072,9 @@ impl PeerSession {
             {
                 continue;
             }
-            let msg = if let (Afi::Ipv4, Safi::Unicast) = (afi, safi) {
-                // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
-                UpdateMessage::build(&[], &[], &[], four_octet_as, false, Ipv4UnicastMode::Body)
-            } else {
-                // MP EoR: UPDATE with empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
-                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                    afi: *afi,
-                    safi: *safi,
-                    withdrawn: vec![],
-                    flowspec_withdrawn: vec![],
-                    evpn_withdrawn: vec![],
-                    bgpls_withdrawn: vec![],
-                    labeled_withdrawn: vec![],
-                    vpn_withdrawn: vec![],
-                    rtc_withdrawn: vec![],
-                })];
-                UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    false,
-                    Ipv4UnicastMode::Body,
-                )
-            };
+            let msg = export
+                .build_end_of_rib(*afi, *safi)
+                .expect("empty End-of-RIB construction is infallible");
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send End-of-RIB for {afi:?}/{safi:?}");
@@ -1457,7 +1087,7 @@ impl PeerSession {
     }
     /// Split `entries` into as many wire UPDATEs as needed so each
     /// `build`-produced message fits `max_len`, enqueueing each in order.
-    /// `UpdateMessage::build` emits one message regardless of size, so a large
+    /// The exact profile builder emits one message regardless of size, so a large
     /// same-attribute IPv4 group (e.g. 1000 /24s ≈ 4114 bytes) exceeds the
     /// 4096-byte limit: `enqueue_bulk` rejects it and the session logs and
     /// abandons the rest of the batch, and — the actual defect — that partial
@@ -1628,10 +1258,10 @@ impl PeerSession {
     /// can abort the whole route batch the same way the unicast path does.
     fn send_evpn_reach_chunked(
         &mut self,
+        profile: &SessionExportProfile,
         next_hop: IpAddr,
         base_attrs: &[PathAttribute],
         routes: &[EvpnRoute],
-        four_octet_as: bool,
         max_len: usize,
     ) -> bool {
         // Initial chunk size: 1000 fits comfortably under the 65535-byte
@@ -1641,28 +1271,17 @@ impl PeerSession {
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let mut attrs = base_attrs.to_vec();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi: Afi::L2Vpn,
-                safi: Safi::Evpn,
-                next_hop,
-                link_local_next_hop: None,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: routes[idx..end].to_vec(),
-                bgpls_announced: vec![],
-                labeled_announced: vec![],
-                vpn_announced: vec![],
-                rtc_announced: vec![],
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_reach(
+                    Afi::L2Vpn,
+                    Safi::Evpn,
+                    next_hop,
+                    None,
+                    base_attrs,
+                    ReachNlri::Evpn(&routes[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .expect("EVPN MP_REACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     // Single-route oversize: a single EVPN route plus its
@@ -1702,33 +1321,20 @@ impl PeerSession {
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_evpn_unreach_chunked(
         &mut self,
+        profile: &SessionExportProfile,
+        afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[EvpnRoute],
-        four_octet_as: bool,
         max_len: usize,
     ) -> bool {
         let mut chunk_size = routes.len().clamp(1, 1000);
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::L2Vpn,
-                safi: Safi::Evpn,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: routes[idx..end].to_vec(),
-                bgpls_withdrawn: vec![],
-                labeled_withdrawn: vec![],
-                vpn_withdrawn: vec![],
-                rtc_withdrawn: vec![],
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_unreach(afi, safi, UnreachNlri::Evpn(&routes[idx..end]), ipv4_mode)
+                .expect("EVPN MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -1762,35 +1368,24 @@ impl PeerSession {
         next_hop: IpAddr,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
-        four_octet_as: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let mut attrs = base_attrs.to_vec();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi: Afi::BgpLs,
-                safi,
-                next_hop,
-                link_local_next_hop: None,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: routes[idx..end].to_vec(),
-                labeled_announced: vec![],
-                vpn_announced: vec![],
-                rtc_announced: vec![],
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_reach(
+                    Afi::BgpLs,
+                    safi,
+                    next_hop,
+                    None,
+                    base_attrs,
+                    ReachNlri::BgpLs(&routes[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .expect("BGP-LS MP_REACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -1820,34 +1415,20 @@ impl PeerSession {
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
     fn send_bgpls_unreach_chunked(
         &mut self,
+        afi: Afi,
         safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::bgpls::BgpLsNlri],
-        four_octet_as: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::BgpLs,
-                safi,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: vec![],
-                bgpls_withdrawn: routes[idx..end].to_vec(),
-                labeled_withdrawn: vec![],
-                vpn_withdrawn: vec![],
-                rtc_withdrawn: vec![],
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_unreach(afi, safi, UnreachNlri::BgpLs(&routes[idx..end]), ipv4_mode)
+                .expect("BGP-LS MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -1883,9 +1464,9 @@ impl PeerSession {
     /// default rewrite) is deliberately inert for this family — rewriting it
     /// would break the remote PE's transport-label resolution toward the
     /// originating PE.
-    #[expect(
+    #[allow(
         clippy::too_many_arguments,
-        reason = "VPN chunked sender adds the RFC 7911 add_path flag to the shared chunking shape"
+        reason = "the MP_REACH chunker receives each wire component explicitly"
     )]
     fn send_vpn_reach_chunked(
         &mut self,
@@ -1894,36 +1475,24 @@ impl PeerSession {
         link_local_next_hop: Option<Ipv6Addr>,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::VpnNlriEntry],
-        four_octet_as: bool,
-        add_path: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let mut attrs = base_attrs.to_vec();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi,
-                safi: Safi::MplsVpn,
-                next_hop,
-                link_local_next_hop,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: vec![],
-                labeled_announced: vec![],
-                vpn_announced: routes[idx..end].to_vec(),
-                rtc_announced: vec![],
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_reach(
+                    afi,
+                    Safi::MplsVpn,
+                    next_hop,
+                    link_local_next_hop,
+                    base_attrs,
+                    ReachNlri::Vpn(&routes[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .expect("VPN MP_REACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -1955,34 +1524,19 @@ impl PeerSession {
     fn send_vpn_unreach_chunked(
         &mut self,
         afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::VpnNlriEntry],
-        four_octet_as: bool,
-        add_path: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi,
-                safi: Safi::MplsVpn,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: vec![],
-                bgpls_withdrawn: vec![],
-                labeled_withdrawn: vec![],
-                vpn_withdrawn: routes[idx..end].to_vec(),
-                rtc_withdrawn: vec![],
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_unreach(afi, safi, UnreachNlri::Vpn(&routes[idx..end]), ipv4_mode)
+                .expect("VPN MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -2012,9 +1566,9 @@ impl PeerSession {
     /// `MP_REACH_NLRI` UPDATEs, splitting so each encoded message fits
     /// `max_len` bytes. Mirrors the VPN sender minus the RD-prefixed
     /// next-hop (RFC 8277 uses the ordinary host next-hop forms).
-    #[expect(
+    #[allow(
         clippy::too_many_arguments,
-        reason = "chunked family senders keep family, next-hop, attrs, and Add-Path mode explicit"
+        reason = "the MP_REACH chunker receives each wire component explicitly"
     )]
     fn send_labeled_reach_chunked(
         &mut self,
@@ -2023,36 +1577,24 @@ impl PeerSession {
         link_local_next_hop: Option<Ipv6Addr>,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::LabeledNlriEntry],
-        four_octet_as: bool,
-        add_path: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let mut attrs = base_attrs.to_vec();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi,
-                safi: Safi::LabeledUnicast,
-                next_hop,
-                link_local_next_hop,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: vec![],
-                vpn_announced: vec![],
-                labeled_announced: routes[idx..end].to_vec(),
-                rtc_announced: vec![],
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_reach(
+                    afi,
+                    Safi::LabeledUnicast,
+                    next_hop,
+                    link_local_next_hop,
+                    base_attrs,
+                    ReachNlri::Labeled(&routes[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .expect("labeled-unicast MP_REACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -2085,34 +1627,24 @@ impl PeerSession {
     fn send_labeled_unreach_chunked(
         &mut self,
         afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::LabeledNlriEntry],
-        four_octet_as: bool,
-        add_path: bool,
+        profile: &SessionExportProfile,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi,
-                safi: Safi::LabeledUnicast,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: vec![],
-                bgpls_withdrawn: vec![],
-                vpn_withdrawn: vec![],
-                labeled_withdrawn: routes[idx..end].to_vec(),
-                rtc_withdrawn: vec![],
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                add_path,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_unreach(
+                    afi,
+                    safi,
+                    UnreachNlri::Labeled(&routes[idx..end]),
+                    ipv4_mode,
+                )
+                .expect("labeled-unicast MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -2143,38 +1675,27 @@ impl PeerSession {
     /// `max_len` bytes. Mirrors the VPN sender minus label handling.
     fn send_rtc_reach_chunked(
         &mut self,
+        profile: &SessionExportProfile,
         next_hop: IpAddr,
         base_attrs: &[PathAttribute],
         routes: &[rustbgpd_wire::RtcNlri],
-        four_octet_as: bool,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let mut attrs = base_attrs.to_vec();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                afi: Afi::Ipv4,
-                safi: Safi::RtConstrain,
-                next_hop,
-                link_local_next_hop: None,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: vec![],
-                labeled_announced: vec![],
-                vpn_announced: vec![],
-                rtc_announced: routes[idx..end].to_vec(),
-            }));
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_reach(
+                    Afi::Ipv4,
+                    Safi::RtConstrain,
+                    next_hop,
+                    None,
+                    base_attrs,
+                    ReachNlri::Rtc(&routes[idx..end]),
+                    Ipv4UnicastMode::Body,
+                )
+                .expect("RTC MP_REACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -2205,33 +1726,20 @@ impl PeerSession {
     /// `max_len` bytes.
     fn send_rtc_unreach_chunked(
         &mut self,
+        profile: &SessionExportProfile,
+        afi: Afi,
+        safi: Safi,
+        ipv4_mode: Ipv4UnicastMode,
         routes: &[rustbgpd_wire::RtcNlri],
-        four_octet_as: bool,
         max_len: usize,
     ) -> bool {
         let mut chunk_size: usize = 1000;
         let mut idx: usize = 0;
         while idx < routes.len() {
             let end = (idx + chunk_size).min(routes.len());
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::Ipv4,
-                safi: Safi::RtConstrain,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: vec![],
-                bgpls_withdrawn: vec![],
-                labeled_withdrawn: vec![],
-                vpn_withdrawn: vec![],
-                rtc_withdrawn: routes[idx..end].to_vec(),
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
+            let msg = profile
+                .build_mp_unreach(afi, safi, UnreachNlri::Rtc(&routes[idx..end]), ipv4_mode)
+                .expect("RTC MP_UNREACH construction was previously infallible");
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
                     warn!(
@@ -2257,16 +1765,10 @@ impl PeerSession {
         }
         true
     }
-    /// Prepare path attributes for outbound advertisement.
-    ///
-    /// For standard eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip
-    /// `LOCAL_PREF`. For route-server clients, preserve `AS_PATH` and
-    /// `NEXT_HOP` by default. For iBGP: ensure `LOCAL_PREF` present (default
-    /// 100), pass `NEXT_HOP` through.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "route-refresh helper keeps per-family replay and EoR emission ordering explicit"
-    )]
+    // Test-facing compatibility helpers delegate to the same immutable
+    // profile preparation used by live emission. They republish first because
+    // focused fixtures intentionally mutate config/negotiation fields directly.
+    #[cfg(test)]
     pub(super) fn prepare_outbound_attributes(
         &self,
         route: &Route,
@@ -2274,940 +1776,55 @@ impl PeerSession {
         local_ipv4: Ipv4Addr,
         nh_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Vec<PathAttribute> {
-        let force_next_hop_self =
-            matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
-        let policy_set_specific = matches!(
-            nh_override,
-            Some(rustbgpd_policy::NextHopAction::Specific(_))
-        );
-        let route_server_client = self.config.route_server_client;
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !route_server_client => {
-                    // Apply private AS removal before prepending our ASN
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    // Prepend our ASN
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                // Merge into first sequence if possible
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                PathAttribute::NextHop(_) => {
-                    if policy_set_specific {
-                        // Policy explicitly set a next-hop — preserve it
-                        attrs.push(attr.clone());
-                    } else if force_next_hop_self || (is_ebgp && !route_server_client) {
-                        attrs.push(PathAttribute::NextHop(local_ipv4));
-                    } else {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                    // Strip LOCAL_PREF for eBGP
-                }
-                // Strip MP_REACH/MP_UNREACH — rebuilt per-UPDATE, not copied
-                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {}
-                // Strip ORIGINATOR_ID and CLUSTER_LIST on eBGP outbound
-                // (optional non-transitive, must not leave the AS)
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        // For iBGP, ensure LOCAL_PREF is present (default 100)
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && matches!(
-                self.config.peer.local_role,
-                Some(BgpRole::Provider | BgpRole::Peer | BgpRole::RouteServer)
-            )
-            && !has_otc(&attrs)
-        {
-            attrs.push(PathAttribute::OnlyToCustomer(self.config.peer.local_asn));
-        }
-        // Ensure classic IPv4 body-NLRI exports carry a NEXT_HOP. This also
-        // preserves the route's original next hop for transparent route-server
-        // clients when the attribute was absent on the stored route.
-        if matches!(route.prefix, Prefix::V4(_))
-            && !attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
-        {
-            let next_hop = match nh_override {
-                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(nh))) => Some(*nh),
-                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_))) => {
-                    // IPv6 next-hop is not encodable in classic IPv4 NEXT_HOP
-                    // attribute. Requires RFC 8950 Extended Next Hop negotiation.
-                    // Fall through to default next-hop selection.
-                    tracing::warn!(
-                        prefix = %route.prefix,
-                        "export policy set IPv6 next-hop for classic IPv4 NLRI; \
-                         requires Extended Next Hop (RFC 8950) — using default next-hop instead"
-                    );
-                    if is_ebgp && !route_server_client {
-                        Some(local_ipv4)
-                    } else {
-                        match route.next_hop {
-                            IpAddr::V4(nh) => Some(nh),
-                            IpAddr::V6(_) => None,
-                        }
-                    }
-                }
-                Some(rustbgpd_policy::NextHopAction::Self_) => Some(local_ipv4),
-                _ if is_ebgp && !route_server_client => Some(local_ipv4),
-                _ => match route.next_hop {
-                    IpAddr::V4(nh) => Some(nh),
-                    IpAddr::V6(_) => None,
-                },
-            };
-            if let Some(next_hop) = next_hop {
-                attrs.push(PathAttribute::NextHop(next_hop));
-            }
-        }
-        // For standard eBGP, ensure AS_PATH is present (even if empty).
-        if is_ebgp
-            && !route_server_client
-            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        // Route reflector attribute manipulation (RFC 4456 §8):
-        // Only when reflecting an iBGP-learned route to an iBGP target do we
-        // set ORIGINATOR_ID and prepend CLUSTER_LIST. Locally originated and
-        // eBGP-learned routes are advertised normally and are not "reflected"
-        // in the RFC 4456 sense.
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            // ORIGINATOR_ID: set to source peer's router-id if not already present
-            if !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            // CLUSTER_LIST: prepend our cluster_id
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        let family = match route.prefix {
-            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
-            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
-        };
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, family, is_ebgp);
-        attrs
+        SessionExportProfile::capture(self)
+            .with_test_ebgp(is_ebgp)
+            .prepare_unicast_attributes(route, local_ipv4, nh_override)
     }
-    /// Prepare path attributes for outbound `FlowSpec` advertisement.
-    ///
-    /// `FlowSpec` has no `NEXT_HOP`. For eBGP: prepend ASN, strip `LOCAL_PREF`.
-    /// For iBGP: ensure `LOCAL_PREF`. Route reflector attributes handled same
-    /// as unicast. Route-server clients skip automatic eBGP `AS_PATH` rewriting,
-    /// matching transparent unicast behavior.
+
+    #[cfg(test)]
     pub(super) fn prepare_outbound_attributes_flowspec(
         &self,
         route: &FlowSpecRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in &route.attributes {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    // Apply private AS removal before prepending our ASN
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                // No NEXT_HOP for FlowSpec — skip; also skip MP framing attrs
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        // Route reflector attribute manipulation for FlowSpec (same as unicast)
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, (route.afi, Safi::FlowSpec), is_ebgp);
-        attrs
-    }
-    /// Prepare outbound attributes for a reflected EVPN route. Mirrors
-    /// [`Self::prepare_outbound_attributes_flowspec`] — route reflectors
-    /// don't rewrite the `NEXT_HOP` (that's what preserves the VTEP loopback
-    /// for VXLAN tunnel construction), don't strip `LOCAL_PREF` across iBGP,
-    /// and add `ORIGINATOR_ID` / `CLUSTER_LIST` per RFC 4456 when reflecting.
-    pub(super) fn prepare_outbound_attributes_evpn(
-        &self,
-        route: &EvpnRibRoute,
-        is_ebgp: bool,
-    ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                // NEXT_HOP is carried in MP_REACH_NLRI for EVPN; strip the
-                // legacy NEXT_HOP attribute if present. Strip MP framing too.
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        // RFC 4456 RR attribute manipulation — ORIGINATOR_ID + CLUSTER_LIST
-        // when reflecting iBGP routes.
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, (Afi::L2Vpn, Safi::Evpn), is_ebgp);
-        attrs
-    }
-    /// Prepare outbound attributes for a reflected BGP-LS route. Mirrors
-    /// EVPN/FlowSpec: `NEXT_HOP` and MP framing live in `MP_REACH_NLRI`, not in
-    /// the attribute set, while RR attributes are added for iBGP reflection.
-    pub(super) fn prepare_outbound_attributes_bgpls(
-        &self,
-        route: &BgpLsRibRoute,
-        is_ebgp: bool,
-    ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, route.family.to_afi_safi(), is_ebgp);
-        attrs
+        SessionExportProfile::capture(self)
+            .with_test_ebgp(is_ebgp)
+            .prepare_flowspec_attributes(route)
     }
 
-    /// Prepare outbound attributes for a reflected VPNv4/VPNv6 route. Mirrors
-    /// EVPN/BGP-LS: `NEXT_HOP` and MP framing live in `MP_REACH_NLRI`, not in
-    /// the attribute set, while RR attributes are added for iBGP reflection.
-    ///
-    /// ADR-0077 §6: the VPN next-hop is never rewritten here — any
-    /// next-hop-self configuration is deliberately inert for SAFI 128, since
-    /// the reflected next-hop must stay the originating PE for transport-label
-    /// resolution. Route Targets ride through untouched as extended
-    /// communities in the generic pass-through arm.
+    #[cfg(test)]
     pub(super) fn prepare_outbound_attributes_vpn(
         &self,
         route: &VpnRibRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
-        attrs
+        SessionExportProfile::capture(self)
+            .with_test_ebgp(is_ebgp)
+            .prepare_vpn_attributes(route)
     }
 
-    /// Prepare outbound attributes for a reflected labeled-unicast route.
-    /// Mirrors the VPN version: RFC 4456 `ORIGINATOR_ID`/`CLUSTER_LIST`
-    /// reflection semantics are identical, and the next-hop lives in
-    /// `MP_REACH_NLRI` (chosen by the caller), never in the attribute set.
-    ///
-    /// ADR-0077 §4/§6: the labeled next-hop is never rewritten here — any
-    /// next-hop-self configuration is deliberately inert for SAFI 4, since
-    /// the reflected next-hop must stay the originating speaker for
-    /// transport-label resolution. The MPLS label stack rides in the NLRI
-    /// and passes through verbatim.
+    #[cfg(test)]
     pub(super) fn prepare_outbound_attributes_labeled(
         &self,
         route: &LabeledRibRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
-        attrs
+        SessionExportProfile::capture(self)
+            .with_test_ebgp(is_ebgp)
+            .prepare_labeled_attributes(route)
     }
 
-    /// Prepare outbound attributes for a reflected RT-Constrain route.
-    /// Mirrors the VPN version: RFC 4456 `ORIGINATOR_ID`/`CLUSTER_LIST`
-    /// reflection semantics are identical, and the next-hop lives in
-    /// `MP_REACH_NLRI` (chosen by the caller), never in the attribute set.
+    #[cfg(test)]
     pub(super) fn prepare_outbound_attributes_rtc(
         &self,
         route: &RtcRibRoute,
         is_ebgp: bool,
     ) -> Vec<PathAttribute> {
-        let mut attrs = Vec::new();
-        for attr in route.attributes.iter() {
-            match attr {
-                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
-                    let cleaned = remove_private_asns(
-                        as_path,
-                        self.config.remove_private_as,
-                        self.config.peer.local_asn,
-                    );
-                    let mut new_segments =
-                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                    for seg in &cleaned.segments {
-                        match seg {
-                            AsPathSegment::AsSequence(asns) => {
-                                if let Some(AsPathSegment::AsSequence(first)) =
-                                    new_segments.first_mut()
-                                {
-                                    first.extend(asns);
-                                }
-                            }
-                            AsPathSegment::AsSet(asns) => {
-                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
-                            }
-                        }
-                    }
-                    attrs.push(PathAttribute::AsPath(AsPath {
-                        segments: new_segments,
-                    }));
-                }
-                PathAttribute::NextHop(_)
-                | PathAttribute::MpReachNlri(_)
-                | PathAttribute::MpUnreachNlri(_) => {}
-                PathAttribute::LocalPref(_) => {
-                    if !is_ebgp {
-                        attrs.push(attr.clone());
-                    }
-                }
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
-                _ => {
-                    attrs.push(attr.clone());
-                }
-            }
-        }
-        if !is_ebgp
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::LocalPref(_)))
-        {
-            attrs.push(PathAttribute::LocalPref(100));
-        }
-        if is_ebgp
-            && !self.config.route_server_client
-            && !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::AsPath(_)))
-        {
-            attrs.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
-            }));
-        }
-        if !is_ebgp
-            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
-            && let Some(cluster_id) = self.config.cluster_id
-        {
-            if !attrs
-                .iter()
-                .any(|attr| matches!(attr, PathAttribute::OriginatorId(_)))
-            {
-                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
-            }
-            let mut found = false;
-            for attr in &mut attrs {
-                if let PathAttribute::ClusterList(ids) = attr {
-                    ids.insert(0, cluster_id);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
-            }
-        }
-        self.attach_graceful_shutdown_if_enabled(&mut attrs);
-        self.apply_llgr_stale_export_form(&mut attrs, route.afi_safi(), is_ebgp);
-        attrs
+        SessionExportProfile::capture(self)
+            .with_test_ebgp(is_ebgp)
+            .prepare_rtc_attributes(route)
     }
 }
-/// Build a BGP-LS NLRI from an Adj-RIB-Out key, used when emitting
-/// `MP_UNREACH_NLRI` withdrawals. The key stores the opaque bytes required by
-/// RFC 9552, including the optional VPN Route Distinguisher.
-fn bgpls_nlri_from_key(key: &BgpLsRouteKey) -> rustbgpd_wire::bgpls::BgpLsNlri {
-    rustbgpd_wire::bgpls::BgpLsNlri {
-        nlri_type: key.nlri.nlri_type,
-        route_distinguisher: key.nlri.route_distinguisher,
-        payload: key.nlri.payload.clone(),
-    }
-}
-/// Build a minimal `EvpnRoute` from a key, used when emitting `MP_UNREACH_NLRI`
-/// withdrawals. The receiver identifies the route by its key fields; any
-/// labels / optional fields the key doesn't capture are zeroed.
-fn evpn_route_from_key(key: EvpnRouteKey) -> EvpnRoute {
-    use rustbgpd_wire::{
-        EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet, EvpnIpPrefixRoute, EvpnMacIp, MplsLabel,
-    };
-    let zero_label = MplsLabel::new(0);
-    match key {
-        EvpnRouteKey::EadPerEs {
-            rd,
-            esi,
-            ethernet_tag,
-        } => EvpnRoute::EadPerEs(EvpnEadPerEs {
-            rd,
-            esi,
-            ethernet_tag,
-            label: zero_label,
-        }),
-        EvpnRouteKey::EadPerEvi {
-            rd,
-            esi,
-            ethernet_tag,
-        } => EvpnRoute::EadPerEvi(EvpnEadPerEvi {
-            rd,
-            esi,
-            ethernet_tag,
-            label: zero_label,
-        }),
-        EvpnRouteKey::MacIp {
-            rd,
-            ethernet_tag,
-            mac,
-            ip,
-        } => EvpnRoute::MacIp(EvpnMacIp {
-            rd,
-            esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
-            ethernet_tag,
-            mac,
-            ip,
-            label1: zero_label,
-            label2: None,
-        }),
-        EvpnRouteKey::Imet {
-            rd,
-            ethernet_tag,
-            originator_ip,
-        } => EvpnRoute::Imet(EvpnImet {
-            rd,
-            ethernet_tag,
-            originator_ip,
-        }),
-        EvpnRouteKey::Es {
-            rd,
-            esi,
-            originator_ip,
-        } => EvpnRoute::Es(EvpnEs {
-            rd,
-            esi,
-            originator_ip,
-        }),
-        EvpnRouteKey::IpPrefix {
-            rd,
-            ethernet_tag,
-            prefix,
-        } => {
-            let gateway = match prefix {
-                rustbgpd_wire::EvpnIpPrefixValue::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                rustbgpd_wire::EvpnIpPrefixValue::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            };
-            EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
-                rd,
-                esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
-                ethernet_tag,
-                prefix,
-                gateway,
-                label: zero_label,
-            })
-        }
-    }
-}
-/// Remove private ASNs from an `AS_PATH` according to the given mode.
-///
-/// - `Remove` — strip all ASNs only if every ASN in the path is private.
-/// - `All` — unconditionally remove all private ASNs; drop empty segments.
-/// - `Replace` — replace each private ASN with `local_asn`.
-/// - `Disabled` — return the path unchanged.
-pub(super) fn remove_private_asns(
-    as_path: &AsPath,
-    mode: RemovePrivateAs,
-    local_asn: u32,
-) -> AsPath {
-    match mode {
-        RemovePrivateAs::Disabled => as_path.clone(),
-        RemovePrivateAs::Remove => {
-            if as_path.all_private() {
-                // Strip all private ASNs (produces empty path)
-                let segments: Vec<_> = as_path
-                    .segments
-                    .iter()
-                    .filter_map(|seg| {
-                        let filtered: Vec<u32> = match seg {
-                            AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns
-                                .iter()
-                                .copied()
-                                .filter(|a| !is_private_asn(*a))
-                                .collect(),
-                        };
-                        if filtered.is_empty() {
-                            None
-                        } else {
-                            Some(match seg {
-                                AsPathSegment::AsSequence(_) => AsPathSegment::AsSequence(filtered),
-                                AsPathSegment::AsSet(_) => AsPathSegment::AsSet(filtered),
-                            })
-                        }
-                    })
-                    .collect();
-                AsPath { segments }
-            } else {
-                as_path.clone()
-            }
-        }
-        RemovePrivateAs::All => {
-            let segments: Vec<_> = as_path
-                .segments
-                .iter()
-                .filter_map(|seg| {
-                    let filtered: Vec<u32> = match seg {
-                        AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns
-                            .iter()
-                            .copied()
-                            .filter(|a| !is_private_asn(*a))
-                            .collect(),
-                    };
-                    if filtered.is_empty() {
-                        None
-                    } else {
-                        Some(match seg {
-                            AsPathSegment::AsSequence(_) => AsPathSegment::AsSequence(filtered),
-                            AsPathSegment::AsSet(_) => AsPathSegment::AsSet(filtered),
-                        })
-                    }
-                })
-                .collect();
-            AsPath { segments }
-        }
-        RemovePrivateAs::Replace => {
-            let segments = as_path
-                .segments
-                .iter()
-                .map(|seg| match seg {
-                    AsPathSegment::AsSequence(asns) => AsPathSegment::AsSequence(
-                        asns.iter()
-                            .map(|a| if is_private_asn(*a) { local_asn } else { *a })
-                            .collect(),
-                    ),
-                    AsPathSegment::AsSet(asns) => AsPathSegment::AsSet(
-                        asns.iter()
-                            .map(|a| if is_private_asn(*a) { local_asn } else { *a })
-                            .collect(),
-                    ),
-                })
-                .collect();
-            AsPath { segments }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3284,17 +1901,25 @@ mod tests {
             let mut session = make_test_session();
             let (client, mut server) = connected_stream_pair().await;
             session.test_install_stream(client);
+            let profile = SessionExportProfile::capture(&session).with_test_ebgp(true);
 
             let sent = if announce {
                 session.send_evpn_reach_chunked(
+                    &profile,
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                     &[PathAttribute::Origin(Origin::Igp)],
                     std::slice::from_ref(&route),
-                    true,
                     1,
                 )
             } else {
-                session.send_evpn_unreach_chunked(std::slice::from_ref(&route), true, 1)
+                session.send_evpn_unreach_chunked(
+                    &profile,
+                    Afi::L2Vpn,
+                    Safi::Evpn,
+                    Ipv4UnicastMode::Body,
+                    std::slice::from_ref(&route),
+                    1,
+                )
             };
             assert!(!sent, "overflowing EVPN send must fail closed");
             assert!(session.read_half.is_none());
