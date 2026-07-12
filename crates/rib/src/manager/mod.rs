@@ -1132,10 +1132,33 @@ impl RibManager {
                 session_id,
                 limits,
             } => {
+                // Transport emits this once per session from the immutable
+                // OPEN negotiation, immediately after PeerUp. Idempotency
+                // suppresses duplicate delivery; this is not a runtime cap
+                // reconfiguration surface (a decrease requires a new session
+                // so excess advertised path IDs are withdrawn by teardown).
                 if self.outbound_session_ids.get(&peer).copied() == Some(session_id) {
-                    self.peer_add_path_send_limits
-                        .insert(peer, limits.into_iter().collect());
-                    self.send_initial_table(peer);
+                    let new_limits: HashMap<_, _> = limits.into_iter().collect();
+                    let scalar_limit = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+                    let effective_limit_changed = self
+                        .peer_add_path_send_families
+                        .get(&peer)
+                        .is_some_and(|families| {
+                            families.iter().any(|family| {
+                                let old = self
+                                    .peer_add_path_send_limits
+                                    .get(&peer)
+                                    .and_then(|limits| limits.get(family))
+                                    .copied()
+                                    .unwrap_or(scalar_limit);
+                                let new = new_limits.get(family).copied().unwrap_or(scalar_limit);
+                                old != new
+                            })
+                        });
+                    self.peer_add_path_send_limits.insert(peer, new_limits);
+                    if effective_limit_changed {
+                        self.send_initial_table(peer);
+                    }
                 }
             }
             RibUpdate::PeerOrfUpdate {

@@ -336,25 +336,104 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     handle.await.unwrap();
 }
 
+fn assert_one_dual_stack_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+    let update = out_rx
+        .try_recv()
+        .expect("effective limit change triggers one resync");
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(
+        update.end_of_rib,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    );
+    assert!(
+        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "effective limit change must trigger exactly one resync"
+    );
+}
+
 #[test]
-fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle pins stale, idempotent, changed, and reverted family-limit updates"
+)]
+fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    manager.outbound_session_ids.insert(peer, 7);
-    manager.peer_add_path_send_max.insert(peer, 8);
-    manager.peer_add_path_send_families.insert(
-        peer,
-        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
-    );
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
 
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 7,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: dual_stack_sendable(),
+        add_path_send_max: 8,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    assert_one_dual_stack_eor(&mut out_rx);
+
+    // A stale session must neither alter stored limits nor trigger a resync.
     manager.handle_update(RibUpdate::PeerAddPathLimits {
         peer,
         session_id: 6,
         limits: vec![((Afi::Ipv4, Safi::Unicast), 1)],
     });
     assert!(!manager.peer_add_path_send_limits.contains_key(&peer));
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 
+    // Explicit scalar-equivalent limits are stored but do not change the
+    // effective caps, so the PeerUp EoR is not repeated.
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 8),
+            ((Afi::Ipv6, Safi::Unicast), 8),
+        ],
+    });
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    // An empty exact map also means scalar fallback for every negotiated
+    // send family and remains idempotent while replacing the stored map.
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![],
+    });
+    assert!(
+        manager
+            .peer_add_path_send_limits
+            .get(&peer)
+            .is_some_and(HashMap::is_empty)
+    );
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    // A family divergence installs the exact map and performs one resync.
     manager.handle_update(RibUpdate::PeerAddPathLimits {
         peer,
         session_id: 7,
@@ -363,20 +442,54 @@ fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
             ((Afi::Ipv6, Safi::Unicast), 5),
         ],
     });
-    assert_eq!(
-        manager.add_path_send_max_for_prefix(
-            peer,
-            &Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24))
-        ),
-        2
+    assert_one_dual_stack_eor(&mut out_rx);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 2);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
+
+    // An identical retransmission replaces the map without another resync.
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 2),
+            ((Afi::Ipv6, Safi::Unicast), 5),
+        ],
+    });
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    // Synthetic differing same-session maps pin the comparison and storage
+    // guard only; production emits one immutable map per negotiation. Each
+    // effective change still requests exactly one replay, and reverting an
+    // override restores scalar fallback in the stored/effective view.
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 3),
+            ((Afi::Ipv6, Safi::Unicast), 5),
+        ],
+    });
+    assert_one_dual_stack_eor(&mut out_rx);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 3);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![],
+    });
+    assert_one_dual_stack_eor(&mut out_rx);
+    assert!(
+        manager
+            .peer_add_path_send_limits
+            .get(&peer)
+            .is_some_and(HashMap::is_empty)
     );
-    assert_eq!(
-        manager.add_path_send_max_for_prefix(
-            peer,
-            &Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32))
-        ),
-        5
-    );
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
 }
 
 #[tokio::test]

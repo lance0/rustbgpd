@@ -2338,6 +2338,9 @@ fn classify_effective_distribution_mode(
 ) -> crate::update::EffectiveDistributionMode {
     use crate::update::EffectiveDistributionMode;
 
+    // This scalar reports the dominant live selection surface. An inactive
+    // registration is always UNKNOWN; for an active peer, ADD_PATH outranks
+    // PER_CLIENT_BEST, which outranks ORR, then ordinary SINGLE_BEST.
     if !registered {
         EffectiveDistributionMode::Unknown
     } else if add_path {
