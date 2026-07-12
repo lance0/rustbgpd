@@ -59,6 +59,10 @@ fn paths_limit_is_applied_per_unicast_family_and_rejects_stale_session() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end dual-stack scenario covers initial dump, churn, withdrawal re-ranking, and refresh replay"
+)]
 async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
