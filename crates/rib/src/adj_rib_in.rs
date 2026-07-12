@@ -1875,11 +1875,13 @@ impl AdjRibIn {
     }
 
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
-    pub fn iter_flowspec_key(&self, key: &FlowSpecKey) -> impl Iterator<Item = &FlowSpecRoute> {
-        let target = key.clone();
+    pub fn iter_flowspec_key<'a>(
+        &'a self,
+        key: &'a FlowSpecKey,
+    ) -> impl Iterator<Item = &'a FlowSpecRoute> + 'a {
         self.flowspec_routes
             .values()
-            .filter(move |route| route.selection_key() == target)
+            .filter(move |route| route.afi == key.afi && route.rule == key.rule)
     }
 
     /// Return the number of `FlowSpec` routes stored.
