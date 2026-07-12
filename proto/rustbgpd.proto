@@ -395,12 +395,13 @@ message PathsLimitState {
   uint32 configured_receive_max = 2;
   uint32 advertised_receive_max = 3;
   uint32 received_receive_max = 4;
-  // Normalized effective send cap. Zero means unlimited only when
-  // effective_send_active is true.
+  // Legacy raw effective send cap: 0 = inactive, UINT32_MAX = unlimited,
+  // any other value = finite. Preserved for rolling compatibility.
   uint32 effective_send_max = 5;
-  // True when Add-Path send is active for this family. Distinguishes an
-  // active unlimited cap from an inactive family.
-  bool effective_send_active = 6;
+  // Normalized effective send cap. Presence means Add-Path send is active:
+  // 0 = unlimited, non-zero = finite. Absence means inactive. New clients
+  // fall back to effective_send_max when reading an older server.
+  optional uint32 effective_send_limit = 6;
 }
 
 message NeighborState {

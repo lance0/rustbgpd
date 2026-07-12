@@ -121,13 +121,17 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             paths_limits: n
                 .paths_limits
                 .iter()
-                .map(|limit| JsonPathsLimit {
-                    family: limit.family.clone(),
-                    configured_receive_max: limit.configured_receive_max,
-                    advertised_receive_max: limit.advertised_receive_max,
-                    received_receive_max: limit.received_receive_max,
-                    effective_send_max: limit.effective_send_max,
-                    effective_send_active: limit.effective_send_active,
+                .map(|limit| {
+                    let (effective_send_active, effective_send_max) =
+                        normalized_effective_send(limit);
+                    JsonPathsLimit {
+                        family: limit.family.clone(),
+                        configured_receive_max: limit.configured_receive_max,
+                        advertised_receive_max: limit.advertised_receive_max,
+                        received_receive_max: limit.received_receive_max,
+                        effective_send_max,
+                        effective_send_active,
+                    }
                 })
                 .collect(),
             role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
@@ -215,10 +219,9 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             println!("Add-Path Send Max:     {add_path_send_max}");
         }
         for limit in &n.paths_limits {
-            let effective_send = paths_limit_effective_send_label(
-                limit.effective_send_active,
-                limit.effective_send_max,
-            );
+            let (effective_send_active, effective_send_max) = normalized_effective_send(limit);
+            let effective_send =
+                paths_limit_effective_send_label(effective_send_active, effective_send_max);
             println!(
                 "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
                 limit.family,
@@ -329,6 +332,17 @@ fn paths_limit_effective_send_label(active: bool, max: u32) -> String {
         "unlimited".to_string()
     } else {
         max.to_string()
+    }
+}
+
+fn normalized_effective_send(limit: &crate::proto::PathsLimitState) -> (bool, u32) {
+    if let Some(normalized) = limit.effective_send_limit {
+        return (true, normalized);
+    }
+    match limit.effective_send_max {
+        0 => (false, 0),
+        u32::MAX => (true, 0),
+        finite => (true, finite),
     }
 }
 
@@ -551,6 +565,25 @@ mod tests {
         assert_eq!(paths_limit_effective_send_label(false, 0), "inactive");
         assert_eq!(paths_limit_effective_send_label(true, 0), "unlimited");
         assert_eq!(paths_limit_effective_send_label(true, 4), "4");
+    }
+
+    #[test]
+    fn paths_limit_new_and_legacy_servers_normalize_bidirectionally() {
+        let row = |raw, normalized| crate::proto::PathsLimitState {
+            effective_send_max: raw,
+            effective_send_limit: normalized,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            normalized_effective_send(&row(u32::MAX, Some(0))),
+            (true, 0)
+        );
+        assert_eq!(normalized_effective_send(&row(4, Some(4))), (true, 4));
+        assert_eq!(normalized_effective_send(&row(0, None)), (false, 0));
+        assert_eq!(normalized_effective_send(&row(u32::MAX, None)), (true, 0));
+        assert_eq!(normalized_effective_send(&row(3, None)), (true, 3));
+        assert_eq!(normalized_effective_send(&row(0, Some(0))), (true, 0));
     }
 
     #[tokio::test]

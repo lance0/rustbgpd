@@ -428,6 +428,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         paths_limit_families
             .iter()
             .filter_map(|family| {
+                let locally_configured = info.families.contains(family);
                 let received = info
                     .peer_paths_limits
                     .iter()
@@ -439,10 +440,16 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                     .effective_add_path_send_limits
                     .iter()
                     .find_map(|(candidate, value)| (candidate == family).then_some(*value));
-                let effective_send_active = effective.is_some();
-                let effective_send_max =
-                    effective.map_or(0, |value| if value == u32::MAX { 0 } else { value });
-                let advertised = if info.add_path_receive
+                let effective_send_limit =
+                    effective.map(|value| if value == u32::MAX { 0 } else { value });
+                let effective_send_max = effective.unwrap_or(0);
+                let configured_receive_max = if locally_configured {
+                    u32::from(info.paths_limit_receive_max)
+                } else {
+                    0
+                };
+                let advertised = if locally_configured
+                    && info.add_path_receive
                     && matches!(
                         family.1,
                         Safi::Unicast | Safi::MplsVpn | Safi::LabeledUnicast
@@ -451,14 +458,14 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                 } else {
                     0
                 };
-                (advertised != 0 || received != 0 || effective_send_active).then(|| {
+                (advertised != 0 || received != 0 || effective.is_some()).then(|| {
                     proto::PathsLimitState {
                         family: family_to_string(family.0, family.1),
-                        configured_receive_max: u32::from(info.paths_limit_receive_max),
+                        configured_receive_max,
                         advertised_receive_max: advertised,
                         received_receive_max: received,
                         effective_send_max,
-                        effective_send_active,
+                        effective_send_limit,
                     }
                 })
             })
@@ -477,7 +484,9 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     let tcp_ao_health = if info.authentication != "tcp_ao" {
         proto::TcpAoHealth::NotApplicable
     } else if let Some(ao) = info.tcp_ao_info {
-        if ao.pkt_bad > 0
+        if !ao.has_current_key
+            || !ao.has_rnext_key
+            || ao.pkt_bad > 0
             || ao.pkt_key_not_found > 0
             || ao.pkt_ao_required > 0
             || ao.pkt_dropped_icmp > 0
@@ -1233,7 +1242,7 @@ mod tests {
         assert!(source.contains("TcpAoState tcp_ao = 28;"));
         assert!(source.contains("TcpAoHealth tcp_ao_health = 29;"));
         assert!(source.contains("EffectiveDistributionMode effective_distribution_mode = 30;"));
-        assert!(source.contains("bool effective_send_active = 6;"));
+        assert!(source.contains("optional uint32 effective_send_limit = 6;"));
     }
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {
@@ -2027,12 +2036,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ipv4_unicast", "ipv6_unicast", "L2Vpn_Evpn"]
         );
-        assert!(paths[0].effective_send_active);
-        assert_eq!(paths[0].effective_send_max, 0);
-        assert!(paths[1].effective_send_active);
+        assert_eq!(paths[0].effective_send_max, u32::MAX);
+        assert_eq!(paths[0].effective_send_limit, Some(0));
         assert_eq!(paths[1].effective_send_max, 2);
-        assert!(!paths[2].effective_send_active);
+        assert_eq!(paths[1].effective_send_limit, Some(2));
         assert_eq!(paths[2].effective_send_max, 0);
+        assert_eq!(paths[2].effective_send_limit, None);
+        assert_eq!(paths[2].configured_receive_max, 0);
+        assert_eq!(paths[2].advertised_receive_max, 0);
     }
 
     #[test]
@@ -2082,6 +2093,52 @@ mod tests {
         );
         assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Unavailable as i32);
         assert!(state.tcp_ao.is_none());
+    }
+
+    #[test]
+    fn tcp_ao_missing_current_key_degrades_clean_counters() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: false,
+            has_rnext_key: true,
+            ao_required: false,
+            accept_icmps: false,
+            current_key: 0,
+            rnext_key: 9,
+            pkt_good: 20,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+        assert_eq!(
+            peer_info_to_proto(&info).tcp_ao_health,
+            proto::TcpAoHealth::Degraded as i32
+        );
+    }
+
+    #[test]
+    fn tcp_ao_missing_rnext_key_degrades_clean_counters() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: false,
+            ao_required: false,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 0,
+            pkt_good: 20,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+        assert_eq!(
+            peer_info_to_proto(&info).tcp_ao_health,
+            proto::TcpAoHealth::Degraded as i32
+        );
     }
 
     #[test]
