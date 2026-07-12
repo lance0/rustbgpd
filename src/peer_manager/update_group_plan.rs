@@ -27,7 +27,7 @@ fn preserves_negotiation(current: &ResolvedNeighbor, candidate: &ResolvedNeighbo
     let left = &current.transport_config;
     let right = &candidate.transport_config;
     left.peer.remote_asn == right.peer.remote_asn
-        && left.peer.families == right.peer.families
+        && same_families(&left.peer.families, &right.peer.families)
         && left.peer.add_path_send == right.peer.add_path_send
         && left.peer.add_path_receive == right.peer.add_path_receive
         && left.peer.graceful_restart == right.peer.graceful_restart
@@ -35,6 +35,11 @@ fn preserves_negotiation(current: &ResolvedNeighbor, candidate: &ResolvedNeighbo
         && left.peer.prefix_orf_receive == right.peer.prefix_orf_receive
         && left.peer.disable_ipv4_unicast == right.peer.disable_ipv4_unicast
         && left.llgr_stale_time == right.llgr_stale_time
+}
+
+fn same_families<T: Eq>(left: &[T], right: &[T]) -> bool {
+    left.iter().all(|family| right.contains(family))
+        && right.iter().all(|family| left.contains(family))
 }
 
 fn candidate_input(
@@ -187,13 +192,18 @@ impl PeerManager {
             let current_cfg = current.get(&peer);
             let candidate_cfg = candidate.get(&peer);
             let live = live.get(&peer);
-            let current_state = live.map_or_else(
-                || PlannedGroupability::Indeterminate {
-                    reason: "indeterminate_session_negotiation".to_string(),
-                },
-                |row| raw_state(&row.classification, &format!("{:?}", row.input)),
-            );
+            let current_state = if current_cfg.is_none() {
+                PlannedGroupability::Absent
+            } else {
+                live.map_or_else(
+                    || PlannedGroupability::Indeterminate {
+                        reason: "indeterminate_session_negotiation".to_string(),
+                    },
+                    |row| raw_state(&row.classification, &format!("{:?}", row.input)),
+                )
+            };
             let candidate_state = match (live, current_cfg, candidate_cfg) {
+                (_, _, None) => PlannedGroupability::Absent,
                 (Some(live), Some(current), Some(candidate))
                     if preserves_negotiation(current, candidate) =>
                 {
@@ -219,21 +229,9 @@ impl PeerManager {
                     raw_groups.insert(id.clone());
                 }
             }
-            let mut families = live.map_or_else(BTreeSet::new, |row| {
+            let families = live.map_or_else(BTreeSet::new, |row| {
                 row.input.sendable_families.iter().copied().collect()
             });
-            if live.is_none() {
-                for config in [current_cfg, candidate_cfg].into_iter().flatten() {
-                    families.extend(
-                        config
-                            .transport_config
-                            .peer
-                            .families
-                            .iter()
-                            .map(|&(afi, safi)| (afi as u16, safi as u8)),
-                    );
-                }
-            }
             for (afi, safi) in families {
                 rows.push((
                     peer,
@@ -360,6 +358,20 @@ mod tests {
             fingerprint: "policy-b".to_string(),
         };
         assert_eq!(transition(&private, &changed_private), "private_resync");
+        assert_eq!(
+            transition(&shared_a, &PlannedGroupability::Absent),
+            "regroup"
+        );
+        assert_eq!(
+            transition(&PlannedGroupability::Absent, &unknown),
+            "indeterminate"
+        );
+    }
+
+    #[test]
+    fn negotiation_family_comparison_is_order_and_duplicate_independent() {
+        assert!(same_families(&[(1, 1), (2, 1), (1, 1)], &[(2, 1), (1, 1)]));
+        assert!(!same_families(&[(1, 1)], &[(1, 1), (2, 1)]));
     }
 
     #[test]

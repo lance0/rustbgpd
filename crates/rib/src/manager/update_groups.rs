@@ -2070,6 +2070,7 @@ impl RibManager {
             .map(|&(afi, safi)| (afi as u16, safi as u8))
             .collect::<Vec<_>>();
         sendable_families.sort_unstable();
+        sendable_families.dedup();
         let mut llgr_families = self
             .peer_advertised_llgr_families
             .get(&peer)
@@ -2078,6 +2079,7 @@ impl RibManager {
             .map(|&(afi, safi)| (afi as u16, safi as u8))
             .collect::<Vec<_>>();
         llgr_families.sort_unstable();
+        llgr_families.dedup();
         UpdateGroupClassifierInput {
             policy_fingerprint: chain.map(|value| format!("{value:?}")),
             policy_provenance: chain.map(|value| value.groupability_provenance().to_string()),
