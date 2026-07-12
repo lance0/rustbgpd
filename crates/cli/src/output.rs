@@ -304,7 +304,11 @@ pub struct JsonPathsLimit {
     pub configured_receive_max: u32,
     pub advertised_receive_max: u32,
     pub received_receive_max: u32,
+    /// Legacy raw value: zero inactive, `u32::MAX` unlimited.
     pub effective_send_max: u32,
+    /// Normalized active limit: zero unlimited, finite otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_send_limit: Option<u32>,
     pub effective_send_active: bool,
 }
 
@@ -847,6 +851,23 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_limit_json_preserves_raw_and_adds_normalized_limit() {
+        let row = JsonPathsLimit {
+            family: "ipv4_unicast".to_string(),
+            configured_receive_max: 3,
+            advertised_receive_max: 3,
+            received_receive_max: 0,
+            effective_send_max: u32::MAX,
+            effective_send_limit: Some(0),
+            effective_send_active: true,
+        };
+        let value = serde_json::to_value(row).unwrap();
+        assert_eq!(value["effective_send_max"], u64::from(u32::MAX));
+        assert_eq!(value["effective_send_limit"], 0);
+        assert_eq!(value["effective_send_active"], true);
+    }
     use serde_json::Value;
     use std::collections::BTreeMap;
 

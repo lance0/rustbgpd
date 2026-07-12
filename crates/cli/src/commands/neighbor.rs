@@ -74,7 +74,12 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         .into_inner();
 
     let cfg = n.config.as_ref();
-    let distribution_mode = effective_distribution_mode_label(n.effective_distribution_mode);
+    let distribution_mode = effective_distribution_mode_label(
+        n.effective_distribution_mode,
+        cfg.map(|c| c.add_path_send).unwrap_or(false),
+        cfg.map(|c| c.per_client_best).unwrap_or(false),
+        &n.update_group,
+    );
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -129,7 +134,8 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
                         configured_receive_max: limit.configured_receive_max,
                         advertised_receive_max: limit.advertised_receive_max,
                         received_receive_max: limit.received_receive_max,
-                        effective_send_max,
+                        effective_send_max: limit.effective_send_max,
+                        effective_send_limit: effective_send_active.then_some(effective_send_max),
                         effective_send_active,
                     }
                 })
@@ -313,15 +319,29 @@ fn tcp_ao_health_label(value: i32) -> &'static str {
     }
 }
 
-fn effective_distribution_mode_label(value: i32) -> &'static str {
+fn effective_distribution_mode_label(
+    value: i32,
+    legacy_add_path_send: bool,
+    legacy_per_client_best: bool,
+    legacy_update_group: &str,
+) -> &'static str {
     match crate::proto::EffectiveDistributionMode::try_from(value) {
         Ok(crate::proto::EffectiveDistributionMode::SingleBest) => "single-best",
         Ok(crate::proto::EffectiveDistributionMode::AddPath) => "add-path",
         Ok(crate::proto::EffectiveDistributionMode::Orr) => "orr",
         Ok(crate::proto::EffectiveDistributionMode::PerClientBest) => "per-client-best",
-        Ok(crate::proto::EffectiveDistributionMode::Unknown)
-        | Ok(crate::proto::EffectiveDistributionMode::Unspecified)
-        | Err(_) => "unknown",
+        Ok(crate::proto::EffectiveDistributionMode::Unknown) | Err(_) => "unknown",
+        Ok(crate::proto::EffectiveDistributionMode::Unspecified) => {
+            if legacy_add_path_send {
+                "add-path"
+            } else if legacy_per_client_best {
+                "per-client-best"
+            } else if legacy_update_group == "orr_vantage" {
+                "orr"
+            } else {
+                "single-best"
+            }
+        }
     }
 }
 
@@ -546,18 +566,47 @@ mod tests {
     fn effective_distribution_mode_is_live_and_backward_compatible() {
         assert_eq!(
             effective_distribution_mode_label(
-                crate::proto::EffectiveDistributionMode::AddPath as i32
+                crate::proto::EffectiveDistributionMode::AddPath as i32,
+                false,
+                false,
+                ""
             ),
             "add-path"
         );
         assert_eq!(
             effective_distribution_mode_label(
-                crate::proto::EffectiveDistributionMode::PerClientBest as i32
+                crate::proto::EffectiveDistributionMode::PerClientBest as i32,
+                false,
+                false,
+                ""
             ),
             "per-client-best"
         );
-        assert_eq!(effective_distribution_mode_label(0), "unknown");
-        assert_eq!(effective_distribution_mode_label(i32::MAX), "unknown");
+        assert_eq!(
+            effective_distribution_mode_label(0, true, false, ""),
+            "add-path"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(0, false, true, ""),
+            "per-client-best"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(0, false, false, "orr_vantage"),
+            "orr"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(
+                crate::proto::EffectiveDistributionMode::Unknown as i32,
+                true,
+                true,
+                "orr_vantage"
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            effective_distribution_mode_label(i32::MAX, true, true, "orr_vantage"),
+            "unknown"
+        );
     }
 
     #[test]
