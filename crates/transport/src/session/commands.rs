@@ -14,7 +14,7 @@ impl PeerSession {
     where
         F: FnOnce(&tokio::net::TcpStream) -> std::io::Result<crate::TcpAoInfoSnapshot>,
     {
-        if self.config.tcp_ao.is_none() {
+        if !self.tcp_ao_protected {
             self.tcp_ao_info = None;
             return;
         }
@@ -123,6 +123,7 @@ impl PeerSession {
                     uptime_secs,
                     last_error: self.last_error.clone(),
                     tcp_ao_info: self.tcp_ao_info.map(Box::new),
+                    tcp_ao_protected: self.tcp_ao_protected,
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())

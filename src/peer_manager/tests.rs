@@ -514,6 +514,68 @@ fn runtime_dynamic_crud_rejects_startup_pinned_tcp_ao_ranges_and_overlaps() {
     assert!(delete_err.to_string().contains("startup-pinned"));
 }
 
+#[tokio::test]
+async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_config() {
+    let (tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut config = make_dynamic_manager_config();
+    config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao());
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let client = client.unwrap();
+    let (server, remote_addr) = accepted.unwrap();
+    tx.send(PeerManagerCommand::AcceptInbound {
+        stream: server,
+        peer_addr: remote_addr,
+        tcp_ao_info: Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: true,
+            ao_required: false,
+            accept_icmps: false,
+            current_key: 1,
+            rnext_key: 1,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        }),
+    })
+    .await
+    .unwrap();
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+        .await
+        .unwrap();
+    let peers = list_rx.await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert!(peers[0].is_dynamic);
+    assert_eq!(peers[0].authentication, "tcp_ao");
+
+    drop(client);
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
 #[test]
 fn delete_dynamic_range_removes_and_stops_future_match() {
     let mut mgr = dynamic_test_manager();
@@ -1129,6 +1191,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -4444,6 +4507,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -5308,6 +5372,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5374,6 +5439,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5437,6 +5503,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -5498,6 +5565,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -6053,6 +6121,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         uptime_secs: u64::from(state == SessionState::Established),
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6166,6 +6235,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         uptime_secs: 1,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -6297,6 +6367,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             uptime_secs: 1,
                             last_error: String::new(),
                             tcp_ao_info: None,
+                            tcp_ao_protected: false,
                         });
                     }
                     PeerCommand::Shutdown => break,
@@ -6518,6 +6589,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 _ => {}
@@ -6635,6 +6707,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             uptime_secs: 1,
                             last_error: String::new(),
                             tcp_ao_info: None,
+                            tcp_ao_protected: false,
                         });
                     }
                     PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6811,6 +6884,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         uptime_secs: 1,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6987,6 +7061,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7157,6 +7232,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7358,6 +7434,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         uptime_secs: 1,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7582,6 +7659,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         uptime_secs: 1,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7916,6 +7994,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         uptime_secs: 0,
                         last_error: String::new(),
                         tcp_ao_info: None,
+                        tcp_ao_protected: false,
                     });
                 }
                 PeerCommand::CollisionDump => {

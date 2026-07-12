@@ -67,7 +67,9 @@ fn build_peer_info(
         flap_count: session_state.map_or(0, |s| s.flap_count),
         uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
         last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
-        authentication: if managed.transport_config.tcp_ao.is_some() {
+        authentication: if session_state.is_some_and(|state| state.tcp_ao_protected)
+            || managed.transport_config.tcp_ao.is_some()
+        {
             "tcp_ao"
         } else if managed.transport_config.md5_password.is_some() {
             "md5"

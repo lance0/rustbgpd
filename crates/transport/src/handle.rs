@@ -450,6 +450,9 @@ pub struct PeerSessionState {
     /// Query-time TCP-AO socket inspection. Refreshed by `QueryState` and
     /// cleared on disconnect or inspection failure.
     pub tcp_ao_info: Option<Box<crate::TcpAoInfoSnapshot>>,
+    /// Whether this session is TCP-AO protected, independent of whether the
+    /// latest read-only socket inspection succeeded.
+    pub tcp_ao_protected: bool,
     /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
     pub otc_routes_blocked: u64,
     /// Import policy evaluations that permitted a route.
