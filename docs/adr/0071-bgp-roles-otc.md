@@ -118,26 +118,29 @@ event-history work so it can carry stable cursors/backfill semantics.
   32-bit ASN that initially set OTC.
 - **Scope: IPv4 unicast and IPv6 unicast only.** RFC 9234 §5 explicitly
   scopes the procedures to AFI 1 / AFI 2, SAFI 1. v1 does NOT apply OTC to
-  FlowSpec, EVPN, or any other AFI/SAFI — only the unicast egress path
-  (`crates/transport/src/session/outbound.rs:1004`
-  `prepare_outbound_attributes`) gets the OTC hook; the FlowSpec and EVPN
-  siblings are deliberately untouched.
+  FlowSpec, EVPN, or any other AFI/SAFI. E2 is staged in the unicast RIB export
+  path; E1 attribute attachment and a defense-only E2 check remain in the
+  transport unicast encoder. Non-unicast siblings are deliberately untouched.
 - **Preserve-existing-OTC invariant.** A valid OTC already present on a
   route is preserved unchanged through E1 and I3 — those rules only ADD
   when OTC is absent, never overwrite. The only paths that suppress an
   OTC-carrying route from the import view are I1 / I2 (semantic
   ineligibility, ingress) and E2 (egress suppression to non-
   Customer/Peer/RS-Client destinations).
-- **Egress** (in `prepare_outbound_attributes()`, unicast only). Driven by
-  the **local** role:
+- **Egress** (unicast only). Driven by the **local** role, which transport
+  session-stamps into the RIB before `PeerUp` so the initial table is covered:
   - **E1:** If our local role is Provider / Peer / RS (i.e. the peer's
     implied role is Customer / Peer / RS-Client), and OTC is not already
     present on the route, ADD OTC = local AS.
   - **E2:** If the route already carries OTC, suppress the route from
     outbound advertisements when the peer's implied role is Provider /
     Peer / RS (i.e. our local role is Customer / Peer / RS-Client). The
-    suppression is observable via the counter/status surface; it is not a
-    silent drop.
+    RIB applies this after export-policy modifications and before grouped or
+    private Adj-RIB-Out commit. Existing advertised state is withdrawn;
+    newly blocked state is never committed. ORR, Add-Path, per-client-best,
+    update-group staging, and export-explain share this rule. Transport keeps
+    the encoder check as defense in depth and publishes the existing
+    counter/event diagnostics from the RIB's rejected-route context.
 - **Ingress — semantic leak detection** (in `process_update`). Driven by
   the **local** role. **This is RFC 9234 §5 semantic ineligibility, NOT
   RFC 7606 treat-as-withdraw** — the route is "ineligible for the Adj-
@@ -357,12 +360,15 @@ on the `local-role` line. The FRR doc reference is pinned to
   `crates/fsm/src/config.rs:41` builds the outgoing OPEN cap list. Append
   `Capability::Role { role }` gated on `config.role.is_some()`, mirroring
   the GR / Add-Path push pattern.
-- **Transport — egress OTC set (E1/E2), unicast only.** Function is
+- **RIB + transport — egress OTC set/suppress, unicast only.** E1 remains in
   `prepare_outbound_attributes` at `crates/transport/src/session/
-  outbound.rs:1004`; the hook itself lands just before
-  `attach_graceful_shutdown_if_enabled` (around `:1170`). The "OTC not
-  already present" guard mirrors the LOCAL_PREF backfill at
-  `outbound.rs:1079-1085`. **Do NOT add the hook to**
+  outbound.rs`; the "OTC not already present" guard preserves an existing
+  value. E2 is enforced in the RIB after export policy and before the
+  Adj-RIB-Out diff/commit for shared and private selection shapes. The local
+  role is part of canonical update-group identity, and is delivered with a
+  session-stamped pre-`PeerUp` context so collision/failover and initial-table
+  construction remain truthful. The transport E2 check is defense-only and
+  consumes RIB denial context for the existing metric/event. **Do NOT add the hook to**
   `prepare_outbound_attributes_flowspec` (`:1182`) or
   `prepare_outbound_attributes_evpn` (`:1286`) — RFC 9234 §5 scopes the
   procedures to AFI 1/2 SAFI 1; non-unicast SAFIs are explicitly out of

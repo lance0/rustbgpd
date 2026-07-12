@@ -129,6 +129,7 @@ impl RibManager {
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
+        target_local_role: Option<rustbgpd_wire::BgpRole>,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
@@ -683,8 +684,52 @@ impl RibManager {
             );
         }
 
-        explain.decision = ExplainDecision::Advertise;
         explain.modifications = result.modifications.clone();
+        let mut otc_memo = super::ExportMemo::default();
+        let (otc_candidate, _) = otc_memo.apply(best, &result.modifications);
+        if super::otc_egress_blocked(&otc_candidate, target_local_role) {
+            explain.decision = ExplainDecision::Deny;
+            let message = "route already carries Only-To-Customer and RFC 9234 forbids propagation toward this Provider, Peer, or Route Server".to_string();
+            gate(
+                &mut explain.gates,
+                "otc",
+                "otc_egress_blocked",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "otc_egress_blocked",
+                message,
+            });
+            return explain;
+        }
+        if matches!(
+            target_local_role,
+            Some(
+                rustbgpd_wire::BgpRole::Customer
+                    | rustbgpd_wire::BgpRole::Peer
+                    | rustbgpd_wire::BgpRole::RouteServerClient
+            )
+        ) {
+            gate(
+                &mut explain.gates,
+                "otc",
+                "otc",
+                Pass,
+                "route carries no Only-To-Customer attribute that blocks this egress role"
+                    .to_string(),
+            );
+        } else {
+            gate(
+                &mut explain.gates,
+                "otc",
+                "otc",
+                NotApplicable,
+                "RFC 9234 OTC egress suppression does not apply to this local role".to_string(),
+            );
+        }
+
+        explain.decision = ExplainDecision::Advertise;
         if let Some(route_type) = explain.route_type {
             explain.reasons.push(ExplainReason {
                 code: route_type_label(route_type),
@@ -1418,6 +1463,40 @@ impl RibManager {
         // source Arc as before.
         let (mut modified, nh_action) = memo.apply(best, &result.modifications);
         modified.path_id = 0;
+
+        // RFC 9234 §5 egress enforcement belongs before the advertised-state
+        // diff. Group staging and explain carry their group-uniform/local
+        // role here; concrete peer staging has a central pre-commit backstop
+        // in `try_send_and_commit_outbound_update` covering every selection
+        // shape (single-best, ORR, Add-Path, and per-client-best).
+        if super::otc_egress_blocked(&modified, target.local_role()) {
+            target.gate("otc", "otc_egress_blocked", Stop, || {
+                "route already carries Only-To-Customer and RFC 9234 forbids propagation toward this Provider, Peer, or Route Server"
+                    .to_string()
+            });
+            target.record_otc_blocked(modified);
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+        if matches!(
+            target.local_role(),
+            Some(
+                rustbgpd_wire::BgpRole::Customer
+                    | rustbgpd_wire::BgpRole::Peer
+                    | rustbgpd_wire::BgpRole::RouteServerClient
+            )
+        ) {
+            target.gate("otc", "otc", Pass, || {
+                "route carries no Only-To-Customer attribute that blocks this egress role"
+                    .to_string()
+            });
+        } else {
+            target.gate("otc", "otc", NotApplicable, || {
+                "RFC 9234 OTC egress suppression does not apply to this local role".to_string()
+            });
+        }
 
         // `force` mode: bypass the AdjRibOut equality suppression so
         // currently-advertised routes re-emit even when the RIB-level

@@ -32,6 +32,26 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ---
 
+## RFC 9234 — Roles and Only-to-Customer
+
+- The configured local Role is session-stamped into the RIB before `PeerUp`,
+  so the first Adj-RIB-Out build and every subsequent export use the same
+  RFC 9234 relationship semantics. Update-group identity includes that role;
+  peers with different OTC egress behavior cannot share advertised state.
+- E2 suppression for IPv4/IPv6 unicast happens after export-policy
+  modifications but before grouped or private Adj-RIB-Out commit. This covers
+  single-best, ORR, Add-Path, and per-client-best selection. A route that was
+  previously advertised and becomes OTC-blocked is withdrawn and removed from
+  logical advertised state; a newly blocked route is never committed.
+- Transport retains the E2 check as a defense-in-depth encoder guard and owns
+  the established `bgp_otc_routes_blocked_total` / `OTC_ROUTE_BLOCKED`
+  diagnostic publication. The RIB passes rejected route context explicitly,
+  so metrics/events and export-explain reflect the same pre-commit decision.
+- RFC 9234 section 5 applies only to IPv4/IPv6 unicast SAFI 1 here. FlowSpec,
+  EVPN, VPN, labeled-unicast, RTC, and BGP-LS are not subject to the OTC gate.
+
+---
+
 ## Milestone 0 — RFC 4271 Sections
 
 ### §4.2 — OPEN Message

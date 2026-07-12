@@ -60,6 +60,11 @@ fn candidate_input(
         policy_requires_peer_context: policy.is_some_and(PolicyChain::requires_peer_context),
         target_is_ebgp: candidate.transport_config.peer.remote_asn != local_asn,
         target_is_rr_client: candidate.transport_config.route_reflector_client,
+        target_local_role: candidate
+            .transport_config
+            .peer
+            .local_role
+            .map(rustbgpd_wire::BgpRole::to_u8),
         sendable_families: live.input.sendable_families.clone(),
         llgr_families: live.input.llgr_families.clone(),
         add_path_send: live.input.add_path_send,
@@ -358,6 +363,7 @@ mod tests {
             policy_requires_peer_context: false,
             target_is_ebgp: true,
             target_is_rr_client: false,
+            target_local_role: None,
             sendable_families: vec![(1, 1)],
             llgr_families: vec![],
             add_path_send: false,
@@ -511,6 +517,7 @@ mod tests {
                 policy_requires_peer_context: false,
                 target_is_ebgp: false,
                 target_is_rr_client: true,
+                target_local_role: None,
                 sendable_families: vec![(1, 1)],
                 llgr_families: vec![],
                 add_path_send: false,

@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation};
-use rustbgpd_wire::{Afi, Prefix, Safi};
+use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use rustc_hash::FxHashMap;
 use tracing::warn;
 
@@ -67,6 +67,8 @@ pub(super) struct GroupKey {
     /// RFC 4456 route-reflector client (with the global `cluster_id`
     /// this fully captures the reflection semantics split).
     target_is_rr_client: bool,
+    /// RFC 9234 local role (the OTC egress gate is role-dependent).
+    target_local_role: Option<u8>,
     /// Sendable IPv4-unicast (v1 keys the unicast subset exactly).
     sendable_ipv4_unicast: bool,
     /// Sendable IPv6-unicast.
@@ -211,6 +213,9 @@ pub(in crate::manager) type SharedUnicastPayload = (
 pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) deltas: Vec<GroupDelta>,
     pub(in crate::manager) evals: GroupEvalAccumulator,
+    /// RFC 9234 denials from this staging pass, replayed per member for
+    /// transport's existing metric/event diagnostics.
+    pub(in crate::manager) otc_blocked: Vec<Route>,
     /// Announce payload for non-exception members, built once per pass.
     pub(in crate::manager) shared_announce: std::sync::Arc<[Route]>,
     /// Next-hop-override flags aligned with `shared_announce`.
@@ -573,6 +578,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// denials its Φ would have RT-gated before the eval (the per-peer
     /// path's RT gate precedes the policy evaluation).
     vpn_policy_denied: FxHashMap<VpnRouteKey, VpnDenialRecord>,
+    /// Persistent RFC 9234 denial residue for join/resync diagnostics.
+    otc_blocked: FxHashMap<(Prefix, u32), Route>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
@@ -586,6 +593,7 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) export_chain: Option<PolicyChain>,
     pub(in crate::manager) is_ebgp: bool,
     pub(in crate::manager) is_rr_client: bool,
+    pub(in crate::manager) local_role: Option<BgpRole>,
     pub(in crate::manager) sendable: Vec<(Afi, Safi)>,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
 }
@@ -600,6 +608,7 @@ impl GroupRibOut {
         export_chain: Option<PolicyChain>,
         is_ebgp: bool,
         is_rr_client: bool,
+        local_role: Option<BgpRole>,
         sendable: Vec<(Afi, Safi)>,
         llgr: Vec<(Afi, Safi)>,
         capacity: usize,
@@ -616,10 +625,12 @@ impl GroupRibOut {
             staged_labels: FxHashMap::default(),
             vpn_staged_labels: FxHashMap::default(),
             vpn_policy_denied: FxHashMap::default(),
+            otc_blocked: FxHashMap::default(),
             vpn_member_counts: FxHashMap::default(),
             export_chain,
             is_ebgp,
             is_rr_client,
+            local_role,
             sendable,
             llgr,
         }
@@ -641,6 +652,29 @@ impl GroupRibOut {
     /// synthesis (non-RTC).
     pub(in crate::manager) fn rtc_negotiated(&self) -> bool {
         self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
+    }
+
+    fn record_otc_blocked(&mut self, prefixes: &HashSet<Prefix>, blocked: &[Route]) {
+        self.otc_blocked
+            .retain(|(prefix, _), _| !prefixes.contains(prefix));
+        self.otc_blocked.extend(
+            blocked
+                .iter()
+                .cloned()
+                .map(|route| ((route.prefix, route.path_id), route)),
+        );
+    }
+
+    pub(in crate::manager) fn otc_blocked_for_member(
+        &self,
+        member: IpAddr,
+        prefixes: &HashSet<Prefix>,
+    ) -> Vec<Route> {
+        self.otc_blocked
+            .values()
+            .filter(|route| route.peer != member && prefixes.contains(&route.prefix))
+            .cloned()
+            .collect()
     }
 
     fn count_slot(prefix: &Prefix) -> usize {
@@ -1062,6 +1096,8 @@ impl RibManager {
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 let mut target = super::distribution::ExportTarget::Group {
                     evals: &mut out.evals,
+                    local_role: group.local_role,
+                    otc_blocked: &mut out.otc_blocked,
                 };
                 Self::distribute_single_best_prefix(
                     &self.loc_rib,
@@ -1115,6 +1151,7 @@ impl RibManager {
         for delta in &out.deltas {
             group.apply_delta(delta);
         }
+        group.record_otc_blocked(prefixes, &out.otc_blocked);
         group.record_policy_filtered(prefixes, &labeled_filtered);
         if !group.dirty_members.is_empty() {
             let withdrawn: Vec<(Prefix, u32)> = out.withdrawn_keys().collect();
@@ -1190,6 +1227,7 @@ impl RibManager {
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
             let mut announce: Vec<VpnRibRoute> = Vec::new();
             let mut withdraw: Vec<VpnRibRouteKey> = Vec::new();
+            let mut ignored_otc_blocked = Vec::new();
             // Reused single-key set: the staging body iterates a key set,
             // but the delta needs per-key `old` capture and eval labels.
             let mut key_set: HashSet<VpnRouteKey> = HashSet::with_capacity(1);
@@ -1198,6 +1236,8 @@ impl RibManager {
                 key_set.insert(*key);
                 let mut target = super::distribution::ExportTarget::Group {
                     evals: &mut out.evals,
+                    local_role: group.local_role,
+                    otc_blocked: &mut ignored_otc_blocked,
                 };
                 Self::stage_vpn_routes(
                     &self.loc_rib,
@@ -1936,6 +1976,7 @@ impl RibManager {
                 self.export_policy_for(peer).map(PolicyChain::share),
                 self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
                 self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+                self.peer_local_roles.get(&peer).copied().flatten(),
                 self.peer_sendable_families
                     .get(&peer)
                     .cloned()
@@ -2048,6 +2089,7 @@ impl RibManager {
             chain: chain_idx,
             target_is_ebgp: fingerprint.target_is_ebgp,
             target_is_rr_client: fingerprint.target_is_rr_client,
+            target_local_role: fingerprint.target_local_role,
             sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
             sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
             sendable_vpnv4: fingerprint.sendable_vpnv4,
@@ -2087,6 +2129,12 @@ impl RibManager {
             policy_requires_peer_context: chain.is_some_and(PolicyChain::requires_peer_context),
             target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
             target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            target_local_role: self
+                .peer_local_roles
+                .get(&peer)
+                .copied()
+                .flatten()
+                .map(BgpRole::to_u8),
             sendable_families,
             llgr_families,
             // Paths-Limit needs no v2 key dimension today: every Add-Path-send
@@ -2280,6 +2328,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             vec![(Afi::Ipv4, Safi::Unicast)],
             vec![],
             0,
@@ -2682,6 +2731,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
             vec![],
             0,
@@ -2723,6 +2773,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             vec![
                 (Afi::Ipv4, Safi::Unicast),
                 (Afi::Ipv4, Safi::MplsVpn),
@@ -2861,6 +2912,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             vec![
                 (Afi::Ipv4, Safi::Unicast),
                 (Afi::Ipv4, Safi::MplsVpn),

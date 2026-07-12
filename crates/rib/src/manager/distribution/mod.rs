@@ -10,8 +10,8 @@ use rustbgpd_policy::{
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
-    AddressPrefixOrf, Afi, FlowSpecRule, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype, Safi,
-    WhenToRefresh,
+    AddressPrefixOrf, Afi, BgpRole, FlowSpecRule, OrfAction, OrfMatch, Prefix, RouteRefreshSubtype,
+    Safi, WhenToRefresh,
 };
 use tracing::{debug, info, warn};
 
@@ -69,6 +69,22 @@ fn llgr_stale_export_suppressed(
     target_is_ebgp
         && !llgr.is_some_and(|families| families.contains(&family))
         && (is_llgr_stale || communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
+}
+
+/// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
+/// carries OTC must not be propagated toward a Provider, Peer, or Route
+/// Server. The local role names our side of those relationships.
+fn otc_egress_blocked(route: &crate::route::Route, local_role: Option<BgpRole>) -> bool {
+    matches!(
+        local_role,
+        Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
+    ) && route.attributes.iter().any(|attribute| match attribute {
+        rustbgpd_wire::PathAttribute::OnlyToCustomer(_) => true,
+        rustbgpd_wire::PathAttribute::Unknown(raw) => {
+            raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+        }
+        _ => false,
+    })
 }
 
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
@@ -187,6 +203,8 @@ pub(in crate::manager) enum ExportTarget<'a> {
     },
     Group {
         evals: &'a mut super::update_groups::GroupEvalAccumulator,
+        local_role: Option<BgpRole>,
+        otc_blocked: &'a mut Vec<crate::route::Route>,
     },
     /// Explain-only dry run of the shared staging body: behaves like
     /// `Peer` for every decision input (split horizon, policy peer
@@ -199,6 +217,7 @@ pub(in crate::manager) enum ExportTarget<'a> {
         peer: IpAddr,
         peer_asn: Option<u32>,
         peer_group: Option<&'a str>,
+        local_role: Option<BgpRole>,
         trace: &'a mut ExportGateTrace,
     },
 }
@@ -360,7 +379,7 @@ impl<'a> ExportTarget<'a> {
                 peer_label,
                 ..
             } => record_export_policy_eval(metrics, policy_stats, peer_label, evaluation),
-            Self::Group { evals } => evals.record(evaluation, source),
+            Self::Group { evals, .. } => evals.record(evaluation, source),
             Self::Explain { .. } => {}
         }
     }
@@ -408,6 +427,19 @@ impl<'a> ExportTarget<'a> {
         match self {
             Self::Explain { trace, .. } => Some(trace),
             Self::Peer { .. } | Self::Group { .. } => None,
+        }
+    }
+
+    fn local_role(&self) -> Option<BgpRole> {
+        match self {
+            Self::Group { local_role, .. } | Self::Explain { local_role, .. } => *local_role,
+            Self::Peer { .. } => None,
+        }
+    }
+
+    fn record_otc_blocked(&mut self, route: crate::route::Route) {
+        if let Self::Group { otc_blocked, .. } = self {
+            otc_blocked.push(route);
         }
     }
 
@@ -461,9 +493,9 @@ impl RibManager {
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
         peer: IpAddr,
-        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-        announce: Arc<[crate::route::Route]>,
-        withdraw: Vec<(Prefix, u32)>,
+        mut next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        mut announce: Arc<[crate::route::Route]>,
+        mut withdraw: Vec<(Prefix, u32)>,
         end_of_rib: Vec<(Afi, Safi)>,
         refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
         flowspec_announce: Vec<crate::route::FlowSpecRoute>,
@@ -496,6 +528,48 @@ impl RibManager {
             .vpn_grouped_member_of(peer)
             .and_then(|gid| self.group_ribs.get(&gid))
             .map(|group| group.vpn_advertised_count_for(peer));
+
+        // RFC 9234 egress enforcement for every concrete-peer selection
+        // shape. Single-best group staging applies the same gate before its
+        // shared table commit; this central pass covers private single-best,
+        // ORR, Add-Path, and per-client-best without duplicating their tails.
+        let mut otc_blocked = self.pending_otc_blocked.remove(&peer).unwrap_or_default();
+        let local_role = self.peer_local_roles.get(&peer).copied().flatten();
+        if announce
+            .iter()
+            .any(|route| otc_egress_blocked(route, local_role))
+        {
+            debug_assert!(
+                grouped_unicast_count.is_none(),
+                "group staging must reject OTC before its shared table commit"
+            );
+            debug_assert_eq!(announce.len(), next_hop_override.len());
+            let mut permitted = Vec::with_capacity(announce.len());
+            let mut permitted_next_hops = Vec::with_capacity(next_hop_override.len());
+            for (route, next_hop) in announce
+                .iter()
+                .cloned()
+                .zip(next_hop_override.iter().cloned())
+            {
+                if otc_egress_blocked(&route, local_role) {
+                    if self
+                        .adj_ribs_out
+                        .get(&peer)
+                        .and_then(|rib_out| rib_out.get(&route.prefix, route.path_id))
+                        .is_some()
+                        && !withdraw.contains(&(route.prefix, route.path_id))
+                    {
+                        withdraw.push((route.prefix, route.path_id));
+                    }
+                    otc_blocked.push(route);
+                } else {
+                    permitted.push(route);
+                    permitted_next_hops.push(next_hop);
+                }
+            }
+            announce = permitted.into();
+            next_hop_override = permitted_next_hops.into();
+        }
 
         if !announce.is_empty()
             || !withdraw.is_empty()
@@ -618,6 +692,7 @@ impl RibManager {
             labeled_withdraw,
             rtc_announce,
             rtc_withdraw,
+            otc_blocked,
             request_refresh_all_negotiated: false,
         });
         true
@@ -1524,6 +1599,7 @@ impl RibManager {
             let mut labeled_withdraw = Vec::new();
             let mut rtc_announce = Vec::new();
             let mut rtc_withdraw = Vec::new();
+            let mut group_otc_blocked = Vec::new();
             let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
                 HashSet::new();
 
@@ -1597,6 +1673,7 @@ impl RibManager {
                     }
                     current_policy_filtered_routes
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
+                    group_otc_blocked = group.otc_blocked_for_member(peer, &effective_prefixes);
                 }
                 // Per-member export-policy counters — integer adds, no
                 // per-(prefix × peer) work. A clean pass takes the group
@@ -1609,6 +1686,12 @@ impl RibManager {
                 } else if let Some(stage) = group_stage.get(&gid) {
                     self.apply_group_policy_counters(peer, &stage.evals);
                 }
+            }
+            if !group_otc_blocked.is_empty() {
+                self.pending_otc_blocked
+                    .entry(peer)
+                    .or_default()
+                    .extend(group_otc_blocked);
             }
 
             // Resolve export policy, sendable families, and RR state before
@@ -2070,6 +2153,7 @@ impl RibManager {
                 || !labeled_withdraw.is_empty()
                 || !rtc_announce.is_empty()
                 || !rtc_withdraw.is_empty()
+                || self.pending_otc_blocked.contains_key(&peer)
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
                 // piggyback it on the successful dirty resync update so it

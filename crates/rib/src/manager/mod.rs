@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, BgpRole, FlowSpecRule, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -122,6 +122,9 @@ pub struct RibManager {
     /// an Established session. Entries are removed by their session's own
     /// `PeerDown`/GR-down or by full peer teardown.
     live_sessions: HashMap<IpAddr, Vec<LiveSessionRecord>>,
+    /// Session-stamped local role staged before `PeerUp`, so the initial
+    /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
+    pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
     export_policy: Option<PolicyChain>,
     peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
@@ -136,6 +139,11 @@ pub struct RibManager {
     peer_is_ebgp: HashMap<IpAddr, bool>,
     /// Whether each registered outbound peer is a route reflector client.
     peer_is_rr_client: HashMap<IpAddr, bool>,
+    /// Local RFC 9234 role for the active outbound registration.
+    peer_local_roles: HashMap<IpAddr, Option<BgpRole>>,
+    /// OTC rejections waiting to ride the next reserved outbound envelope to
+    /// transport's existing metric/event publisher.
+    pending_otc_blocked: HashMap<IpAddr, Vec<crate::route::Route>>,
     /// RFC 9107 ORR vantage per registered outbound peer (RR clients
     /// configured with `orr_vantage` only).
     peer_orr_vantage: HashMap<IpAddr, IpAddr>,
@@ -381,6 +389,7 @@ pub(super) struct LiveSessionRecord {
     sendable_families: Vec<(Afi, Safi)>,
     is_ebgp: bool,
     route_reflector_client: bool,
+    local_role: Option<BgpRole>,
     orr_vantage: Option<IpAddr>,
     per_client_best: bool,
     add_path_send_families: Vec<(Afi, Safi)>,
@@ -760,12 +769,15 @@ impl RibManager {
             outbound_peers: HashMap::new(),
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
+            pending_peer_export_context: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
             peer_advertised_llgr_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
+            peer_local_roles: HashMap::new(),
+            pending_otc_blocked: HashMap::new(),
             peer_orr_vantage: HashMap::new(),
             orr: crate::orr::OrrState::default(),
             cluster_id,
@@ -1120,6 +1132,17 @@ impl RibManager {
                 ) {
                     self.handle_set_peer_policy_context(peer, peer_group);
                 }
+            }
+            RibUpdate::SetPeerExportContext {
+                peer,
+                session_id,
+                local_role,
+            } => {
+                // This context intentionally precedes `PeerUp` so the initial
+                // table build cannot race RFC 9234 enforcement. Key by session
+                // id because collision-window senders can interleave.
+                self.pending_peer_export_context
+                    .insert((peer, session_id), local_role);
             }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {
@@ -1836,6 +1859,7 @@ impl RibManager {
                 peer_group,
                 target_is_ebgp,
                 target_is_rr_client,
+                self.peer_local_roles.get(&peer).copied().flatten(),
                 self.cluster_id,
                 sendable,
                 llgr,
@@ -1873,6 +1897,7 @@ impl RibManager {
             peer,
             peer_asn,
             peer_group,
+            local_role: self.peer_local_roles.get(&peer).copied().flatten(),
             trace: &mut trace,
         };
         let mut memo = distribution::ExportMemo::default();
@@ -1979,6 +2004,7 @@ impl RibManager {
             peer,
             peer_asn,
             peer_group,
+            local_role: self.peer_local_roles.get(&peer).copied().flatten(),
             trace: &mut trace,
         };
         let mut keys = HashSet::new();

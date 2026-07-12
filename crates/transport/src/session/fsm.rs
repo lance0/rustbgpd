@@ -438,6 +438,18 @@ impl PeerSession {
                         self.emit_bmp_event_reliable(peer_up).await;
                     }
 
+                    // Stage the session-bound RFC 9234 role before `PeerUp`:
+                    // `PeerUp` synchronously builds the initial Adj-RIB-Out,
+                    // whose OTC gate must see the role from its first route.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerExportContext {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            local_role: self.config.peer.local_role,
+                        })
+                        .await;
+
                     // Register with RIB manager for outbound updates
                     let _ = self
                         .rib_tx

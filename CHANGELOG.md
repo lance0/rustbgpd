@@ -65,6 +65,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 9234 OTC suppression now precedes Adj-RIB-Out commit.** IPv4/IPv6
+  unicast routes carrying OTC toward a Provider, Peer, or Route Server are
+  rejected while staging grouped and private export views, including ORR,
+  Add-Path, and per-client-best. A newly blocked route is never recorded as
+  advertised; a route that becomes blocked generates a withdrawal and is
+  removed from logical advertised state. Session-stamped local roles separate
+  update groups from the initial table onward, export explain reports the same
+  OTC gate, and the existing counter/event diagnostics remain emitted without
+  relying on a transport-only wire drop. (LAN-368, LAN-369)
+
 - **EVPN load generation validates unsafe workloads and honors exact event
   budgets.** The development-only `evpn-tester` now rejects zero-sized batches,
   zero-route or zero-rate churn, and hold times of 1-2 seconds before opening a

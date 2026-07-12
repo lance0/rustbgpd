@@ -256,6 +256,60 @@ impl PeerSession {
                 Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
             )
     }
+    fn record_otc_egress_block(&mut self, route: &Route) {
+        debug!(
+            peer = %self.peer_label,
+            prefix = %route.prefix,
+            "not advertising unicast route with OTC to Provider/Peer/RouteServer"
+        );
+        self.record_otc_routes_blocked(
+            rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
+            1,
+        );
+        if !self.event_sink().wants_otc_route_blocked() {
+            return;
+        }
+        let otc_value = route
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::OnlyToCustomer(asn) => Some(*asn),
+                PathAttribute::Unknown(raw)
+                    if raw.type_code == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
+                        && raw.data.len() == 4 =>
+                {
+                    Some(u32::from_be_bytes([
+                        raw.data[0],
+                        raw.data[1],
+                        raw.data[2],
+                        raw.data[3],
+                    ]))
+                }
+                _ => None,
+            });
+        let as_path_string = route
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::AsPath(path) => Some(path.to_aspath_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.event_sink()
+            .publish_otc_route_blocked(&crate::event_sink::OtcRouteBlockedEvent {
+                peer: self.peer_ip,
+                direction: crate::event_sink::OtcDirection::Egress,
+                reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
+                prefixes: vec![route.prefix.to_string()],
+                local_role: self.config.peer.local_role,
+                remote_role: self
+                    .negotiated
+                    .as_ref()
+                    .and_then(|session| session.remote_role),
+                otc_value,
+                as_path: as_path_string,
+            });
+    }
     /// Send an outbound route update as wire UPDATE messages.
     ///
     /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
@@ -269,6 +323,9 @@ impl PeerSession {
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+        for route in &update.otc_blocked {
+            self.record_otc_egress_block(route);
+        }
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let is_ebgp = self
             .negotiated
@@ -547,57 +604,10 @@ impl PeerSession {
                 continue;
             }
             if self.otc_egress_blocks_unicast(route) {
-                debug!(
-                    peer = %self.peer_label,
-                    prefix = %route.prefix,
-                    "not advertising unicast route with OTC to Provider/Peer/RouteServer"
-                );
-                self.record_otc_routes_blocked(
-                    rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
-                    1,
-                );
-                if self.event_sink().wants_otc_route_blocked() {
-                    // ADR-0072 follow-up: structured event surface. Emit
-                    // after the legacy counter so the counter-vs-event-stream
-                    // consistency is monotone. One event per blocked route —
-                    // the outer loop is already per-route, so this matches the
-                    // counter's per-route increment.
-                    let otc_value = route.attributes.iter().find_map(|a| match a {
-                        PathAttribute::OnlyToCustomer(asn) => Some(*asn),
-                        PathAttribute::Unknown(raw)
-                            if raw.type_code
-                                == rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER
-                                && raw.data.len() == 4 =>
-                        {
-                            Some(u32::from_be_bytes([
-                                raw.data[0],
-                                raw.data[1],
-                                raw.data[2],
-                                raw.data[3],
-                            ]))
-                        }
-                        _ => None,
-                    });
-                    let as_path_string = route
-                        .attributes
-                        .iter()
-                        .find_map(|a| match a {
-                            PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    let otc_event = crate::event_sink::OtcRouteBlockedEvent {
-                        peer: self.peer_ip,
-                        direction: crate::event_sink::OtcDirection::Egress,
-                        reason: rustbgpd_telemetry::reason_labels::OtcBlockReason::EgressToUpstreamViaOtc,
-                        prefixes: vec![route.prefix.to_string()],
-                        local_role: self.config.peer.local_role,
-                        remote_role: self.negotiated.as_ref().and_then(|n| n.remote_role),
-                        otc_value,
-                        as_path: as_path_string,
-                    };
-                    self.event_sink().publish_otc_route_blocked(&otc_event);
-                }
+                // Defense-in-depth for legacy/manual RIB producers. Normal
+                // RIB staging already removed this route before commit and
+                // carried it in `otc_blocked` above.
+                self.record_otc_egress_block(route);
                 continue;
             }
             let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());
