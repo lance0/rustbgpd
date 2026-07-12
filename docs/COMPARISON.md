@@ -93,7 +93,7 @@ IPv4/IPv6 `Prefix` routes.
 | Long-Lived GR (RFC 9494) | Yes | Partial | Yes | Yes | No |
 | Notification GR (RFC 8538) | Yes | Yes | No | Yes | Yes |
 | Add-Path (RFC 7911) | Yes | Yes | Yes | Yes | Yes |
-| Extended Messages (RFC 8654) | Yes | Yes | Yes | No | Yes |
+| Extended Messages (RFC 8654) | Yes | Yes | Yes | Yes[^gobgp-extmsg] | Yes |
 | Extended Nexthop (RFC 8950) | Yes | Yes | Yes | Yes | Yes |
 | BGP unnumbered (interface IPv6 link-local)[^unnum] | Yes | Yes | Yes | Yes | No |
 | Route Reflector (RFC 4456) | Yes | Yes | Yes | Yes | Yes |
@@ -105,6 +105,11 @@ IPv4/IPv6 `Prefix` routes.
     eBGP IPv4/IPv6 unicast sessions and is FRR-interop-tested by M55. FlowSpec,
     EVPN, iBGP roles, AS-confederation sub-AS roles, and operator overrides of
     OTC behavior are intentionally out of scope for v1.
+
+[^gobgp-extmsg]: GoBGP upstream support was added in the exact `v4.7.0` tag,
+    verified 2026-07-12 from the tagged
+    [release notes](https://github.com/osrg/gobgp/releases/tag/v4.7.0). This
+    records upstream support, not a rustbgpd/GoBGP interoperability receipt.
 
 ## Policy Engine
 

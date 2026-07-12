@@ -4,13 +4,15 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 This document is the canonical source for GoBGP capability claims in the
 project docs (the [comparison matrix](COMPARISON.md) defers to it). GoBGP
-cells are verified against GoBGP source — the `BGPCapabilityCode` constants
-in `pkg/packet/bgp/bgp.go` — rather than release notes: Enhanced Route
-Refresh is present (`BGP_CAP_ENHANCED_ROUTE_REFRESH = 70`); no ORF
+cells are verified against the exact GoBGP `v4.7.0` tag and its
+[release notes](https://github.com/osrg/gobgp/releases/tag/v4.7.0): Enhanced
+Route Refresh is present (`BGP_CAP_ENHANCED_ROUTE_REFRESH = 70`); no ORF
 capability is defined (no code 3 in the constant block); no BGP Role
 capability is defined (RFC 9234, tracked upstream as the still-open feature
-request [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244)).
-Verified 2026-07 against GoBGP `master`.
+request [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244)); and
+Extended Messages support was added in v4.7.0. Verified 2026-07-12. These are
+upstream capability claims, not rustbgpd interoperability receipts; receipts
+are identified explicitly where they exist.
 
 ## Address Families
 
@@ -49,7 +51,7 @@ Verified 2026-07 against GoBGP `master`.
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
-| Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
+| Extended Messages (RFC 8654) | Yes | Yes | GoBGP upstream support was added in v4.7.0; no rustbgpd/GoBGP interop receipt is claimed here |
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
 | Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
@@ -233,7 +235,6 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Advantages Over GoBGP
 
-- **Extended Messages (RFC 8654)** — rustbgpd has it, GoBGP doesn't
 - **Zero unsafe in application logic** — `deny(unsafe_code)` per-crate
 - **Fuzz testing + property testing** — GoBGP has neither
 - **Interop test suite** — Containerlab + FRR/BIRD shipped; GoBGP doesn't ship one
