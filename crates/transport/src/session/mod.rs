@@ -75,7 +75,7 @@ pub(crate) struct PeerSession {
     ///
     /// **Lifecycle invariants** (subtle — these three groups are
     /// distinct, see `close_tcp` / `handle_tcp_disconnect` /
-    /// `trigger_outbound_saturation_teardown`):
+    /// `trigger_outbound_out_of_resources_teardown`):
     ///
     /// - **At connect**: `read_half`, both writer senders, and
     ///   `writer_join` are all set together.
@@ -108,11 +108,11 @@ pub(crate) struct PeerSession {
     /// teardown) also stops the cadence.
     writer_keepalive_tx: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
     /// Hard-teardown signal for the writer task. Signalled (before the
-    /// senders are dropped) by `trigger_outbound_saturation_teardown`
-    /// only: the writer discards its bulk backlog so the `Cease/8` is
-    /// the final frame on the wire, then exits `WriterExit::TornDown`,
-    /// which the writer-exit arm maps to `TcpConnectionFails`. Ordinary
-    /// close paths drop it unsignalled (drain semantics preserved).
+    /// senders are dropped) by the Cease/Out-of-Resources teardown path:
+    /// the writer discards its bulk backlog so the `Cease/8` is the final
+    /// frame on the wire, then exits `WriterExit::TornDown`, which the
+    /// writer-exit arm maps to `TcpConnectionFails`. Ordinary close paths
+    /// drop it unsignalled (drain semantics preserved).
     writer_teardown_tx: Option<watch::Sender<bool>>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687

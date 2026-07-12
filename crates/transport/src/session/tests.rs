@@ -1850,7 +1850,7 @@ async fn oversized_bgpls_output_tears_down_session() {
         .expect("writer join should not panic");
     assert!(
         matches!(result, Err(super::writer::WriterExit::TornDown)),
-        "oversize output routes through the saturation hard close, got: {result:?}"
+        "oversize output routes through the out-of-resources hard close, got: {result:?}"
     );
 }
 fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {

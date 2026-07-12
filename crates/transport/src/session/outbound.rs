@@ -229,10 +229,6 @@ impl PeerSession {
             self.trigger_outbound_out_of_resources_teardown();
             return;
         }
-        debug_assert_eq!(
-            rustbgpd_rib::ExactExportSnapshot::generation(export),
-            export.generation()
-        );
         for route in &update.otc_blocked {
             self.record_otc_egress_block(route);
         }
@@ -1190,7 +1186,7 @@ impl PeerSession {
                         max = max_len,
                         "single IPv4 {kind} entry exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1276,7 +1272,7 @@ impl PeerSession {
                         "single {family} {kind} cannot be encoded — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     ),
                 }
-                self.trigger_outbound_saturation_teardown();
+                self.trigger_outbound_out_of_resources_teardown();
                 return false;
             }
             let message = candidate.expect("successful MP build checked above");
@@ -1350,7 +1346,7 @@ impl PeerSession {
                         max = max_len,
                         "single EVPN route exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1393,7 +1389,7 @@ impl PeerSession {
                         max = max_len,
                         "single EVPN withdrawal exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1444,7 +1440,7 @@ impl PeerSession {
                         max = max_len,
                         "single BGP-LS route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1487,7 +1483,7 @@ impl PeerSession {
                         max = max_len,
                         "single BGP-LS withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1551,7 +1547,7 @@ impl PeerSession {
                         max = max_len,
                         "single VPN route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1595,7 +1591,7 @@ impl PeerSession {
                         max = max_len,
                         "single VPN withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1653,7 +1649,7 @@ impl PeerSession {
                         max = max_len,
                         "single labeled route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1703,7 +1699,7 @@ impl PeerSession {
                         max = max_len,
                         "single labeled withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1754,7 +1750,7 @@ impl PeerSession {
                         max = max_len,
                         "single RTC route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1798,7 +1794,7 @@ impl PeerSession {
                         max = max_len,
                         "single RTC withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_saturation_teardown();
+                    self.trigger_outbound_out_of_resources_teardown();
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
