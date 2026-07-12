@@ -14,8 +14,9 @@
 //!   rrharness flood <n_clients> <n_prefixes> <secs> <out_prefix>
 //!   rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -99,17 +100,69 @@ fn rss_mib() -> u64 {
     0
 }
 
-/// utime+stime (seconds) of a thread from /proc/self/task/<tid>/stat.
-fn thread_cpu_secs(tid: i32) -> f64 {
-    let stat = fs::read_to_string(format!("/proc/self/task/{tid}/stat")).unwrap_or_default();
-    // fields 14/15 (1-based) after the comm field; comm may contain spaces but
-    // never does for our named thread — split after the closing paren.
-    let after = stat.rsplit(") ").next().unwrap_or("");
-    let f: Vec<&str> = after.split_whitespace().collect();
-    let utime: f64 = f.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let stime: f64 = f.get(12).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let hz = 100.0; // CONFIG_HZ user-visible clock ticks
-    (utime + stime) / hz
+fn invalid_stat(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+/// Parse `utime+stime` clock ticks from a Linux `/proc/<pid>/stat` record.
+///
+/// The parenthesized `comm` field may contain spaces and right parentheses, so
+/// field-number parsing must start after the *last* `") "` delimiter rather
+/// than by splitting the complete record on whitespace.
+fn parse_thread_cpu_ticks(stat: &str) -> io::Result<u64> {
+    let open = stat
+        .find('(')
+        .ok_or_else(|| invalid_stat("/proc stat is missing the comm opening parenthesis"))?;
+    let close = stat
+        .rfind(") ")
+        .ok_or_else(|| invalid_stat("/proc stat is missing the comm closing delimiter"))?;
+    if close <= open {
+        return Err(invalid_stat("/proc stat has an invalid comm field"));
+    }
+
+    // The suffix starts with field 3 (`state`), making zero-based positions
+    // 11 and 12 fields 14 (`utime`) and 15 (`stime`) respectively.
+    let fields: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+    let parse_tick = |index: usize, name: &str| -> io::Result<u64> {
+        fields
+            .get(index)
+            .ok_or_else(|| invalid_stat(format!("/proc stat is missing {name}")))?
+            .parse::<u64>()
+            .map_err(|error| invalid_stat(format!("invalid /proc stat {name}: {error}")))
+    };
+    let utime = parse_tick(11, "utime")?;
+    let stime = parse_tick(12, "stime")?;
+    utime
+        .checked_add(stime)
+        .ok_or_else(|| invalid_stat("/proc stat utime+stime overflowed u64"))
+}
+
+fn validate_clock_ticks(ticks: libc::c_long) -> io::Result<u64> {
+    if ticks <= 0 {
+        return Err(io::Error::other(format!(
+            "sysconf(_SC_CLK_TCK) returned invalid value {ticks}"
+        )));
+    }
+    u64::try_from(ticks).map_err(|_| {
+        io::Error::other(format!(
+            "sysconf(_SC_CLK_TCK) value {ticks} does not fit in u64"
+        ))
+    })
+}
+
+fn clock_ticks_per_second() -> io::Result<u64> {
+    // SAFETY: sysconf has no pointer arguments and `_SC_CLK_TCK` is a valid
+    // process-wide query on every Linux target supported by this harness.
+    validate_clock_ticks(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+}
+
+/// `utime+stime` (seconds) of a thread from `/proc/self/task/<tid>/stat`.
+fn thread_cpu_secs(tid: i32, ticks_per_second: u64) -> io::Result<f64> {
+    if ticks_per_second == 0 {
+        return Err(io::Error::other("_SC_CLK_TCK must be greater than zero"));
+    }
+    let stat = fs::read_to_string(format!("/proc/self/task/{tid}/stat"))?;
+    Ok(parse_thread_cpu_ticks(&stat)? as f64 / ticks_per_second as f64)
 }
 
 fn empty_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
@@ -131,9 +184,11 @@ struct Harness {
     drained: Arc<AtomicU64>,
     clients: Vec<IpAddr>,
     mgr_tid: i32,
+    ticks_per_second: u64,
 }
 
 async fn setup(n_clients: u32) -> Harness {
+    let ticks_per_second = clock_ticks_per_second().expect("failed to query sysconf(_SC_CLK_TCK)");
     let (tx, rx) = mpsc::channel::<RibUpdate>(1024);
     let (qtx, qrx) = mpsc::channel::<RibUpdate>(64);
     let (tid_tx, tid_rx) = std::sync::mpsc::channel::<i32>();
@@ -198,6 +253,7 @@ async fn setup(n_clients: u32) -> Harness {
         drained,
         clients,
         mgr_tid,
+        ticks_per_second,
     }
 }
 
@@ -297,22 +353,61 @@ impl Harness {
     }
 }
 
-fn write_folded(report: &pprof::Report, path: &str) {
+fn escape_folded_field(value: &str) -> io::Result<String> {
+    if value.contains(['\t', '\n', '\r']) {
+        return Err(invalid_stat("profile field contains a tab or newline"));
+    }
+    Ok(value.replace('%', "%25").replace(';', "%3B"))
+}
+
+fn render_folded(
+    samples: impl IntoIterator<Item = (String, Vec<String>, u64)>,
+) -> io::Result<String> {
+    let mut aggregated: BTreeMap<(String, Vec<String>), u64> = BTreeMap::new();
+    let mut input_total = 0u64;
+    for (thread, stack, count) in samples {
+        let thread = escape_folded_field(&thread)?;
+        let stack = stack
+            .into_iter()
+            .map(|frame| escape_folded_field(&frame))
+            .collect::<io::Result<Vec<_>>>()?;
+        input_total = input_total
+            .checked_add(count)
+            .ok_or_else(|| invalid_stat("profile sample total overflowed u64"))?;
+        let entry = aggregated.entry((thread, stack)).or_default();
+        *entry = entry
+            .checked_add(count)
+            .ok_or_else(|| invalid_stat("profile stack sample count overflowed u64"))?;
+    }
+
+    let mut output_total = 0u64;
     let mut out = String::new();
-    for (frames, count) in &report.data {
-        let stack: Vec<String> = frames
+    for ((thread, stack), count) in aggregated {
+        output_total = output_total
+            .checked_add(count)
+            .ok_or_else(|| invalid_stat("aggregated profile sample total overflowed u64"))?;
+        out.push_str(&format!("{thread}\t{}\t{count}\n", stack.join(";")));
+    }
+    if output_total != input_total {
+        return Err(invalid_stat("profile aggregation changed the sample total"));
+    }
+    Ok(out)
+}
+
+fn write_folded(report: &pprof::Report, path: &str) -> io::Result<()> {
+    let mut samples = Vec::with_capacity(report.data.len());
+    for (frames, &count) in &report.data {
+        let count = u64::try_from(count)
+            .map_err(|_| invalid_stat(format!("profiler returned invalid sample count {count}")))?;
+        let stack = frames
             .frames
             .iter()
-            .flat_map(|fs| fs.iter().map(|sym| format!("{sym}")))
+            .rev()
+            .flat_map(|frame| frame.iter().rev().map(|symbol| format!("{symbol}")))
             .collect();
-        out.push_str(&format!(
-            "{}\t{}\t{}\n",
-            frames.thread_name,
-            stack.join(";"),
-            count
-        ));
+        samples.push((frames.thread_name.clone(), stack, count));
     }
-    fs::write(path, out).unwrap();
+    fs::write(path, render_folded(samples)?)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -346,7 +441,8 @@ fn main() {
                 println!("rss_converged_mib {}", rss_mib());
 
                 // Sustained fresh-block window under the profiler.
-                let cpu0 = thread_cpu_secs(h.mgr_tid);
+                let cpu0 = thread_cpu_secs(h.mgr_tid, h.ticks_per_second)
+                    .expect("failed to read initial ribmgr CPU time");
                 let guard = pprof::ProfilerGuardBuilder::default()
                     .frequency(997)
                     .build()
@@ -362,10 +458,12 @@ fn main() {
                         .await;
                 }
                 let window = w0.elapsed().as_secs_f64();
-                let cpu1 = thread_cpu_secs(h.mgr_tid);
+                let cpu1 = thread_cpu_secs(h.mgr_tid, h.ticks_per_second)
+                    .expect("failed to read final ribmgr CPU time");
                 let report = guard.report().build().unwrap();
                 drop(guard);
-                write_folded(&report, &format!("{out}.folded"));
+                write_folded(&report, &format!("{out}.folded"))
+                    .expect("failed to write folded profile");
                 println!("sustained_blocks {blocks}");
                 println!("sustained_window_s {window:.3}");
                 println!("mgr_cpu_s {:.3}", cpu1 - cpu0);
@@ -423,7 +521,8 @@ fn main() {
                 // Flap waves under the profiler: rotate the winning source
                 // with escalating LOCAL_PREF; every wave = n_prefixes flips
                 // fanned to all clients.
-                let cpu0 = thread_cpu_secs(h.mgr_tid);
+                let cpu0 = thread_cpu_secs(h.mgr_tid, h.ticks_per_second)
+                    .expect("failed to read initial ribmgr CPU time");
                 let guard = pprof::ProfilerGuardBuilder::default()
                     .frequency(997)
                     .build()
@@ -456,10 +555,12 @@ fn main() {
                     waves += 1;
                 }
                 let window = w0.elapsed().as_secs_f64();
-                let cpu1 = thread_cpu_secs(h.mgr_tid);
+                let cpu1 = thread_cpu_secs(h.mgr_tid, h.ticks_per_second)
+                    .expect("failed to read final ribmgr CPU time");
                 let report = guard.report().build().unwrap();
                 drop(guard);
-                write_folded(&report, &format!("{out}.folded"));
+                write_folded(&report, &format!("{out}.folded"))
+                    .expect("failed to write folded profile");
                 println!("waves {waves}");
                 println!("waves_per_s {:.2}", waves as f64 / window);
                 println!("window_s {window:.3}");
@@ -471,4 +572,90 @@ fn main() {
         }
     });
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stat(comm: &str, utime: &str, stime: &str) -> String {
+        format!("42 ({comm}) S 1 2 3 4 5 6 7 8 9 10 {utime} {stime} 16 17 18 19 20 21")
+    }
+
+    #[test]
+    fn parses_cpu_ticks_with_spaces_and_parentheses_in_comm() {
+        assert_eq!(
+            parse_thread_cpu_ticks(&stat("rib mgr ) worker", "120", "23")).unwrap(),
+            143
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_stat_record() {
+        let error = parse_thread_cpu_ticks("42 (ribmgr) S 1 2").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("utime"));
+    }
+
+    #[test]
+    fn rejects_invalid_tick_field() {
+        let error = parse_thread_cpu_ticks(&stat("ribmgr", "not-a-number", "23")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("utime"));
+    }
+
+    #[test]
+    fn rejects_tick_sum_overflow() {
+        let error =
+            parse_thread_cpu_ticks(&stat("ribmgr", &u64::MAX.to_string(), "1")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn host_clock_tick_query_is_positive() {
+        assert!(clock_ticks_per_second().unwrap() > 0);
+    }
+
+    #[test]
+    fn clock_tick_validator_rejects_non_positive_values() {
+        assert!(validate_clock_ticks(-1).is_err());
+        assert!(validate_clock_ticks(0).is_err());
+        assert_eq!(validate_clock_ticks(250).unwrap(), 250);
+    }
+
+    #[test]
+    fn folded_render_aggregates_duplicates_sorts_and_preserves_samples() {
+        let output = render_folded([
+            ("ribmgr".to_string(), vec!["root".into(), "z".into()], 2),
+            ("ribmgr".to_string(), vec!["root".into(), "a".into()], 3),
+            ("ribmgr".to_string(), vec!["root".into(), "z".into()], 5),
+        ])
+        .unwrap();
+        assert_eq!(output, "ribmgr\troot;a\t3\nribmgr\troot;z\t7\n");
+        let total: u64 = output
+            .lines()
+            .map(|line| line.rsplit_once('\t').unwrap().1.parse::<u64>().unwrap())
+            .sum();
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn folded_render_rejects_overflow_and_escapes_delimiters() {
+        assert!(render_folded([
+            ("ribmgr".to_string(), vec!["root".into()], u64::MAX),
+            ("ribmgr".to_string(), vec!["root".into()], 1),
+        ])
+        .is_err());
+        assert_eq!(
+            render_folded([(
+                "ribmgr".to_string(),
+                vec!["array::<[u8; 32]>::percent%owner".into()],
+                1,
+            )])
+            .unwrap(),
+            "ribmgr\tarray::<[u8%3B 32]>::percent%25owner\t1\n"
+        );
+        assert!(render_folded([("ribmgr".to_string(), vec!["bad\tframe".into()], 1,)]).is_err());
+    }
 }

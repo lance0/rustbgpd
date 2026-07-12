@@ -1,0 +1,11 @@
+ribmgr	root;array::<[u8%3B 32]>::percent%25unknown	1
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes	4
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::RibManager::stage_group_prefixes	3
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::RibManager::stage_group_prefixes;rustbgpd_rib::manager::RibManager::distribute_single_best_prefix	10
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::GroupRibOut::apply_delta	20
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::GroupStageOutput::build_shared_emit	5
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::emit_group_deltas_for_member	10
+ribmgr	root;rustbgpd_rib::manager::RibManager::process_next_route_chunk;rustbgpd_rib::adj_rib_in::AdjRibIn::insert	40
+ribmgr	root;rustbgpd_rib::manager::RibManager::recompute_best	2
+ribmgr	root;rustbgpd_rib::manager::RibManager::recompute_best;rustbgpd_rib::manager::RibManager::publish_route_event	5
+worker	root;rustbgpd_rib::manager::RibManager::recompute_best	99

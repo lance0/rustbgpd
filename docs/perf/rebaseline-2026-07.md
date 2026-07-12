@@ -14,6 +14,17 @@ Two measurements the July perf arc left open, both taken at commit
    246 MB figure. Verdict for the memory program (slab-storage premise)
    below.
 
+> **Reproducibility status:** the tables below are retained as historical
+> decision evidence, but they are not a revision-reproducible receipt. The CPU
+> harness was reconstructed and committed after `e6ed41fe`, and the original
+> folded profiles, classifier, DHAT derivative, and same-run CSV were not
+> archived. Do not compare a new run against these values as if it were the
+> same-revision baseline. The replacement procedure, deterministic mappings,
+> fixtures, and artifact contract are committed in
+> [`bench/scale/rebaseline/README.md`](../../bench/scale/rebaseline/README.md);
+> a replacement table must pin one measured source SHA and archive the
+> checksummed artifacts produced from that exact checkout.
+
 ## Environment
 
 | Field | Value |
@@ -258,9 +269,10 @@ CPU harness (`bench/scale/rrharness/`, a standalone crate kept out of
 the workspace; shape pinned above): modes
 `flood <n_clients> <n_prefixes> <secs> <out>` and
 `churn <n_clients> <n_cand> <n_prefixes> <secs> <out>`; folded-stack
-output per run classified by the owning-function markers listed in
-Part 1. Build with `cd bench/scale/rrharness && cargo build --release`,
-then run `./target/release/rrharness <mode> <args>`. Runs:
+output per run classified by the committed leaf-first mapping in
+`bench/scale/rebaseline/classify_cpu.py`. Build with
+`cd bench/scale/rrharness && cargo build --release`, then run
+`./target/release/rrharness <mode> <args>`. Runs:
 
 ```text
 rrharness flood 256  100000 20 flood-256-{a,b}
@@ -275,3 +287,7 @@ commit, `bench -t rustbgpd -n 2 -p 100000`, SIGTERM to the daemon
 after convergence — dhat records the live-at-peak snapshot at t-gmax
 regardless — `dhat-heap.json` extracted from the target container),
 run with nothing else on the host.
+
+This historical command sketch is insufficient for a replacement receipt on
+its own. Follow the artifact naming, load gate, manifest, sanitization,
+classification, and checksum steps in `bench/scale/rebaseline/README.md`.

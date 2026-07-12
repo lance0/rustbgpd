@@ -1,0 +1,2 @@
+name, target, version, peers, prefixes per peer, required, received, monitor (s), elapsed (s), prefix received (s), testers (s), total time, max cpu %, max mem (GB), min idle%, min free mem (GB), flags, date,cores,Mem (GB), tester errors, failed, MSG, filters
+rustbgpd,rustbgpd,rustbgpd 0.51.0,2,100000,200000,200000,40,45,5,40,50.25,98,0.321,90,124.000,,2026-07-12,64,125.0G,0,0,,,
