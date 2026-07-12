@@ -2516,11 +2516,6 @@ impl RibManager {
                         prior.extend(announce.iter().map(|route| {
                             crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
                         }));
-                        prior.extend(
-                            vpn_announce
-                                .iter()
-                                .map(|route| crate::update::ExactExportKey::Vpn(route.key())),
-                        );
                     } else if is_force {
                         if let Some(group) = self.group_ribs.get(&gid) {
                             let rejected = self.peer_unexportable.get(&peer);
@@ -2546,6 +2541,17 @@ impl RibManager {
                                 delta.path_id,
                             ))
                         }));
+                    }
+                    if is_dirty || is_force {
+                        // Both full-resync shapes replace the member's
+                        // previously-advertised VPN wire view. Preserve that
+                        // prior identity so an exact-export rejection emits
+                        // the withdrawal needed to remove stale attributes.
+                        prior.extend(
+                            vpn_announce
+                                .iter()
+                                .map(|route| crate::update::ExactExportKey::Vpn(route.key())),
+                        );
                     }
                     if let Some(base) = self.pending_regroup_baseline.get(&peer) {
                         prior.extend(base.unicast.keys().map(|(prefix, path_id)| {

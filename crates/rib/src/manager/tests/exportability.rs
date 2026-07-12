@@ -442,6 +442,42 @@ async fn peer_up_with_encoder(
     out_rx
 }
 
+async fn vpn_peer_up_with_encoder(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    encoder: Arc<dyn ExactExportEncoder>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 9,
+        encoder,
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 9,
+        peer,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
 async fn add_path_peer_up_with_encoder(
     tx: &mpsc::Sender<RibUpdate>,
     peer: IpAddr,
@@ -650,6 +686,87 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     }
     assert_eq!(advertised_count(&tx, classic).await, 0);
     assert_eq!(advertised_count(&tx, extended).await, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    let sibling = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30));
+    let route = make_vpn_rib_route(Ipv4Addr::new(198, 51, 100, 30), 30, 1030, 100);
+    let key = route.key();
+    let exact_key = ExactExportKey::Vpn(key.clone());
+    let target_encoder = MockExactExportEncoder::accepting(51);
+    let sibling_encoder = MockExactExportEncoder::accepting(52);
+    let mut target_rx = vpn_peer_up_with_encoder(&tx, target, target_encoder.clone()).await;
+    let mut sibling_rx = vpn_peer_up_with_encoder(&tx, sibling, sibling_encoder).await;
+    assert_eq!(update_group(&tx, target).await, "group:0");
+    assert_eq!(update_group(&tx, sibling).await, "group:0");
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![route],
+        withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(target_rx.recv().await.unwrap().vpn_announce.len(), 1);
+    assert_eq!(sibling_rx.recv().await.unwrap().vpn_announce.len(), 1);
+
+    // A GShut-style forced refresh changes the wire attributes. If the
+    // refreshed route no longer fits, the grouped peer must withdraw the
+    // previously-advertised identity rather than leave its old attributes
+    // resident indefinitely.
+    target_encoder.set_profile(53, [exact_key.clone()]);
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.await.unwrap(), Ok(()));
+    let rejected_refresh = target_rx.recv().await.unwrap();
+    assert!(rejected_refresh.vpn_announce.is_empty());
+    assert_eq!(rejected_refresh.vpn_withdraw, vec![key.clone()]);
+
+    // The later source withdrawal retires the rejected overlay. It must not
+    // require (or emit) a second wire withdrawal: the forced-refresh reject
+    // already removed the stale route.
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: Vec::new(),
+        withdrawn: vec![key.clone()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(sibling_rx.recv().await.unwrap().vpn_withdraw, vec![key]);
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryVpnAdvertised {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(result.await.unwrap().is_empty());
+
+    if let Ok(Some(update)) =
+        tokio::time::timeout(Duration::from_millis(25), target_rx.recv()).await
+    {
+        assert!(
+            update.vpn_withdraw.is_empty(),
+            "withdrawal must be emitted once"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();
