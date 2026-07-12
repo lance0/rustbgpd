@@ -1054,6 +1054,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
         pkt_key_not_found: 0,
         pkt_ao_required: 0,
         pkt_dropped_icmp: 0,
+        keys: Vec::new(),
     });
     // Latch divergence + arm the repair timer via a dropped RM on a full
     // channel.
@@ -1108,6 +1109,20 @@ fn tcp_ao_snapshot(good: u64, bad: u64) -> crate::TcpAoInfoSnapshot {
         pkt_key_not_found: 0,
         pkt_ao_required: 0,
         pkt_dropped_icmp: 0,
+        keys: vec![crate::TcpAoKeyState {
+            peer: "10.0.0.2".parse().unwrap(),
+            prefix_len: 32,
+            send_id: 7,
+            recv_id: 9,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            is_current: true,
+            is_rnext: true,
+            preferred: false,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: good,
+            pkt_bad: bad,
+        }],
     }
 }
 
@@ -1177,21 +1192,30 @@ async fn tcp_ao_query_refreshes_degraded_cumulative_counters() {
 async fn tcp_ao_query_clears_stale_snapshot_and_recovers() {
     let mut session = tcp_ao_query_test_session().await;
     session.tcp_ao_info = Some(tcp_ao_snapshot(12, 0));
-    session.refresh_tcp_ao_info_with(|_| Err(std::io::Error::other("inspection failed")));
+    session.refresh_tcp_ao_info_with(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "TCP-AO INFO and key inventory remained inconsistent",
+        ))
+    });
     assert!(session.tcp_ao_info.is_none());
 
     session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(44, 0)));
-    assert_eq!(session.tcp_ao_info.unwrap().pkt_good, 44);
+    assert_eq!(session.tcp_ao_info.as_ref().unwrap().pkt_good, 44);
+    assert!(session.tcp_ao_info.as_ref().unwrap().keys[0].preferred);
 }
 
 #[tokio::test]
 async fn accepted_tcp_ao_snapshot_seeds_durable_refresh_across_failure_and_recovery() {
-    let mut session = accepted_query_test_session(Some(tcp_ao_snapshot(20, 0))).await;
+    let mut initial = tcp_ao_snapshot(20, 0);
+    initial.keys[0].preferred = true;
+    let mut session = accepted_query_test_session(Some(initial)).await;
     assert!(session.config.tcp_ao.is_none());
     assert!(session.tcp_ao_protected);
 
     session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(43, 0)));
-    assert_eq!(session.tcp_ao_info.unwrap().pkt_good, 43);
+    assert_eq!(session.tcp_ao_info.as_ref().unwrap().pkt_good, 43);
+    assert!(session.tcp_ao_info.as_ref().unwrap().keys[0].preferred);
     session.refresh_tcp_ao_info_with(|_| Err(std::io::Error::other("inspection failed")));
     assert!(session.tcp_ao_info.is_none());
     assert!(
@@ -1199,7 +1223,8 @@ async fn accepted_tcp_ao_snapshot_seeds_durable_refresh_across_failure_and_recov
         "inspection failure must not erase protection identity"
     );
     session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(44, 0)));
-    assert_eq!(session.tcp_ao_info.unwrap().pkt_good, 44);
+    assert_eq!(session.tcp_ao_info.as_ref().unwrap().pkt_good, 44);
+    assert!(session.tcp_ao_info.as_ref().unwrap().keys[0].preferred);
 }
 
 #[tokio::test]

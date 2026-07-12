@@ -249,18 +249,28 @@ Runtime key rotation is not exposed.
 `PLAINTEXT`, `MD5`, or `TCP_AO`. For direct dynamic-prefix TCP-AO sessions,
 that identity comes from the validated accepted socket rather than a synthesized
 per-neighbor key configuration. When socket inspection succeeds for a connected
-TCP-AO session, `NeighborState.tcp_ao` contains current/RNext KeyIDs
-and Linux verification/error counters. The daemon refreshes this read-only
-snapshot from the live socket for each neighbor state query and clears it on
-disconnect or inspection failure; it never serves an older healthy snapshot as
+TCP-AO session, `NeighborState.tcp_ao` contains current/RNext KeyIDs,
+Linux verification/error counters, and an ordered `keys` inventory. Each key
+row is deliberately redacted: it contains only peer/prefix, directional IDs,
+algorithm, current/RNext and local rollover flags, optional Linux VRF
+L3-master ifindex, and per-key counters. The VRF ifindex is not an IPv6
+link-local scope ID; absence means the MKT is VRF-unbound, not default-VRF
+bound. The inventory never contains key material, key length, a hash, or a
+fingerprint. The daemon
+refreshes `TCP_AO_INFO` and `TCP_AO_GET_KEYS` from the live socket for each
+neighbor state query, publishes them only as one internally consistent result,
+and clears it on disconnect or inspection failure; it never serves an older healthy snapshot as
 a fallback. The counters are cumulative for the lifetime of that TCP socket,
 so any non-zero error counter keeps the socket `DEGRADED` until reconnect.
 `NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
 `UNAVAILABLE` when TCP-AO protects the session but there is no socket snapshot
-(including disconnect and inspection failure), `HEALTHY` when the snapshot has
-both current/RNext key-validity flags and no error counters, and `DEGRADED`
-when either key-validity flag is absent or any bad, key-not-found,
-unsigned-required, or dropped-ICMP counter is non-zero.
+(including disconnect, inspection failure, or persistent INFO/inventory
+inconsistency), `HEALTHY` when the published snapshot has
+both current/RNext key-validity flags, a matching nondeprecated key inventory,
+and no error counters, and `DEGRADED` when either key-validity flag is absent,
+an active key is deprecated, or any bad, key-not-found, unsigned-required, or
+dropped-ICMP counter is non-zero. An inconsistent INFO/inventory pair is never
+published as degraded state.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is

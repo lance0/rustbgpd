@@ -14,9 +14,12 @@ use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
+use crate::config::TcpAoAlgorithm;
 #[cfg(target_os = "linux")]
-use crate::config::{TcpAoAlgorithm, TcpAoConfig};
+use crate::config::TcpAoConfig;
 use socket2::Socket;
+#[cfg(target_os = "linux")]
+use zeroize::Zeroize;
 
 /// Set TCP MD5 signature on a socket for a specific peer.
 ///
@@ -110,7 +113,6 @@ pub(crate) enum TcpAoSocketRole {
 
 /// A single Linux TCP-AO Master Key Tuple for a peer address.
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub(crate) struct TcpAoKey<'a> {
     pub(crate) peer: IpAddr,
@@ -143,6 +145,22 @@ struct TcpAoAdd {
 }
 
 #[cfg(target_os = "linux")]
+impl Drop for TcpAoAdd {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl TcpAoAdd {
+    fn scrub(&mut self) {
+        self.alg_name.zeroize();
+        self.key.zeroize();
+        self.keylen.zeroize();
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[repr(C, align(8))]
 #[allow(dead_code)]
 struct TcpAoInfoOpt {
@@ -157,8 +175,78 @@ struct TcpAoInfoOpt {
     pkt_dropped_icmp: u64,
 }
 
+/// Linux `tcp_ao_getsockopt`. This raw type contains the MKT secret copied
+/// back by the kernel, so it deliberately implements neither formatting nor
+/// cloning and scrubs every secret-bearing byte on drop.
+#[cfg(target_os = "linux")]
+#[repr(C, align(8))]
+struct TcpAoGetSockOpt {
+    addr: libc::sockaddr_storage,
+    alg_name: [u8; 64],
+    key: [u8; 80],
+    nkeys: u32,
+    flags: u16,
+    sndid: u8,
+    rcvid: u8,
+    prefix: u8,
+    maclen: u8,
+    keyflags: u8,
+    keylen: u8,
+    ifindex: libc::c_int,
+    pkt_good: u64,
+    pkt_bad: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl TcpAoGetSockOpt {
+    fn zeroed() -> Self {
+        // SAFETY: this is a C UAPI record made entirely of integer/byte fields.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TcpAoGetSockOpt {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl TcpAoGetSockOpt {
+    fn scrub(&mut self) {
+        self.alg_name.zeroize();
+        self.key.zeroize();
+        self.keylen.zeroize();
+    }
+}
+
+/// Redacted per-MKT Linux TCP-AO state. No key material, key length, or
+/// key-derived identifier is retained in this projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors independent Linux selection and local rollover flags"
+)]
+pub struct TcpAoKeyState {
+    pub peer: std::net::IpAddr,
+    pub prefix_len: u8,
+    pub send_id: u8,
+    pub recv_id: u8,
+    pub algorithm: TcpAoAlgorithm,
+    pub is_current: bool,
+    pub is_rnext: bool,
+    pub preferred: bool,
+    pub deprecated: bool,
+    /// VRF L3-master ifindex when Linux marks this MKT `TCP_AO_KEYF_IFINDEX`.
+    /// This is not an IPv6 link-local scope ID.
+    pub vrf_ifindex: Option<u32>,
+    pub pkt_good: u64,
+    pub pkt_bad: u64,
+}
+
 /// Runtime TCP-AO socket state returned by Linux `getsockopt(TCP_AO_INFO)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "mirrors independent Linux TCP_AO_INFO flag bits"
@@ -186,6 +274,8 @@ pub struct TcpAoInfoSnapshot {
     pub pkt_ao_required: u64,
     /// ICMPs dropped by TCP-AO policy.
     pub pkt_dropped_icmp: u64,
+    /// Ordered, redacted kernel MKT inventory for this socket.
+    pub keys: Vec<TcpAoKeyState>,
 }
 
 /// Result of probing whether the running host supports Linux TCP-AO.
@@ -202,6 +292,8 @@ const TCP_AO_ADD_KEY: libc::c_int = 38;
 #[allow(dead_code)]
 const TCP_AO_INFO: libc::c_int = 40;
 #[cfg(target_os = "linux")]
+const TCP_AO_GET_KEYS: libc::c_int = 41;
+#[cfg(target_os = "linux")]
 const TCP_AO_MAXKEYLEN: usize = 80;
 #[cfg(target_os = "linux")]
 const TCP_AO_ADD_SET_CURRENT: u32 = 1 << 0;
@@ -215,6 +307,20 @@ const TCP_AO_INFO_SET_RNEXT: u32 = 1 << 1;
 const TCP_AO_INFO_AO_REQUIRED: u32 = 1 << 2;
 #[cfg(target_os = "linux")]
 const TCP_AO_INFO_ACCEPT_ICMPS: u32 = 1 << 4;
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_CURRENT: u16 = 1 << 0;
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_RNEXT: u16 = 1 << 1;
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_ALL: u16 = 1 << 2;
+#[cfg(target_os = "linux")]
+const TCP_AO_KEYF_IFINDEX: u8 = 1 << 0;
+#[cfg(target_os = "linux")]
+const TCP_AO_KEYF_EXCLUDE_OPT: u8 = 1 << 1;
+#[cfg(target_os = "linux")]
+const TCP_AO_KEY_QUERY_ATTEMPTS: usize = 3;
+#[cfg(target_os = "linux")]
+const TCP_AO_MAX_DUMP_KEYS: usize = 4096;
 
 /// Add a TCP-AO key to a socket.
 ///
@@ -303,7 +409,7 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
             fd,
             libc::IPPROTO_TCP,
             TCP_AO_ADD_KEY,
-            (&raw const add).cast(),
+            std::ptr::from_ref(add.as_ref()).cast(),
             std::mem::size_of::<TcpAoAdd>() as libc::socklen_t,
         )
     };
@@ -322,7 +428,7 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
     clippy::cast_possible_truncation,
     reason = "TCP-AO inspection uses raw Linux getsockopt ABI structs"
 )]
-pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnapshot> {
+fn get_tcp_ao_info_only(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnapshot> {
     let mut info: TcpAoInfoOpt = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<TcpAoInfoOpt>() as libc::socklen_t;
 
@@ -357,9 +463,334 @@ pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnap
     Ok(TcpAoInfoSnapshot::from_raw(&info))
 }
 
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    reason = "TCP-AO key inventory uses the raw Linux getsockopt ABI"
+)]
+fn query_tcp_ao_keys(socket: &impl AsRawFd, entries: &mut [TcpAoGetSockOpt]) -> io::Result<usize> {
+    let capacity = entries.len();
+    let Some(first) = entries.first_mut() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty TCP-AO key dump buffer",
+        ));
+    };
+    first.nkeys = u32::try_from(capacity).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO key dump capacity exceeds u32",
+        )
+    })?;
+    first.flags = TCP_AO_GET_ALL;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<TcpAoGetSockOpt>())
+        .expect("TCP-AO key record size fits socklen_t");
+    let ret = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_AO_GET_KEYS,
+            entries.as_mut_ptr().cast(),
+            &raw mut len,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let returned_len = usize::try_from(len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TCP-AO key record length does not fit usize",
+        )
+    })?;
+    validate_tcp_ao_key_record_len(returned_len)?;
+    usize::try_from(entries[0].nkeys).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TCP-AO key count does not fit usize",
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_tcp_ao_key_record_len(returned_len: usize) -> io::Result<()> {
+    let known_len = std::mem::size_of::<TcpAoGetSockOpt>();
+    if returned_len < known_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("short TCP-AO key record: {returned_len} < {known_len}"),
+        ));
+    }
+    // Linux returns its current structure size for version negotiation. A
+    // newer kernel may append fields; all fields consumed here are in the
+    // known prefix and the input stride remains our userspace structure size.
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn get_tcp_ao_keys_with<F>(mut query: F) -> io::Result<Vec<TcpAoGetSockOpt>>
+where
+    F: FnMut(&mut [TcpAoGetSockOpt]) -> io::Result<usize>,
+{
+    let mut capacity = 1;
+    for _ in 0..TCP_AO_KEY_QUERY_ATTEMPTS {
+        // Allocate the complete zero-only buffer before the syscall. Once the
+        // kernel writes secrets, records remain stationary: retries drop this
+        // Vec in place, and ordering is applied only to redacted projections.
+        let mut raw = (0..capacity)
+            .map(|_| TcpAoGetSockOpt::zeroed())
+            .collect::<Vec<_>>();
+        let matched = query(&mut raw)?;
+        if matched > TCP_AO_MAX_DUMP_KEYS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("TCP-AO key count {matched} exceeds safety limit {TCP_AO_MAX_DUMP_KEYS}"),
+            ));
+        }
+        if matched > capacity {
+            capacity = matched;
+            continue;
+        }
+        raw.truncate(matched);
+        for record in &raw {
+            decode_tcp_ao_key_state(record)?;
+        }
+        return Ok(raw);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "TCP-AO key inventory changed during bounded query",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_tcp_ao_key_state(raw: &TcpAoGetSockOpt) -> io::Result<TcpAoKeyState> {
+    let peer = read_sockaddr(&raw.addr)?;
+    let max_prefix = if peer.is_ipv4() { 32 } else { 128 };
+    if raw.prefix > max_prefix {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid TCP-AO key prefix",
+        ));
+    }
+    let key_len = usize::from(raw.keylen);
+    if key_len == 0 || key_len > TCP_AO_MAXKEYLEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid TCP-AO key length",
+        ));
+    }
+    let nul = raw
+        .alg_name
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unterminated TCP-AO algorithm name",
+            )
+        })?;
+    let name = std::str::from_utf8(&raw.alg_name[..nul])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid TCP-AO algorithm name"))?;
+    let canonical = if name == "cmac(aes)" {
+        "cmac(aes128)"
+    } else {
+        name
+    };
+    let algorithm = TcpAoAlgorithm::from_linux_name(canonical)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown TCP-AO algorithm"))?;
+    if raw.keyflags & !(TCP_AO_KEYF_IFINDEX | TCP_AO_KEYF_EXCLUDE_OPT) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown TCP-AO key flags",
+        ));
+    }
+    let vrf_ifindex = if raw.keyflags & TCP_AO_KEYF_IFINDEX != 0 {
+        Some(u32::try_from(raw.ifindex).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid TCP-AO VRF ifindex")
+        })?)
+    } else {
+        if raw.ifindex != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "TCP-AO ifindex lacks TCP_AO_KEYF_IFINDEX",
+            ));
+        }
+        None
+    };
+    Ok(TcpAoKeyState {
+        peer,
+        prefix_len: raw.prefix,
+        send_id: raw.sndid,
+        recv_id: raw.rcvid,
+        algorithm,
+        is_current: raw.flags & TCP_AO_GET_IS_CURRENT != 0,
+        is_rnext: raw.flags & TCP_AO_GET_IS_RNEXT != 0,
+        preferred: false,
+        deprecated: false,
+        vrf_ifindex,
+        pkt_good: raw.pkt_good,
+        pkt_bad: raw.pkt_bad,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn redacted_tcp_ao_keys(keys: &[TcpAoGetSockOpt]) -> io::Result<Vec<TcpAoKeyState>> {
+    let mut states = keys
+        .iter()
+        .map(decode_tcp_ao_key_state)
+        .collect::<io::Result<Vec<_>>>()?;
+    states.sort_by_key(|key| (key.peer, key.prefix_len, key.send_id, key.recv_id));
+    Ok(states)
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_ao_inventory_consistent(info: &TcpAoInfoSnapshot, keys: &[TcpAoGetSockOpt]) -> bool {
+    let current = keys
+        .iter()
+        .filter(|key| key.flags & TCP_AO_GET_IS_CURRENT != 0)
+        .collect::<Vec<_>>();
+    let rnext = keys
+        .iter()
+        .filter(|key| key.flags & TCP_AO_GET_IS_RNEXT != 0)
+        .collect::<Vec<_>>();
+    (!info.has_current_key || (current.len() == 1 && current[0].sndid == info.current_key))
+        && (!info.has_rnext_key || (rnext.len() == 1 && rnext[0].rcvid == info.rnext_key))
+        && (info.has_current_key || current.is_empty())
+        && (info.has_rnext_key || rnext.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn get_tcp_ao_snapshot_with<I, K>(
+    mut info_query: I,
+    mut key_query: K,
+) -> io::Result<(TcpAoInfoSnapshot, Vec<TcpAoGetSockOpt>)>
+where
+    I: FnMut() -> io::Result<TcpAoInfoSnapshot>,
+    K: FnMut() -> io::Result<Vec<TcpAoGetSockOpt>>,
+{
+    for _ in 0..TCP_AO_KEY_QUERY_ATTEMPTS {
+        let info = info_query()?;
+        let keys = key_query()?;
+        if tcp_ao_inventory_consistent(&info, &keys) {
+            return Ok((info, keys));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "TCP-AO INFO and key inventory remained inconsistent",
+    ))
+}
+
+/// Inspect socket-wide and per-key TCP-AO state as one all-or-none freshness
+/// result. The two Linux syscalls are cross-checked and retried on a transition.
+#[cfg(target_os = "linux")]
+pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnapshot> {
+    let (mut info, keys) = get_tcp_ao_snapshot_with(
+        || get_tcp_ao_info_only(socket),
+        || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
+    )?;
+    info.keys = redacted_tcp_ao_keys(&keys)?;
+    drop(keys);
+    Ok(info)
+}
+
+/// Inspect and annotate the singleton MKT installed from configuration.
+/// `exact` is used for accepted sockets, where any missing/unexpected key or
+/// transient secret mismatch must fail closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn get_tcp_ao_info_for_config(
+    socket: &impl AsRawFd,
+    peer: IpAddr,
+    prefix_len: u8,
+    config: &TcpAoConfig,
+    exact: bool,
+) -> io::Result<TcpAoInfoSnapshot> {
+    let (mut info, keys) = get_tcp_ao_snapshot_with(
+        || get_tcp_ao_info_only(socket),
+        || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
+    )?;
+    annotate_tcp_ao_config(&mut info, &keys, peer, prefix_len, config, exact)?;
+    drop(keys);
+    Ok(info)
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_ao_secret_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    // Mirror the bearer-token comparison contract: include the length in the
+    // accumulated difference and walk the longer input so neither the first
+    // mismatching byte nor a length mismatch short-circuits comparison.
+    let max_len = lhs.len().max(rhs.len());
+    let mut diff = lhs.len() ^ rhs.len();
+    for index in 0..max_len {
+        let left = lhs.get(index).copied().unwrap_or(0);
+        let right = rhs.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[cfg(target_os = "linux")]
+fn annotate_tcp_ao_config(
+    info: &mut TcpAoInfoSnapshot,
+    keys: &[TcpAoGetSockOpt],
+    peer: IpAddr,
+    prefix_len: u8,
+    config: &TcpAoConfig,
+    exact: bool,
+) -> io::Result<()> {
+    let states = keys
+        .iter()
+        .map(decode_tcp_ao_key_state)
+        .collect::<io::Result<Vec<_>>>()?;
+    let matching = keys
+        .iter()
+        .zip(&states)
+        .enumerate()
+        .filter(|(_, (raw, state))| {
+            state.peer == peer
+                && state.prefix_len == prefix_len
+                && state.send_id == config.send_id
+                && state.recv_id == config.recv_id
+                && state.algorithm == config.algorithm
+                && state.vrf_ifindex.is_none()
+                && raw.keyflags == 0
+                && usize::from(raw.keylen) == config.key.len()
+                && tcp_ao_secret_eq(&raw.key[..usize::from(raw.keylen)], config.key.as_bytes())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 || (exact && keys.len() != 1) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO kernel MKT inventory does not exactly match configured singleton",
+        ));
+    }
+    let mut states = states;
+    states[matching[0]].preferred = config.preferred;
+    states[matching[0]].deprecated = config.deprecated;
+    states.sort_by_key(|key| (key.peer, key.prefix_len, key.send_id, key.recv_id));
+    info.keys = states;
+    Ok(())
+}
+
 /// Inspect runtime TCP-AO socket state.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn get_tcp_ao_info<T>(_socket: &T) -> io::Result<TcpAoInfoSnapshot> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn get_tcp_ao_info_for_config<T>(
+    _socket: &T,
+    _peer: std::net::IpAddr,
+    _prefix_len: u8,
+    _config: &crate::config::TcpAoConfig,
+    _exact: bool,
+) -> io::Result<TcpAoInfoSnapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO inspection is only supported on Linux",
@@ -381,6 +812,7 @@ impl TcpAoInfoSnapshot {
             pkt_key_not_found: info.pkt_key_not_found,
             pkt_ao_required: info.pkt_ao_required,
             pkt_dropped_icmp: info.pkt_dropped_icmp,
+            keys: Vec::new(),
         }
     }
 }
@@ -429,7 +861,7 @@ pub fn probe_tcp_ao_support() -> TcpAoSupport {
 }
 
 #[cfg(target_os = "linux")]
-fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
+fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<Box<TcpAoAdd>> {
     let max_prefix = match key.peer {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
@@ -453,7 +885,9 @@ fn build_tcp_ao_add(key: &TcpAoKey<'_>) -> io::Result<TcpAoAdd> {
         ));
     }
 
-    let mut add: TcpAoAdd = unsafe { std::mem::zeroed() };
+    // Allocate before copying the secret so the initialized raw record never
+    // moves between stack/heap locations before its zeroizing Drop runs.
+    let mut add = Box::new(unsafe { std::mem::zeroed::<TcpAoAdd>() });
     write_sockaddr(&mut add.addr, key.peer, key.scope_id);
     write_alg_name(&mut add.alg_name, key.algorithm.linux_name())?;
     if key.set_current {
@@ -505,6 +939,27 @@ fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: 
             };
             sin6.sin6_scope_id = scope_id;
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn read_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<IpAddr> {
+    match libc::c_int::from(storage.ss_family) {
+        libc::AF_INET => {
+            let sin = unsafe { &*(std::ptr::from_ref(storage).cast::<libc::sockaddr_in>()) };
+            Ok(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
+                sin.sin_addr.s_addr,
+            ))))
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &*(std::ptr::from_ref(storage).cast::<libc::sockaddr_in6>()) };
+            Ok(IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid TCP-AO key address family",
+        )),
     }
 }
 
@@ -639,12 +1094,24 @@ mod tests {
         assert_eq!(mem::offset_of!(TcpAoInfoOpt, current_key), 6);
         assert_eq!(mem::offset_of!(TcpAoInfoOpt, rnext), 7);
         assert_eq!(mem::offset_of!(TcpAoInfoOpt, pkt_good), 8);
+
+        assert_eq!(mem::size_of::<TcpAoGetSockOpt>(), 304);
+        assert_eq!(mem::align_of::<TcpAoGetSockOpt>(), 8);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, addr), 0);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, alg_name), 128);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, key), 192);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, nkeys), 272);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, flags), 276);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, sndid), 278);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, ifindex), 284);
+        assert_eq!(mem::offset_of!(TcpAoGetSockOpt, pkt_good), 288);
     }
 
     #[test]
     fn tcp_ao_constants_match_linux_header() {
         assert_eq!(TCP_AO_ADD_KEY, 38);
         assert_eq!(TCP_AO_INFO, 40);
+        assert_eq!(TCP_AO_GET_KEYS, 41);
         assert_eq!(TCP_AO_MAXKEYLEN, 80);
         assert_eq!(TCP_AO_ADD_SET_CURRENT, 1);
         assert_eq!(TCP_AO_ADD_SET_RNEXT, 2);
@@ -652,6 +1119,240 @@ mod tests {
         assert_eq!(TCP_AO_INFO_SET_RNEXT, 2);
         assert_eq!(TCP_AO_INFO_AO_REQUIRED, 4);
         assert_eq!(TCP_AO_INFO_ACCEPT_ICMPS, 16);
+    }
+
+    #[test]
+    fn tcp_ao_get_keys_accepts_extended_kernel_record_size() {
+        let known = mem::size_of::<TcpAoGetSockOpt>();
+        assert!(validate_tcp_ao_key_record_len(known).is_ok());
+        assert!(validate_tcp_ao_key_record_len(known + 16).is_ok());
+        assert_eq!(
+            validate_tcp_ao_key_record_len(known - 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    fn raw_dump_key(peer: IpAddr, algorithm: &str, secret: &[u8]) -> TcpAoGetSockOpt {
+        let mut raw = TcpAoGetSockOpt::zeroed();
+        write_sockaddr(&mut raw.addr, peer, 0);
+        write_alg_name(&mut raw.alg_name, algorithm).unwrap();
+        raw.key[..secret.len()].copy_from_slice(secret);
+        raw.keylen = u8::try_from(secret.len()).unwrap();
+        raw.prefix = if peer.is_ipv4() { 32 } else { 128 };
+        raw.sndid = 7;
+        raw.rcvid = 9;
+        raw.flags = TCP_AO_GET_IS_CURRENT | TCP_AO_GET_IS_RNEXT;
+        raw.pkt_good = 11;
+        raw
+    }
+
+    #[test]
+    fn tcp_ao_get_keys_retries_count_growth_and_orders_projection() {
+        let mut calls = 0;
+        let keys = get_tcp_ao_keys_with(|entries| {
+            calls += 1;
+            if calls == 1 {
+                return Ok(2);
+            }
+            entries[0] = raw_dump_key("2001:db8::2".parse().unwrap(), "hmac(sha256)", b"two");
+            entries[1] = raw_dump_key("192.0.2.1".parse().unwrap(), "hmac(sha1)", b"one");
+            Ok(2)
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        let states = redacted_tcp_ao_keys(&keys).unwrap();
+        assert_eq!(states[0].peer, "192.0.2.1".parse::<IpAddr>().unwrap());
+        assert_eq!(states[1].peer, "2001:db8::2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn tcp_ao_get_keys_bounds_growth_and_retries() {
+        let err = get_tcp_ao_keys_with(|_| Ok(TCP_AO_MAX_DUMP_KEYS + 1))
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let err = get_tcp_ao_keys_with(|entries| Ok(entries.len() + 1))
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn tcp_ao_get_keys_canonicalizes_cmac_and_rejects_bad_records() {
+        let raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "cmac(aes)", b"secret");
+        assert_eq!(
+            decode_tcp_ao_key_state(&raw).unwrap().algorithm,
+            TcpAoAlgorithm::CmacAes128
+        );
+
+        let mut bad = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha1)", b"secret");
+        bad.keylen = 0;
+        assert_eq!(
+            decode_tcp_ao_key_state(&bad).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut vrf = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha1)", b"secret");
+        vrf.keyflags = TCP_AO_KEYF_IFINDEX;
+        vrf.ifindex = 9;
+        assert_eq!(decode_tcp_ao_key_state(&vrf).unwrap().vrf_ifindex, Some(9));
+        vrf.keyflags = 0;
+        assert_eq!(
+            decode_tcp_ao_key_state(&vrf).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        vrf.keyflags = 1 << 7;
+        assert_eq!(
+            decode_tcp_ao_key_state(&vrf).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        bad.keylen = 6;
+        bad.alg_name.fill(b'x');
+        assert_eq!(
+            decode_tcp_ao_key_state(&bad).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        bad.alg_name.fill(0);
+        write_alg_name(&mut bad.alg_name, "unknown").unwrap();
+        assert_eq!(
+            decode_tcp_ao_key_state(&bad).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn tcp_ao_secret_buffers_scrub_without_formatting() {
+        let mut add = build_tcp_ao_add(&base_key()).unwrap();
+        add.scrub();
+        assert!(add.alg_name.iter().all(|byte| *byte == 0));
+        assert!(add.key.iter().all(|byte| *byte == 0));
+        assert_eq!(add.keylen, 0);
+
+        let mut raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha256)", b"secret");
+        raw.scrub();
+        assert!(raw.alg_name.iter().all(|byte| *byte == 0));
+        assert!(raw.key.iter().all(|byte| *byte == 0));
+        assert_eq!(raw.keylen, 0);
+    }
+
+    #[test]
+    fn tcp_ao_secret_comparison_covers_content_and_length() {
+        assert!(tcp_ao_secret_eq(b"shared secret", b"shared secret"));
+        assert!(!tcp_ao_secret_eq(b"shared secret", b"shared secreu"));
+        assert!(!tcp_ao_secret_eq(b"shared secret", b"shared secret!"));
+        assert!(!tcp_ao_secret_eq(b"shared secret!", b"shared secret"));
+    }
+
+    #[test]
+    fn tcp_ao_config_annotation_requires_transient_secret_and_exact_singleton() {
+        let peer = IpAddr::from([192, 0, 2, 1]);
+        let config = TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        };
+        let info_raw = TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT,
+            reserved2: 0,
+            current_key: 7,
+            rnext: 9,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        };
+        let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
+        let raw = raw_dump_key(peer, "hmac(sha256)", b"secret");
+        let keys = vec![raw];
+        annotate_tcp_ao_config(&mut info, &keys, peer, 32, &config, true).unwrap();
+        assert!(info.keys[0].preferred);
+
+        let wrong_secret = vec![raw_dump_key(peer, "hmac(sha256)", b"wrong")];
+        assert_eq!(
+            annotate_tcp_ao_config(&mut info, &wrong_secret, peer, 32, &config, true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let extra = vec![
+            raw_dump_key(peer, "hmac(sha256)", b"secret"),
+            raw_dump_key(IpAddr::from([192, 0, 2, 2]), "hmac(sha256)", b"other"),
+        ];
+        assert_eq!(
+            annotate_tcp_ao_config(&mut info, &extra, peer, 32, &config, true)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        for mut wrong in [
+            raw_dump_key(IpAddr::from([192, 0, 2, 2]), "hmac(sha256)", b"secret"),
+            raw_dump_key(peer, "hmac(sha1)", b"secret"),
+            raw_dump_key(peer, "hmac(sha256)", b"secret"),
+        ] {
+            if wrong.alg_name.starts_with(b"hmac(sha256)")
+                && read_sockaddr(&wrong.addr).unwrap() == peer
+            {
+                wrong.sndid = 8;
+            }
+            let wrong = vec![wrong];
+            assert_eq!(
+                annotate_tcp_ao_config(&mut info, &wrong, peer, 32, &config, true)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_ao_composite_snapshot_retries_inconsistent_key_selection() {
+        let info = TcpAoInfoSnapshot::from_raw(&TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT,
+            reserved2: 0,
+            current_key: 7,
+            rnext: 9,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+        let mut calls = 0;
+        let (_, keys) = get_tcp_ao_snapshot_with(
+            || Ok(info.clone()),
+            || {
+                calls += 1;
+                let mut raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha256)", b"secret");
+                if calls == 1 {
+                    raw.sndid = 8;
+                }
+                Ok(vec![raw])
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(decode_tcp_ao_key_state(&keys[0]).unwrap().send_id, 7);
+
+        let err = get_tcp_ao_snapshot_with(
+            || Ok(info.clone()),
+            || {
+                let mut raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha256)", b"secret");
+                raw.sndid = 8;
+                Ok(vec![raw])
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]

@@ -93,8 +93,17 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
 - Runtime deletion of a configured TCP-AO neighbor is rejected until listener
   MKT deletion / key rotation support exists.
 - Protected active-open and accepted passive sockets are inspected with
-  `getsockopt(TCP_AO_INFO)` after connection setup; logs include current and
-  RNext key IDs plus Linux TCP-AO packet counters when inspection succeeds.
+  `getsockopt(TCP_AO_INFO)` plus a bounded `TCP_AO_GET_KEYS` dump after
+  connection setup. Raw GET_KEYS records are non-formatting, non-cloning
+  temporaries that are zeroized on drop; only peer/prefix, IDs, algorithm,
+  selection metadata, optional VRF L3-master ifindex, and counters leave the
+  transport boundary. The Linux AO ifindex selector is a VRF identity rather
+  than an IPv6 link-local scope; current rustbgpd AO MKTs are VRF-unbound and
+  may match any L3 master because `TCP_AO_KEYF_IFINDEX` is clear. Active-open
+  inspection is best effort. Accepted static and dynamic-prefix sockets fail
+  closed unless the full singleton inventory, including transient key-byte
+  equality, matches configuration. Dropped-ICMP counters degrade health but do
+  not by themselves reject an accepted authenticated socket.
 - Protected M43 interop against BIRD 3.2.1 runs in the self-hosted
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
@@ -106,6 +115,7 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
 
 Still deferred: runtime key rotation / deletion on an already-listening socket,
 multi-key rollover, and peer-group inheritance. API/CLI neighbor state exposes
-redacted live inspection results (KeyIDs, validity flags, and counters) for
+redacted live inspection results (KeyIDs, validity flags, per-key inventory,
+and counters) for
 static and direct dynamic-prefix protected sessions; runtime protected-range
 CRUD remains restart-gated.

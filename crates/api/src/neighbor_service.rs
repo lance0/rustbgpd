@@ -483,13 +483,26 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
 
     let tcp_ao_health = if info.authentication != "tcp_ao" {
         proto::TcpAoHealth::NotApplicable
-    } else if let Some(ao) = info.tcp_ao_info {
+    } else if let Some(ao) = info.tcp_ao_info.as_ref() {
         if !ao.has_current_key
             || !ao.has_rnext_key
             || ao.pkt_bad > 0
             || ao.pkt_key_not_found > 0
             || ao.pkt_ao_required > 0
             || ao.pkt_dropped_icmp > 0
+            || ao.keys.is_empty()
+            || ao
+                .keys
+                .iter()
+                .any(|key| key.pkt_bad > 0 || key.deprecated && (key.is_current || key.is_rnext))
+            || !ao
+                .keys
+                .iter()
+                .any(|key| key.is_current && key.send_id == ao.current_key)
+            || !ao
+                .keys
+                .iter()
+                .any(|key| key.is_rnext && key.recv_id == ao.rnext_key)
         {
             proto::TcpAoHealth::Degraded
         } else {
@@ -532,7 +545,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             "plaintext" => proto::AuthenticationMode::Plaintext.into(),
             _ => proto::AuthenticationMode::Unspecified.into(),
         },
-        tcp_ao: info.tcp_ao_info.map(|ao| proto::TcpAoState {
+        tcp_ao: info.tcp_ao_info.as_ref().map(|ao| proto::TcpAoState {
             current_key_id: ao.has_current_key.then_some(u32::from(ao.current_key)),
             rnext_key_id: ao.has_rnext_key.then_some(u32::from(ao.rnext_key)),
             ao_required: ao.ao_required,
@@ -542,6 +555,24 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             packets_key_not_found: ao.pkt_key_not_found,
             packets_ao_required: ao.pkt_ao_required,
             packets_dropped_icmp: ao.pkt_dropped_icmp,
+            keys: ao
+                .keys
+                .iter()
+                .map(|key| proto::TcpAoKeyState {
+                    peer_address: key.peer.to_string(),
+                    prefix_length: u32::from(key.prefix_len),
+                    send_id: u32::from(key.send_id),
+                    recv_id: u32::from(key.recv_id),
+                    algorithm: key.algorithm.linux_name().to_string(),
+                    is_current: key.is_current,
+                    is_rnext: key.is_rnext,
+                    preferred: key.preferred,
+                    deprecated: key.deprecated,
+                    packets_good: key.pkt_good,
+                    packets_bad: key.pkt_bad,
+                    vrf_ifindex: key.vrf_ifindex,
+                })
+                .collect(),
         }),
         tcp_ao_health: tcp_ao_health.into(),
         effective_distribution_mode: proto::EffectiveDistributionMode::Unknown.into(),
@@ -1241,6 +1272,8 @@ mod tests {
         assert!(source.contains("AuthenticationMode authentication = 27;"));
         assert!(source.contains("TcpAoState tcp_ao = 28;"));
         assert!(source.contains("TcpAoHealth tcp_ao_health = 29;"));
+        assert!(source.contains("repeated TcpAoKeyState keys = 10;"));
+        assert!(source.contains("message TcpAoKeyState {"));
         assert!(source.contains("EffectiveDistributionMode effective_distribution_mode = 30;"));
         assert!(source.contains("optional uint32 effective_send_limit = 6;"));
     }
@@ -2062,6 +2095,20 @@ mod tests {
             pkt_key_not_found: 2,
             pkt_ao_required: 3,
             pkt_dropped_icmp: 4,
+            keys: vec![rustbgpd_transport::TcpAoKeyState {
+                peer: "10.0.0.1".parse().unwrap(),
+                prefix_len: 32,
+                send_id: 7,
+                recv_id: 9,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: false,
+                preferred: true,
+                deprecated: false,
+                vrf_ifindex: None,
+                pkt_good: 21,
+                pkt_bad: 1,
+            }],
         });
         let state = peer_info_to_proto(&info);
         assert_eq!(
@@ -2076,6 +2123,11 @@ mod tests {
         assert_eq!(ao.packets_key_not_found, 2);
         assert_eq!(ao.packets_ao_required, 3);
         assert_eq!(ao.packets_dropped_icmp, 4);
+        assert_eq!(ao.keys.len(), 1);
+        assert_eq!(ao.keys[0].peer_address, "10.0.0.1");
+        assert_eq!(ao.keys[0].algorithm, "hmac(sha256)");
+        assert!(ao.keys[0].preferred);
+        assert_eq!(ao.keys[0].vrf_ifindex, None);
         assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Degraded as i32);
     }
 
@@ -2111,6 +2163,7 @@ mod tests {
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
+            keys: Vec::new(),
         });
         assert_eq!(
             peer_info_to_proto(&info).tcp_ao_health,
@@ -2134,6 +2187,7 @@ mod tests {
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
+            keys: Vec::new(),
         });
         assert_eq!(
             peer_info_to_proto(&info).tcp_ao_health,
@@ -2182,11 +2236,70 @@ mod tests {
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
+            keys: vec![rustbgpd_transport::TcpAoKeyState {
+                peer: "10.0.0.1".parse().unwrap(),
+                prefix_len: 32,
+                send_id: 7,
+                recv_id: 9,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: true,
+                preferred: true,
+                deprecated: false,
+                vrf_ifindex: None,
+                pkt_good: 20,
+                pkt_bad: 0,
+            }],
         });
 
         let state = peer_info_to_proto(&info);
 
         assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Healthy as i32);
+    }
+
+    #[test]
+    fn active_deprecated_tcp_ao_key_is_degraded() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.authentication = "tcp_ao".to_string();
+        let mut snapshot = rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: true,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 9,
+            pkt_good: 20,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+            keys: vec![rustbgpd_transport::TcpAoKeyState {
+                peer: "10.0.0.1".parse().unwrap(),
+                prefix_len: 32,
+                send_id: 7,
+                recv_id: 9,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: true,
+                preferred: false,
+                deprecated: true,
+                vrf_ifindex: None,
+                pkt_good: 20,
+                pkt_bad: 0,
+            }],
+        };
+        info.tcp_ao_info = Some(snapshot.clone());
+        assert_eq!(
+            peer_info_to_proto(&info).tcp_ao_health,
+            proto::TcpAoHealth::Degraded as i32
+        );
+        snapshot.keys[0].deprecated = false;
+        snapshot.pkt_dropped_icmp = 1;
+        info.tcp_ao_info = Some(snapshot);
+        assert_eq!(
+            peer_info_to_proto(&info).tcp_ao_health,
+            proto::TcpAoHealth::Degraded as i32
+        );
     }
 
     #[test]

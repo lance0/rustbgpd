@@ -1,6 +1,8 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonTcpAoState};
+use crate::output::{
+    self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonTcpAoKeyState, JsonTcpAoState,
+};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
@@ -110,6 +112,24 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
                 packets_key_not_found: ao.packets_key_not_found,
                 packets_ao_required: ao.packets_ao_required,
                 packets_dropped_icmp: ao.packets_dropped_icmp,
+                keys: ao
+                    .keys
+                    .iter()
+                    .map(|key| JsonTcpAoKeyState {
+                        peer_address: key.peer_address.clone(),
+                        prefix_length: key.prefix_length,
+                        send_id: key.send_id,
+                        recv_id: key.recv_id,
+                        algorithm: key.algorithm.clone(),
+                        is_current: key.is_current,
+                        is_rnext: key.is_rnext,
+                        preferred: key.preferred,
+                        deprecated: key.deprecated,
+                        vrf_ifindex: key.vrf_ifindex,
+                        packets_good: key.packets_good,
+                        packets_bad: key.packets_bad,
+                    })
+                    .collect(),
             }),
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
@@ -278,6 +298,24 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
                 "TCP-AO Packets:        good={} bad={} key-not-found={} unsigned-required={}",
                 ao.packets_good, ao.packets_bad, ao.packets_key_not_found, ao.packets_ao_required
             );
+            for key in &ao.keys {
+                println!(
+                    "  MKT {}/{}: send={} recv={} algorithm={} current={} rnext={} preferred={} deprecated={} vrf-ifindex={} good={} bad={}",
+                    key.peer_address,
+                    key.prefix_length,
+                    key.send_id,
+                    key.recv_id,
+                    key.algorithm,
+                    key.is_current,
+                    key.is_rnext,
+                    key.preferred,
+                    key.deprecated,
+                    key.vrf_ifindex
+                        .map_or_else(|| "unbound".to_string(), |value| value.to_string()),
+                    key.packets_good,
+                    key.packets_bad
+                );
+            }
         }
         println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
         println!("Policy Stats:");

@@ -77,7 +77,7 @@ pub(super) fn build_peer_info(
             "plaintext"
         }
         .to_string(),
-        tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().copied()),
+        tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().cloned()),
         is_dynamic: managed.is_dynamic,
         stale,
     }
