@@ -7061,4 +7061,21 @@ families = ["ipv4_unicast"]
             ConfigTransactionApplyError::Unavailable("busy".to_string())
         );
     }
+
+    #[test]
+    fn apply_response_preserves_the_accepted_plan_impact_exactly() {
+        let impact = proto::UpdateGroupImpactPlan {
+            schema_version: 1,
+            capacity_class: "within_mixed".to_string(),
+            capacity_basis: "fixture".to_string(),
+            ..proto::UpdateGroupImpactPlan::default()
+        };
+        let response = committable_response(
+            "after".to_string(),
+            vec!["[policy]".to_string()],
+            "committed".to_string(),
+            Some(impact.clone()),
+        );
+        assert_eq!(response.update_group_impact, Some(impact));
+    }
 }

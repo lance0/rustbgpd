@@ -45,6 +45,7 @@ fn candidate_input(
     let policy = candidate.export_policy.as_ref();
     UpdateGroupClassifierInput {
         policy_fingerprint: policy.map(|chain| format!("{chain:?}")),
+        policy_provenance: policy.map(|chain| chain.groupability_provenance().to_string()),
         policy_requires_peer_context: policy.is_some_and(PolicyChain::requires_peer_context),
         target_is_ebgp: candidate.transport_config.peer.remote_asn != local_asn,
         target_is_rr_client: candidate.transport_config.route_reflector_client,
@@ -80,6 +81,16 @@ fn canonicalize_group(
     }
 }
 
+fn plan_local_ids(raw_groups: impl IntoIterator<Item = String>) -> BTreeMap<String, String> {
+    raw_groups
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| (raw, format!("plan-group-{:03}", index + 1)))
+        .collect()
+}
+
 fn transition(current: &PlannedGroupability, candidate: &PlannedGroupability) -> &'static str {
     use PlannedGroupability::{Absent, Group, Indeterminate, Private};
     match (current, candidate) {
@@ -90,6 +101,34 @@ fn transition(current: &PlannedGroupability, candidate: &PlannedGroupability) ->
         (Private { .. }, Group { .. }) => "shared_migration",
         (_, Private { .. }) => "private_resync",
         (_, Indeterminate { .. }) | (Indeterminate { .. }, _) => "indeterminate",
+    }
+}
+
+fn capacity_class(
+    projected_peers: usize,
+    shared_groups: usize,
+    private_views: usize,
+    indeterminate: u32,
+) -> (&'static str, &'static str) {
+    if indeterminate > 0 {
+        ("unknown", "future session negotiation is not projected")
+    } else if private_views == 0 && shared_groups == 1 {
+        ("fully_shared", "one shared group and no private views")
+    } else if private_views == 0 && projected_peers <= 1_000 {
+        (
+            "within_uniform",
+            "inside the measured 1000-peer uniform envelope",
+        )
+    } else if private_views <= 100 && projected_peers <= 1_000 {
+        (
+            "within_mixed",
+            "inside the measured 900-shared/100-private envelope",
+        )
+    } else {
+        (
+            "outside_measured",
+            "outside published update-group receipt envelopes",
+        )
     }
 }
 
@@ -151,6 +190,15 @@ impl PeerManager {
                     reason: "indeterminate_session_negotiation".to_string(),
                 },
             };
+            let provenance = match (&candidate_state, candidate_cfg) {
+                (PlannedGroupability::Indeterminate { .. }, _) => "session_negotiation".to_string(),
+                (_, Some(candidate)) => candidate
+                    .export_policy
+                    .as_ref()
+                    .map_or("no_export_policy", PolicyChain::groupability_provenance)
+                    .to_string(),
+                _ => "session_negotiation".to_string(),
+            };
             for state in [&current_state, &candidate_state] {
                 if let PlannedGroupability::Group { id } = state {
                     raw_groups.insert(id.clone());
@@ -176,22 +224,19 @@ impl PeerManager {
                     safi,
                     current_state.clone(),
                     candidate_state.clone(),
+                    provenance.clone(),
                 ));
             }
             if live.is_none() || rows.last().is_none_or(|row| row.0 != peer) {
-                rows.push((peer, 0, 0, current_state, candidate_state));
+                rows.push((peer, 0, 0, current_state, candidate_state, provenance));
             }
         }
 
-        let ids = raw_groups
-            .into_iter()
-            .enumerate()
-            .map(|(index, raw)| (raw, format!("plan-group-{:03}", index + 1)))
-            .collect::<BTreeMap<_, _>>();
+        let ids = plan_local_ids(raw_groups);
         let mut entries = Vec::with_capacity(rows.len());
         let mut rollup = UpdateGroupImpactRollup::default();
         let mut affected = BTreeSet::new();
-        for (peer, afi, safi, current, candidate) in rows {
+        for (peer, afi, safi, current, candidate, provenance) in rows {
             let current = canonicalize_group(current, &ids);
             let candidate = canonicalize_group(candidate, &ids);
             let class = transition(&current, &candidate).to_string();
@@ -224,7 +269,7 @@ impl PeerManager {
                 candidate,
                 transition: class,
                 reason,
-                provenance: "runtime_groupability_classifier".to_string(),
+                provenance,
                 local_resync,
                 remote_route_refresh: false,
             });
@@ -250,26 +295,12 @@ impl PeerManager {
             .map(|row| row.peer)
             .collect::<BTreeSet<_>>()
             .len();
-        let (capacity_class, capacity_basis) = if rollup.indeterminate > 0 {
-            ("unknown", "future session negotiation is not projected")
-        } else if candidate_private.is_empty() && candidate_groups.len() == 1 {
-            ("fully_shared", "one shared group and no private views")
-        } else if candidate_private.is_empty() && projected_peers <= 1_000 {
-            (
-                "within_uniform",
-                "inside the measured 1000-peer uniform envelope",
-            )
-        } else if candidate_private.len() <= 100 && projected_peers <= 1_000 {
-            (
-                "within_mixed",
-                "inside the measured 900-shared/100-private envelope",
-            )
-        } else {
-            (
-                "outside_measured",
-                "outside published update-group receipt envelopes",
-            )
-        };
+        let (capacity_class, capacity_basis) = capacity_class(
+            projected_peers,
+            candidate_groups.len(),
+            candidate_private.len(),
+            rollup.indeterminate,
+        );
         Ok(UpdateGroupImpactPlan {
             schema_version: 1,
             entries,
@@ -317,5 +348,97 @@ mod tests {
                 id: "plan-group-001".to_string()
             }
         );
+    }
+
+    #[test]
+    fn plan_local_ids_are_insertion_order_independent() {
+        let forward = plan_local_ids([
+            "raw:c".to_string(),
+            "raw:a".to_string(),
+            "raw:b".to_string(),
+        ]);
+        let reverse = plan_local_ids([
+            "raw:b".to_string(),
+            "raw:a".to_string(),
+            "raw:c".to_string(),
+        ]);
+        assert_eq!(forward, reverse);
+        assert_eq!(forward["raw:a"], "plan-group-001");
+    }
+
+    #[test]
+    fn uniform_and_mixed_fleet_capacity_goldens() {
+        assert_eq!(capacity_class(1_000, 1, 0, 0).0, "fully_shared");
+        assert_eq!(capacity_class(1_000, 2, 0, 0).0, "within_uniform");
+        assert_eq!(capacity_class(1_000, 1, 100, 0).0, "within_mixed");
+        assert_eq!(capacity_class(1_000, 1, 101, 0).0, "outside_measured");
+        assert_eq!(capacity_class(10, 1, 0, 1).0, "unknown");
+    }
+
+    #[test]
+    fn runtime_after_apply_parity_transition_matrix() {
+        fn fixture(policy: &str) -> UpdateGroupClassifierInput {
+            UpdateGroupClassifierInput {
+                policy_fingerprint: Some(policy.to_string()),
+                policy_provenance: Some("toml_compiled_ir".to_string()),
+                policy_requires_peer_context: false,
+                target_is_ebgp: false,
+                target_is_rr_client: true,
+                sendable_families: vec![(1, 1)],
+                llgr_families: vec![],
+                add_path_send: false,
+                per_client_best: false,
+                orr_vantage: false,
+                orf_installed: false,
+            }
+        }
+        let shared_a = fixture("a");
+        let shared_b = fixture("b");
+        let mut private_peer = fixture("peer");
+        private_peer.policy_requires_peer_context = true;
+        let mut private_orf = fixture("orf");
+        private_orf.orf_installed = true;
+        let mut rtc = fixture("rtc");
+        rtc.sendable_families = vec![(1, 128), (1, 132)];
+        let cases = [
+            (
+                "shared_to_shared",
+                shared_a.clone(),
+                shared_b.clone(),
+                "regroup",
+            ),
+            (
+                "shared_to_private",
+                shared_a.clone(),
+                private_peer.clone(),
+                "private_resync",
+            ),
+            (
+                "private_to_shared",
+                private_peer.clone(),
+                shared_a.clone(),
+                "shared_migration",
+            ),
+            (
+                "private_to_private",
+                private_peer.clone(),
+                private_orf,
+                "private_resync",
+            ),
+            (
+                "content_identical_reinstall",
+                shared_a.clone(),
+                shared_a.clone(),
+                "no_op",
+            ),
+            ("rtc_membership_stable", rtc.clone(), rtc, "no_op"),
+        ];
+        for (name, current_input, candidate_input, expected) in cases {
+            let current = raw_state(&classify_update_group(current_input));
+            let planned = raw_state(&classify_update_group(candidate_input.clone()));
+            let observed_after_apply = raw_state(&classify_update_group(candidate_input));
+            assert_eq!(transition(&current, &planned), expected, "plan {name}");
+            assert_eq!(observed_after_apply, planned, "runtime parity {name}");
+        }
     }
 }

@@ -1209,6 +1209,16 @@ impl fmt::Debug for PolicyChain {
 }
 
 impl PolicyChain {
+    /// Stable origin label for update-group planning diagnostics.
+    #[must_use]
+    pub fn groupability_provenance(&self) -> &'static str {
+        if self.policies.iter().any(|policy| policy.rpol.is_some()) {
+            "rpol_compiled_ir"
+        } else {
+            "toml_compiled_ir"
+        }
+    }
+
     /// Create a chain from an ordered list of (unnamed) policies. Each
     /// becomes a `NamedPolicy` with `name = None`. Callers that have
     /// names in hand (the config resolver) build `NamedPolicy` values

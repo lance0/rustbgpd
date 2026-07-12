@@ -2094,6 +2094,7 @@ impl RibManager {
         llgr_families.sort_unstable();
         UpdateGroupClassifierInput {
             policy_fingerprint: chain.map(|value| format!("{value:?}")),
+            policy_provenance: chain.map(|value| value.groupability_provenance().to_string()),
             policy_requires_peer_context: chain.is_some_and(PolicyChain::requires_peer_context),
             target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
             target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),

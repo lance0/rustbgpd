@@ -424,6 +424,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plan_response_uses_the_canonical_impact_projection() {
+        let impact = rustbgpd_rib::UpdateGroupImpactPlan {
+            schema_version: 1,
+            capacity_class: "fully_shared".to_string(),
+            capacity_basis: "fixture".to_string(),
+            ..rustbgpd_rib::UpdateGroupImpactPlan::default()
+        };
+        let expected = update_group_impact_to_proto(impact.clone());
+        let response = transaction_plan_to_proto(RuntimeConfigTransactionPlan {
+            status: RuntimeConfigTransactionStatus::Committable,
+            runtime_snapshot_token: "before".to_string(),
+            post_commit_runtime_snapshot_token: "after".to_string(),
+            diff: sample_runtime_diff(),
+            supported_sections: vec!["[policy]".to_string()],
+            unsupported_sections: vec![],
+            restart_required_sections: vec![],
+            human_text: String::new(),
+            update_group_impact: impact,
+        });
+        assert_eq!(response.update_group_impact, Some(expected));
+    }
+
     #[tokio::test]
     async fn plan_config_transaction_forwards_candidate_and_token() {
         let (tx, mut rx) = mpsc::channel(1);

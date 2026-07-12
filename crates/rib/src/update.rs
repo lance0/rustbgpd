@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UpdateGroupClassifierInput {
     pub policy_fingerprint: Option<String>,
+    pub policy_provenance: Option<String>,
     pub policy_requires_peer_context: bool,
     pub target_is_ebgp: bool,
     pub target_is_rr_client: bool,
@@ -154,6 +155,7 @@ mod update_group_classifier_tests {
     fn input() -> UpdateGroupClassifierInput {
         UpdateGroupClassifierInput {
             policy_fingerprint: Some("permit-all".to_string()),
+            policy_provenance: Some("toml_compiled_ir".to_string()),
             policy_requires_peer_context: false,
             target_is_ebgp: false,
             target_is_rr_client: true,
@@ -184,6 +186,67 @@ mod update_group_classifier_tests {
             classify_update_group(value),
             UpdateGroupClassification::PolicyPeerContext
         );
+    }
+
+    #[test]
+    fn classifier_golden_groupability_scenarios() {
+        let cases: Vec<(&str, UpdateGroupClassifierInput, Option<&str>)> = vec![
+            ("uniform", input(), None),
+            (
+                "rtc_membership",
+                UpdateGroupClassifierInput {
+                    sendable_families: vec![(1, 132), (1, 128)],
+                    ..input()
+                },
+                None,
+            ),
+            (
+                "per_client_best",
+                UpdateGroupClassifierInput {
+                    per_client_best: true,
+                    ..input()
+                },
+                Some("per_client_best"),
+            ),
+            (
+                "orf",
+                UpdateGroupClassifierInput {
+                    orf_installed: true,
+                    ..input()
+                },
+                Some("orf_installed"),
+            ),
+            (
+                "orr",
+                UpdateGroupClassifierInput {
+                    orr_vantage: true,
+                    ..input()
+                },
+                Some("orr_vantage"),
+            ),
+            (
+                "toml_peer_context",
+                UpdateGroupClassifierInput {
+                    policy_requires_peer_context: true,
+                    policy_provenance: Some("toml_compiled_ir".to_string()),
+                    ..input()
+                },
+                Some("policy_peer_context"),
+            ),
+            (
+                "rpol_peer_context",
+                UpdateGroupClassifierInput {
+                    policy_requires_peer_context: true,
+                    policy_provenance: Some("rpol_compiled_ir".to_string()),
+                    ..input()
+                },
+                Some("policy_peer_context"),
+            ),
+        ];
+        for (name, value, expected_reason) in cases {
+            let result = classify_update_group(value);
+            assert_eq!(result.reason(), expected_reason, "scenario {name}");
+        }
     }
 }
 
