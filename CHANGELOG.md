@@ -11,10 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Neighbor state reports live effective transport and distribution truth.**
+  TCP-AO health is refreshed read-only from the connected socket for every
+  state query, clears rather than serving stale data when inspection fails,
+  and retains Linux's cumulative-per-socket degraded semantics. The API and
+  CLI report the RIB's live effective distribution mode independently of
+  update-group diagnostic labels. Paths-Limit rows use stable numeric AFI/SAFI
+  order and an explicit active bit, allowing active unlimited, inactive, and
+  finite effective send caps to render without a zero-value ambiguity.
+  (LAN-225, LAN-364, LAN-366)
+
 - **Neighbor diagnostics expose transport authentication health.** Neighbor
   API, JSON, and human output identify plaintext, TCP-MD5, and TCP-AO sessions;
-  connected TCP-AO peers include connection-time current/RNext KeyIDs and
-  verification counters when socket inspection succeeds. Connect setup
+  connected TCP-AO peers include current/RNext KeyIDs and verification
+  counters when live socket inspection succeeds. Connect setup
   failures remain visible in `last_error`;
   `rbgp doctor` flags configured AO peers on unsupported kernels, and the
   configuration guide documents directional KeyID cross-mapping.

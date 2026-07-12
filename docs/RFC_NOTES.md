@@ -547,6 +547,9 @@ Capability code 76 implements the tuple format from the expired
 `draft-abraitis-idr-addpath-paths-limit-04`. Each AFI/SAFI receiver preference
 is applied only to the matching negotiated Add-Path send direction. This is an
 experimental interoperability feature, not an adopted IETF standard.
+Neighbor output orders rows by numeric AFI/SAFI and carries a separate active
+bit so API zero can represent active unlimited without being confused with an
+inactive family.
 
 - Capability code 69. Per-family Send/Receive/Both modes.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.

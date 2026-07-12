@@ -1021,7 +1021,7 @@ receive_max = 3   # experimental Paths-Limit preference sent to this peer
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
-| `receive_max` | integer | no    | —       | Experimental preferred maximum received paths per family (1..=65535) |
+| `receive_max` | integer | no    | —       | Experimental preferred maximum received paths per family (1..=65535); omit or set 0 to disable |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
@@ -1035,7 +1035,9 @@ the peer's value; it does not affect other families and never rejects excess
 inbound paths. Zero tuples and tuples without matching Add-Path negotiation are
 ignored. Because the draft expired without IETF adoption, deploy this only
 after confirming peer support. `rbgp neighbor <address>` reports configured,
-advertised, received, and effective values per family.
+advertised, received, and effective values per family in stable numeric
+AFI/SAFI order. Effective send renders as `inactive`, `unlimited`, or a finite
+cap; JSON carries `effective_send_active` so zero is never ambiguous.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by

@@ -247,14 +247,28 @@ Runtime key rotation is not exposed.
 
 `NeighborState.authentication` reports `PLAINTEXT`, `MD5`, or `TCP_AO` from
 the effective transport configuration. When socket inspection succeeds for a
-connected TCP-AO session, `NeighborState.tcp_ao` contains the connection-time
-current/RNext KeyIDs and Linux verification/error counters. The best-effort
-message is cleared on disconnect; counters are not continuously refreshed.
+connected TCP-AO session, `NeighborState.tcp_ao` contains current/RNext KeyIDs
+and Linux verification/error counters. The daemon refreshes this read-only
+snapshot from the live socket for each neighbor state query and clears it on
+disconnect or inspection failure; it never serves an older healthy snapshot as
+a fallback. The counters are cumulative for the lifetime of that TCP socket,
+so any non-zero error counter keeps the socket `DEGRADED` until reconnect.
 `NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
 `UNAVAILABLE` when TCP-AO is configured but there is no socket snapshot
 (including disconnect and inspection failure), `HEALTHY` when the snapshot has
 no error counters, and `DEGRADED` when any bad, key-not-found,
 unsigned-required, or dropped-ICMP counter is non-zero.
+
+`NeighborState.effective_distribution_mode` reports the live RIB selection
+surface: `SINGLE_BEST`, `ADD_PATH`, `ORR`, or `PER_CLIENT_BEST`. It is `UNKNOWN`
+when the peer has no active outbound registration; `UNSPECIFIED` remains the
+backward-compatible value returned by older servers. This field is independent
+of the diagnostic `update_group` label.
+
+`NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Each row's
+`effective_send_active` distinguishes an inactive family from active unlimited
+Add-Path send: when active, `effective_send_max = 0` means unlimited; when
+inactive, the zero is only a placeholder.
 
 ---
 

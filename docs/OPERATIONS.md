@@ -905,12 +905,13 @@ For live inspection, `rbgp neighbor <address>` reports the configured
 authentication mode and an explicit TCP-AO health state. `unavailable` means
 TCP-AO is configured but no socket inspection snapshot is available (the peer
 may be disconnected, connecting, or socket inspection may have failed).
-`healthy` means the connection-time snapshot has no authentication error
-counters; `degraded` means at least one error counter is non-zero. When socket
+`healthy` means the live snapshot has no authentication error counters;
+`degraded` means at least one cumulative socket-lifetime error counter is
+non-zero. When socket
 inspection succeeds, connected sessions also show current/RNext KeyIDs and
 packet verification counters.
-Counters are captured when the socket connects and are not continuously
-refreshed; inspect `last_error` for setup or connect failures.
+Counters are refreshed from the socket for each query; inspect `last_error` for
+setup or connect failures.
 
 What is never collected: the raw daemon config file (the config section is
 the daemon's own secret-redacted effective dump — the same document as
@@ -1222,6 +1223,18 @@ unauthenticated sessions: listener failures abort startup, while active-open
 failures reject that connect attempt and retry later. TCP-AO key additions,
 removals, and rotations are restart-required because Linux requires the keys to
 exist when active-open or passive-listener sockets are created.
+
+`rbgp neighbor <address>` reads TCP-AO KeyIDs and verification counters from
+the live connected socket on every query. Inspection failure is reported as
+`unavailable` without falling back to an older snapshot or disturbing the BGP
+session. Linux counters are cumulative for the socket lifetime, so `degraded`
+means at least one verification, missing-key, unsigned-required, or dropped-ICMP
+error has occurred since that TCP connection was created.
+
+The same neighbor view reports the RIB's effective live distribution mode,
+rather than inferring it from configuration or update-group fallback labels.
+Down peers show `unknown`. Paths-Limit rows are numeric AFI/SAFI ordered, and
+their effective send value is explicitly `inactive`, `unlimited`, or finite.
 
 ### View received routes from a peer
 

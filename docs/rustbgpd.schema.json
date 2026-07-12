@@ -183,7 +183,7 @@
           "default": false
         },
         "receive_max": {
-          "description": "Experimental Paths-Limit preference per received Add-Path family.",
+          "description": "Experimental Paths-Limit preference per received Add-Path family.\nZero or absent disables Paths-Limit advertisement.",
           "type": [
             "integer",
             "null"
