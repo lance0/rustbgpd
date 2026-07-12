@@ -1,22 +1,23 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, BgpMetrics, FlowSpecRule, HashMap, HashSet, IpAddr, Ipv4Addr,
-    LOCAL_PEER, LocRib, NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, debug, flowspec_route_family, gauge_val, record_export_policy_eval,
-    route_type, should_suppress_ibgp_inner, warn,
+    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
+    NeighborPolicyStats, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext, Safi,
+    debug, flowspec_route_family, gauge_val, record_export_policy_eval, route_type,
+    should_suppress_ibgp_inner, warn,
 };
+use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 
 impl RibManager {
     pub(super) fn process_flowspec_withdraw_chunk(
         &mut self,
         peer: IpAddr,
-        flowspec_withdrawn: Vec<FlowSpecRule>,
+        flowspec_withdrawn: Vec<FlowSpecKey>,
     ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+        let mut fs_affected: HashSet<FlowSpecKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
@@ -25,20 +26,24 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("peer rib must exist before chunk processing");
 
-            for rule in flowspec_withdrawn {
-                if rib.withdraw_flowspec(&rule, 0) {
-                    debug!(%peer, rule = %rule, "flowspec withdrawn");
-                    fs_affected.insert(rule.clone());
+            for key in flowspec_withdrawn {
+                let route_key = FlowSpecRouteKey {
+                    afi: key.afi,
+                    rule: key.rule.clone(),
+                    path_id: 0,
+                };
+                if rib.withdraw_flowspec(&route_key) {
+                    debug!(%peer, afi = ?key.afi, rule = %key.rule, "flowspec withdrawn");
+                    fs_affected.insert(key.clone());
                 }
-                if active_refresh.iter().any(|(afi, safi)| {
-                    *safi == Safi::FlowSpec && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
-                }) && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                if active_refresh.contains(&(key.afi, Safi::FlowSpec))
+                    && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                 {
-                    stale.retain(|(stale_afi, stale_rule, _)| {
-                        let keep = stale_rule != &rule;
+                    stale.retain(|stale_key| {
+                        let keep = stale_key.afi != key.afi || stale_key.rule != key.rule;
                         if !keep {
                             *removed_stale_counts
-                                .entry((*stale_afi, Safi::FlowSpec))
+                                .entry((stale_key.afi, Safi::FlowSpec))
                                 .or_default() += 1;
                         }
                         keep
@@ -74,7 +79,7 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+        let mut fs_affected: HashSet<FlowSpecKey> = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
@@ -85,15 +90,15 @@ impl RibManager {
 
             for route in flowspec_announced {
                 debug!(%peer, rule = %route.rule, "flowspec announced");
-                let stale_key = (route.afi, route.rule.clone(), route.path_id);
-                fs_affected.insert(route.rule.clone());
+                let stale_key = route.key();
+                fs_affected.insert(route.selection_key());
                 rib.insert_flowspec(route);
-                if active_refresh.contains(&(stale_key.0, Safi::FlowSpec))
+                if active_refresh.contains(&(stale_key.afi, Safi::FlowSpec))
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                     && stale.remove(&stale_key)
                 {
                     *removed_stale_counts
-                        .entry((stale_key.0, Safi::FlowSpec))
+                        .entry((stale_key.afi, Safi::FlowSpec))
                         .or_default() += 1;
                 }
             }
@@ -121,37 +126,43 @@ impl RibManager {
         route: crate::route::FlowSpecRoute,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
-        let rule = route.rule.clone();
+        let key = route.selection_key();
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert_flowspec(route);
-        debug!(rule = %rule, "injected local FlowSpec route");
+        debug!(afi = ?key.afi, rule = %key.rule, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
-        fs_affected.insert(rule);
+        fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
         let _ = reply.send(Ok(()));
     }
 
     pub(in crate::manager) fn handle_withdraw_flowspec(
         &mut self,
-        rule: FlowSpecRule,
+        key: FlowSpecKey,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        if rib.withdraw_flowspec(&rule, 0) {
-            debug!(rule = %rule, "withdrawn injected FlowSpec route");
+        let route_key = FlowSpecRouteKey {
+            afi: key.afi,
+            rule: key.rule.clone(),
+            path_id: 0,
+        };
+        if rib.withdraw_flowspec(&route_key) {
+            debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
-            fs_affected.insert(rule);
+            fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
-                "FlowSpec rule {rule} not found"
+                "FlowSpec {:?} rule {} not found",
+                key.afi, key.rule
             ))));
         }
     }
@@ -170,7 +181,7 @@ impl RibManager {
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
-        rules: &HashSet<FlowSpecRule>,
+        keys: &HashSet<FlowSpecKey>,
         target_peer: IpAddr,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
@@ -184,15 +195,15 @@ impl RibManager {
         policy_stats: &mut NeighborPolicyStats,
         target_peer_label: &str,
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
-        fs_withdraw: &mut Vec<FlowSpecRule>,
+        fs_withdraw: &mut Vec<FlowSpecKey>,
     ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
-        for rule in rules {
-            if let Some(best) = loc_rib.get_flowspec(rule) {
+        for key in keys {
+            if let Some(best) = loc_rib.get_flowspec(key) {
                 let fs_family = (best.afi, Safi::FlowSpec);
                 if !sendable.is_some_and(|f| f.contains(&fs_family)) {
-                    if rib_out.get_flowspec(rule).is_some() {
-                        fs_withdraw.push(rule.clone());
+                    if rib_out.get_flowspec(key).is_some() {
+                        fs_withdraw.push(key.clone());
                     }
                     continue;
                 }
@@ -206,8 +217,8 @@ impl RibManager {
                     target_is_ebgp,
                     llgr,
                 ) {
-                    if rib_out.get_flowspec(rule).is_some() {
-                        fs_withdraw.push(rule.clone());
+                    if rib_out.get_flowspec(key).is_some() {
+                        fs_withdraw.push(key.clone());
                     }
                     continue;
                 }
@@ -240,8 +251,8 @@ impl RibManager {
                     cluster_id,
                     peer_is_rr_client,
                 ) {
-                    if rib_out.get_flowspec(rule).is_some() {
-                        fs_withdraw.push(rule.clone());
+                    if rib_out.get_flowspec(key).is_some() {
+                        fs_withdraw.push(key.clone());
                     }
                     continue;
                 }
@@ -284,11 +295,11 @@ impl RibManager {
                 record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
                     fs_announce.push(best.clone());
-                } else if rib_out.get_flowspec(rule).is_some() {
-                    fs_withdraw.push(rule.clone());
+                } else if rib_out.get_flowspec(key).is_some() {
+                    fs_withdraw.push(key.clone());
                 }
-            } else if rib_out.get_flowspec(rule).is_some() {
-                fs_withdraw.push(rule.clone());
+            } else if rib_out.get_flowspec(key).is_some() {
+                fs_withdraw.push(key.clone());
             }
         }
     }
@@ -297,27 +308,27 @@ impl RibManager {
     /// distribute changes to all outbound peers.
     pub(in crate::manager) fn recompute_and_distribute_flowspec(
         &mut self,
-        affected: &HashSet<rustbgpd_wire::FlowSpecRule>,
+        affected: &HashSet<FlowSpecKey>,
     ) {
         use crate::route::FlowSpecRoute;
 
-        let mut changed_rules: HashSet<rustbgpd_wire::FlowSpecRule> = HashSet::new();
+        let mut changed_keys: HashSet<FlowSpecKey> = HashSet::new();
 
-        for rule in affected {
+        for key in affected {
             let candidates: Vec<&FlowSpecRoute> = self
                 .ribs
                 .values()
-                .flat_map(|rib| rib.iter_flowspec_rule(rule))
+                .flat_map(|rib| rib.iter_flowspec_key(key))
                 .collect();
             let did_change = self
                 .loc_rib
-                .recompute_flowspec(rule.clone(), candidates.into_iter());
+                .recompute_flowspec(key.clone(), candidates.into_iter());
             if did_change {
-                changed_rules.insert(rule.clone());
+                changed_keys.insert(key.clone());
             }
         }
 
-        if changed_rules.is_empty() {
+        if changed_keys.is_empty() {
             return;
         }
 
@@ -360,7 +371,7 @@ impl RibManager {
                 &self.loc_rib,
                 rib_out,
                 &self.peer_is_rr_client,
-                &changed_rules,
+                &changed_keys,
                 peer,
                 target_peer_asn,
                 target_peer_group,

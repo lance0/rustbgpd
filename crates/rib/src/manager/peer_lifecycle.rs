@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -259,6 +259,8 @@ impl RibManager {
         // afterwards is classified against an empty state (accept-all
         // for teardowns, fresh registration for PeerUp).
         self.live_sessions.remove(&peer);
+        self.pending_peer_export_context
+            .retain(|(context_peer, _), _| *context_peer != peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
@@ -311,8 +313,10 @@ impl RibManager {
         };
         let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
         let count = rib.len();
-        let fs_affected: HashSet<FlowSpecRule> =
-            rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+        let fs_affected: HashSet<crate::route::FlowSpecKey> = rib
+            .iter_flowspec()
+            .map(crate::route::FlowSpecRoute::selection_key)
+            .collect();
         let evpn_affected: HashSet<EvpnRouteKey> = rib
             .iter_evpn()
             .map(crate::route::EvpnRibRoute::key)
@@ -415,6 +419,8 @@ impl RibManager {
         self.peer_advertised_llgr_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
+        self.peer_local_roles.remove(&peer);
+        self.pending_otc_blocked.remove(&peer);
         // The ORR vantage binding is per-registration: dropping the last
         // peer bound to a vantage must also drop the vantage's cached
         // SPF (and re-arm the empty-state early-out). Consuming the
@@ -534,6 +540,11 @@ impl RibManager {
             self.clear_outbound_peer_state(peer);
         }
 
+        let local_role = self
+            .pending_peer_export_context
+            .remove(&(peer, session_id))
+            .flatten();
+
         let record = LiveSessionRecord {
             session_id,
             outbound_tx,
@@ -543,6 +554,7 @@ impl RibManager {
             sendable_families,
             is_ebgp,
             route_reflector_client,
+            local_role,
             orr_vantage,
             per_client_best,
             add_path_send_families,
@@ -591,6 +603,7 @@ impl RibManager {
         let sendable_families = record.sendable_families.clone();
         let is_ebgp = record.is_ebgp;
         let route_reflector_client = record.route_reflector_client;
+        let local_role = record.local_role;
         let orr_vantage = record.orr_vantage;
         let per_client_best = record.per_client_best;
         let add_path_send_families = record.add_path_send_families.clone();
@@ -690,6 +703,7 @@ impl RibManager {
             .insert(peer, negotiated_llgr_families);
         self.peer_is_ebgp.insert(peer, is_ebgp);
         self.peer_is_rr_client.insert(peer, route_reflector_client);
+        self.peer_local_roles.insert(peer, local_role);
         if let Some(vantage) = orr_vantage {
             self.peer_orr_vantage.insert(peer, vantage);
             // The vantage may register after the BGP-LS routes arrived
@@ -1085,10 +1099,10 @@ impl RibManager {
             }
         }
 
-        let all_flowspec_rules: HashSet<FlowSpecRule> = self
+        let all_flowspec_rules: HashSet<crate::route::FlowSpecKey> = self
             .loc_rib
             .iter_flowspec()
-            .map(|route| route.rule.clone())
+            .map(crate::route::FlowSpecRoute::selection_key)
             .collect();
         if !all_flowspec_rules.is_empty() {
             Self::stage_flowspec_rules(

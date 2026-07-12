@@ -5,8 +5,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
 use rustbgpd_wire::{
-    AddressPrefixOrf, Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi,
-    WhenToRefresh,
+    AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi, WhenToRefresh,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -22,6 +21,9 @@ pub struct UpdateGroupClassifierInput {
     pub policy_requires_peer_context: bool,
     pub target_is_ebgp: bool,
     pub target_is_rr_client: bool,
+    /// Local RFC 9234 role. OTC egress eligibility is a RIB-staging
+    /// decision, so groups with different roles must never share a table.
+    pub target_local_role: Option<u8>,
     pub sendable_families: Vec<(u16, u8)>,
     pub llgr_families: Vec<(u16, u8)>,
     pub add_path_send: bool,
@@ -40,6 +42,7 @@ pub struct UpdateGroupFingerprint {
     pub policy_fingerprint: Option<String>,
     pub target_is_ebgp: bool,
     pub target_is_rr_client: bool,
+    pub target_local_role: Option<u8>,
     pub sendable_ipv4_unicast: bool,
     pub sendable_ipv6_unicast: bool,
     pub sendable_vpnv4: bool,
@@ -96,6 +99,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
             policy_fingerprint: input.policy_fingerprint,
             target_is_ebgp: input.target_is_ebgp,
             target_is_rr_client: input.target_is_rr_client,
+            target_local_role: input.target_local_role,
             sendable_ipv4_unicast: contains((1, 1)),
             sendable_ipv6_unicast: contains((2, 1)),
             sendable_vpnv4: contains((1, 128)),
@@ -188,6 +192,7 @@ mod update_group_classifier_tests {
             policy_requires_peer_context: false,
             target_is_ebgp: false,
             target_is_rr_client: true,
+            target_local_role: None,
             sendable_families: vec![(2, 1), (1, 1), (1, 1)],
             llgr_families: vec![],
             add_path_send: false,
@@ -287,6 +292,20 @@ mod update_group_classifier_tests {
         right.policy_provenance = Some("rpol_compiled_ir".to_string());
         assert_eq!(classify_update_group(left), classify_update_group(right));
     }
+
+    #[test]
+    fn canonical_fingerprint_separates_rfc9234_local_roles() {
+        let mut customer = input();
+        customer.target_local_role = Some(BgpRole::Customer.to_u8());
+        let mut provider = customer.clone();
+        provider.target_local_role = Some(BgpRole::Provider.to_u8());
+
+        assert_ne!(
+            classify_update_group(customer),
+            classify_update_group(provider),
+            "peers with different OTC egress semantics must not share a table"
+        );
+    }
 }
 
 use crate::best_path::BestPathReason;
@@ -323,7 +342,7 @@ pub struct OutboundRouteUpdate {
     /// `FlowSpec` routes to announce (RFC 8955).
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.
-    pub flowspec_withdraw: Vec<FlowSpecRule>,
+    pub flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
     /// EVPN routes to announce (RFC 7432).
     pub evpn_announce: Vec<EvpnRibRoute>,
     /// EVPN route keys to withdraw.
@@ -344,6 +363,10 @@ pub struct OutboundRouteUpdate {
     pub rtc_announce: Vec<RtcRibRoute>,
     /// RT-Constrain route keys to withdraw.
     pub rtc_withdraw: Vec<RtcRibRouteKey>,
+    /// Unicast routes rejected by the pre-commit RFC 9234 OTC egress gate.
+    /// Transport publishes the existing per-route metric/event diagnostics
+    /// but never attempts to encode these routes.
+    pub otc_blocked: Vec<Route>,
     /// Ask the session task to send a ROUTE-REFRESH *request* toward the
     /// peer (RFC 2918) for **every negotiated family**, so the peer
     /// re-advertises its routes. Used by the RIB manager's
@@ -678,7 +701,7 @@ pub enum RibUpdate {
         /// `FlowSpec` routes announced (RFC 8955).
         flowspec_announced: Vec<FlowSpecRoute>,
         /// `FlowSpec` rules withdrawn.
-        flowspec_withdrawn: Vec<FlowSpecRule>,
+        flowspec_withdrawn: Vec<crate::route::FlowSpecKey>,
         /// EVPN routes announced (RFC 7432).
         evpn_announced: Vec<EvpnRibRoute>,
         /// EVPN route keys withdrawn.
@@ -845,6 +868,17 @@ pub enum RibUpdate {
         session_id: u64,
         /// Optional peer-group membership.
         peer_group: Option<String>,
+    },
+    /// Session-bound export context needed before the initial Adj-RIB-Out
+    /// build. Sent immediately before `PeerUp`; the session id prevents a
+    /// collision loser from overwriting the winner's role.
+    SetPeerExportContext {
+        /// Peer whose export context is being staged.
+        peer: IpAddr,
+        /// Transport session identity that will accompany `PeerUp`.
+        session_id: u64,
+        /// Local RFC 9234 BGP Role, if configured.
+        local_role: Option<BgpRole>,
     },
     /// Inject a locally-originated route.
     InjectRoute {
@@ -1199,8 +1233,8 @@ pub enum RibUpdate {
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {
-        /// The `FlowSpec` rule to withdraw.
-        rule: FlowSpecRule,
+        /// Family-complete `FlowSpec` identity to withdraw.
+        key: crate::route::FlowSpecKey,
         /// Completion reply.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },

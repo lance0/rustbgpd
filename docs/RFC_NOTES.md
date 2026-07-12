@@ -32,6 +32,29 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ---
 
+## RFC 9234 — Roles and Only-to-Customer
+
+- The configured local Role is session-stamped into the RIB before `PeerUp`,
+  so the first Adj-RIB-Out build and every subsequent export use the same
+  RFC 9234 relationship semantics. Update-group identity includes that role;
+  peers with different OTC egress behavior cannot share advertised state.
+- E2 suppression for IPv4/IPv6 unicast happens after export-policy
+  modifications but before grouped or private Adj-RIB-Out commit. This covers
+  single-best, ORR, Add-Path, and per-client-best selection. A route that was
+  previously advertised and becomes OTC-blocked is withdrawn and removed from
+  logical advertised state; a newly blocked route is never committed.
+- Transport retains the E2 check as a defense-in-depth encoder guard and owns
+  the established `bgp_otc_routes_blocked_total` / `OTC_ROUTE_BLOCKED`
+  diagnostic publication. The RIB passes rejected route context explicitly,
+  so metrics/events and export-explain reflect the same pre-commit decision.
+  Backpressured grouped peers retain at most one pending diagnostic per route;
+  resync rebuilds that residue from current denials so withdrawn sources do
+  not leak stale events into an unrelated later update.
+- RFC 9234 section 5 applies only to IPv4/IPv6 unicast SAFI 1 here. FlowSpec,
+  EVPN, VPN, labeled-unicast, RTC, and BGP-LS are not subject to the OTC gate.
+
+---
+
 ## Milestone 0 — RFC 4271 Sections
 
 ### §4.2 — OPEN Message
@@ -61,6 +84,14 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   capability negotiated in OPEN.
 - Structural decode (can I read these bytes?) separated from semantic
   validation (is the attribute set RFC-compliant?). See ADR-0012.
+- Outbound IPv4/IPv6 unicast and IPv4/IPv6 FlowSpec announcements and
+  withdrawals are chunked by the peer's negotiated 4096/65535-byte message
+  limit. Structured FlowSpec construction is fallible; an individually
+  unencodable NLRI fails the session rather than partially committing a batch.
+- FlowSpec identity is `(AFI, rule)` throughout Adj-RIB-In, Loc-RIB,
+  Adj-RIB-Out, recompute, distribution, and withdrawal. AFI is never inferred
+  from an optional destination-prefix component: legal destination-less IPv4
+  and IPv6 rules remain distinct.
 
 ### §4.4 — KEEPALIVE Message
 

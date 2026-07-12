@@ -1,7 +1,7 @@
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
-    EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr,
+    EvpnRoute, EvpnRouteKey, FlowSpecKey, FlowSpecRoute, Instant, IpAddr, Ipv4Addr,
     LabeledRibRoute, LabeledRibRouteKey, NextHopScope, NotificationCode, NotificationMessage,
     PathAttribute, PeerSession, Prefix, RibUpdate, Route, RtcRibRoute, RtcRibRouteKey, Safi,
     VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info, is_ipv6_link_local,
@@ -697,7 +697,7 @@ impl PeerSession {
                 .iter()
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect();
-            let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
+            let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
@@ -708,7 +708,12 @@ impl PeerSession {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                        loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
+                        loop_fs_withdrawn.extend(
+                            mp.flowspec_withdrawn
+                                .iter()
+                                .cloned()
+                                .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
+                        );
                         loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                         if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                             loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
@@ -920,7 +925,7 @@ impl PeerSession {
                 .iter()
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect();
-            let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
+            let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
@@ -931,7 +936,12 @@ impl PeerSession {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                        loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
+                        loop_fs_withdrawn.extend(
+                            mp.flowspec_withdrawn
+                                .iter()
+                                .cloned()
+                                .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
+                        );
                         loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                         if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                             loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
@@ -1335,7 +1345,7 @@ impl PeerSession {
         // FlowSpec / EVPN, `mp_unicast` for unicast) — the stripping
         // happens once in `RouteAttrBundle::new`.
         let mut flowspec_announced: Vec<FlowSpecRoute> = Vec::new();
-        let mut flowspec_withdrawn: Vec<FlowSpecRule> = Vec::new();
+        let mut flowspec_withdrawn: Vec<FlowSpecKey> = Vec::new();
         let mut evpn_announced: Vec<EvpnRibRoute> = Vec::new();
         let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
         let mut bgpls_announced: Vec<BgpLsRibRoute> = Vec::new();
@@ -1895,7 +1905,12 @@ impl PeerSession {
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                    flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
+                    flowspec_withdrawn.extend(
+                        mp.flowspec_withdrawn
+                            .iter()
+                            .cloned()
+                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
+                    );
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
@@ -1963,11 +1978,11 @@ impl PeerSession {
         for route in &announced {
             self.remember_known_path(route.prefix, route.path_id);
         }
-        for rule in &flowspec_withdrawn {
-            self.known_flowspec.remove(rule);
+        for key in &flowspec_withdrawn {
+            self.known_flowspec.remove(key);
         }
         for route in &flowspec_announced {
-            self.known_flowspec.insert(route.rule.clone());
+            self.known_flowspec.insert(route.selection_key());
         }
         for key in &evpn_withdrawn {
             self.known_evpn.remove(key);

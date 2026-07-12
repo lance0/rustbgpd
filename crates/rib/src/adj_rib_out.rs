@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
@@ -9,8 +9,8 @@ use smallvec::SmallVec;
 
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
-    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, LabeledRibRouteKey,
-    Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
+    LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
 
@@ -32,7 +32,7 @@ pub struct AdjRibOut {
     /// multi-path spills to heap transparently.
     prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
-    flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
+    flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
@@ -227,18 +227,18 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
-        self.flowspec_routes.insert(route.rule.clone(), route);
+        self.flowspec_routes.insert(route.selection_key(), route);
     }
 
     /// Remove a `FlowSpec` route by rule. Returns `true` if it existed.
-    pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
-        self.flowspec_routes.remove(rule).is_some()
+    pub fn remove_flowspec(&mut self, key: &FlowSpecKey) -> bool {
+        self.flowspec_routes.remove(key).is_some()
     }
 
     /// Look up a `FlowSpec` route by rule.
     #[must_use]
-    pub fn get_flowspec(&self, rule: &FlowSpecRule) -> Option<&FlowSpecRoute> {
-        self.flowspec_routes.get(rule)
+    pub fn get_flowspec(&self, key: &FlowSpecKey) -> Option<&FlowSpecRoute> {
+        self.flowspec_routes.get(key)
     }
 
     /// Iterate over all advertised `FlowSpec` routes.

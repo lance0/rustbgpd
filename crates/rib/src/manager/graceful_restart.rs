@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
@@ -181,7 +181,7 @@ impl RibManager {
             }
             for route in rib.iter_flowspec() {
                 if gr_families.contains(&(route.afi, Safi::FlowSpec)) {
-                    fs_affected.insert(route.rule.clone());
+                    fs_affected.insert(route.selection_key());
                 }
             }
             if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
@@ -627,7 +627,7 @@ impl RibManager {
             self.distribute_changes(&changed, &affected);
         }
         if had_fs_swept {
-            let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+            let fs_affected: HashSet<crate::route::FlowSpecKey> = fs_swept.into_iter().collect();
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
         if had_evpn_swept {
@@ -768,7 +768,7 @@ impl RibManager {
             self.distribute_changes(&changed, &affected);
         }
         if had_fs_swept {
-            let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+            let fs_affected: HashSet<crate::route::FlowSpecKey> = fs_swept.into_iter().collect();
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
         if had_evpn_swept {

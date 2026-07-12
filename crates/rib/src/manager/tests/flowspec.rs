@@ -348,6 +348,85 @@ fn make_destless_flowspec_route(afi: Afi, peer: Ipv4Addr, protocol: u8) -> FlowS
     route
 }
 
+#[tokio::test]
+async fn destinationless_v4_v6_rules_coexist_and_withdraw_independently() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source: IpAddr = "198.51.100.1".parse().unwrap();
+    let v4 = make_destless_flowspec_route(Afi::Ipv4, "198.51.100.1".parse().unwrap(), 6);
+    let v6 = make_destless_flowspec_route(Afi::Ipv6, "198.51.100.1".parse().unwrap(), 6);
+    assert_eq!(v4.rule, v6.rule, "fixture must differ only by AFI");
+    let v4_key = v4.selection_key();
+    let v6_key = v6.selection_key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![v4, v6],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let announced = out_rx.recv().await.unwrap();
+    assert_eq!(
+        announced
+            .flowspec_announce
+            .iter()
+            .map(FlowSpecRoute::selection_key)
+            .collect::<HashSet<_>>(),
+        HashSet::from([v4_key.clone(), v6_key.clone()])
+    );
+    assert_eq!(query_flowspec_routes(&tx).await.len(), 2);
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![v6_key.clone()],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let withdrawn = out_rx.recv().await.unwrap();
+    assert_eq!(withdrawn.flowspec_withdraw, vec![v6_key]);
+    let remaining = query_flowspec_routes(&tx).await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].selection_key(), v4_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// LAN-291: a destination-less `FlowSpec` rule must be `prefix = None` in
 /// the export policy context — a fabricated `0.0.0.0/0` would spuriously
 /// match prefix-based deny terms and suppress the rule.

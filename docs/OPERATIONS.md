@@ -461,8 +461,10 @@ authenticated sensitive-read surface.
 
 Mechanisms that block routes for protocol-correctness reasons: most
 reject at the session boundary before the route reaches the RIB; the
-one egress case is `egress_to_upstream_via_otc`, which suppresses an
-outbound advertisement after best-path selection. Where a metric
+one egress case is `egress_to_upstream_via_otc`, which rejects an
+outbound advertisement after policy but before Adj-RIB-Out commit. If a
+previously advertised route becomes blocked, the RIB withdraws it and removes
+the logical advertised entry. Where a metric
 carries a `reason` label, its values are the canonical contract
 pinned in `crates/telemetry/src/reason_labels.rs` — stable across
 releases and shared verbatim by the metric label, the log-line
@@ -472,7 +474,7 @@ without a `reason` label encode the mechanism in the metric name.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_otc_routes_blocked_total{peer,reason}` | RFC 9234 Only-to-Customer route-leak blocks (ADR-0071). `reason` is `ingress_from_customer_rsclient` (OTC-tagged route arrived while we act as Provider / Route Server), `ingress_peer_mismatch` (lateral Peer session, OTC value is not the peer's ASN), `malformed_length` (OTC attribute undecodable; announcements dropped treat-as-withdraw style per RFC 7606), or `egress_to_upstream_via_otc` (outbound advertisement of an OTC-tagged route toward a Provider / Peer / Route Server suppressed) |
+| `bgp_otc_routes_blocked_total{peer,reason}` | RFC 9234 Only-to-Customer route-leak blocks (ADR-0071). `reason` is `ingress_from_customer_rsclient` (OTC-tagged route arrived while we act as Provider / Route Server), `ingress_peer_mismatch` (lateral Peer session, OTC value is not the peer's ASN), `malformed_length` (OTC attribute undecodable; announcements dropped treat-as-withdraw style per RFC 7606), or `egress_to_upstream_via_otc` (post-policy route rejected before grouped/private Adj-RIB-Out commit toward a Provider / Peer / Route Server). The egress counter/event and export explain describe the same RIB decision; transport retains a defense-only check. |
 | `bgp_as_path_loop_detected_total{peer}` | Prefixes rejected because our own ASN appears in the received `AS_PATH` (RFC 4271 §9.1.2). No `reason` label — the mechanism is the metric name; withdrawals in the same UPDATE are still processed |
 | `bgp_rr_loop_detected_total{peer}` | UPDATEs rejected by route-reflection loop detection (RFC 4456 §8). No `reason` label; the debug log line emitted with each increment carries `reason=originator_id` (received `ORIGINATOR_ID` equals our router-id) or `reason=cluster_list` (our cluster-id already in `CLUSTER_LIST`) |
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |

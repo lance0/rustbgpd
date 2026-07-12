@@ -65,6 +65,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 9234 OTC suppression now precedes Adj-RIB-Out commit.** IPv4/IPv6
+  unicast routes carrying OTC toward a Provider, Peer, or Route Server are
+  rejected while staging grouped and private export views, including ORR,
+  Add-Path, and per-client-best. A newly blocked route is never recorded as
+  advertised; a route that becomes blocked generates a withdrawal and is
+  removed from logical advertised state. Session-stamped local roles separate
+  update groups from the initial table onward, export explain reports the same
+  OTC gate, and the existing counter/event diagnostics remain emitted without
+  relying on a transport-only wire drop. (LAN-368, LAN-369)
+
 - **EVPN load generation validates unsafe workloads and honors exact event
   budgets.** The development-only `evpn-tester` now rejects zero-sized batches,
   zero-route or zero-rate churn, and hold times of 1-2 seconds before opening a
@@ -86,7 +96,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   values remain effective, import policy may still set a local value, and the
   byte-exact pre-policy BMP view continues to expose the original wire UPDATE.
 
-- **Outbound IPv4-unicast UPDATEs are split by encoded message size.** A
+- **Outbound unicast and FlowSpec UPDATEs are split by encoded message size.** A
   same-attribute Adj-RIB-Out group larger than one BGP message (≈1000 /24s
   ≈ 4114 bytes against the 4096-byte limit) was built as a single UPDATE; the
   transport rejected it with `MessageTooLong`, logged, and abandoned the rest
@@ -94,11 +104,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RIB/session boundary, so the RIB kept believing the whole group was
   advertised. Affected peers were left silently under-advertised with no
   dirty-resync recovery (surfaced most sharply after a changed-policy reload,
-  where every route is re-advertised at once). All four IPv4-unicast paths
-  (body/MP_REACH announcement and body/MP_UNREACH withdrawal) now chunk to the
-  negotiated maximum message size, filling Extended Messages when negotiated. A
-  lone entry that still cannot fit tears the session down so Adj-RIB-Out is
-  rebuilt on reconnect, rather than falsely reporting the route advertised.
+  where every route is re-advertised at once). IPv4 body/MP_REACH,
+  IPv4 MP_UNREACH, IPv6 MP_REACH/MP_UNREACH, and IPv4/IPv6 FlowSpec
+  MP_REACH/MP_UNREACH now chunk to the negotiated maximum message size,
+  filling Extended Messages when negotiated. FlowSpec uses fallible structured
+  encoding throughout. Its RIB and withdrawal identity now carries AFI
+  explicitly, so destination-less IPv4 and IPv6 rules can coexist and withdraw
+  independently. A lone entry that still cannot fit tears the session down so
+  Adj-RIB-Out is rebuilt on reconnect, rather than falsely reporting the route
+  advertised. (LAN-368, LAN-372)
 
 - **rpol cost passes guard against duplicate-name underflow.** The LAN-304
   function-cost Kahn pass and the LAN-290 apply-bounds pass seed their

@@ -18,9 +18,9 @@ use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
-    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute,
-    LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, RibUpdate, Route, RtcRibRoute,
-    RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
+    LabeledRibRoute, LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, RibUpdate, Route,
+    RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -231,7 +231,7 @@ pub(crate) struct PeerSession {
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
-    known_flowspec: HashSet<FlowSpecRule>,
+    known_flowspec: HashSet<FlowSpecKey>,
     /// Accepted EVPN routes from this peer (RFC 7432 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_evpn: HashSet<EvpnRouteKey>,
