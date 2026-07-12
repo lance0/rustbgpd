@@ -226,6 +226,7 @@ impl PeerManager {
         }
 
         info!(%address, %remote_asn, "peer added dynamically");
+        let tcp_ao_protected = transport.tcp_ao.is_some();
         self.peers.insert(
             peer_key.clone(),
             ManagedPeer {
@@ -242,6 +243,7 @@ impl PeerManager {
                 export_policy,
                 pending_inbound: None,
                 is_dynamic: false,
+                tcp_ao_protected,
                 accepted_dynamic_range: None,
                 pending_refresh: false,
                 pending_export_apply: false,

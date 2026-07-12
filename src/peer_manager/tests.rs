@@ -1083,6 +1083,7 @@ fn insert_test_managed_peer_with_asn(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh,
             pending_export_apply: false,
@@ -1122,6 +1123,7 @@ fn insert_test_scoped_managed_peer(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -1220,6 +1222,53 @@ fn fake_peer_handle_with_route_refresh_reply(
         Ok(())
     });
     PeerHandle::from_parts(session_tx, task)
+}
+
+#[tokio::test]
+async fn unavailable_session_authentication_uses_durable_managed_protection() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.44".parse().unwrap();
+    let handle = fake_peer_handle(
+        addr,
+        SessionState::Idle,
+        None,
+        Arc::new(FakePeerCounters::default()),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let peer_key = key(addr);
+
+    {
+        let managed = mgr.peers.get_mut(&peer_key).unwrap();
+        managed.is_dynamic = true;
+        managed.tcp_ao_protected = true;
+        assert!(managed.transport_config.tcp_ao.is_none());
+        let info = super::snapshot::build_peer_info(&peer_key, managed, None);
+        assert_eq!(info.authentication, "tcp_ao");
+        assert!(info.tcp_ao_info.is_none());
+        assert!(info.stale);
+
+        managed.is_dynamic = false;
+        managed.tcp_ao_protected = true;
+        assert_eq!(
+            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            "tcp_ao"
+        );
+
+        managed.tcp_ao_protected = false;
+        assert_eq!(
+            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            "plaintext"
+        );
+
+        managed.transport_config.md5_password = Some("test-password".to_string());
+        assert_eq!(
+            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            "md5"
+        );
+    }
+
+    let managed = mgr.peers.remove(&peer_key).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
 }
 
 fn attach_test_pending_inbound(
@@ -1738,6 +1787,7 @@ fn insert_test_dynamic_managed_peer(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: true,
+            tcp_ao_protected: false,
             accepted_dynamic_range: Some(AcceptedDynamicRange {
                 addr: range_addr,
                 prefix_len: range_prefix_len,
@@ -5132,6 +5182,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: true,
             pending_export_apply: false,
@@ -6936,6 +6987,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -7108,6 +7160,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -7290,6 +7343,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -7491,6 +7545,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -7717,6 +7772,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
@@ -7873,6 +7929,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,

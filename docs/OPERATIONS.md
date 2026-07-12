@@ -1229,8 +1229,9 @@ exist when active-open or passive-listener sockets are created.
 the live connected socket on every query. Inspection failure is reported as
 `unavailable` without falling back to an older snapshot or disturbing the BGP
 session. Linux counters are cumulative for the socket lifetime, so `degraded`
-means at least one verification, missing-key, unsigned-required, or dropped-ICMP
-error has occurred since that TCP connection was created.
+means either the current/RNext key-validity flag is missing or at least one
+verification, missing-key, unsigned-required, or dropped-ICMP error has occurred
+since that TCP connection was created.
 
 The same neighbor view reports the RIB's effective live distribution mode,
 rather than inferring it from configuration or update-group fallback labels.

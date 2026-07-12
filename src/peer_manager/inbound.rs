@@ -195,6 +195,7 @@ impl PeerManager {
                     .dead_lettered_pending
                     .get(&peer_ip)
                     .is_some_and(|pending| pending.graceful_shutdown);
+                let tcp_ao_protected = tcp_ao_info.is_some();
 
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
@@ -244,6 +245,7 @@ impl PeerManager {
                     export_policy,
                     pending_inbound: None,
                     is_dynamic: true,
+                    tcp_ao_protected,
                     accepted_dynamic_range: Some(accepted_dynamic_range),
                     pending_refresh: false,
                     pending_export_apply: false,

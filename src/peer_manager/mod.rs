@@ -113,6 +113,9 @@ struct ManagedPeer {
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     /// Dynamic peers are ephemeral: removed when session falls to Idle.
     is_dynamic: bool,
+    /// Durable, non-secret TCP-AO protection identity used when the bounded
+    /// session-state query times out or the task has exited.
+    tcp_ao_protected: bool,
     /// Canonical `[[dynamic_neighbors]]` range that accepted this peer.
     ///
     /// Static peers are `None`. Dynamic peers keep the accepted range even if
