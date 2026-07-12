@@ -37,6 +37,7 @@ mod notifications;
 mod policy;
 mod reconcile;
 mod snapshot;
+mod update_group_plan;
 
 use dynamic::{AcceptedDynamicRange, DeadLetteredPending, DynamicRange};
 
@@ -651,7 +652,7 @@ impl PeerManager {
                             let result = self.plan_config_transaction(
                                 &candidate_toml,
                                 expected_runtime_snapshot_token.as_deref(),
-                            );
+                            ).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::StageConfigSnapshot {

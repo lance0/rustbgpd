@@ -41,6 +41,10 @@ use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
+use crate::update::{
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupPeerSnapshot,
+    UpdateGroupSnapshot, classify_update_group,
+};
 use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
 
 /// Fingerprint of every RIB-staging input that makes per-peer staged
@@ -2009,26 +2013,6 @@ impl RibManager {
         if self.test_force_ungrouped {
             return GroupMembership::PolicyPeerContext;
         }
-        if self
-            .export_policy_for(peer)
-            .is_some_and(PolicyChain::requires_peer_context)
-        {
-            return GroupMembership::PolicyPeerContext;
-        }
-        if self.peer_has_any_add_path_send(peer) {
-            // Paths-Limit needs no v2 key dimension today: every Add-Path-send
-            // peer is deliberately private and stages with its own exact
-            // family-local cap. If Add-Path grouping is introduced, the
-            // effective `(AFI, SAFI) -> max` map MUST become part of GroupKey
-            // before this disqualifier is relaxed.
-            return GroupMembership::AddPathSend;
-        }
-        if self.peer_per_client_best.contains(&peer) {
-            return GroupMembership::PerClientBest;
-        }
-        if self.peer_orr_vantage.contains_key(&peer) {
-            return GroupMembership::OrrVantage;
-        }
         // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
         // 5291 §6 gate never meets grouping). Read from the live
         // session record — `peer_orf_pending` drains as gates lift, so
@@ -2038,42 +2022,118 @@ impl RibManager {
             .get(&peer)
             .and_then(|sessions| sessions.last())
             .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-        if orf_negotiated || self.peer_orf_filters.contains_key(&peer) {
-            return GroupMembership::OrfInstalled;
-        }
+        let chain = self.export_policy_for(peer).cloned();
+        let input = self.update_group_classifier_input(
+            peer,
+            chain.as_ref(),
+            orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+        );
+        let fingerprint = match classify_update_group(input) {
+            UpdateGroupClassification::PolicyPeerContext => {
+                return GroupMembership::PolicyPeerContext;
+            }
+            UpdateGroupClassification::AddPathSend => return GroupMembership::AddPathSend,
+            UpdateGroupClassification::PerClientBest => return GroupMembership::PerClientBest,
+            UpdateGroupClassification::OrrVantage => return GroupMembership::OrrVantage,
+            UpdateGroupClassification::OrfInstalled => return GroupMembership::OrfInstalled,
+            UpdateGroupClassification::Groupable(fingerprint) => fingerprint,
+        };
 
         // Clone released before the &mut intern below; chains are small
         // and this runs at config/session-lifecycle frequency only.
-        let chain = self.export_policy_for(peer).cloned();
         let chain_idx = chain
             .as_ref()
             .map(|chain| self.update_groups.intern_chain(chain));
-        let sendable = self.peer_sendable_families.get(&peer);
-        let contains = |family: (Afi, Safi)| sendable.is_some_and(|f| f.contains(&family));
-        let mut llgr_families: Vec<(u16, u8)> = self
-            .peer_advertised_llgr_families
-            .get(&peer)
-            .map(|families| {
-                families
-                    .iter()
-                    .map(|&(afi, safi)| (afi as u16, safi as u8))
-                    .collect()
-            })
-            .unwrap_or_default();
-        llgr_families.sort_unstable();
-        llgr_families.dedup();
         let key = GroupKey {
             chain: chain_idx,
-            target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
-            target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
-            sendable_ipv4_unicast: contains((Afi::Ipv4, Safi::Unicast)),
-            sendable_ipv6_unicast: contains((Afi::Ipv6, Safi::Unicast)),
-            sendable_vpnv4: contains((Afi::Ipv4, Safi::MplsVpn)),
-            sendable_vpnv6: contains((Afi::Ipv6, Safi::MplsVpn)),
-            rtc_negotiated: contains((Afi::Ipv4, Safi::RtConstrain)),
-            llgr_families,
+            target_is_ebgp: fingerprint.target_is_ebgp,
+            target_is_rr_client: fingerprint.target_is_rr_client,
+            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
+            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
+            sendable_vpnv4: fingerprint.sendable_vpnv4,
+            sendable_vpnv6: fingerprint.sendable_vpnv6,
+            rtc_negotiated: fingerprint.rtc_negotiated,
+            llgr_families: fingerprint.llgr_families,
         };
         GroupMembership::Grouped(self.update_groups.group_for(key))
+    }
+
+    fn update_group_classifier_input(
+        &self,
+        peer: IpAddr,
+        chain: Option<&PolicyChain>,
+        orf_installed: bool,
+    ) -> UpdateGroupClassifierInput {
+        let sendable = self.peer_sendable_families.get(&peer);
+        let mut sendable_families = sendable
+            .into_iter()
+            .flatten()
+            .map(|&(afi, safi)| (afi as u16, safi as u8))
+            .collect::<Vec<_>>();
+        sendable_families.sort_unstable();
+        sendable_families.dedup();
+        let mut llgr_families = self
+            .peer_advertised_llgr_families
+            .get(&peer)
+            .into_iter()
+            .flatten()
+            .map(|&(afi, safi)| (afi as u16, safi as u8))
+            .collect::<Vec<_>>();
+        llgr_families.sort_unstable();
+        llgr_families.dedup();
+        UpdateGroupClassifierInput {
+            policy_fingerprint: chain.map(|value| format!("{value:?}")),
+            policy_provenance: chain.map(|value| value.groupability_provenance().to_string()),
+            policy_requires_peer_context: chain.is_some_and(PolicyChain::requires_peer_context),
+            target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
+            target_is_rr_client: self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            sendable_families,
+            llgr_families,
+            // Paths-Limit needs no v2 key dimension today: every Add-Path-send
+            // peer is deliberately private (classified `AddPathSend`) and stages
+            // with its own exact family-local cap. If Add-Path grouping is
+            // introduced, the effective `(AFI, SAFI) -> max` map MUST become part
+            // of GroupKey before this disqualifier is relaxed.
+            add_path_send: self.peer_has_any_add_path_send(peer),
+            per_client_best: self.peer_per_client_best.contains(&peer),
+            orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
+            orf_installed,
+        }
+    }
+
+    pub(super) fn handle_query_update_group_snapshot(
+        &self,
+        reply: tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
+    ) {
+        let mut peers = self
+            .update_groups
+            .members
+            .iter()
+            .map(|(&peer, membership)| {
+                let chain = self.export_policy_for(peer);
+                let orf_negotiated = self
+                    .live_sessions
+                    .get(&peer)
+                    .and_then(|sessions| sessions.last())
+                    .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
+                let input = self.update_group_classifier_input(
+                    peer,
+                    chain,
+                    orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+                );
+                UpdateGroupPeerSnapshot {
+                    peer,
+                    classification: classify_update_group(input.clone()),
+                    input,
+                    runtime_membership: membership.label(),
+                }
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|row| match row.peer {
+            IpAddr::V4(addr) => (0, addr.octets().to_vec()),
+            IpAddr::V6(addr) => (1, addr.octets().to_vec()),
+        });
+        let _ = reply.send(UpdateGroupSnapshot { peers });
     }
 
     /// Re-derive every update-group gauge from the membership map.

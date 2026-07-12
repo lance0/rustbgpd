@@ -187,7 +187,9 @@ enum ConfigTransactionPlanStatus {
 message ConfigTransactionPlanResponse {
   ConfigTransactionPlanStatus status = 1;
   // Opaque process-local optimistic-concurrency token for the live runtime
-  // config snapshot used to produce this plan. It is not a cryptographic
+  // config and negotiated update-group snapshot observed while producing this
+  // plan. Apply performs the same observation before mutation; the token does
+  // not freeze sessions after that apply-time re-plan. It is not a cryptographic
   // commitment or authorization credential; clients must re-plan after daemon
   // restart.
   string runtime_snapshot_token = 2;
@@ -204,6 +206,44 @@ message ConfigTransactionPlanResponse {
   repeated string restart_required_sections = 6;
   // Short operator-facing summary of the transaction classification.
   string human_text = 7;
+  UpdateGroupImpactPlan update_group_impact = 8;
+}
+
+message UpdateGroupImpactPlan {
+  uint32 schema_version = 1;
+  repeated UpdateGroupFamilyImpact entries = 2;
+  UpdateGroupImpactRollup rollup = 3;
+  string capacity_class = 4;
+  string capacity_basis = 5;
+}
+
+message UpdateGroupFamilyImpact {
+  string peer = 1;
+  // Negotiated address-family identifiers. Both are zero only for the single
+  // synthetic indeterminate row emitted when no negotiated family is known.
+  uint32 afi = 2;
+  uint32 safi = 3;
+  string current = 4;
+  string candidate = 5;
+  string transition = 6;
+  string reason = 7;
+  string provenance = 8;
+  bool local_resync = 9;
+  bool remote_route_refresh = 10;
+}
+
+message UpdateGroupImpactRollup {
+  uint32 affected_peers = 1;
+  uint32 affected_families = 2;
+  uint32 no_op = 3;
+  uint32 regroup = 4;
+  uint32 shared_migration = 5;
+  uint32 private_resync = 6;
+  uint32 indeterminate = 7;
+  uint32 projected_shared_groups = 8;
+  uint32 projected_private_views = 9;
+  uint32 local_resyncs = 10;
+  uint32 remote_route_refreshes = 11;
 }
 
 message ApplyConfigTransactionRequest {
@@ -234,6 +274,7 @@ message ConfigTransactionApplyResponse {
   repeated string committed_sections = 3;
   string human_text = 4;
   ConfigTransactionConfirmation confirmation = 5;
+  UpdateGroupImpactPlan update_group_impact = 6;
 }
 
 enum ConfigTransactionConfirmationStatus {

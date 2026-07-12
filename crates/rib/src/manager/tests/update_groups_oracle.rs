@@ -705,6 +705,24 @@ impl Oracle {
         reply_rx.await.unwrap()
     }
 
+    async fn group_snapshot(&mut self) -> crate::update::UpdateGroupSnapshot {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryUpdateGroupSnapshot { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    async fn outbound_health(&mut self) -> (usize, usize, usize, usize, usize, usize) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::TestQueryOutboundHealth { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
     pub(super) async fn replace_policy(
         &mut self,
         peer: Ipv4Addr,
@@ -833,6 +851,51 @@ where
     scenario(&mut ungrouped).await;
     let ungrouped = ungrouped.finish().await;
     (grouped, ungrouped)
+}
+
+#[tokio::test]
+async fn update_group_snapshot_is_side_effect_free_and_runtime_exact() {
+    let mut oracle = Oracle::spawn(false, None);
+    oracle.peer_up(A, false, true, None, 64).await;
+    oracle.peer_up(B, false, true, None, 64).await;
+    let labels_before = (oracle.group_label(A).await, oracle.group_label(B).await);
+    let evals_before = oracle.export_policy_evals().await;
+    let health_before = oracle.outbound_health().await;
+
+    let first = oracle.group_snapshot().await;
+    let second = oracle.group_snapshot().await;
+
+    assert_eq!(first, second, "snapshot must be deterministic");
+    assert_eq!(first.peers.len(), 2);
+    assert!(first.peers.iter().all(|row| {
+        row.runtime_membership.starts_with("group:")
+            && row.classification == crate::update::classify_update_group(row.input.clone())
+    }));
+    assert_eq!(
+        labels_before,
+        (oracle.group_label(A).await, oracle.group_label(B).await)
+    );
+    assert_eq!(evals_before, oracle.export_policy_evals().await);
+    assert_eq!(health_before, oracle.outbound_health().await);
+    oracle.finish().await;
+}
+
+#[tokio::test]
+async fn runtime_group_key_ignores_non_staging_families() {
+    let mut oracle = Oracle::spawn(false, None);
+    oracle
+        .peer_up_families(
+            A,
+            false,
+            true,
+            None,
+            64,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)],
+        )
+        .await;
+    oracle.peer_up(B, false, true, None, 64).await;
+    assert_eq!(oracle.group_label(A).await, oracle.group_label(B).await);
+    oracle.finish().await;
 }
 
 /// The kitchen-sink exact-stream scenario: initial dump, best change,
