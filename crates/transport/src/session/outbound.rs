@@ -1545,7 +1545,11 @@ impl PeerSession {
     where
         F: FnMut(&[E]) -> Result<UpdateMessage, rustbgpd_wire::EncodeError>,
     {
-        let mut chunk_size = entries.len().min(max_len / 2).max(1);
+        // `max_len` is a byte budget, not an entry count. Keep the first
+        // clone/encode probe bounded, then let the exact encoded-size check
+        // halve it for large or variable-length NLRI. This avoids a 32K-entry
+        // speculative allocation when Extended Messages are negotiated.
+        let mut chunk_size = entries.len().clamp(1, 1024);
         let mut idx = 0;
         while idx < entries.len() {
             let end = (idx + chunk_size).min(entries.len());
