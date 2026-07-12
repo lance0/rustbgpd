@@ -280,6 +280,7 @@ pub struct AddNeighborOpts {
     pub add_path_receive: bool,
     pub add_path_send: bool,
     pub add_path_send_max: u32,
+    pub paths_limit_receive_max: u16,
 }
 
 pub async fn add(
@@ -311,7 +312,7 @@ pub async fn add(
                 add_path_receive: opts.add_path_receive,
                 add_path_send: opts.add_path_send,
                 add_path_send_max: opts.add_path_send_max,
-                paths_limit_receive_max: 0,
+                paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
             }),
         })
         .await?;
@@ -483,6 +484,7 @@ mod tests {
                 add_path_receive: true,
                 add_path_send: true,
                 add_path_send_max: 4,
+                paths_limit_receive_max: 3,
             },
             true,
         )
@@ -496,6 +498,7 @@ mod tests {
         assert!(request.add_path_receive);
         assert!(request.add_path_send);
         assert_eq!(request.add_path_send_max, 4);
+        assert_eq!(request.paths_limit_receive_max, 3);
         assert_eq!(request.remote_asn, 65002);
     }
 

@@ -591,6 +591,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let families = parse_families_proto(&config.families)?;
         let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
         let local_role = parse_bgp_role_proto(&config.role)?;
+        let paths_limit_receive_max = u16::try_from(config.paths_limit_receive_max)
+            .map_err(|_| Status::invalid_argument("paths_limit_receive_max must be <= 65535"))?;
         if remove_private_as != RemovePrivateAs::Disabled && config.remote_asn == self.local_asn {
             return Err(Status::invalid_argument(format!(
                 "remove_private_as requires eBGP (remote_asn {} == local asn {})",
@@ -664,7 +666,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
-            paths_limit_receive_max: 0,
+            paths_limit_receive_max,
             local_role,
             strict_role: config.strict_role,
             // ORF and IPv6-only peering are not exposed on the runtime
