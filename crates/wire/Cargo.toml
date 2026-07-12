@@ -15,7 +15,7 @@ bytes.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]

@@ -36,7 +36,7 @@ tokio-stream.workspace = true
 bench-internals = []
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
 
