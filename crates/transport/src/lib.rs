@@ -20,8 +20,10 @@ pub(crate) mod session;
 mod socket_opts;
 pub mod timer;
 
-// Inbound attribute handling exposed ONLY for the `inbound_attrs`
-// microbench (off by default). Not part of the public API.
+// Authoritative export encoding plus inbound attribute handling exposed ONLY
+// for the off-by-default microbenches. Not part of the normal public API.
+#[cfg(feature = "bench-internals")]
+pub use session::export::fanout_bench_export_encoder;
 #[cfg(feature = "bench-internals")]
 pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 

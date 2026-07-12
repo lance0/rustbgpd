@@ -43,8 +43,3 @@ criterion.workspace = true
 [[bench]]
 name = "rib_ops"
 harness = false
-
-[[bench]]
-name = "fanout"
-harness = false
-required-features = ["bench-internals"]

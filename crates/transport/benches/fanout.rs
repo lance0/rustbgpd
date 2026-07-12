@@ -15,7 +15,7 @@
 //! short-circuits) — the conservative upper bound on per-peer cost.
 //!
 //! Gated behind `bench-internals`; run with:
-//!   cargo bench -p rustbgpd-rib --features bench-internals --bench fanout
+//!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -29,6 +29,7 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_transport::fanout_bench_export_encoder;
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
 };
@@ -153,7 +154,13 @@ fn build(n_peers: usize, export_policy: Option<PolicyChain>) -> FanoutState {
     // Register peers first (Loc-RIB empty → the initial-table dump only emits an
     // EoR marker, which the driver drains → channels start empty), then seed the
     // table to fan out.
-    let receivers = mgr.bench_register_peers(n_peers, export_policy.as_ref(), true, CHANNEL_CAP);
+    let receivers = mgr.bench_register_peers(
+        n_peers,
+        export_policy.as_ref(),
+        true,
+        CHANNEL_CAP,
+        fanout_bench_export_encoder,
+    );
     mgr.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
     let changed: HashSet<Prefix> = prefixes.into_iter().collect();
     (mgr, receivers, changed)

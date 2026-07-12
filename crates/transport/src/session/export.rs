@@ -1672,6 +1672,35 @@ impl SessionExportEncoder {
     }
 }
 
+/// Build the authoritative exact-export encoder used by the manager fanout
+/// microbench. Each call returns a distinct session owner with the fixed
+/// established iBGP/RR profile modelled by that benchmark.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    Arc::new(SessionExportEncoder::new(SessionExportProfile {
+        owner_id: 0,
+        generation: 0,
+        local_asn: 64_512,
+        local_router_id: Ipv4Addr::new(10, 255, 255, 255),
+        local_role: None,
+        route_server_client: false,
+        remove_private_as: RemovePrivateAs::Disabled,
+        cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
+        configured_local_ipv6_nexthop: None,
+        peer_asn: Some(64_512),
+        four_octet_as: true,
+        extended_messages: false,
+        extended_nexthop_ipv4: false,
+        add_path_send_families: Arc::from(Vec::new()),
+        peer_llgr_families: Arc::from(Vec::new()),
+        local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
+        scoped_link_local_peer: false,
+        advertise_graceful_shutdown: false,
+    }))
+}
+
 impl PeerSession {
     /// Publish a complete profile replacement and return the immutable
     /// snapshot that the next outbound envelope must use throughout.

@@ -31,10 +31,10 @@ rustc-hash.workspace = true
 zeroize.workspace = true
 
 [features]
-# Exposes `RouteAttrBundle` + `materialize_attrs` (inbound attribute
-# handling) to the `inbound_attrs` microbench. Off by default — nothing
-# is reachable outside the crate in a normal build.
-bench-internals = []
+# Exposes the real outbound export encoder plus inbound attribute helpers to
+# the `fanout` and `inbound_attrs` microbenches. Off by default — nothing is
+# reachable outside the crate in a normal build.
+bench-internals = ["rustbgpd-rib/bench-internals"]
 
 [dev-dependencies]
 rustbgpd-rib.workspace = true
@@ -43,5 +43,10 @@ criterion.workspace = true
 
 [[bench]]
 name = "inbound_attrs"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "fanout"
 harness = false
 required-features = ["bench-internals"]

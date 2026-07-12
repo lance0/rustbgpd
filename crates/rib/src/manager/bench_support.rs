@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
@@ -21,7 +22,7 @@ use tokio::sync::mpsc;
 use super::RibManager;
 use crate::adj_rib_in::AdjRibIn;
 use crate::route::Route;
-use crate::update::OutboundRouteUpdate;
+use crate::update::{ExactExportEncoder, OutboundRouteUpdate};
 
 impl RibManager {
     /// Register `n_peers` synthetic iBGP outbound peers (`10.a.b.c`), each
@@ -32,17 +33,24 @@ impl RibManager {
     /// initial-table dump enqueues an End-of-RIB marker (even for an empty
     /// Loc-RIB); that marker is drained here so the channels genuinely start
     /// empty for the measured pass, independent of `channel_capacity`.
+    /// `make_exact_export_encoder` must return a fresh authoritative encoder
+    /// for each synthetic session so the measured path includes the same exact
+    /// wire-size probe and owner fencing as production.
     ///
     /// # Panics
     /// If `n_peers` exceeds `u32::MAX` — far beyond any realistic bench.
     #[must_use]
-    pub fn bench_register_peers(
+    pub fn bench_register_peers<F>(
         &mut self,
         n_peers: usize,
         export_policy: Option<&PolicyChain>,
         is_rr_client: bool,
         channel_capacity: usize,
-    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>> {
+        mut make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        F: FnMut() -> Arc<dyn ExactExportEncoder>,
+    {
         let mut receivers = Vec::with_capacity(n_peers);
         for i in 0..n_peers {
             // Unique peer address `10.b1.b2.b3` from the index; the high byte is
@@ -50,10 +58,13 @@ impl RibManager {
             let idx = u32::try_from(i).expect("bench peer count fits in u32");
             let [_, b1, b2, b3] = idx.to_be_bytes();
             let peer = IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3));
+            let session_id = u64::from(idx) + 1;
             let (tx, mut rx) = mpsc::channel(channel_capacity);
+            self.pending_peer_export_encoders
+                .insert((peer, session_id), make_exact_export_encoder());
             self.handle_peer_up(
                 peer,
-                u64::from(idx) + 1,          // synthetic session id
+                session_id,
                 64_512,                      // iBGP — all peers share the local ASN
                 Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
                 tx,

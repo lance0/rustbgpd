@@ -619,7 +619,7 @@ impl RibManager {
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let negotiated_llgr_families = record.negotiated_llgr_families.clone();
         let exact_export_encoder = record.exact_export_encoder.clone();
-        #[cfg(any(test, feature = "bench-internals"))]
+        #[cfg(test)]
         let exact_export_encoder =
             exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
 

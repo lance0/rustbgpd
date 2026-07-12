@@ -36,10 +36,10 @@ use helpers::{
     DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family, unicast_route_family,
 };
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 struct PermissiveTestExactExport;
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 impl crate::update::ExactExportSnapshot for PermissiveTestExactExport {
     fn owner_id(&self) -> u64 {
         0
@@ -65,7 +65,7 @@ impl crate::update::ExactExportSnapshot for PermissiveTestExactExport {
     }
 }
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 impl ExactExportEncoder for PermissiveTestExactExport {
     fn owner_id(&self) -> u64 {
         0
@@ -76,7 +76,7 @@ impl ExactExportEncoder for PermissiveTestExactExport {
     }
 }
 
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 fn permissive_test_exact_export_encoder() -> Arc<dyn ExactExportEncoder> {
     Arc::new(PermissiveTestExactExport)
 }
