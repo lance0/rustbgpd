@@ -254,9 +254,10 @@ disconnect or inspection failure; it never serves an older healthy snapshot as
 a fallback. The counters are cumulative for the lifetime of that TCP socket,
 so any non-zero error counter keeps the socket `DEGRADED` until reconnect.
 `NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
-`UNAVAILABLE` when TCP-AO is configured but there is no socket snapshot
+`UNAVAILABLE` when TCP-AO protects the session but there is no socket snapshot
 (including disconnect and inspection failure), `HEALTHY` when the snapshot has
-no error counters, and `DEGRADED` when any bad, key-not-found,
+both current/RNext key-validity flags and no error counters, and `DEGRADED`
+when either key-validity flag is absent or any bad, key-not-found,
 unsigned-required, or dropped-ICMP counter is non-zero.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection

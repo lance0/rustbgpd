@@ -905,9 +905,10 @@ For live inspection, `rbgp neighbor <address>` reports the configured
 authentication mode and an explicit TCP-AO health state. `unavailable` means
 TCP-AO is configured but no socket inspection snapshot is available (the peer
 may be disconnected, connecting, or socket inspection may have failed).
-`healthy` means the live snapshot has no authentication error counters;
-`degraded` means at least one cumulative socket-lifetime error counter is
-non-zero. When socket
+`healthy` means the live snapshot has valid current/RNext keys and no
+authentication error counters; `degraded` means either key-validity flag is
+missing or at least one cumulative socket-lifetime error counter is non-zero.
+When socket
 inspection succeeds, connected sessions also show current/RNext KeyIDs and
 packet verification counters.
 Counters are refreshed from the socket for each query; inspect `last_error` for

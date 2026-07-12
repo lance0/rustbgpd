@@ -299,8 +299,8 @@ the roadmap:
   [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails);
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
-- TCP-AO (RFC 5925) dynamic-neighbor support, runtime key rotation,
-  multi-key rollover, and per-socket metrics for BGP session protection
+- TCP-AO (RFC 5925) runtime key rotation, multi-key rollover, and per-socket
+  metrics for BGP session protection
 
 ## Current gaps
 
