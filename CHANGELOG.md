@@ -88,6 +88,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for both IPv4 and IPv6; the primary pre-commit RIB policy is unchanged.
   (LAN-375)
 
+- **ORR isolates its SPF graph to the RFC 9552 default topology.** BGP-LS
+  Node, Link, and Prefix inputs are classified before deduplication or graph
+  insertion: valid non-default MT-ID objects and malformed topology/Attribute
+  29 inputs are excluded fail-closed, so they cannot claim nodes, addresses,
+  links, or reachability. Flex-Algorithm data remains inert while the base
+  default object and classic IGP/Prefix Metric stay usable. `rbgp orr`, the
+  status API, aggregate transition logs, export explain, and five fixed-label
+  Prometheus series expose the bounded input diagnostics. (LAN-373)
+
 - **RFC 9234 OTC suppression now precedes Adj-RIB-Out commit.** IPv4/IPv6
   unicast routes carrying OTC toward a Provider, Peer, or Route Server are
   rejected while staging grouped and private export views, including ORR,

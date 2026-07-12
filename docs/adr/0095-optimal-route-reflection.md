@@ -39,8 +39,12 @@ BIRD/GoBGP/OpenBGPd lack it); only commercial routers do.
    it verbatim (the fidelity M73 pins). The topology builder parses the raw
    bytes lazily and locally: IGP Metric (TLV 1095, 1/2/3-byte forms) as link
    cost — a link without it contributes no edge; Prefix Metric (TLV 1155)
-   for reachability cost; TE Default Metric (1092) parsed but unused;
-   Multi-Topology deferred.
+   for reachability cost; TE Default Metric (1092) parsed but unused. The SPF
+   graph is strictly the default topology. Valid non-default Multi-Topology
+   objects and malformed descriptor/Attribute-29 inputs are classified before
+   deduplication and excluded before they can intern nodes or claim addresses,
+   links, or prefixes. Flex-Algorithm attributes are diagnostic-only: the base
+   default object and classic metric remain usable, but no Flex SPF is run.
 
 3. **Next-hop resolution**: exact match on link interface/neighbor addresses
    (TLVs 259–262) wins outright — an unreachable owner is a real
@@ -102,7 +106,9 @@ BIRD/GoBGP/OpenBGPd lack it); only commercial routers do.
   cost to each candidate's next-hop, exactly like unicast
   (`vpn_tiebreak_orr`, same slot in the chain; the RFC 4684 RTC gate
   applies to the vantage winner).
-- **TE / Multi-Topology metrics** — operator demand.
+- **Selectable non-default Multi-Topology, TE, or Flex-Algorithm SPF** —
+  operator demand. Aggregate default-topology input diagnostics are shipped;
+  selection and per-object diagnostics remain deliberately out of scope.
 - **RFC 9107 §3.2 per-policy multiple Decision Processes** — policy
   divergence below step (e) is out of scope until a concrete case appears.
 

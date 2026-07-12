@@ -387,9 +387,12 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   via SPF over the BGP-LS-sourced topology; typed topology accessors, graph +
   hand-rolled Dijkstra + NH-cost resolution, `orr_vantage` config, the
   interior-cost tiebreak at RFC 4271's step-(e) slot, `rbgp topology`/`rbgp
-  orr`. M76 proves live divergent bests, topology-driven flips with zero
-  churn to unaffected clients, and clean fallback. **No other open-source
-  BGP daemon ships ORR.** The M76 lab also surfaced and fixed a latent
+  orr`. The SPF graph is default-topology-only: non-default/malformed inputs
+  are isolated before graph insertion, with aggregate API/CLI/metric/explain
+  diagnostics; Flex-Algorithm data is inert. M76 proves live divergent bests,
+  topology-driven flips with zero churn to unaffected clients, and clean
+  fallback. **No other open-source BGP daemon ships ORR.** The M76 lab also
+  surfaced and fixed a latent
   negotiation bug: implicit IPv4 unicast was added against explicit MP
   capability sets, leaking classic NLRI onto linkstate/VPN/RTC-only
   sessions (#632; capability-less-legacy-peers-only now).
@@ -1231,8 +1234,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   flapping pods), so the stricter probe should be opt-in, not a redefinition.
 - ~~**Optimal Route Reflection (RFC 9107).**~~ **Shipped 2026-07-02**
   (ADR-0095, M76) — see "Recently shipped" under Next. The remaining ORR
-  tail (backup vantages, inter-RR Add-Path for multi-cluster, VPN-ORR,
-  TE/multi-topology metrics, §3.2 per-policy Decision Processes) is
+  tail (backup vantages, inter-RR Add-Path for multi-cluster, selectable
+  TE/non-default/Flex-Algorithm SPF, §3.2 per-policy Decision Processes) is
   recorded in ADR-0095's deferral register with un-defer triggers.
 - **ORF / Outbound Route Filtering follow-ups.** Receive-side Address-Prefix ORF
   (capability code 3, type 64; ADR-0075) is shipped and closes the IX
