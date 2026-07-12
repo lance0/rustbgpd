@@ -1213,6 +1213,7 @@ impl RibManager {
                     None,
                     None, // ORR disqualifies from grouping
                     0,    // Add-Path send disqualifies from grouping
+                    None, // Effective cap is inapplicable to grouped peers.
                     &[],
                     chain.as_ref(),
                     &mut announce,
@@ -2015,6 +2016,11 @@ impl RibManager {
             return GroupMembership::PolicyPeerContext;
         }
         if self.peer_has_any_add_path_send(peer) {
+            // Paths-Limit needs no v2 key dimension today: every Add-Path-send
+            // peer is deliberately private and stages with its own exact
+            // family-local cap. If Add-Path grouping is introduced, the
+            // effective `(AFI, SAFI) -> max` map MUST become part of GroupKey
+            // before this disqualifier is relaxed.
             return GroupMembership::AddPathSend;
         }
         if self.peer_per_client_best.contains(&peer) {

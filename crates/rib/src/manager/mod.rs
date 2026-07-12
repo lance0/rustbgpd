@@ -1997,6 +1997,7 @@ impl RibManager {
             rtc_filter.as_ref(),
             orr_ctx,
             add_path_send_max,
+            self.peer_add_path_send_limits.get(&peer),
             &add_path_send_families,
             self.export_policy_for(peer),
             &mut vpn_announce,

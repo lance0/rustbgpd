@@ -92,6 +92,7 @@ impl RibManager {
         llgr: Option<&Vec<(Afi, Safi)>>,
         orr_ctx: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
         add_path_send_max: u32,
+        add_path_send_limits: Option<&HashMap<(Afi, Safi), u32>>,
         add_path_send_families: &[(Afi, Safi)],
         export_pol: Option<&PolicyChain>,
         metrics: &BgpMetrics,
@@ -122,9 +123,10 @@ impl RibManager {
                 continue;
             }
 
-            let key_send_max = if add_path_send_max > 0 && add_path_send_families.contains(&family)
-            {
-                add_path_send_max
+            let key_send_max = if add_path_send_families.contains(&family) {
+                add_path_send_limits
+                    .and_then(|limits| limits.get(&family).copied())
+                    .unwrap_or(add_path_send_max)
             } else {
                 0
             };
@@ -541,6 +543,7 @@ impl RibManager {
                 llgr.as_ref(),
                 orr_ctx,
                 add_path_send_max,
+                self.peer_add_path_send_limits.get(&peer),
                 &add_path_send_families,
                 export_pol.as_ref(),
                 &metrics,

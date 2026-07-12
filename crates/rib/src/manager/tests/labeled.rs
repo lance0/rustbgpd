@@ -378,9 +378,17 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
         route_reflector_client: false,
         orr_vantage: None,
         add_path_send_families: vec![(Afi::Ipv4, Safi::LabeledUnicast)],
-        add_path_send_max: 2,
+        add_path_send_max: 3,
         negotiated_orf_recv: Vec::new(),
         negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut addpath_out).await;
+    tx.send(RibUpdate::PeerAddPathLimits {
+        peer: addpath_target,
+        session_id: 0,
+        limits: vec![((Afi::Ipv4, Safi::LabeledUnicast), 2)],
     })
     .await
     .unwrap();
@@ -430,7 +438,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     assert_eq!(
         staged.len(),
         2,
-        "send_max=2 caps the staged set at two paths, not three"
+        "family-local limit=2 overrides scalar send_max=3"
     );
     let rank_1 = staged
         .get(&crate::route::LabeledRibRouteKey { prefix, path_id: 1 })
