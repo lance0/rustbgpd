@@ -1239,6 +1239,11 @@ async fn apply_config_transaction_locked(
                 committed_sections: Vec::new(),
                 human_text: "No changes.\n".to_string(),
                 confirmation: None,
+                update_group_impact: Some(
+                    rustbgpd_api::config_service::update_group_impact_to_proto(
+                        plan.update_group_impact,
+                    ),
+                ),
             });
         }
         RuntimeConfigTransactionStatus::Rejected => {
@@ -1263,6 +1268,8 @@ async fn apply_config_transaction_locked(
     // Post-commit token comes from the plan (computed under the peer-manager's
     // key); the apply path can't recompute a key-consistent token itself.
     let post_commit_runtime_snapshot_token = plan.post_commit_runtime_snapshot_token;
+    let update_group_impact =
+        rustbgpd_api::config_service::update_group_impact_to_proto(plan.update_group_impact);
     commit_apply_family(
         deps,
         &config_tx,
@@ -1271,10 +1278,15 @@ async fn apply_config_transaction_locked(
         candidate,
         plan.supported_sections,
         post_commit_runtime_snapshot_token,
+        update_group_impact,
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transaction executor carries candidate, receipt, and commit-token state"
+)]
 async fn commit_apply_family(
     deps: &FibTableControlDeps,
     config_tx: &mpsc::Sender<ConfigEvent>,
@@ -1283,6 +1295,7 @@ async fn commit_apply_family(
     candidate: Config,
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
+    update_group_impact: proto::UpdateGroupImpactPlan,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     match family {
         ApplyFamily::FibTables => {
@@ -1291,6 +1304,7 @@ async fn commit_apply_family(
                 config_tx,
                 &candidate,
                 post_commit_runtime_snapshot_token,
+                update_group_impact,
             )
             .await
         }
@@ -1303,6 +1317,7 @@ async fn commit_apply_family(
                     "Committed [[dynamic_neighbors]] transaction.\n{} range(s) active.\n",
                     candidate.dynamic_neighbors.len()
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::CatalogSnapshot => {
@@ -1316,6 +1331,7 @@ async fn commit_apply_family(
                     candidate.policy.neighbor_sets.len(),
                     candidate.peer_groups.len(),
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::LivePolicyImpact => {
@@ -1332,6 +1348,7 @@ async fn commit_apply_family(
                 format!(
                     "Committed live policy-impact runtime config transaction.\n{refreshed} live session(s) re-evaluated under the new resolved policy.\n"
                 ),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::PeerSessionReshape => {
@@ -1346,6 +1363,7 @@ async fn commit_apply_family(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
                 peer_session_reshape_commit_message(&commit),
+                Some(update_group_impact),
             ))
         }
         ApplyFamily::StaticNeighbors => {
@@ -1361,6 +1379,7 @@ async fn commit_apply_family(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
                 "Committed [[neighbors]] add/delete/modify transaction.\n".to_string(),
+                Some(update_group_impact),
             ))
         }
     }
@@ -1371,6 +1390,7 @@ async fn commit_fib_transaction(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate: &Config,
     post_commit_runtime_snapshot_token: String,
+    update_group_impact: proto::UpdateGroupImpactPlan,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
@@ -1393,6 +1413,7 @@ async fn commit_fib_transaction(
             "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
             response.tables.len()
         ),
+        Some(update_group_impact),
     ))
 }
 
@@ -2457,6 +2478,7 @@ fn committable_response(
     runtime_snapshot_token: String,
     committed_sections: Vec<String>,
     human_text: String,
+    update_group_impact: Option<proto::UpdateGroupImpactPlan>,
 ) -> proto::ConfigTransactionApplyResponse {
     proto::ConfigTransactionApplyResponse {
         status: proto::ConfigTransactionPlanStatus::Committable.into(),
@@ -2464,6 +2486,7 @@ fn committable_response(
         committed_sections,
         human_text,
         confirmation: None,
+        update_group_impact,
     }
 }
 
@@ -2583,6 +2606,7 @@ fn rejected_response(runtime_snapshot_token: String) -> proto::ConfigTransaction
         committed_sections: Vec::new(),
         human_text: "Config transaction is not committable by the current apply executor.\nRun PlanConfigTransaction for section classification.\n".to_string(),
         confirmation: None,
+        update_group_impact: None,
     }
 }
 
@@ -3062,6 +3086,7 @@ peer_group = "edge"
             unsupported_sections: Vec::new(),
             restart_required_sections: Vec::new(),
             human_text: String::new(),
+            update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan::default(),
         }
     }
 

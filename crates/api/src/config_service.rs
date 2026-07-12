@@ -28,6 +28,7 @@ pub struct ConfigService {
 }
 
 impl ConfigService {
+    #[must_use]
     pub fn new(peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
         Self {
             peer_mgr_tx,
@@ -88,6 +89,48 @@ fn transaction_plan_to_proto(
         unsupported_sections: plan.unsupported_sections,
         restart_required_sections: plan.restart_required_sections,
         human_text: plan.human_text,
+        update_group_impact: Some(update_group_impact_to_proto(plan.update_group_impact)),
+    }
+}
+
+#[must_use]
+pub fn update_group_impact_to_proto(
+    plan: rustbgpd_rib::UpdateGroupImpactPlan,
+) -> proto::UpdateGroupImpactPlan {
+    let rollup = plan.rollup;
+    proto::UpdateGroupImpactPlan {
+        schema_version: plan.schema_version,
+        entries: plan
+            .entries
+            .into_iter()
+            .map(|row| proto::UpdateGroupFamilyImpact {
+                peer: row.peer.to_string(),
+                afi: u32::from(row.afi),
+                safi: u32::from(row.safi),
+                current: row.current.label(),
+                candidate: row.candidate.label(),
+                transition: row.transition,
+                reason: row.reason,
+                provenance: row.provenance,
+                local_resync: row.local_resync,
+                remote_route_refresh: row.remote_route_refresh,
+            })
+            .collect(),
+        rollup: Some(proto::UpdateGroupImpactRollup {
+            affected_peers: rollup.affected_peers,
+            affected_families: rollup.affected_families,
+            no_op: rollup.no_op,
+            regroup: rollup.regroup,
+            shared_migration: rollup.shared_migration,
+            private_resync: rollup.private_resync,
+            indeterminate: rollup.indeterminate,
+            projected_shared_groups: rollup.projected_shared_groups,
+            projected_private_views: rollup.projected_private_views,
+            local_resyncs: rollup.local_resyncs,
+            remote_route_refreshes: rollup.remote_route_refreshes,
+        }),
+        capacity_class: plan.capacity_class,
+        capacity_basis: plan.capacity_basis,
     }
 }
 
@@ -408,6 +451,7 @@ mod tests {
                 unsupported_sections: Vec::new(),
                 restart_required_sections: Vec::new(),
                 human_text: "Config transaction is committable by v1.\n".to_string(),
+                update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan::default(),
             }));
         });
 
@@ -509,6 +553,7 @@ mod tests {
                 unsupported_sections: Vec::new(),
                 restart_required_sections: Vec::new(),
                 human_text: "No changes.\n".to_string(),
+                update_group_impact: rustbgpd_rib::UpdateGroupImpactPlan::default(),
             }));
         });
 
@@ -575,6 +620,7 @@ mod tests {
                         committed_sections: vec!["[[fib_tables]]".to_string()],
                         human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
                         confirmation: None,
+                        update_group_impact: None,
                     })
                 })
             })),

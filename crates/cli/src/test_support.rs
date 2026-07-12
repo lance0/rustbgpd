@@ -403,6 +403,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 unsupported_sections: Vec::new(),
                 restart_required_sections: Vec::new(),
                 human_text: "Config transaction is a noop.\n".to_string(),
+                update_group_impact: None,
             }));
         }
         Ok(Response::new(server_proto::ConfigTransactionPlanResponse {
@@ -421,6 +422,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
             unsupported_sections: Vec::new(),
             restart_required_sections: Vec::new(),
             human_text: "Config transaction is committable by v1.\n".to_string(),
+            update_group_impact: None,
         }))
     }
 
@@ -437,6 +439,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 committed_sections: vec!["[[fib_tables]]".to_string()],
                 human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
                 confirmation: None,
+                update_group_impact: None,
             },
         ))
     }
