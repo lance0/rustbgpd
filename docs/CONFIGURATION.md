@@ -2265,16 +2265,19 @@ Plan and apply responses also carry `update_group_impact` schema version 1.
 It projects each established peer and negotiated AFI/SAFI through the same
 groupability classifier used by live update-group registration, assigns
 deterministic plan-local group IDs, and distinguishes regroup, shared migration,
-private resync, and no-op transitions. New, down, deleted, or session-reshaped
-peers are reported as `indeterminate_session_negotiation`; the planner never
-guesses future capabilities. `local_resync` describes local outbound
+private resync, and no-op transitions. Deleted peers have an explicit `absent`
+candidate state and do not count toward the projected topology or local resyncs.
+New, down, or session-reshaped peers are reported as
+`indeterminate_session_negotiation`; the planner never guesses future
+capabilities. `local_resync` describes local outbound
 re-evaluation, while `remote_route_refresh` is separate and remains false for
 this outbound-only projection. Capacity is a receipt-envelope class
 (`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
 `unknown`), not a byte, memory, or completion-time estimate.
 Only the exact published 1,000-peer uniform and 900-shared/100-private
-topologies receive measured capacity labels; smaller or otherwise different
-shapes are `outside_measured`, not extrapolated. The optimistic transaction
+topologies receive measured capacity labels. `fully_shared` is a structural,
+explicitly unmeasured label for other one-group topologies; remaining shapes are
+`outside_measured`, not extrapolated. The optimistic transaction
 token is also bound to the live negotiated update-group snapshot, so a session
 flap, capability change, or membership change observed by Apply's mandatory
 re-plan makes Apply fail with `FAILED_PRECONDITION` and requires a fresh plan.

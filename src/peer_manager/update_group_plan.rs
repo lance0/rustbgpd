@@ -122,6 +122,23 @@ fn transition(current: &PlannedGroupability, candidate: &PlannedGroupability) ->
     }
 }
 
+fn requires_local_resync(candidate: &PlannedGroupability, changed: bool) -> bool {
+    changed
+        && !matches!(
+            candidate,
+            PlannedGroupability::Indeterminate { .. } | PlannedGroupability::Absent
+        )
+}
+
+fn projected_peer_count(entries: &[UpdateGroupFamilyImpact]) -> usize {
+    entries
+        .iter()
+        .filter(|row| !matches!(row.candidate, PlannedGroupability::Absent))
+        .map(|row| row.peer)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
 fn capacity_class(
     projected_peers: usize,
     shared_groups: usize,
@@ -267,8 +284,7 @@ impl PeerManager {
                 "private_resync" => rollup.private_resync += 1,
                 _ => rollup.indeterminate += 1,
             }
-            let local_resync =
-                changed && !matches!(candidate, PlannedGroupability::Indeterminate { .. });
+            let local_resync = requires_local_resync(&candidate, changed);
             if local_resync {
                 rollup.local_resyncs += 1;
             }
@@ -305,11 +321,7 @@ impl PeerManager {
             .collect::<BTreeSet<_>>();
         rollup.projected_shared_groups = u32::try_from(candidate_groups.len()).unwrap_or(u32::MAX);
         rollup.projected_private_views = u32::try_from(candidate_private.len()).unwrap_or(u32::MAX);
-        let projected_peers = entries
-            .iter()
-            .map(|row| row.peer)
-            .collect::<BTreeSet<_>>()
-            .len();
+        let projected_peers = projected_peer_count(&entries);
         let (capacity_class, capacity_basis) = capacity_class(
             projected_peers,
             candidate_groups.len(),
@@ -372,6 +384,37 @@ mod tests {
     fn negotiation_family_comparison_is_order_and_duplicate_independent() {
         assert!(same_families(&[(1, 1), (2, 1), (1, 1)], &[(2, 1), (1, 1)]));
         assert!(!same_families(&[(1, 1)], &[(1, 1), (2, 1)]));
+    }
+
+    #[test]
+    fn deletion_is_not_a_projected_peer_or_local_resync() {
+        let deleted = PlannedGroupability::Absent;
+        assert_eq!(
+            transition(
+                &PlannedGroupability::Group {
+                    id: "plan-group-001".to_string()
+                },
+                &deleted
+            ),
+            "regroup"
+        );
+        assert!(!requires_local_resync(&deleted, true));
+
+        let entries = [UpdateGroupFamilyImpact {
+            peer: "192.0.2.1".parse().unwrap(),
+            afi: 1,
+            safi: 1,
+            current: PlannedGroupability::Group {
+                id: "plan-group-001".to_string(),
+            },
+            candidate: deleted,
+            transition: "regroup".to_string(),
+            reason: "absent".to_string(),
+            provenance: "session_negotiation".to_string(),
+            local_resync: false,
+            remote_route_refresh: false,
+        }];
+        assert_eq!(projected_peer_count(&entries), 0);
     }
 
     #[test]
