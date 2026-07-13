@@ -4,8 +4,9 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
-use super::helpers::{ERR_REFRESH_TIMEOUT, afi_safi_label, gauge_val, prefix_family};
+use super::helpers::{afi_safi_label, gauge_val, prefix_family};
 use super::{PolicyFilteredRouteKey, RibManager};
+use crate::ERR_REFRESH_TIMEOUT;
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
@@ -476,23 +477,20 @@ impl RibManager {
             (peer, afi, safi),
             tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
         );
-        // RFC 7313 §4 refresh-stale snapshot, joint with GR/LLGR retention
-        // (LAN-187). A route can be inside a refresh window AND GR/LLGR-stale
-        // at once: the peer re-established under GR (or during the LLGR
-        // phase), its End-of-RIB is still pending, and a refresh window
-        // opened. The four combinations at EoRR:
+        // RFC 7313 §4 refresh-stale snapshot, kept distinct from GR/LLGR
+        // retention. Transport rejects a GR-capable peer's BoRR until
+        // this family has received End-of-RIB, so a conforming current session
+        // cannot open a refresh window while its initial GR replay is pending.
+        // The GR/LLGR exclusions below remain defensive for retained state from
+        // an older session or direct RIB test/control senders. At EoRR:
         //   1. snapshotted, not GR/LLGR-stale, not re-advertised → purged
         //      (RFC 7313 §4: not re-advertised between BoRR and EoRR).
         //   2. re-advertised inside the window → kept; the insert removed
         //      the snapshot key and cleared any GR/LLGR staleness
         //      (implicit-replace, RFC 4724 §4.1).
-        //   3. GR/LLGR-stale at BoRR, not re-advertised → NOT snapshotted
-        //      below, so EoRR does not purge it: a restarting peer's replay
-        //      is not authoritative while it is still converging. RFC 4724
-        //      §4.1 retains stale paths until End-of-RIB or the restart
-        //      timer, and RFC 9494 §4.2 retains LLGR-stale paths until the
-        //      LLGR timer — those owners sweep the route later.
-        //   4. GR/LLGR-stale acquired DURING the window: unreachable — GR
+        //   3. defensive GR/LLGR-stale state at BoRR is not snapshotted, so its
+        //      RFC 4724/RFC 9494 lifecycle remains authoritative.
+        //   4. GR/LLGR-stale acquired DURING the window is unreachable — GR
         //      entry is session-down, which drops every refresh window for
         //      the peer (`clear_peer_refresh_state`).
         let mut stale_count = 0usize;

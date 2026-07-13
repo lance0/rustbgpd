@@ -503,6 +503,8 @@ impl PeerSession {
             // IPv4 EoR: empty UPDATE (no NLRI, no withdrawn, no attributes)
             if parsed.attributes.is_empty() {
                 info!(peer = %self.peer_label, family = "ipv4_unicast", "received End-of-RIB");
+                self.received_eor_families
+                    .insert((Afi::Ipv4, Safi::Unicast));
                 let _ = self
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
@@ -532,6 +534,7 @@ impl PeerSession {
                     safi = ?mp.safi,
                     "received End-of-RIB"
                 );
+                self.received_eor_families.insert((mp.afi, mp.safi));
                 let _ = self
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
@@ -814,10 +817,19 @@ impl PeerSession {
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
             }
-            if (!loop_withdrawn.is_empty()
+            if !loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty())
-                && self
+                || !loop_evpn_withdrawn.is_empty()
+            {
+                let refresh_delta = self.capture_routes_refresh_delta(
+                    &[],
+                    &loop_withdrawn,
+                    &[],
+                    &loop_fs_withdrawn,
+                    &[],
+                    &loop_evpn_withdrawn,
+                );
+                if self
                     .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -830,11 +842,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_bgpls_withdrawn.is_empty()
-                && self
+            if !loop_bgpls_withdrawn.is_empty() {
+                let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -843,11 +860,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_l3vpn_withdrawn.is_empty()
-                && self
+            if !loop_l3vpn_withdrawn.is_empty() {
+                let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -856,11 +878,17 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_labeled_withdrawn.is_empty()
-                && self
+            if !loop_labeled_withdrawn.is_empty() {
+                let refresh_delta =
+                    self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -869,11 +897,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_rtc_withdrawn.is_empty()
-                && self
+            if !loop_rtc_withdrawn.is_empty() {
+                let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -882,8 +915,12 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
@@ -1042,10 +1079,19 @@ impl PeerSession {
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
             }
-            if (!loop_withdrawn.is_empty()
+            if !loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty())
-                && self
+                || !loop_evpn_withdrawn.is_empty()
+            {
+                let refresh_delta = self.capture_routes_refresh_delta(
+                    &[],
+                    &loop_withdrawn,
+                    &[],
+                    &loop_fs_withdrawn,
+                    &[],
+                    &loop_evpn_withdrawn,
+                );
+                if self
                     .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -1058,11 +1104,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_bgpls_withdrawn.is_empty()
-                && self
+            if !loop_bgpls_withdrawn.is_empty() {
+                let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -1071,11 +1122,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_l3vpn_withdrawn.is_empty()
-                && self
+            if !loop_l3vpn_withdrawn.is_empty() {
+                let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -1084,11 +1140,17 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_labeled_withdrawn.is_empty()
-                && self
+            if !loop_labeled_withdrawn.is_empty() {
+                let refresh_delta =
+                    self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -1097,11 +1159,16 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
-            if !loop_rtc_withdrawn.is_empty()
-                && self
+            if !loop_rtc_withdrawn.is_empty() {
+                let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
+                if self
                     .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
                         peer: self.peer_ip,
                         session_id: self.session_identity.id,
@@ -1110,8 +1177,12 @@ impl PeerSession {
                     })
                     .await
                     .is_err()
-            {
-                return;
+                {
+                    return;
+                }
+                if let Some(delta) = refresh_delta {
+                    self.apply_refresh_accounting_delta(delta);
+                }
             }
             self.drive_fsm(Event::UpdateReceived).await;
             return;
@@ -2046,13 +2117,22 @@ impl PeerSession {
             self.drive_fsm(Event::UpdateValidationError(notif)).await;
             return;
         }
-        if (!announced.is_empty()
+        if !announced.is_empty()
             || !withdrawn.is_empty()
             || !flowspec_announced.is_empty()
             || !flowspec_withdrawn.is_empty()
             || !evpn_announced.is_empty()
-            || !evpn_withdrawn.is_empty())
-            && self
+            || !evpn_withdrawn.is_empty()
+        {
+            let refresh_delta = self.capture_routes_refresh_delta(
+                &announced,
+                &withdrawn,
+                &flowspec_announced,
+                &flowspec_withdrawn,
+                &evpn_announced,
+                &evpn_withdrawn,
+            );
+            if self
                 .deliver_routes_to_rib(RibUpdate::RoutesReceived {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
@@ -2065,11 +2145,17 @@ impl PeerSession {
                 })
                 .await
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
         }
-        if (!bgpls_announced.is_empty() || !bgpls_withdrawn.is_empty())
-            && self
+        if !bgpls_announced.is_empty() || !bgpls_withdrawn.is_empty() {
+            let refresh_delta =
+                self.capture_bgpls_refresh_delta(&bgpls_announced, &bgpls_withdrawn);
+            if self
                 .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
@@ -2078,11 +2164,16 @@ impl PeerSession {
                 })
                 .await
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
         }
-        if (!vpn_announced.is_empty() || !vpn_withdrawn.is_empty())
-            && self
+        if !vpn_announced.is_empty() || !vpn_withdrawn.is_empty() {
+            let refresh_delta = self.capture_vpn_refresh_delta(&vpn_announced, &vpn_withdrawn);
+            if self
                 .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
@@ -2091,11 +2182,17 @@ impl PeerSession {
                 })
                 .await
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
         }
-        if (!labeled_announced.is_empty() || !labeled_withdrawn.is_empty())
-            && self
+        if !labeled_announced.is_empty() || !labeled_withdrawn.is_empty() {
+            let refresh_delta =
+                self.capture_labeled_refresh_delta(&labeled_announced, &labeled_withdrawn);
+            if self
                 .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
@@ -2104,11 +2201,16 @@ impl PeerSession {
                 })
                 .await
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
         }
-        if (!rtc_announced.is_empty() || !rtc_withdrawn.is_empty())
-            && self
+        if !rtc_announced.is_empty() || !rtc_withdrawn.is_empty() {
+            let refresh_delta = self.capture_rtc_refresh_delta(&rtc_announced, &rtc_withdrawn);
+            if self
                 .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
@@ -2117,8 +2219,12 @@ impl PeerSession {
                 })
                 .await
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
         }
         // 5. Tell FSM about the update (restarts hold timer)
         self.drive_fsm(Event::UpdateReceived).await;

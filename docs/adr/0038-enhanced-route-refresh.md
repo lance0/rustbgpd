@@ -51,12 +51,28 @@ When a peer sends:
 When we trigger `SoftResetIn` and the peer supports RFC 7313:
 
 1. Inbound `BoRR` marks current routes from that peer/family as
-   refresh-stale in external RIB manager state
+   refresh-stale in external RIB manager state and snapshots the transport's
+   matching typed route identities for max-prefix accounting
 2. Refreshed announcements/withdrawals clear the exact stale entries they
-   replace
-3. Inbound `EoRR` sweeps any remaining unreplaced routes for that family
+   replace in both views, after their ordered RIB update is accepted
+3. Inbound `EoRR` sweeps any remaining unreplaced routes for that family from
+   both the RIB and the transport's live max-prefix count
 
-This applies to both unicast families and `FlowSpec`.
+The transport mirror covers every family that contributes to the neighbor's
+max-prefix limit: IPv4/IPv6 unicast (including exact Add-Path identity),
+`FlowSpec`, EVPN, BGP-LS, VPN, labeled-unicast, and RT-Constrain. Stale routes
+remain counted during the refresh window. This intentionally provides no
+transient headroom: a peer already at its configured limit can still exceed it
+by announcing a new prefix before `EoRR` reconciles an omitted old prefix.
+
+Marker mutation is ordered behind acceptance by the peer's RIB sender. A full
+RIB channel applies backpressure without opening or closing the local window;
+a closed channel preserves the existing accounting state rather than sweeping
+only one side.
+
+For a peer that advertised Graceful Restart, rustbgpd ignores a `BoRR` for a
+family until that exact family has completed its initial End-of-RIB. This keeps
+RFC 7313 replacement state from overlapping the initial RFC 4724 replay.
 
 Graceful Restart stale state remains separate; ERR uses its own tracking and
 does not overload GR `is_stale`.
@@ -68,9 +84,18 @@ Each active inbound ERR window has a fixed 5-minute timeout.
 If a peer sends `BoRR` but never sends `EoRR`, rustbgpd treats the timeout as
 an implicit end-of-refresh sweep for that `(peer, afi, safi)`:
 
-1. remaining unreplaced refresh-stale entries are withdrawn
-2. the refresh window is closed
-3. a warning is logged
+1. transport enqueues an ordinary `EndRouteRefresh` on the same ordered peer
+   sender used by inbound UPDATEs
+2. after that enqueue succeeds, remaining unreplaced refresh-stale entries are
+   withdrawn from the RIB and transport max-prefix mirror
+3. the refresh window is closed and a warning is logged
+
+The transport checks expiry before every buffered PDU decode and also owns an
+independent timer for quiet peers. If the RIB channel is full, expiry waits so
+the implicit end marker cannot be overtaken by the next UPDATE. If the channel
+is closed, the session preserves the window and live count and stops processing
+the buffered batch; it does not perform an unpaired local sweep. Families with
+different refresh deadlines expire independently.
 
 This bounds resource use and prevents stale refresh state from persisting
 indefinitely due to buggy peers or dropped inbound markers.

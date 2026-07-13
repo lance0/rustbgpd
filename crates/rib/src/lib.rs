@@ -8,6 +8,11 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+/// How long an inbound Enhanced Route Refresh window may remain open before
+/// unreplayed state is reconciled. Shared by the RIB stale-route owner and the
+/// transport max-prefix mirror so both use the same bounded lifecycle.
+pub const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
+
 /// Per-peer inbound RIB storage.
 pub mod adj_rib_in;
 /// Per-peer outbound RIB storage.
