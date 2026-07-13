@@ -68,6 +68,16 @@ def require_directory(path: Path, label: str) -> None:
         fail(f"{label} is not a directory: {path}")
 
 
+def read_text(path: Path, label: str, *, encoding: str = "utf-8") -> str:
+    """Read retained text without leaking a traceback or a private path."""
+    try:
+        return path.read_text(encoding=encoding, errors="strict")
+    except OSError as error:
+        fail(f"cannot read {label}: {error.strerror or error.__class__.__name__}")
+    except UnicodeError as error:
+        fail(f"cannot decode {label}: {error}")
+
+
 def validate_identity(args: argparse.Namespace) -> None:
     candidate_baseline_ancestor = getattr(args, "candidate_baseline_ancestor", None)
     identities = {
@@ -117,7 +127,10 @@ def validate_image(args: argparse.Namespace) -> None:
     require_regular_file(args.builder_provenance, "builder provenance")
     require_regular_file(args.runtime_provenance, "runtime provenance")
     require_equal(args.bgperf2_commit, BGPERF2_COMMIT, "pinned bgperf2 commit")
-    inspect = json.loads(args.inspect.read_text(encoding="utf-8"))
+    try:
+        inspect = json.loads(read_text(args.inspect, "Docker image inspection"))
+    except json.JSONDecodeError as error:
+        fail(f"cannot parse Docker image inspection JSON: {error.msg}")
     if not isinstance(inspect, list) or len(inspect) != 1:
         fail("Docker image inspection must contain exactly one image")
     image = inspect[0]
@@ -141,8 +154,8 @@ def validate_image(args: argparse.Namespace) -> None:
     for name, expected in expected_labels.items():
         require_equal(labels.get(name), expected, f"OCI label {name}")
 
-    builder = args.builder_provenance.read_text(encoding="utf-8")
-    runtime = args.runtime_provenance.read_text(encoding="utf-8")
+    builder = read_text(args.builder_provenance, "builder provenance")
+    runtime = read_text(args.runtime_provenance, "runtime provenance")
     required_builder_lines = (
         f"rustbgpd_commit={args.source_commit}",
         f"bgperf2_commit={args.bgperf2_commit}",
@@ -202,7 +215,8 @@ def validate_barrier(args: argparse.Namespace) -> None:
 
 
 def load_scenario(path: Path) -> dict[str, object]:
-    raw = path.read_text(encoding="utf-8")
+    require_regular_file(path, "scenario")
+    raw = read_text(path, "scenario")
     # bgperf2 stores a Mako helper followed by ordinary YAML. The unexpanded
     # ${gen_paths(...)} token is useful receipt identity and need not allocate
     # 200k route strings merely to validate the scenario.
@@ -211,7 +225,11 @@ def load_scenario(path: Path) -> dict[str, object]:
         if end < 0:
             fail("scenario has an unterminated Mako preamble")
         raw = raw[end + 2 :]
-    scenario = yaml.safe_load(raw)
+    try:
+        scenario = yaml.safe_load(raw)
+    except yaml.YAMLError as error:
+        detail = getattr(error, "problem", None) or error.__class__.__name__
+        fail(f"cannot parse scenario YAML: {detail}")
     if not isinstance(scenario, dict):
         fail("scenario must decode to a mapping")
     return scenario
@@ -384,10 +402,7 @@ def validate_bird_tester_logs(
             sha256_file(source_path),
             f"copied BIRD log {name}",
         )
-        try:
-            content = path.read_text(encoding="utf-8", errors="strict")
-        except (OSError, UnicodeError) as error:
-            fail(f"cannot read retained BIRD log {path.name}: {error}")
+        content = read_text(path, f"tester log {path.name}")
         for line_number, line in enumerate(content.splitlines(), start=1):
             if "RMT" in line and "NEXT_HOP" not in line:
                 errors.append(f"{path.name}:{line_number}")
@@ -439,7 +454,7 @@ def validate_bgperf(args: argparse.Namespace) -> None:
     require_regular_file(args.log, "retained bgperf log")
     scenario = validate_scenario(args.scenario)
     validate_bird_tester_logs(args, scenario)
-    log = args.log.read_text(encoding="utf-8", errors="strict")
+    log = read_text(args.log, "retained bgperf log")
     if "FAILED" in log:
         fail("bgperf log contains FAILED")
 

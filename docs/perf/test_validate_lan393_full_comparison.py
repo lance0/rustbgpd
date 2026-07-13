@@ -69,6 +69,7 @@ def populate(root: Path) -> None:
         "full-daemon-baseline-enabled-SHA256SUMS",
         "full-daemon-baseline-disabled-SHA256SUMS",
         "full-daemon-candidate-enabled-SHA256SUMS",
+        "full-daemon-candidate-disabled-SHA256SUMS",
     ):
         write_manifest(root, manifest)
 
@@ -124,6 +125,21 @@ class FullComparisonTests(unittest.TestCase):
             )
             with self.assertRaises(SystemExit):
                 comparison.baseline(root)
+
+    def test_disabled_receipt_manifests_are_mandatory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            populate(root)
+            (root / "full-daemon-baseline-disabled-SHA256SUMS").unlink()
+            with self.assertRaises(SystemExit):
+                comparison.baseline(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            populate(root)
+            (root / "full-daemon-candidate-disabled-SHA256SUMS").unlink()
+            with self.assertRaises(SystemExit):
+                comparison.candidate(root)
 
 
 if __name__ == "__main__":

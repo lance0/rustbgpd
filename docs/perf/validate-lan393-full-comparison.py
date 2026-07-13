@@ -121,6 +121,7 @@ def zero_producer_samples(receipt: dict[str, object], label: str) -> bool:
 def baseline(root: Path) -> dict[str, object]:
     verify_manifest(root, "microbench-baseline-SHA256SUMS")
     verify_manifest(root, "full-daemon-baseline-enabled-SHA256SUMS")
+    verify_manifest(root, "full-daemon-baseline-disabled-SHA256SUMS")
     manager = read_json(root / "microbench-baseline-verdict.json")
     enabled = read_json(root / "full-daemon-baseline-enabled-perf-attribution.json")
     disabled = read_json(root / "full-daemon-baseline-disabled-perf-attribution.json")
@@ -151,6 +152,7 @@ def candidate(root: Path) -> dict[str, object]:
         "full-daemon-baseline-enabled-SHA256SUMS",
         "full-daemon-baseline-disabled-SHA256SUMS",
         "full-daemon-candidate-enabled-SHA256SUMS",
+        "full-daemon-candidate-disabled-SHA256SUMS",
     ):
         verify_manifest(root, manifest)
     microbench = read_json(root / "microbench-candidate-verdict.json")

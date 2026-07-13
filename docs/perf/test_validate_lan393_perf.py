@@ -69,6 +69,23 @@ class PerfClassifierTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 perf.classify(self.write(Path(directory), PRODUCER), "baseline", "disabled")
 
+    def test_parent_symlink_and_invalid_utf8_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "real"
+            real.mkdir()
+            path = self.write(real, MANAGER)
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(SystemExit):
+                perf.classify(alias / path.name, "baseline", "enabled")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perf-script.txt"
+            path.write_bytes(b"\xff\xfe")
+            with self.assertRaises(SystemExit):
+                perf.classify(path, "baseline", "enabled")
+
 
 if __name__ == "__main__":
     unittest.main()

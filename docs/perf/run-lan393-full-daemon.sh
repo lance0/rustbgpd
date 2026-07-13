@@ -63,7 +63,10 @@ write_host_fingerprint() {
     local output=$1 cpu_model physical_cores logical_cpus memory_bytes
     cpu_model=$(awk -F: '/model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)
     logical_cpus=$(getconf _NPROCESSORS_ONLN)
-    physical_cores=$(lscpu -p=CORE,SOCKET | awk '!/^#/ { seen[$1 FS $2]=1 } END { print length(seen) }')
+    physical_cores=$(lscpu -p=CORE,SOCKET | awk '
+        !/^#/ { seen[$1 FS $2]=1 }
+        END { for (key in seen) count++; print count + 0 }
+    ')
     memory_bytes=$(awk '/MemTotal:/ { print $2 * 1024 }' /proc/meminfo)
     {
         printf 'schema=1\n'

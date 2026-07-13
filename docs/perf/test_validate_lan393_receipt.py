@@ -502,6 +502,31 @@ class ReceiptValidatorTests(unittest.TestCase):
                     self.image_files(Path(directory), revision=CANDIDATE)
                 )
 
+    def test_malformed_image_json_fails_closed_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.image_files(Path(directory))
+            args.inspect.write_text("{not-json\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as raised:
+                receipt.validate_image(args)
+            self.assertIn("cannot parse Docker image inspection JSON", str(raised.exception))
+
+    def test_malformed_scenario_and_bgperf_encoding_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.bgperf_files(Path(directory))
+            malformed = "target: [unterminated\n"
+            args.scenario.write_text(malformed, encoding="utf-8")
+            args.source_scenario.write_text(malformed, encoding="utf-8")
+            with self.assertRaises(SystemExit) as raised:
+                receipt.validate_bgperf(args)
+            self.assertIn("cannot parse scenario YAML", str(raised.exception))
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.bgperf_files(Path(directory))
+            args.log.write_bytes(b"\xff\xfe")
+            with self.assertRaises(SystemExit) as raised:
+                receipt.validate_bgperf(args)
+            self.assertIn("cannot decode retained bgperf log", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

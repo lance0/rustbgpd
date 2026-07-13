@@ -24,10 +24,26 @@ def fail(message: str) -> None:
     raise SystemExit(message)
 
 
+def require_no_symlink_components(path: Path) -> None:
+    """Reject a perf input whose leaf or any existing parent is a symlink."""
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.is_symlink():
+            fail("perf script contains a symlink component")
+
+
 def classify(path: Path, phase: str, mode: str) -> dict[str, object]:
-    if path.is_symlink() or not path.is_file():
-        fail(f"perf script is not a regular file: {path}")
-    text = path.read_text(encoding="utf-8", errors="strict")
+    require_no_symlink_components(path)
+    if not path.is_file():
+        fail("perf script is not a regular file")
+    try:
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except OSError as error:
+        fail(f"cannot read perf script: {error.strerror or error.__class__.__name__}")
+    except UnicodeError as error:
+        fail(f"cannot decode perf script: {error}")
     if "/home/" in text or "/Users/" in text:
         fail("perf script contains an unsanitized host path")
     blocks = [block for block in text.split("\n\n") if block.strip()]
