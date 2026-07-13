@@ -26,6 +26,10 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+      - name: Install receipt-tool dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - run: cargo fmt --check
       - run: python3 scripts/check-clippy-reasons.py
       - run: python3 scripts/check-v1-stable-surface.py
