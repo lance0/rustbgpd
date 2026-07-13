@@ -6,13 +6,39 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{dummy_query_rx, make_route_with_lp, query_best_routes};
+use super::{
+    dummy_query_rx, make_bgpls_route, make_evpn_imet, make_flowspec_route, make_labeled_rib_route,
+    make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route, query_best_routes,
+};
 use crate::{
     PeerOutboundState, RibManager, RibUpdate, SelectionDeferralConfig,
     SelectionDeferralWaiterConfig,
 };
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+
+fn counter_value(metrics: &BgpMetrics, name: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .map_or(0.0, |family| {
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| metric.get_counter().value())
+                .sum()
+        })
+}
+
+fn assert_counter_value(metrics: &BgpMetrics, name: &str, expected: f64) {
+    let actual = counter_value(metrics, name);
+    assert!(
+        (actual - expected).abs() < f64::EPSILON,
+        "expected {name}={expected}, got {actual}"
+    );
+}
 
 fn peer(octet: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))
@@ -324,31 +350,38 @@ async fn duplicate_address_roster_fails_closed_until_timer() {
 }
 
 #[test]
-fn withdrawn_restored_key_is_recomputed_before_release_eor() {
+fn overflow_fallback_withdraws_restored_keys_before_release_eor() {
     let source = peer(1);
     let observer = peer(2);
     let (_tx, rx) = mpsc::channel(32);
+    let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(
         rx,
         dummy_query_rx(),
         None,
         Some(Ipv4Addr::new(10, 0, 0, 254)),
-        BgpMetrics::new(),
+        metrics.clone(),
     );
 
     let (observer_tx, mut observer_rx) = mpsc::channel(16);
     manager.handle_update(peer_up(observer, 7, observer_tx));
     while observer_rx.try_recv().is_ok() {}
 
-    let route = make_route_with_lp(
+    let route_a = make_route_with_lp(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
         Ipv4Addr::new(10, 0, 0, 1),
         100,
     );
-    let prefix = route.prefix;
+    let route_b = make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+        100,
+    );
+    let prefix_a = route_a.prefix;
+    let prefix_b = route_b.prefix;
     manager.enqueue_routes_received(
         source,
-        vec![route],
+        vec![route_a, route_b],
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -356,27 +389,34 @@ fn withdrawn_restored_key_is_recomputed_before_release_eor() {
         Vec::new(),
     );
     while manager.process_next_route_chunk() {}
-    assert!(manager.loc_rib.get(&prefix).is_some());
+    assert!(manager.loc_rib.get(&prefix_a).is_some());
+    assert!(manager.loc_rib.get(&prefix_b).is_some());
     while observer_rx.try_recv().is_ok() {}
 
     // Model a route restored before the planned-restart gate is installed.
-    // A withdrawal received while gated disappears from Adj-RIB-In, so the
-    // deferred identity ledger is the only release-time evidence that the
-    // stale Loc-RIB row must be removed.
+    // Only one identity fits in this test ledger. The second marks the family
+    // overflowed, after which later identities for that family are not retained.
+    // Release must use the frozen Loc-RIB as the fail-safe identity source.
     manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    manager.record_deferred_unicast_with_test_limit(&HashSet::from([prefix_a, prefix_b]), 1);
+    assert_counter_value(
+        &metrics,
+        "bgp_selection_deferral_ledger_overflows_total",
+        1.0,
+    );
     manager.enqueue_routes_received(
         source,
         Vec::new(),
-        vec![(prefix, 0)],
+        vec![(prefix_a, 0), (prefix_b, 0)],
         Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
     );
     while manager.process_next_route_chunk() {}
-    assert!(manager.loc_rib.get(&prefix).is_some());
+    assert!(manager.loc_rib.get(&prefix_a).is_some());
+    assert!(manager.loc_rib.get(&prefix_b).is_some());
 
-    let metrics = manager.metrics.clone();
     let peer_gr_families = HashSet::from([FAMILY]);
     let released = manager
         .selection_deferral
@@ -389,16 +429,131 @@ fn withdrawn_restored_key_is_recomputed_before_release_eor() {
     manager.finalize_selection_deferral_all_eor(FAMILY);
     manager.release_selection_families(&[FAMILY], "test all EoRs received");
 
-    assert!(manager.loc_rib.get(&prefix).is_none());
-    let mut saw_withdraw = false;
+    assert!(manager.loc_rib.get(&prefix_a).is_none());
+    assert!(manager.loc_rib.get(&prefix_b).is_none());
+    assert_eq!(manager.adj_ribs_out.get(&observer).unwrap().len(), 0);
+    let mut withdrawn = HashSet::new();
     loop {
         let update = observer_rx.try_recv().unwrap();
         if update.end_of_rib.contains(&FAMILY) {
-            assert!(saw_withdraw, "EoR overtook the deferred withdrawal");
+            assert_eq!(
+                withdrawn,
+                HashSet::from([prefix_a, prefix_b]),
+                "EoR overtook one or more deferred withdrawals"
+            );
             break;
         }
-        saw_withdraw |= update.withdraw.iter().any(|(p, _)| *p == prefix);
+        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
     }
+    assert_counter_value(
+        &metrics,
+        "bgp_selection_deferral_ledger_overflows_total",
+        1.0,
+    );
+}
+
+#[test]
+fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let route_peer = Ipv4Addr::new(10, 0, 0, 1);
+
+    let unicast = make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        route_peer,
+        100,
+    );
+    let unicast_key = unicast.prefix;
+    assert!(
+        manager
+            .loc_rib
+            .recompute(unicast_key, std::iter::once(&unicast))
+    );
+
+    let flowspec = make_flowspec_route(route_peer);
+    let flowspec_key = flowspec.selection_key();
+    assert!(
+        manager
+            .loc_rib
+            .recompute_flowspec(flowspec_key.clone(), std::iter::once(&flowspec))
+    );
+
+    let evpn = make_evpn_imet(route_peer, 101);
+    let evpn_key = evpn.key();
+    assert!(
+        manager
+            .loc_rib
+            .recompute_evpn(evpn_key, std::iter::once(&evpn))
+    );
+
+    let vpn = make_vpn_rib_route(route_peer, 31, 100, 100);
+    let vpn_key = vpn.nlri.key();
+    manager.loc_rib.insert_vpn(vpn);
+
+    let labeled = make_labeled_rib_route(route_peer, 32, 100, 100);
+    let labeled_key = labeled.nlri.key();
+    manager.loc_rib.insert_labeled(labeled);
+
+    let bgpls = make_bgpls_route(route_peer, 33, 100);
+    let bgpls_key = bgpls.key();
+    let bgpls_family = bgpls.family.to_afi_safi();
+    manager.loc_rib.insert_bgpls(bgpls);
+
+    let rtc = make_rtc_rib_route(route_peer, 34, 100);
+    let rtc_key = rtc.key();
+    manager.loc_rib.insert_rtc(rtc);
+
+    let families = [
+        FAMILY,
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        bgpls_family,
+        crate::route::RtcRibRouteKey::afi_safi(),
+    ];
+    for family in families {
+        manager.mark_deferred_selection_overflow_for_test(family);
+        manager.recompute_released_selection_family_for_test(family);
+    }
+
+    assert!(manager.loc_rib.get(&unicast_key).is_none());
+    assert!(manager.loc_rib.get_flowspec(&flowspec_key).is_none());
+    assert!(manager.loc_rib.get_evpn(&evpn_key).is_none());
+    assert!(manager.loc_rib.get_vpn(&vpn_key).is_none());
+    assert!(manager.loc_rib.get_labeled(&labeled_key).is_none());
+    assert!(manager.loc_rib.get_bgpls(&bgpls_key).is_none());
+    assert!(manager.loc_rib.get_rtc(&rtc_key).is_none());
+}
+
+#[test]
+fn inactive_selection_gate_skips_identity_tracking_before_and_after_release() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let prefix = rustbgpd_wire::Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    let affected = HashSet::from([prefix]);
+
+    manager.record_deferred_unicast_with_test_limit(&affected, 0);
+    assert_counter_value(
+        &metrics,
+        "bgp_selection_deferral_ledger_overflows_total",
+        0.0,
+    );
+
+    manager = manager.with_selection_deferral(config(Duration::from_secs(1), &[peer(1)]));
+    let released = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .expire(&metrics);
+    assert_eq!(released, vec![FAMILY]);
+    manager.record_deferred_unicast_with_test_limit(&affected, 0);
+    assert_counter_value(
+        &metrics,
+        "bgp_selection_deferral_ledger_overflows_total",
+        0.0,
+    );
 }
 
 #[test]

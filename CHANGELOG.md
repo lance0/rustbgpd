@@ -132,6 +132,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   policy in addition to selected property schemas, while continuing to allow
   unselected optional sibling fields and descriptive-prose changes.
 
+- **Planned-restart selection deferral now has a bounded identity ledger.**
+  At most one million affected route identities are retained across all gated
+  families. If a family exceeds that process-wide bound, release performs a
+  complete Adj-RIB-In plus Loc-RIB sweep so withdrawals received before EoR
+  cannot leave stale selected or advertised routes. A one-shot warning and
+  `bgp_selection_deferral_ledger_overflows_total{afi_safi}` expose the fallback.
+
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
   encoder and negotiated message ceiling. The RIB probes the final one-route

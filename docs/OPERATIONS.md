@@ -749,11 +749,14 @@ owned-state.
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking selection for the family |
 | `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor` or `timer` |
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
+| `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families that exceeded the one-million-identity process ledger and used a complete release sweep |
 
 For active gates, `rbgp neighbor <address>` and
 `NeighborService.GetNeighborState` also show the peer's waiter state, stamped
 session, blocking-waiter count, and remaining time. A released row retains its
-reason for the daemon lifetime.
+reason for the daemon lifetime. A ledger-overflow warning is emitted once per
+family; release then enumerates the complete Adj-RIB-In and Loc-RIB family so
+withdrawals that already left Adj-RIB-In are still removed before EoR.
 
 ### BFD
 
