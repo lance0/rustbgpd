@@ -242,6 +242,8 @@ pub(super) struct PendingCleanPolicyTransition {
     reply: Option<
         tokio::sync::oneshot::Sender<Result<crate::update::ExportPolicyCohortOutcome, String>>,
     >,
+    started_at: tokio::time::Instant,
+    slow_warning_emitted: bool,
     phase: Option<CleanPolicyTransitionPhase>,
     created_destination: Option<usize>,
 }
@@ -322,6 +324,8 @@ impl PendingCleanPolicyTransition {
         Self {
             replacements,
             reply,
+            started_at: tokio::time::Instant::now(),
+            slow_warning_emitted: false,
             phase: Some(CleanPolicyTransitionPhase::Classify {
                 cursor: 0,
                 seen: HashSet::new(),
@@ -329,6 +333,26 @@ impl PendingCleanPolicyTransition {
             }),
             created_destination: None,
         }
+    }
+
+    pub(super) fn elapsed(&self) -> std::time::Duration {
+        self.started_at.elapsed()
+    }
+
+    pub(super) fn member_count(&self) -> usize {
+        self.replacements.len()
+    }
+
+    pub(super) fn take_slow_warning(
+        &mut self,
+        threshold: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        let elapsed = self.elapsed();
+        if elapsed < threshold || self.slow_warning_emitted {
+            return None;
+        }
+        self.slow_warning_emitted = true;
+        Some(elapsed)
     }
 
     pub(super) fn take_reply(
@@ -2196,10 +2220,13 @@ impl RibManager {
             )));
             return;
         }
-        assert!(
-            self.pending_clean_policy_transition.is_none(),
-            "normal RIB mutations must remain fenced behind a pending policy transition"
-        );
+        if self.pending_clean_policy_transition.is_some() {
+            let _ = reply.send(Err(
+                "internal RIB sequencing error: policy transition already in progress".to_string(),
+            ));
+            return;
+        }
+        self.metrics.set_rib_policy_transition_in_progress(true);
         self.pending_clean_policy_transition =
             Some(PendingCleanPolicyTransition::new(replacements, Some(reply)));
     }

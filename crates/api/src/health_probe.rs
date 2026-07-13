@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerReadinessQuery};
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 
 /// Total deadline for the core actor readiness probe.
 pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
@@ -83,7 +83,8 @@ pub struct CoreHealthSnapshot {
 pub struct CoreReadinessProbe {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: Option<mpsc::Sender<PeerManagerReadinessQuery>>,
-    rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
+    rib_readiness_tx: Option<mpsc::Sender<RibReadinessQuery>>,
     gate: Option<DaemonGate>,
 }
 
@@ -92,12 +93,13 @@ impl CoreReadinessProbe {
     #[must_use]
     pub fn new(
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-        rib_tx: mpsc::Sender<RibUpdate>,
+        rib_query_tx: mpsc::Sender<RibUpdate>,
     ) -> Self {
         Self {
             peer_mgr_tx,
             peer_mgr_readiness_tx: None,
-            rib_tx,
+            rib_query_tx,
+            rib_readiness_tx: None,
             gate: None,
         }
     }
@@ -112,6 +114,15 @@ impl CoreReadinessProbe {
         peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     ) -> Self {
         self.peer_mgr_readiness_tx = Some(peer_mgr_readiness_tx);
+        self
+    }
+
+    /// Route the RIB half of the probe through its dedicated type-narrow lane.
+    /// Production callers install this sender so general RIB queries remain
+    /// fenced behind an atomic policy transition.
+    #[must_use]
+    pub fn with_rib_readiness(mut self, rib_readiness_tx: mpsc::Sender<RibReadinessQuery>) -> Self {
+        self.rib_readiness_tx = Some(rib_readiness_tx);
         self
     }
 
@@ -185,10 +196,17 @@ impl CoreReadinessProbe {
     async fn query_rib(&self, deadline: Instant) -> Result<usize, CoreReadinessError> {
         timeout_until(deadline, CoreReadinessError::RibTimedOut, async {
             let (reply_tx, reply_rx) = oneshot::channel();
-            self.rib_tx
-                .send(RibUpdate::QueryLocRibCount { reply: reply_tx })
-                .await
-                .map_err(|_| CoreReadinessError::RibUnavailable)?;
+            if let Some(readiness_tx) = &self.rib_readiness_tx {
+                readiness_tx
+                    .send(RibReadinessQuery::LocRibCount { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::RibUnavailable)?;
+            } else {
+                self.rib_query_tx
+                    .send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::RibUnavailable)?;
+            }
             reply_rx
                 .await
                 .map_err(|_| CoreReadinessError::RibDroppedReply)
@@ -375,6 +393,28 @@ mod tests {
         assert!(
             peer_rx.try_recv().is_err(),
             "ordinary peer-manager command lane must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_uses_dedicated_rib_readiness_lane_when_installed() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
+        let (rib_readiness_tx, mut rib_readiness_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            let RibReadinessQuery::LocRibCount { reply } =
+                rib_readiness_rx.recv().await.expect("RIB readiness query");
+            reply.send(11).unwrap();
+        });
+
+        assert_eq!(result.unwrap().total_routes, 11);
+        assert!(
+            rib_query_rx.try_recv().is_err(),
+            "ordinary RIB query lane must remain untouched"
         );
     }
 

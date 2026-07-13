@@ -1194,19 +1194,22 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
 #[tokio::test(flavor = "current_thread")]
 #[expect(
     clippy::too_many_lines,
-    reason = "the scheduler regression pins query visibility, no-emission, and mutation FIFO in one transaction"
+    reason = "the scheduler regression pins dedicated readiness, general-query isolation, and terminal release in one transaction"
 )]
-async fn clean_policy_transition_yields_to_queries_and_fences_mutations() {
+async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     const ROUTE_COUNT: usize = 32;
+    const QUERY_FLOOD: usize = 128;
     let (tx, rx) = mpsc::channel(128);
-    let (query_tx, query_rx) = mpsc::channel(128);
-    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let (query_tx, query_rx) = mpsc::channel(QUERY_FLOOD);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, query_rx, None, None, metrics.clone())
+        .with_readiness_queries(readiness_rx);
     let handle = tokio::spawn(manager.run());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_1001);
     let next_policy = community_chain(0xFDE8_1002);
-    let later_policy = community_chain(0xFDE8_1003);
     let peers = [
         IpAddr::V4(Ipv4Addr::new(10, 25, 0, 1)),
         IpAddr::V4(Ipv4Addr::new(10, 25, 0, 2)),
@@ -1266,66 +1269,70 @@ async fn clean_policy_transition_yields_to_queries_and_fences_mutations() {
         .collect::<Vec<_>>();
     let (reply, mut response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicies {
-        replacements: replacements.clone(),
+        replacements,
         reply,
     })
     .await
     .unwrap();
 
-    // Establish a scheduler-visible barrier: once a read-only priority query
-    // reports a completed actor poll, the next query is necessarily created
-    // after transition work has begun on this single-thread runtime.
-    loop {
-        let (reply, stats) = oneshot::channel();
-        query_tx
-            .send(RibUpdate::TestQueryPolicyTransitionStats { reply })
-            .await
-            .unwrap();
-        if stats.await.unwrap().4 > 0 {
-            break;
-        }
+    // The zero-label gauge is the production ownership barrier. On this
+    // current-thread runtime the actor yields after each transition poll, so
+    // observing 1 proves the transition owns the actor before the flood below.
+    while (gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]) - 1.0).abs()
+        >= f64::EPSILON
+    {
+        tokio::task::yield_now().await;
     }
     assert!(matches!(
         response.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
 
-    tx.send(RibUpdate::PeerDown {
-        peer: peers[0],
-        session_id: 0,
-    })
-    .await
-    .unwrap();
-    let (second_reply, mut second_response) = oneshot::channel();
-    tx.send(RibUpdate::ReplacePeerExportPolicies {
-        replacements: peers
-            .iter()
-            .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
-                export_policy: Some(later_policy.clone()),
-            })
-            .collect(),
-        reply: second_reply,
-    })
-    .await
-    .unwrap();
+    let mut general_replies = Vec::with_capacity(QUERY_FLOOD);
+    for _ in 0..QUERY_FLOOD {
+        let (reply, response) = oneshot::channel();
+        query_tx
+            .send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        general_replies.push(response);
+    }
+    assert_eq!(
+        query_tx.capacity(),
+        0,
+        "general query lane must be saturated"
+    );
 
-    assert_eq!(query_update_group(&query_tx, peers[0]).await, "group:0");
-    let (count_reply, count_response) = oneshot::channel();
-    query_tx
-        .send(RibUpdate::QueryLocRibCount { reply: count_reply })
+    let (readiness_reply, readiness_response) = oneshot::channel();
+    readiness_tx
+        .send(crate::update::RibReadinessQuery::LocRibCount {
+            reply: readiness_reply,
+        })
         .await
         .unwrap();
-    assert_eq!(count_response.await.unwrap(), ROUTE_COUNT);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), readiness_response)
+            .await
+            .expect("dedicated readiness must beat the core deadline")
+            .unwrap(),
+        ROUTE_COUNT
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        1.0,
+        "transition remains owned while readiness overtakes the query flood",
+    );
+    for reply in &mut general_replies {
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
     assert!(
         receivers
             .iter_mut()
             .all(|receiver| receiver.try_recv().is_err())
     );
-    assert!(matches!(
-        second_response.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
     assert!(matches!(
         response.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -1335,19 +1342,159 @@ async fn clean_policy_transition_yields_to_queries_and_fences_mutations() {
         response.await.unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
     );
-    assert!(
-        second_response.await.unwrap().is_err(),
-        "PeerDown queued first must unregister the peer before the second replacement"
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        0.0,
+        "commit clears transition ownership",
     );
+    for reply in &mut general_replies {
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
     for receiver in &mut receivers {
         assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
     }
-    assert_eq!(query_update_group(&query_tx, peers[0]).await, "");
+    for reply in general_replies {
+        assert_eq!(reply.await.unwrap(), ROUTE_COUNT);
+    }
+    assert_eq!(query_update_group(&query_tx, peers[0]).await, "group:1");
     assert_eq!(query_update_group(&query_tx, peers[1]).await, "group:1");
 
     drop(tx);
     drop(query_tx);
+    drop(readiness_tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_policy_transition_batches_leave_observability_idle() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+
+    let (empty_reply, empty_response) = oneshot::channel();
+    manager.handle_replace_peer_export_policies(Vec::new(), empty_reply);
+    assert_eq!(
+        empty_response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+
+    let (invalid_reply, invalid_response) = oneshot::channel();
+    manager.handle_replace_peer_export_policies(
+        vec![crate::update::PeerExportPolicyReplacement {
+            peer: "192.0.2.250".parse().unwrap(),
+            export_policy: None,
+        }],
+        invalid_reply,
+    );
+    assert!(invalid_response.await.unwrap().is_err());
+
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        0.0,
+        "empty and rejected batches never acquire transition ownership",
+    );
+    assert_metric(
+        gauge_metric_value(
+            &metrics,
+            "bgp_rib_policy_transition_last_duration_milliseconds",
+            &[],
+        ),
+        0.0,
+        "non-started batches do not create a terminal duration",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_pending_policy_transition_returns_internal_error_without_gauge_churn() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer: IpAddr = "192.0.2.251".parse().unwrap();
+    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+    manager.outbound_peers.insert(peer, outbound_tx);
+    let replacement = crate::update::PeerExportPolicyReplacement {
+        peer,
+        export_policy: None,
+    };
+
+    let (first_reply, mut first_response) = oneshot::channel();
+    manager.handle_replace_peer_export_policies(vec![replacement.clone()], first_reply);
+    assert!(matches!(
+        first_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        1.0,
+        "first batch acquires transition ownership",
+    );
+
+    let (duplicate_reply, duplicate_response) = oneshot::channel();
+    manager.handle_replace_peer_export_policies(vec![replacement], duplicate_reply);
+    assert_eq!(
+        duplicate_response.await.unwrap().unwrap_err(),
+        "internal RIB sequencing error: policy transition already in progress"
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        1.0,
+        "duplicate rejection must not clear or reacquire existing ownership",
+    );
+    assert_metric(
+        gauge_metric_value(
+            &metrics,
+            "bgp_rib_policy_transition_last_duration_milliseconds",
+            &[],
+        ),
+        0.0,
+        "duplicate rejection must not create a terminal duration",
+    );
+}
+
+#[tokio::test]
+async fn accepted_policy_transition_does_not_drain_prequeued_general_queries() {
+    let (_tx, rx) = mpsc::channel(1);
+    let (query_tx, query_rx) = mpsc::channel(1);
+    let (query_reply, mut query_response) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply: query_reply })
+        .await
+        .unwrap();
+
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, query_rx, None, None, metrics.clone());
+    let peer: IpAddr = "192.0.2.252".parse().unwrap();
+    let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+    manager.outbound_peers.insert(peer, outbound_tx);
+    let (transition_reply, mut transition_response) = oneshot::channel();
+    manager.handle_replace_peer_export_policies(
+        vec![crate::update::PeerExportPolicyReplacement {
+            peer,
+            export_policy: None,
+        }],
+        transition_reply,
+    );
+
+    // This is the exact fairness seam used after a primary-channel receive.
+    // The accepted transition must suppress it even though the query was
+    // already queued before ownership began.
+    manager.drain_general_queries_if_unfenced();
+    assert!(matches!(
+        query_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        transition_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        1.0,
+        "prequeued general query remains behind accepted transition",
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1456,7 +1603,9 @@ async fn clean_policy_transition_matches_force_ungrouped_member_views() {
 )]
 async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejection() {
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let metrics = BgpMetrics::new();
+    metrics.set_rib_policy_transition_last_duration(std::time::Duration::from_secs(987));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
@@ -1540,6 +1689,19 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         query_uncommitted_policy_transition_groups(&tx).await,
         0,
         "a fully staged destination must be removed before the fallback handoff"
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        0.0,
+        "fallback clears transition ownership",
+    );
+    assert!(
+        gauge_metric_value(
+            &metrics,
+            "bgp_rib_policy_transition_last_duration_milliseconds",
+            &[],
+        ) < 987_000.0,
+        "fallback must replace the retained terminal-duration sample"
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 

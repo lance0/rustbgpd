@@ -460,7 +460,18 @@ authenticated sensitive-read surface.
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The survivor is re-registered, re-sent the initial table, and asked for an inbound ROUTE-REFRESH |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
+| `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane stays live |
+| `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_orr_input_objects{classification}` | Inputs considered by the ORR default-topology builder before NLRI deduplication. Exactly five classifications exist: `included_default`, `excluded_nondefault`, `malformed_topology`, `malformed_attribute_29`, and `default_with_ignored_flex_algo`. The Flex series is a subset of included default objects: its base object and classic metric remain usable. All series reset to zero when no vantage is configured |
+
+The shipped alert pack raises `BgpPolicyTransitionStalled` when
+`bgp_rib_policy_transition_in_progress == 1` for one minute. Readiness remains
+healthy during bounded progress by design; investigate the transition warning
+and retained duration rather than treating this gauge as a readiness failure.
+A readiness request that arrives after general queries have queued can overtake
+them on its dedicated lane. It cannot preempt an O(table) general query that
+was already executing when the request arrived; that actor call must return
+before either the transition or readiness probe can advance.
 
 ### Ingress rejection / route-leak detection
 

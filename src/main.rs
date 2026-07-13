@@ -2248,6 +2248,7 @@ async fn run<T>(
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(resolve_rib_channel_capacity());
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
+    let (rib_readiness_tx, rib_readiness_rx) = mpsc::channel::<rustbgpd_rib::RibReadinessQuery>(64);
 
     // Spawn BMP subsystem (manager + per-collector clients). Spawned
     // before the RIB manager so the RFC 9069 Loc-RIB tap and the
@@ -2377,7 +2378,8 @@ async fn run<T>(
         export_policy,
         cluster_id,
         metrics.clone(),
-    );
+    )
+    .with_readiness_queries(rib_readiness_rx);
     if let Some(deadline) = local_gr_restart_until {
         let waiters = peer_configs
             .iter()
@@ -3345,6 +3347,7 @@ async fn run<T>(
         metrics: metrics.clone(),
         start_time,
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
+        rib_readiness_tx: rib_readiness_tx.clone(),
         mrt_trigger_tx,
         evpn_originated_local_mac_count: {
             let counts = evpn_originated_local_mac_counts.clone();
@@ -3700,6 +3703,7 @@ async fn run<T>(
             rib_query_tx.clone(),
         )
         .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
+        .with_rib_readiness(rib_readiness_tx.clone())
         .with_gate(daemon_gate.clone());
         tokio::spawn(async move {
             metrics_server::serve_metrics(prometheus_addr, metrics_clone, readiness_probe).await;

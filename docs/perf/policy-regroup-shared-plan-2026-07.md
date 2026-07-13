@@ -113,11 +113,12 @@ The follow-up measurement source is `114072d7`, based on merged shared-plan
 main `d6d07a76`. It keeps the strict PR-1 eligibility and fallback rules. One
 actor-owned pending transition has exactly five phases: `Classify`,
 `StageDestination`, `BuildInventory`, `ProbeAndPrepare`, and `Finalize`. The
-RIB advances one production step, services only the explicitly enumerated
-read-only priority lane, then calls `tokio::task::yield_now`. It does not poll
-normal mutations, route batches, resync, GR/LLGR, refresh, selection, or other
-timers while the transaction is pending. Classification processes at most
-eight members per poll. Two deliberately explicit O(table) snapshot polls
+RIB advances one production step, services only the dedicated type-narrow
+Loc-RIB-count readiness lane, then calls `tokio::task::yield_now`. General RIB
+queries remain queued alongside normal mutations, route batches, resync,
+GR/LLGR, refresh, selection, and other timers while the transaction is
+pending. Classification processes at most eight members per poll. Two
+deliberately explicit O(table) snapshot polls
 precede the chunked bodies: `StageDestination` first snapshots all Loc-RIB
 prefix identities, and `BuildInventory` later snapshots all destination-table
 route keys. Both are measured production actor polls; the
@@ -134,16 +135,20 @@ incompatible wire profiles still perform their own chunked full probe.
 The final poll revalidates every active session, registration channel, encoder
 owner/generation, source/destination classification, and reserved writer permit
 before changing membership. Membership, counter replay, and all
-reserved-permit sends then remain one synchronous section, so a priority query
-observes either the old cohort or the complete new cohort. An incomplete
-unowned destination is discarded before authoritative fallback. Dropping the
-caller or closing the input channels does not cancel the owned transition.
+reserved-permit sends then remain one synchronous section. General queries do
+not observe staged membership: they resume only after the complete new cohort
+or fail-closed fallback handoff is terminal. An incomplete unowned destination
+is discarded before the handoff. Dropping the caller or closing the input
+channels does not cancel the owned transition.
 
 PeerManager also has a dedicated, type-narrow `ListPeers` readiness channel.
-The production `/readyz` path uses that channel plus the RIB priority-query
-channel while retaining the same absolute 200 ms deadline. Session-policy and
-RIB-reply waits select the transaction result first, then service one live
-readiness snapshot at a time. Once a cohort command is successfully enqueued,
+The production `/readyz` and gRPC health paths use that channel plus the RIB's
+dedicated, type-narrow `LocRibCount` readiness channel while retaining the same
+absolute 200 ms deadline. A later readiness probe can overtake queued general
+queries, but cannot preempt an O(table) query that was already executing when
+the probe arrived. Session-policy and RIB-reply waits select the transaction
+result first, then service one live readiness snapshot at a time. Once a cohort
+command is successfully enqueued,
 PeerManager owns its reply to terminal success, explicit failure, or sender
 closure; it does not start rollback on the ordinary five-second per-peer RIB
 timeout while the forward commit can still complete. Ordinary per-peer
@@ -175,14 +180,15 @@ cargo test -p rustbgpd-rib \
   clean_policy_transition_builds_and_probes_once_per_wire_cohort -- --nocapture
 ```
 
-A current-thread scheduler regression creates a priority query only after the
-first transition poll has completed. It proves that the query sees old
-committed membership, no optimized envelope has been emitted, and queued
-`PeerDown` plus a second replacement remain FIFO behind finalization:
+A current-thread scheduler regression waits for the production in-progress
+gauge to establish actor ownership, saturates the general-query lane, and
+proves that all ordinary query replies remain pending while dedicated RIB
+readiness completes inside 200 ms. The transition commits without draining the
+flood; only then do all queued queries release:
 
 ```console
 cargo test -p rustbgpd-rib \
-  clean_policy_transition_yields_to_queries_and_fences_mutations -- --nocapture
+  clean_policy_transition_isolates_readiness_from_general_query_flood -- --nocapture
 ```
 
 Paused-time coverage also holds a session policy command for 250 ms, then
@@ -192,6 +198,11 @@ failure test interleaves readiness before a rejected RIB commit and preserves
 newest-first rollback and prior policy state.
 
 ### Actor-poll receipts
+
+The actor-poll values below measure transition state-machine work only. They
+exclude both dedicated-readiness handling and general-query work; general
+queries are now fenced until the transition is terminal rather than folded
+into the measured transition slices.
 
 - Toolchain: `rustc 1.97.0 (2d8144b78 2026-07-07)`.
 - CPU: AMD Ryzen Threadripper 7970X 32-Cores.

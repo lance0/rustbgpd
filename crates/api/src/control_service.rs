@@ -9,7 +9,7 @@ use crate::health_probe::CoreReadinessProbe;
 use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
 /// MRT trigger channel type.
@@ -26,7 +26,8 @@ pub struct ControlService {
     metrics: BgpMetrics,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: Option<mpsc::Sender<PeerManagerReadinessQuery>>,
-    rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
+    rib_readiness_tx: Option<mpsc::Sender<RibReadinessQuery>>,
     shutdown_tx: watch::Sender<bool>,
     mrt_trigger_tx: Option<MrtTriggerTx>,
 }
@@ -41,7 +42,7 @@ impl ControlService {
         start_time: tokio::time::Instant,
         metrics: BgpMetrics,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-        rib_tx: mpsc::Sender<RibUpdate>,
+        rib_query_tx: mpsc::Sender<RibUpdate>,
         shutdown_tx: watch::Sender<bool>,
         mrt_trigger_tx: Option<MrtTriggerTx>,
     ) -> Self {
@@ -51,7 +52,8 @@ impl ControlService {
             metrics,
             peer_mgr_tx,
             peer_mgr_readiness_tx: None,
-            rib_tx,
+            rib_query_tx,
+            rib_readiness_tx: None,
             shutdown_tx,
             mrt_trigger_tx,
         }
@@ -67,6 +69,14 @@ impl ControlService {
         self.peer_mgr_readiness_tx = Some(peer_mgr_readiness_tx);
         self
     }
+
+    /// Route health snapshots through the RIB actor's dedicated type-narrow
+    /// readiness lane.
+    #[must_use]
+    pub fn with_rib_readiness(mut self, rib_readiness_tx: mpsc::Sender<RibReadinessQuery>) -> Self {
+        self.rib_readiness_tx = Some(rib_readiness_tx);
+        self
+    }
 }
 
 #[tonic::async_trait]
@@ -77,9 +87,13 @@ impl proto::control_service_server::ControlService for ControlService {
     ) -> Result<Response<proto::HealthResponse>, Status> {
         let uptime = self.start_time.elapsed().as_secs();
 
-        let mut probe = CoreReadinessProbe::new(self.peer_mgr_tx.clone(), self.rib_tx.clone());
+        let mut probe =
+            CoreReadinessProbe::new(self.peer_mgr_tx.clone(), self.rib_query_tx.clone());
         if let Some(readiness_tx) = &self.peer_mgr_readiness_tx {
             probe = probe.with_peer_manager_readiness(readiness_tx.clone());
+        }
+        if let Some(readiness_tx) = &self.rib_readiness_tx {
+            probe = probe.with_rib_readiness(readiness_tx.clone());
         }
         let snapshot = probe
             .snapshot()

@@ -56,7 +56,7 @@ use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
@@ -449,6 +449,8 @@ pub struct ServeConfig {
     pub start_time: tokio::time::Instant,
     /// Dedicated read-only peer-manager lane used only by core readiness.
     pub peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    /// Dedicated type-narrow RIB lane used only by core readiness.
+    pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
     /// Live count provider for locally-originated Type 2 MAC routes
@@ -877,6 +879,7 @@ async fn run_listener(
     let metrics = config.metrics;
     let start_time = config.start_time;
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
+    let rib_readiness_tx = config.rib_readiness_tx;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
     let evpn_instance_status_snapshot = config.evpn_instance_status_snapshot;
@@ -931,6 +934,7 @@ async fn run_listener(
                 principal,
                 rib_tx,
                 rib_query_tx,
+                rib_readiness_tx,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -988,6 +992,7 @@ async fn run_listener(
                 principal,
                 rib_tx,
                 rib_query_tx,
+                rib_readiness_tx,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -1051,6 +1056,7 @@ async fn run_tcp_listener(
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
+    rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -1268,7 +1274,8 @@ async fn run_tcp_listener(
             rpc_shutdown_tx,
             mrt_trigger_tx,
         )
-        .with_peer_manager_readiness(peer_mgr_readiness_tx),
+        .with_peer_manager_readiness(peer_mgr_readiness_tx)
+        .with_rib_readiness(rib_readiness_tx),
         interceptor.clone(),
     ));
     if tls_enabled {
@@ -1305,6 +1312,7 @@ async fn run_uds_listener(
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
+    rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -1482,7 +1490,8 @@ async fn run_uds_listener(
             rpc_shutdown_tx,
             mrt_trigger_tx,
         )
-        .with_peer_manager_readiness(peer_mgr_readiness_tx),
+        .with_peer_manager_readiness(peer_mgr_readiness_tx)
+        .with_rib_readiness(rib_readiness_tx),
         interceptor.clone(),
     ));
     routes.add_service(GNmiServer::with_interceptor(
