@@ -35,7 +35,8 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 
 The PR-sized parameterized fixed-scenario corpus compares the grouped manager
 path with the forced-per-peer oracle under bounded channel saturation, dirty
-policy regroup, stale session generations, and RT-Constrain membership churn:
+policy regroup, stale and replacement session generations, RT-Constrain/ORF
+membership churn, and Add-Path cap changes:
 
 ```bash
 cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
@@ -62,9 +63,12 @@ cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --no
 
 `RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must be
 `18..=64`, where 18 is the longest fixed schedule and is test-ratcheted when a
-schedule changes. Invalid values and overflowing seed ranges fail before a
-manager starts. The corpus uses virtual time and hard caps; it is not a
-replacement for a live or multi-day soak.
+schedule changes. Every path must finish with the terminal sentinel in the
+current transport generation; equal empty, truncated, or predecessor-session
+streams fail before grouped/per-peer equality is considered. Invalid values
+and overflowing seed ranges fail before a manager starts. The corpus uses
+virtual time and hard caps; it is not a replacement for a live or multi-day
+soak.
 
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any

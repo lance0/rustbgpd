@@ -9,10 +9,12 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use rustbgpd_wire::{Afi, Ipv4Prefix, Prefix, RtcNlri, Safi};
+use rustbgpd_wire::{
+    AddressPrefixOrf, Afi, Ipv4Prefix, OrfAction, OrfMatch, Prefix, RtcNlri, Safi,
+};
 
 use super::update_groups_oracle::{
-    NormAnnounce, NormMsg, NormVpnAnnounce, Oracle, Streams, deny_prefix_chain,
+    NormAnnounce, NormMsg, NormVpnAnnounce, Oracle, OraclePeerFeatures, Streams, deny_prefix_chain,
     deny_prefixes_chain, fold, fold_vpn, ibgp_route, peer_context_permit_chain, pfx, rtc_default,
     vpn_nlri, vpn_route, vpn_rtc_sendable,
 };
@@ -114,6 +116,8 @@ enum PolicySpec {
 enum MembershipExpectation {
     SharedGroup,
     PeerContextFallback,
+    AddPathFallback,
+    OrfFallback,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +129,32 @@ enum Op {
         families: FamilySet,
     },
     PeerDown {
+        peer: Ipv4Addr,
+        generation: u64,
+    },
+    PeerUpAddPath {
+        peer: Ipv4Addr,
+        generation: u64,
+        capacity: usize,
+        send_max: u32,
+    },
+    PeerUpOrf {
+        peer: Ipv4Addr,
+        generation: u64,
+        capacity: usize,
+    },
+    AddPathLimit {
+        peer: Ipv4Addr,
+        generation: u64,
+        limit: u32,
+    },
+    OrfPermitExact {
+        peer: Ipv4Addr,
+        generation: u64,
+        prefix: Ipv4Prefix,
+        accepted: bool,
+    },
+    OrfRemoveAll {
         peer: Ipv4Addr,
         generation: u64,
     },
@@ -212,6 +242,14 @@ fn distinct_seed_octet(seed: u64, byte: usize, other: u8) -> u8 {
     }
 }
 
+fn distinct_seed_octet_from(seed: u64, byte: usize, others: &[u8]) -> u8 {
+    let mut candidate = seed_octet(seed, byte);
+    while others.contains(&candidate) {
+        candidate = candidate.wrapping_add(2);
+    }
+    candidate
+}
+
 fn policy(spec: &PolicySpec) -> Option<rustbgpd_policy::PolicyChain> {
     match spec {
         PolicySpec::Permit => None,
@@ -223,6 +261,10 @@ fn policy(spec: &PolicySpec) -> Option<rustbgpd_policy::PolicyChain> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum SemanticEffect {
+    SessionStart {
+        peer: IpAddr,
+        generation: u64,
+    },
     Announce {
         peer: IpAddr,
         route: NormAnnounce,
@@ -257,6 +299,14 @@ fn semantic_effects(streams: &Streams) -> Vec<SemanticEffect> {
         let mut state: HashMap<(Prefix, u32), NormAnnounce> = HashMap::new();
         let mut vpn_state: HashMap<String, NormVpnAnnounce> = HashMap::new();
         for message in messages {
+            if let Some(generation) = message.session_start {
+                state.clear();
+                vpn_state.clear();
+                effects.push(SemanticEffect::SessionStart {
+                    peer: *peer,
+                    generation,
+                });
+            }
             for key in &message.withdraw {
                 if state.remove(key).is_some() {
                     effects.push(SemanticEffect::Withdraw {
@@ -349,9 +399,21 @@ async fn assert_membership(
             !label.starts_with("group:") && (force_ungrouped || label == "policy_peer_context"),
             "peer-context transition did not reach per-peer path for {peer}: {label}"
         ),
+        MembershipExpectation::AddPathFallback => assert!(
+            !label.starts_with("group:") && (force_ungrouped || label == "add_path_send"),
+            "Add-Path transition did not reach per-peer path for {peer}: {label}"
+        ),
+        MembershipExpectation::OrfFallback => assert!(
+            !label.starts_with("group:") && (force_ungrouped || label == "orf_installed"),
+            "ORF transition did not reach per-peer path for {peer}: {label}"
+        ),
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive fault-script interpreter keeps every operation's behavior in one auditable match"
+)]
 async fn apply(oracle: &mut Oracle, op: &Op, force_ungrouped: bool) {
     match op {
         Op::PeerUp {
@@ -378,6 +440,101 @@ async fn apply(oracle: &mut Oracle, op: &Op, force_ungrouped: bool) {
         }
         Op::PeerDown { peer, generation } => {
             oracle.peer_down_generation(*peer, *generation).await;
+        }
+        Op::PeerUpAddPath {
+            peer,
+            generation,
+            capacity,
+            send_max,
+        } => {
+            oracle
+                .peer_up_families_generation_with_features(
+                    *peer,
+                    *generation,
+                    false,
+                    true,
+                    None,
+                    *capacity,
+                    unicast(),
+                    OraclePeerFeatures {
+                        add_path_send_max: *send_max,
+                        ..OraclePeerFeatures::default()
+                    },
+                )
+                .await;
+        }
+        Op::PeerUpOrf {
+            peer,
+            generation,
+            capacity,
+        } => {
+            oracle
+                .peer_up_families_generation_with_features(
+                    *peer,
+                    *generation,
+                    false,
+                    true,
+                    None,
+                    *capacity,
+                    unicast(),
+                    OraclePeerFeatures {
+                        negotiated_orf_recv: unicast(),
+                        ..OraclePeerFeatures::default()
+                    },
+                )
+                .await;
+        }
+        Op::AddPathLimit {
+            peer,
+            generation,
+            limit,
+        } => {
+            oracle
+                .peer_add_path_limits(*peer, *generation, *limit)
+                .await;
+        }
+        Op::OrfPermitExact {
+            peer,
+            generation,
+            prefix,
+            accepted,
+        } => {
+            let result = oracle
+                .peer_orf_update(
+                    *peer,
+                    *generation,
+                    vec![AddressPrefixOrf {
+                        action: OrfAction::Add,
+                        match_: OrfMatch::Permit,
+                        sequence: 10,
+                        min_len: 0,
+                        max_len: 0,
+                        prefix: Some(Prefix::V4(*prefix)),
+                    }],
+                )
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                *accepted,
+                "ORF generation acceptance mismatch: {result:?}"
+            );
+        }
+        Op::OrfRemoveAll { peer, generation } => {
+            oracle
+                .peer_orf_update(
+                    *peer,
+                    *generation,
+                    vec![AddressPrefixOrf {
+                        action: OrfAction::RemoveAll,
+                        match_: OrfMatch::Permit,
+                        sequence: 0,
+                        min_len: 0,
+                        max_len: 0,
+                        prefix: None,
+                    }],
+                )
+                .await
+                .expect("current-session ORF Remove-All must be accepted");
         }
         Op::Announce {
             peer,
@@ -491,11 +648,12 @@ async fn run_path(schedule: &Schedule, force_ungrouped: bool, max_ops: usize) ->
         schedule.replay()
     );
     let streams = oracle.finish().await; // Awaiting the handle proves manager completion.
-    assert!(
-        streams.values().any(|messages| !messages.is_empty()),
-        "schedule emitted no traffic: {}",
-        schedule.replay()
-    );
+    validate_terminal_stream(&streams).unwrap_or_else(|error| {
+        panic!(
+            "incomplete outbound stream ({error}): {}",
+            schedule.replay()
+        )
+    });
     if schedule.require_vpn_churn {
         let left = streams
             .get(&IpAddr::V4(LEFT))
@@ -514,24 +672,23 @@ async fn run_path(schedule: &Schedule, force_ungrouped: bool, max_ops: usize) ->
             schedule.replay()
         );
     }
-    for peer in [LEFT, RIGHT] {
-        let delivered = streams
-            .get(&IpAddr::V4(peer))
-            .into_iter()
-            .flatten()
-            .any(|message| {
-                message
-                    .announce
-                    .iter()
-                    .any(|(prefix, ..)| *prefix == Prefix::V4(sentinel()))
-            });
-        assert!(
-            delivered,
-            "terminal sentinel missing for {peer}: {}",
-            schedule.replay()
-        );
-    }
     streams
+}
+
+fn validate_terminal_stream(streams: &Streams) -> Result<(), String> {
+    let terminal = fold(streams);
+    for peer in [LEFT, RIGHT] {
+        let key = (Prefix::V4(sentinel()), 0);
+        if !terminal
+            .get(&IpAddr::V4(peer))
+            .is_some_and(|routes| routes.contains_key(&key))
+        {
+            return Err(format!(
+                "terminal sentinel absent from final session state for {peer}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn run_schedule(schedule: Schedule, max_ops: usize) {
@@ -705,8 +862,14 @@ fn dirty_policy_schedule(seed: u64) -> Schedule {
 }
 
 fn stale_generation_rtc_schedule(seed: u64) -> Schedule {
-    let live = pfx(seed_octet(seed, 4), 4);
-    let stale = pfx(seed_octet(seed, 5), 5);
+    let live_octet = seed_octet(seed, 4);
+    let stale_octet = distinct_seed_octet(seed, 5, live_octet);
+    let live = pfx(live_octet, 4);
+    let stale = pfx(stale_octet, 5);
+    assert_ne!(
+        live, stale,
+        "stale-generation probe must not alias the current route"
+    );
     Schedule {
         name: "stale-generation-rtc-membership-churn",
         seed,
@@ -785,11 +948,267 @@ fn stale_generation_rtc_schedule(seed: u64) -> Schedule {
     }
 }
 
-fn schedules(seed: u64) -> [Schedule; 3] {
+fn add_path_membership_schedule(seed: u64) -> Schedule {
+    let prefix = pfx(seed_octet(seed, 0), 7);
+    Schedule {
+        name: "add-path-membership-and-limit-churn",
+        seed,
+        comparison: ComparisonMode::SemanticFold,
+        require_vpn_churn: false,
+        ops: vec![
+            Op::PeerUp {
+                peer: SOURCE,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: LEFT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix,
+                local_pref: 200,
+            },
+            Op::Announce {
+                peer: LEFT,
+                generation: 2,
+                prefix,
+                local_pref: 100,
+            },
+            Op::PeerUpAddPath {
+                peer: RIGHT,
+                generation: 3,
+                capacity: 64,
+                send_max: 2,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::AddPathFallback,
+            },
+            // The predecessor generation cannot narrow the active session's
+            // cap or trigger its replay.
+            Op::AddPathLimit {
+                peer: RIGHT,
+                generation: 2,
+                limit: 1,
+            },
+            Op::AddPathLimit {
+                peer: RIGHT,
+                generation: 3,
+                limit: 1,
+            },
+            Op::Withdraw {
+                peer: SOURCE,
+                generation: 2,
+                prefix,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 4,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerDown {
+                peer: RIGHT,
+                generation: 3,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
+            },
+            Op::Quiesce,
+        ],
+    }
+}
+
+fn orf_membership_schedule(seed: u64) -> Schedule {
+    let first_octet = seed_octet(seed, 1);
+    let second_octet = distinct_seed_octet(seed, 2, first_octet);
+    let third_octet = distinct_seed_octet_from(seed, 3, &[first_octet, second_octet]);
+    let first = pfx(first_octet, 8);
+    let second = pfx(second_octet, 9);
+    let third = pfx(third_octet, 10);
+    Schedule {
+        name: "orf-membership-generation-and-filter-churn",
+        seed,
+        comparison: ComparisonMode::SemanticFold,
+        require_vpn_churn: false,
+        ops: vec![
+            Op::PeerUp {
+                peer: SOURCE,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: LEFT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: first,
+                local_pref: 100,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: second,
+                local_pref: 100,
+            },
+            Op::PeerUpOrf {
+                peer: RIGHT,
+                generation: 3,
+                capacity: 64,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::OrfFallback,
+            },
+            Op::OrfPermitExact {
+                peer: RIGHT,
+                generation: 2,
+                prefix: first,
+                accepted: false,
+            },
+            Op::OrfPermitExact {
+                peer: RIGHT,
+                generation: 3,
+                prefix: first,
+                accepted: true,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: third,
+                local_pref: 100,
+            },
+            Op::OrfRemoveAll {
+                peer: RIGHT,
+                generation: 3,
+            },
+            Op::Withdraw {
+                peer: SOURCE,
+                generation: 2,
+                prefix: first,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 4,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerDown {
+                peer: RIGHT,
+                generation: 3,
+            },
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
+            },
+            Op::Quiesce,
+        ],
+    }
+}
+
+fn replacement_during_resync_schedule(seed: u64) -> Schedule {
+    let first_octet = seed_octet(seed, 4);
+    let second_octet = distinct_seed_octet(seed, 5, first_octet);
+    let stale_octet = distinct_seed_octet_from(seed, 6, &[first_octet, second_octet]);
+    let first = pfx(first_octet, 11);
+    let second = pfx(second_octet, 12);
+    let stale = pfx(stale_octet, 13);
+    Schedule {
+        name: "session-replacement-during-dirty-resync",
+        seed,
+        comparison: ComparisonMode::SemanticFold,
+        require_vpn_churn: false,
+        ops: vec![
+            Op::PeerUp {
+                peer: SOURCE,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: LEFT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 2,
+                capacity: 1,
+                families: FamilySet::Unicast,
+            },
+            Op::DrainOne(RIGHT),
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: first,
+                local_pref: 100,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: second,
+                local_pref: 100,
+            },
+            // Replace the dirty transport before its virtual-time retry.
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 3,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerDown {
+                peer: RIGHT,
+                generation: 2,
+            },
+            Op::Announce {
+                peer: RIGHT,
+                generation: 2,
+                prefix: stale,
+                local_pref: 250,
+            },
+            Op::AdvanceRetry,
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SharedGroup,
+            },
+            Op::DrainAvailable,
+        ],
+    }
+}
+
+fn schedules(seed: u64) -> [Schedule; 6] {
     [
         saturation_schedule(seed),
         dirty_policy_schedule(seed),
         stale_generation_rtc_schedule(seed),
+        add_path_membership_schedule(seed),
+        orf_membership_schedule(seed),
+        replacement_during_resync_schedule(seed),
     ]
 }
 
@@ -807,8 +1226,20 @@ fn norm_announce(prefix: Ipv4Prefix, local_pref: u32) -> NormAnnounce {
 
 fn norm_message(announce: Vec<NormAnnounce>, withdraw: Vec<(Prefix, u32)>) -> NormMsg {
     NormMsg {
+        session_start: None,
         announce,
         withdraw,
+        end_of_rib: vec![],
+        vpn_announce: vec![],
+        vpn_withdraw: vec![],
+    }
+}
+
+fn session_start_message(generation: u64) -> NormMsg {
+    NormMsg {
+        session_start: Some(generation),
+        announce: vec![],
+        withdraw: vec![],
         end_of_rib: vec![],
         vpn_announce: vec![],
         vpn_withdraw: vec![],
@@ -866,6 +1297,51 @@ fn semantic_effects_allow_only_terminally_absent_unknown_withdraws() {
     assert_ne!(
         semantic_effects(&terminal_route),
         semantic_effects(&withdraw_before_terminal_route)
+    );
+}
+
+#[test]
+fn completion_gate_rejects_equal_but_incomplete_streams() {
+    let empty: Streams = [(IpAddr::V4(LEFT), vec![]), (IpAddr::V4(RIGHT), vec![])]
+        .into_iter()
+        .collect();
+    assert_eq!(semantic_effects(&empty), semantic_effects(&empty));
+    assert_eq!(fold(&empty), fold(&empty));
+    assert!(
+        validate_terminal_stream(&empty).is_err(),
+        "equal empty streams must not pass the differential oracle"
+    );
+
+    let truncated_message = norm_message(vec![norm_announce(pfx(42, 0), 100)], vec![]);
+    let truncated: Streams = [
+        (IpAddr::V4(LEFT), vec![truncated_message.clone()]),
+        (IpAddr::V4(RIGHT), vec![truncated_message]),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(semantic_effects(&truncated), semantic_effects(&truncated));
+    assert_eq!(fold(&truncated), fold(&truncated));
+    assert!(
+        validate_terminal_stream(&truncated).is_err(),
+        "equal nonempty streams truncated before convergence must not pass"
+    );
+
+    let sentinel_message = norm_message(vec![norm_announce(sentinel(), 250)], vec![]);
+    let mut complete: Streams = [
+        (IpAddr::V4(LEFT), vec![sentinel_message.clone()]),
+        (IpAddr::V4(RIGHT), vec![sentinel_message]),
+    ]
+    .into_iter()
+    .collect();
+    assert!(validate_terminal_stream(&complete).is_ok());
+
+    complete
+        .get_mut(&IpAddr::V4(RIGHT))
+        .unwrap()
+        .push(session_start_message(9));
+    assert!(
+        validate_terminal_stream(&complete).is_err(),
+        "a sentinel from a superseded connection cannot complete the current session"
     );
 }
 

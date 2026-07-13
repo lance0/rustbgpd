@@ -24,6 +24,10 @@ jobs:
         with:
           key: update-group-fault
       - name: Run hard-capped deterministic corpus
+        env:
+          RUSTBGPD_UPDATE_GROUP_SEED_START: "0x35700000"
+          RUSTBGPD_UPDATE_GROUP_SEED_COUNT: "24"
+          RUSTBGPD_UPDATE_GROUP_MAX_OPS: "64"
         run: >-
           cargo test -p rustbgpd-rib
           deterministic_fault_corpus_extended

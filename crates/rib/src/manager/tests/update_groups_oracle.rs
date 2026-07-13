@@ -261,6 +261,10 @@ pub(super) type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttri
 
 #[derive(Debug, PartialEq, Clone)]
 pub(super) struct NormMsg {
+    /// A new transport generation replaced the prior connection for this
+    /// peer. Wire state is connection-scoped, so folding must discard the
+    /// predecessor session's advertisements before consuming the new dump.
+    pub(super) session_start: Option<u64>,
     pub(super) announce: Vec<NormAnnounce>,
     pub(super) withdraw: Vec<(Prefix, u32)>,
     pub(super) end_of_rib: Vec<(Afi, Safi)>,
@@ -312,6 +316,7 @@ fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
         .collect();
     vpn_withdraw.sort();
     NormMsg {
+        session_start: None,
         announce,
         withdraw,
         end_of_rib,
@@ -333,6 +338,9 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
     for (peer, msgs) in streams {
         let table = state.entry(*peer).or_default();
         for msg in msgs {
+            if msg.session_start.is_some() {
+                table.clear();
+            }
             for (prefix, path_id) in &msg.withdraw {
                 table.remove(&(*prefix, *path_id));
             }
@@ -357,6 +365,9 @@ pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
     for (peer, msgs) in streams {
         let table = state.entry(*peer).or_default();
         for msg in msgs {
+            if msg.session_start.is_some() {
+                table.clear();
+            }
             for (key, _) in &msg.vpn_withdraw {
                 table.remove(key);
             }
@@ -376,6 +387,15 @@ pub(super) struct Oracle {
     /// invariant checker can fold mid-scenario); `finish` drains the
     /// remainder into it and returns the whole stream set.
     collected: Streams,
+}
+
+/// Session features that disqualify a peer from shared single-best staging.
+/// The fault corpus varies these only at stamped `PeerUp` boundaries, matching
+/// production OPEN negotiation rather than inventing live capability changes.
+#[derive(Clone, Debug, Default)]
+pub(super) struct OraclePeerFeatures {
+    pub(super) add_path_send_max: u32,
+    pub(super) negotiated_orf_recv: Vec<(Afi, Safi)>,
 }
 
 impl Oracle {
@@ -449,7 +469,44 @@ impl Oracle {
         capacity: usize,
         sendable_families: Vec<(Afi, Safi)>,
     ) {
+        self.peer_up_families_generation_with_features(
+            peer,
+            session_id,
+            is_ebgp,
+            route_reflector_client,
+            export_policy,
+            capacity,
+            sendable_families,
+            OraclePeerFeatures::default(),
+        )
+        .await;
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "fault oracle mirrors PeerUp plus negotiated feature changes at a stamped session boundary"
+    )]
+    pub(super) async fn peer_up_families_generation_with_features(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
+        is_ebgp: bool,
+        route_reflector_client: bool,
+        export_policy: Option<PolicyChain>,
+        capacity: usize,
+        sendable_families: Vec<(Afi, Safi)>,
+        features: OraclePeerFeatures,
+    ) {
         let (out_tx, out_rx) = mpsc::channel(capacity);
+        let add_path_send_families = if features.add_path_send_max > 0 {
+            sendable_families
+                .iter()
+                .copied()
+                .filter(|(_, safi)| *safi == Safi::Unicast)
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.tx
             .send(RibUpdate::PeerUp {
                 per_client_best: false,
@@ -463,9 +520,9 @@ impl Oracle {
                 is_ebgp,
                 route_reflector_client,
                 orr_vantage: None,
-                add_path_send_families: vec![],
-                add_path_send_max: 0,
-                negotiated_orf_recv: Vec::new(),
+                add_path_send_families,
+                add_path_send_max: features.add_path_send_max,
+                negotiated_orf_recv: features.negotiated_orf_recv,
                 negotiated_llgr_families: Vec::new(),
             })
             .await
@@ -478,8 +535,57 @@ impl Oracle {
             while let Ok(update) = old_rx.try_recv() {
                 msgs.push(normalize(&update));
             }
+            msgs.push(NormMsg {
+                session_start: Some(session_id),
+                announce: vec![],
+                withdraw: vec![],
+                end_of_rib: vec![],
+                vpn_announce: vec![],
+                vpn_withdraw: vec![],
+            });
         }
         self.quiesce().await;
+    }
+
+    pub(super) async fn peer_add_path_limits(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
+        limit: u32,
+    ) {
+        self.tx
+            .send(RibUpdate::PeerAddPathLimits {
+                peer: IpAddr::V4(peer),
+                session_id,
+                limits: vec![((Afi::Ipv4, Safi::Unicast), limit)],
+            })
+            .await
+            .unwrap();
+        self.quiesce().await;
+    }
+
+    pub(super) async fn peer_orf_update(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
+        entries: Vec<AddressPrefixOrf>,
+    ) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::PeerOrfUpdate {
+                peer: IpAddr::V4(peer),
+                session_id,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                when: WhenToRefresh::Immediate,
+                entries,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let result = reply_rx.await.unwrap();
+        self.quiesce().await;
+        result
     }
 
     pub(super) async fn peer_down(&mut self, peer: Ipv4Addr) {
