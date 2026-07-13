@@ -1283,6 +1283,13 @@ fn tcp_ao_keyring_validation_rejects_ambiguous_or_unselectable_rings() {
         ),
         (
             r#"[
+{ key = "one", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+{ key = "two", send_id = 2, recv_id = 11, algorithm = "hmac(sha256)" }
+]"#,
+            "duplicate RecvID",
+        ),
+        (
+            r#"[
 { key = "one", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", preferred = true },
 { key = "two", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
 ]"#,
@@ -13557,6 +13564,57 @@ fn dataset_reload_reuses_handles_swaps_scoped_and_keeps_prior_on_failure() {
         2,
         "old data still probing"
     );
+}
+
+#[test]
+fn staged_dataset_reload_defers_live_handle_mutation_until_commit() {
+    let dir = dataset_config_dir("64500\n");
+    let path = dir.path().join("config.toml");
+    let path = path.to_str().unwrap();
+    let initial = Config::load_with_diagnostics(path).expect("initial load");
+    let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+
+    fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+    let mut staged =
+        Config::load_with_diagnostics_and_staged_datasets(path, &initial.policy.dataset_bindings)
+            .expect("stage changed dataset");
+
+    assert_eq!(live.pin().generation, 1);
+    assert_eq!(live.pin().data.records(), 1);
+    assert_eq!(staged.policy.dataset_events.swapped, vec!["customers"]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &live,
+        staged.policy.dataset_bindings.get("customers").unwrap()
+    ));
+
+    let commit = staged.prepare_staged_datasets(&initial.policy.dataset_bindings);
+    assert!(std::sync::Arc::ptr_eq(
+        &live,
+        staged.policy.dataset_bindings.get("customers").unwrap()
+    ));
+    assert_eq!(live.pin().generation, 1);
+    commit.commit();
+    assert_eq!(live.pin().generation, 2);
+    assert_eq!(live.pin().data.records(), 2);
+
+    fs::write(
+        dir.path().join("datasets/customers.list"),
+        "garbage entry\n",
+    )
+    .unwrap();
+    let mut failed =
+        Config::load_with_diagnostics_and_staged_datasets(path, &staged.policy.dataset_bindings)
+            .expect("stage failed refresh against prior snapshot");
+    assert_eq!(failed.policy.dataset_events.failed.len(), 1);
+    assert!(live.status().last_error.is_none());
+    assert_eq!(live.pin().generation, 2);
+
+    let commit = failed.prepare_staged_datasets(&staged.policy.dataset_bindings);
+    assert!(live.status().last_error.is_none());
+    commit.commit();
+    assert!(live.status().last_error.is_some());
+    assert_eq!(live.pin().generation, 2);
+    assert_eq!(live.pin().data.records(), 2);
 }
 
 // ---------------------------------------------------------------------------
