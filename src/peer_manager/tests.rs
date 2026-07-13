@@ -7151,6 +7151,12 @@ async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
         peers.len(),
         "the handoff must not hot-apply session policy a second time"
     );
+    assert!(peers.iter().all(|peer| {
+        manager
+            .peers
+            .get(&key(*peer))
+            .is_some_and(|peer_state| peer_state.export_policy == Some(next.clone()))
+    }));
     for peer in peers {
         manager.delete_peer(key(peer), false).await.unwrap();
     }
@@ -7260,6 +7266,122 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
         rib_task.await.unwrap(),
         vec![peers[0], peers[1], peers[1], peers[0]]
     );
+    for peer in peers {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.export_policy.is_none());
+        assert!(!peer_state.pending_export_apply);
+        assert!(!peer_state.pending_refresh);
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the timeout regression keeps the late forward reply and ordered rollback in one paused-time proof"
+)]
+async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_command() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 37, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 37, 0, 2)),
+    ];
+    let installs = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .map(|&address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+
+        let RibUpdate::ReplacePeerExportPolicy {
+            peer: forward_peer,
+            export_policy: forward_policy,
+            reply: late_forward_reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected first ordinary forward command");
+        };
+        assert_eq!(forward_peer, peers[0]);
+        assert_eq!(forward_policy, Some(next.clone()));
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            late_forward_reply.send(Ok(())).is_err(),
+            "the timed-out forward receiver must be gone before the RIB actor advances to rollback"
+        );
+        let mut rollback_order = Vec::new();
+        for expected_peer in peers.into_iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy {
+                peer,
+                export_policy,
+                reply,
+            } = rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected ordinary rollback command");
+            };
+            assert_eq!(peer, expected_peer);
+            assert!(export_policy.is_none());
+            rollback_order.push(peer);
+            reply.send(Ok(())).unwrap();
+        }
+        rollback_order
+    };
+    let (result, rollback_order) = tokio::join!(apply, drive_rib);
+
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("did not reply within")
+                && error.contains("already-applied peers restored")
+        }),
+        "a timed-out handoff must fail only after complete rollback: {result:?}"
+    );
+    assert_eq!(rollback_order, vec![peers[1], peers[0]]);
+    assert_eq!(installs.load(Ordering::SeqCst), peers.len() * 2);
     for peer in peers {
         let peer_state = manager.peers.get(&key(peer)).unwrap();
         assert!(peer_state.export_policy.is_none());
