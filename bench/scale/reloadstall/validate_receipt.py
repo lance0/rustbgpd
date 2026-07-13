@@ -56,6 +56,7 @@ REQUIRED_FILES = {
     "scenario/member.final.rpol",
     "scenario/member.initial.rpol",
     "source-status.txt",
+    "sources/build_fence.py",
     "sources/gen-scenario.py",
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
@@ -65,6 +66,7 @@ REQUIRED_FILES = {
 }
 UNSUMMED_FILES = {"SHA256SUMS"}
 SOURCE_FILES = {
+    "sources/build_fence.py",
     "sources/gen-scenario.py",
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
@@ -212,6 +214,7 @@ def validate_source_archive(root: Path, manifest: dict[str, Any]) -> None:
     )
 
     copies = {
+        "bench/scale/reloadstall/build_fence.py": "sources/build_fence.py",
         "bench/scale/reloadstall/gen-scenario.py": "sources/gen-scenario.py",
         "bench/scale/reloadstall/process_fence.py": "sources/process_fence.py",
         "bench/scale/reloadstall/src/main.rs": "sources/reloadstall-main.rs",
@@ -296,7 +299,10 @@ def validate_publication_safety(root: Path, files: set[str]) -> None:
             "raw temporary path",
         ),
         (checkout_path, "absolute checkout path"),
-        (re.compile(r"(?i)\bpid(?:=|[\"']?\s*:\s*)[0-9]+\b"), "unsanitized daemon PID"),
+        (
+            re.compile(r"(?i)\b(?:daemon\s+)?pid(?:\s*(?:=|:)\s*|\s+)[0-9]+\b"),
+            "unsanitized daemon PID",
+        ),
     )
     resolved_root = str(root)
     public_files = set(PUBLIC_DYNAMIC_TEXT_FILES)
@@ -333,6 +339,20 @@ def validate_manifest(root: Path) -> dict[str, Any]:
     )
     if read_text(root / "source-status.txt") != "":
         fail("source-status.txt must be empty for a retained receipt")
+    require_exact(
+        manifest.get("timeouts_seconds"),
+        {
+            "build_each": 1800,
+            "scenario_generation": 60,
+            "harness_outer": 4200,
+            "stub_connect_open": 15,
+            "overall_establishment": 120,
+            "initial_convergence": 120,
+            "per_reload": 900,
+            "quiesce": 20,
+        },
+        "manifest.timeouts_seconds",
+    )
 
     scenario = require_mapping(manifest.get("scenario"), "manifest.scenario")
     required_scenario = {
@@ -390,6 +410,9 @@ def validate_manifest(root: Path) -> dict[str, Any]:
     if not isinstance(samples, int) or isinstance(samples, bool) or samples < 1:
         fail("manifest.result.health_samples must be a positive integer")
     require_exact(result.get("health_failures"), 0, "manifest.result.health_failures")
+    require_exact(result.get("parse_errors"), 0, "manifest.result.parse_errors")
+    require_exact(result.get("base_withdrawals"), 0, "manifest.result.base_withdrawals")
+    require_exact(result.get("marker_conflicts"), 0, "manifest.result.marker_conflicts")
     return manifest
 
 
@@ -485,14 +508,28 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(invocation.get("build_cwd"), SOURCE_ROOT, "invocation.build_cwd")
     require_exact(
         invocation.get("build_environment"),
-        {"CARGO_TARGET_DIR": BUILD_TARGET},
+        {
+            "CARGO_TARGET_DIR": BUILD_TARGET,
+            "allowed_cargo_config": f"{SOURCE_ROOT}/.cargo/config.toml",
+            "external_cargo_configs": "rejected",
+        },
         "invocation.build_environment",
+    )
+    require_exact(
+        invocation.get("runtime_environments"),
+        {
+            "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
+            "harness": {"LC_ALL": "C", "TZ": "UTC"},
+            "health": {"LC_ALL": "C", "TZ": "UTC"},
+        },
+        "invocation.runtime_environments",
     )
 
     commands = require_mapping(invocation.get("commands"), "invocation.commands")
     for name in (
         "archive",
         "build_daemon_cli",
+        "build_fence",
         "build_harness",
         "extract",
         "generate",
@@ -512,7 +549,12 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(
         commands["build_daemon_cli"],
         [
-            "cargo",
+            "timeout",
+            "--foreground",
+            "--signal=TERM",
+            "--kill-after=30s",
+            "1800",
+            "<CARGO_COMMAND>",
             "build",
             "--release",
             "--locked",
@@ -530,7 +572,12 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(
         commands["build_harness"],
         [
-            "cargo",
+            "timeout",
+            "--foreground",
+            "--signal=TERM",
+            "--kill-after=30s",
+            "1800",
+            "<CARGO_COMMAND>",
             "build",
             "--release",
             "--locked",
@@ -538,11 +585,6 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
             "bench/scale/reloadstall/Cargo.toml",
         ],
         "invocation.commands.build_harness",
-    )
-    require_exact(
-        invocation.get("daemon_environment"),
-        {"RUST_LOG": "info"},
-        "invocation.daemon_environment",
     )
     require_exact(
         invocation.get("health_probe"),
@@ -553,6 +595,18 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         invocation.get("process_fence_environment"),
         {"PYTHONDONTWRITEBYTECODE": "1"},
         "invocation.process_fence_environment",
+    )
+    require_exact(
+        commands["build_fence"],
+        [
+            "python3",
+            f"{SOURCE_ROOT}/bench/scale/reloadstall/build_fence.py",
+            "--source-root",
+            SOURCE_ROOT,
+            "--cargo-home",
+            "<CARGO_HOME>",
+        ],
+        "invocation.commands.build_fence",
     )
     require_exact(
         commands["archive"],
@@ -601,47 +655,81 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "invocation.commands.validate",
     )
 
-    harness = commands["harness"]
-    if Path(harness[0]).name != "reloadstall" or harness[1:4] != [
-        str(PEERS),
-        str(PREFIXES),
-        str(PORT),
-    ]:
-        fail("harness invocation does not pin the 700x400,400 shape")
-    if len(harness) != 10 or harness[4] != DAEMON_PID:
-        fail("harness invocation has the wrong argument contract")
-    expected_tail = [
-        f"{runtime_dir}/member.rpol",
-        f"{runtime_dir}/gen-a.rpol",
-        f"{runtime_dir}/gen-b.rpol",
-        str(RELOADS),
-        str(CONTROL_SECS),
-    ]
-    if harness[5:] != expected_tail:
-        fail("harness invocation does not use the generated policy inputs")
-
-    daemon = commands["daemon"]
-    if daemon != [f"{BUILD_TARGET}/release/rustbgpd", f"{runtime_dir}/config.toml"]:
-        fail("daemon invocation does not use the generated config")
-    health = commands["health"]
-    if health != [
-        f"{BUILD_TARGET}/release/rbgp",
-        "--addr",
-        f"unix://{runtime_dir}/grpc.sock",
-        "health",
-    ]:
-        fail("health invocation is not pinned to the generated UDS")
-    generate = commands["generate"]
-    if generate != [
-        "python3",
-        f"{SOURCE_ROOT}/bench/scale/reloadstall/gen-scenario.py",
-        str(PEERS),
-        runtime_dir,
-        str(PORT),
-    ]:
-        fail("scenario-generator invocation does not pin the acceptance shape")
-    if harness[0] != f"{BUILD_TARGET}/release/reloadstall":
-        fail("harness invocation does not use the retained build path")
+    require_exact(
+        commands["generate"],
+        [
+            "timeout",
+            "--foreground",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "60",
+            "python3",
+            f"{SOURCE_ROOT}/bench/scale/reloadstall/gen-scenario.py",
+            str(PEERS),
+            runtime_dir,
+            str(PORT),
+        ],
+        "invocation.commands.generate",
+    )
+    require_exact(
+        commands["daemon"],
+        [
+            "setsid",
+            "env",
+            "-i",
+            "LC_ALL=C",
+            "TZ=UTC",
+            "RUST_LOG=info",
+            f"{BUILD_TARGET}/release/rustbgpd",
+            f"{runtime_dir}/config.toml",
+        ],
+        "invocation.commands.daemon",
+    )
+    require_exact(
+        commands["health"],
+        [
+            "timeout",
+            "--foreground",
+            "--signal=TERM",
+            "--kill-after=1s",
+            "10",
+            "env",
+            "-i",
+            "LC_ALL=C",
+            "TZ=UTC",
+            f"{BUILD_TARGET}/release/rbgp",
+            "--addr",
+            f"unix://{runtime_dir}/grpc.sock",
+            "health",
+        ],
+        "invocation.commands.health",
+    )
+    require_exact(
+        commands["harness"],
+        [
+            "setsid",
+            "timeout",
+            "--foreground",
+            "--signal=TERM",
+            "--kill-after=30s",
+            "4200",
+            "env",
+            "-i",
+            "LC_ALL=C",
+            "TZ=UTC",
+            f"{BUILD_TARGET}/release/reloadstall",
+            str(PEERS),
+            str(PREFIXES),
+            str(PORT),
+            DAEMON_PID,
+            f"{runtime_dir}/member.rpol",
+            f"{runtime_dir}/gen-a.rpol",
+            f"{runtime_dir}/gen-b.rpol",
+            str(RELOADS),
+            str(CONTROL_SECS),
+        ],
+        "invocation.commands.harness",
+    )
 
     rendered = read_text(root / "provenance.txt")
     for required in (
@@ -659,12 +747,32 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "rustbgpd_sha256=",
         "rbgp_sha256=",
         "reloadstall_sha256=",
+        "allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml",
+        "external_cargo_configs=<none>",
+        "build_override_fence=clear",
+        "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info",
+        "harness_environment=env -i LC_ALL=C TZ=UTC",
+        "health_environment=env -i LC_ALL=C TZ=UTC",
         "environment_RUSTFLAGS=<unset>",
+        "environment_RUSTDOCFLAGS=<unset>",
         "environment_CARGO_ENCODED_RUSTFLAGS=<unset>",
+        "environment_CARGO_INCREMENTAL=<unset>",
         "environment_CARGO_TARGET_DIR=<unset>",
     ):
         if required not in rendered:
             fail(f"provenance.txt is missing {required!r}")
+    for tool_name in (
+        "cargo_command",
+        "cargo_resolved",
+        "rustc_command",
+        "rustc_resolved",
+        "rustup_command",
+        "rustup_resolved",
+        "active_toolchain",
+        "rustc_sysroot",
+    ):
+        if len(re.findall(rf"^{tool_name}=\S.*$", rendered, re.M)) != 1:
+            fail(f"provenance.txt must contain one resolved {tool_name}")
     for hash_name in (
         "root_Cargo.lock_sha256",
         "reloadstall_Cargo.lock_sha256",
@@ -683,12 +791,44 @@ def expected_stub_addr(index: int) -> str:
     return f"127.1.{index // 200}.{index % 200 + 1}"
 
 
+def expected_policy(reject_prefix: str, community: str) -> str:
+    return f"""# reload-stall policy generation - generated by gen-scenario.py.
+#
+# member-in rejects one out-of-table prefix ({reject_prefix} is outside the
+# announced 20.0.0.0-26.x base table), so the import chain is content-real:
+# reinstalled per peer, 700 Route Refreshes fire, 400k routes re-enter the
+# new chain, but output-neutral - no announced route's verdict changes.
+# member-out tags every advertised route with the generation community the
+# harness samples to confirm which generation is live at the receiver.
+policy member-in {{
+    term drop-blocked {{ if route.prefix == {reject_prefix} {{ reject }} }}
+    term default {{ accept }}
+}}
+
+policy member-out {{
+    term tag {{ add community {community}; accept }}
+}}
+"""
+
+
 def validate_scenario(root: Path, manifest: dict[str, Any]) -> None:
     try:
         config = tomllib.loads(read_text(root / "scenario/config.toml"))
     except tomllib.TOMLDecodeError as exc:
         fail(f"generated config is invalid TOML: {exc}")
+    require_exact(
+        set(config), {"global", "neighbors", "policy", "security"}, "config keys"
+    )
     global_config = require_mapping(config.get("global"), "config.global")
+    require_exact(
+        set(global_config),
+        {"asn", "listen_port", "router_id", "runtime_state_dir", "telemetry"},
+        "config.global keys",
+    )
+    require_exact(global_config.get("asn"), 65_500, "config.global.asn")
+    require_exact(
+        global_config.get("router_id"), "10.0.0.1", "config.global.router_id"
+    )
     require_exact(global_config.get("listen_port"), PORT, "config.global.listen_port")
     runtime_dir = manifest["runtime_dir"]
     require_exact(
@@ -699,14 +839,37 @@ def validate_scenario(root: Path, manifest: dict[str, Any]) -> None:
     telemetry = require_mapping(
         global_config.get("telemetry"), "config.global.telemetry"
     )
+    require_exact(
+        set(telemetry), {"grpc_uds", "log_format"}, "config telemetry keys"
+    )
     require_exact(telemetry.get("log_format"), "json", "config telemetry log_format")
     uds = require_mapping(telemetry.get("grpc_uds"), "config grpc_uds")
+    require_exact(set(uds), {"path"}, "config grpc_uds keys")
     require_exact(uds.get("path"), f"{runtime_dir}/grpc.sock", "config grpc_uds path")
+    require_exact(
+        config.get("security"),
+        {"grpc": {"enforcement": "legacy"}},
+        "config.security",
+    )
+    require_exact(
+        config.get("policy"),
+        {
+            "rpol_files": ["member.rpol"],
+            "import_chain": ["member-in"],
+            "export_chain": ["member-out"],
+        },
+        "config.policy",
+    )
     neighbors = config.get("neighbors")
     if not isinstance(neighbors, list) or len(neighbors) != PEERS:
         fail(f"generated config must contain exactly {PEERS} neighbors")
     for index, neighbor_value in enumerate(neighbors):
         neighbor = require_mapping(neighbor_value, f"config.neighbors[{index}]")
+        require_exact(
+            set(neighbor),
+            {"address", "families", "hold_time", "remote_asn", "route_server_client"},
+            f"neighbor {index} keys",
+        )
         require_exact(
             neighbor.get("address"),
             expected_stub_addr(index),
@@ -737,10 +900,7 @@ def validate_scenario(root: Path, manifest: dict[str, Any]) -> None:
         ("A", generation_a, "65500:1000", "192.0.2.0/24"),
         ("B", generation_b, "65500:2000", "198.51.100.0/24"),
     ):
-        if policy.count(f"add community {community}") != 1:
-            fail(f"generation {label} does not carry exactly one expected community")
-        if policy.count(f"route.prefix == {reject}") != 1:
-            fail(f"generation {label} does not carry exactly one expected reject term")
+        require_exact(policy, expected_policy(reject, community), f"generation {label}")
     if generation_a == generation_b:
         fail("policy generations must differ")
 
@@ -841,6 +1001,11 @@ def validate_harness_log(root: Path) -> None:
             rf"reload {reload_index} sessions_up {PEERS}/{PEERS}",
             f"reload {reload_index} session continuity",
         )
+    one_line(
+        lines,
+        r"defects parse_errors=0 base_withdrawals=0 marker_conflicts=0",
+        "zero-defect counters",
+    )
     one_line(lines, r"done rss_mib=[0-9]+", "completion")
 
 

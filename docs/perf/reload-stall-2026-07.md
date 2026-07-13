@@ -305,7 +305,10 @@ bench/scale/reloadstall/run-receipt.sh \
 
 The wrapper acquires the shared host lock, retains the requested commit as a
 full Git archive, reconstructs and builds from a read-only extraction with both
-lockfiles, generates the exact 700-neighbor inputs from that extraction, then
+lockfiles, rejects inherited compiler/linker/profile/target overrides and every
+Cargo config except the archived regular `.cargo/config.toml`, records the
+resolved toolchain, generates the exact 700-neighbor inputs from that
+extraction, then
 takes a timestamped final snapshot of every CPU-frequency governor, one-minute
 load below 2.0, and the argv/cwd/process-tree-checked empty competing-process set
 immediately before daemon start. It runs the daemon, health probe, and
@@ -316,7 +319,13 @@ fails closed unless every reload proves 700/700 observers × 399,828 unique
 non-self prefixes under the expected alternating community, the worst
 observer stays below the precommitted 1,000 ms gate, all four daemon reloads
 complete, session continuity is proven daemon-side, and every health query
-succeeds.
+succeeds. Builds, generation, per-stub OPEN, total establishment, initial
+convergence, each reload, and the outer harness all have explicit backstops;
+terminal signals run bounded harness/health/daemon cleanup. Measurement
+processes inherit no ambient daemon, loader, allocator, or benchmark variables:
+they run under an exact `env -i` whitelist. Acceptance also requires exact
+generated config/policy mappings and zero decoded base withdrawals, marker
+conflicts, or wire defects.
 
 For mechanics only, the underlying manual build-and-run shape remains:
 

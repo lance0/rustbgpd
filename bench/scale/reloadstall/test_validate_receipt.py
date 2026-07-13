@@ -21,6 +21,7 @@ REPO = validator.REPO_ROOT
 SOURCE = validator.SOURCE_ROOT
 TARGET = validator.BUILD_TARGET
 ARCHIVE_FILES = {
+    "bench/scale/reloadstall/build_fence.py": b"# build fence fixture\n",
     "bench/scale/reloadstall/gen-scenario.py": b"# generator fixture\n",
     "bench/scale/reloadstall/process_fence.py": b"# process fence fixture\n",
     "bench/scale/reloadstall/src/main.rs": b"// harness fixture\n",
@@ -66,14 +67,7 @@ def source_archive() -> bytes:
 
 
 def policy(reject: str, community: str) -> str:
-    return f"""policy member-in {{
-    term drop-blocked {{ if route.prefix == {reject} {{ reject }} }}
-    term default {{ accept }}
-}}
-policy member-out {{
-    term tag {{ add community {community}; accept }}
-}}
-"""
+    return validator.expected_policy(reject, community)
 
 
 def config() -> str:
@@ -89,6 +83,14 @@ def config() -> str:
         "",
         "[global.telemetry.grpc_uds]",
         f'path = "{RUNTIME}/grpc.sock"',
+        "",
+        "[security.grpc]",
+        'enforcement = "legacy"',
+        "",
+        "[policy]",
+        'rpol_files = ["member.rpol"]',
+        'import_chain = ["member-in"]',
+        'export_chain = ["member-out"]',
         "",
     ]
     for index in range(validator.PEERS):
@@ -131,7 +133,12 @@ def harness_log() -> str:
                 f"reload {reload_index} sessions_up 700/700",
             ]
         )
-    rows.append("done rss_mib=1303")
+    rows.extend(
+        [
+            "defects parse_errors=0 base_withdrawals=0 marker_conflicts=0",
+            "done rss_mib=1303",
+        ]
+    )
     return "\n".join(rows) + "\n"
 
 
@@ -193,13 +200,29 @@ def make_receipt(root: Path) -> None:
             "build_source_root=<SOURCE_ROOT>\nbuild_target_dir=<BUILD_TARGET>\n"
             "host_lock=<HOST_LOCK>\nruntime_dir=<RUNTIME_DIR>\n"
             "output_dir=<OUTPUT_DIR>\n"
+            "cargo_command=<CARGO_HOME>/bin/cargo\n"
+            "cargo_resolved=<CARGO_HOME>/bin/rustup\n"
+            "rustc_command=<CARGO_HOME>/bin/rustc\n"
+            "rustc_resolved=<CARGO_HOME>/bin/rustup\n"
+            "rustup_command=<CARGO_HOME>/bin/rustup\n"
+            "rustup_resolved=<CARGO_HOME>/bin/rustup\n"
+            "active_toolchain=stable-x86_64-unknown-linux-gnu (default)\n"
+            "rustc_sysroot=<RUSTUP_HOME>/toolchains/stable-x86_64-unknown-linux-gnu\n"
+            "allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml\n"
+            "external_cargo_configs=<none>\n"
+            "build_override_fence=clear\n"
+            "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n"
+            "harness_environment=env -i LC_ALL=C TZ=UTC\n"
+            "health_environment=env -i LC_ALL=C TZ=UTC\n"
             "rustc 1.95.0\ncargo 1.95.0\n"
             f"root_Cargo.lock_sha256={'4' * 64}\n"
             f"reloadstall_Cargo.lock_sha256={'5' * 64}\n"
             f"rustbgpd_sha256={'1' * 64}\nrbgp_sha256={'2' * 64}\n"
             f"reloadstall_sha256={'3' * 64}\n"
             "environment_RUSTFLAGS=<unset>\n"
+            "environment_RUSTDOCFLAGS=<unset>\n"
             "environment_CARGO_ENCODED_RUSTFLAGS=<unset>\n"
+            "environment_CARGO_INCREMENTAL=<unset>\n"
             "environment_CARGO_TARGET_DIR=<unset>\n"
         ),
         "scenario/config.toml": config(),
@@ -208,6 +231,9 @@ def make_receipt(root: Path) -> None:
         "scenario/member.initial.rpol": generation_a,
         "scenario/member.final.rpol": generation_a,
         "source-status.txt": "",
+        "sources/build_fence.py": ARCHIVE_FILES[
+            "bench/scale/reloadstall/build_fence.py"
+        ].decode(),
         "sources/gen-scenario.py": ARCHIVE_FILES[
             "bench/scale/reloadstall/gen-scenario.py"
         ].decode(),
@@ -230,9 +256,17 @@ def make_receipt(root: Path) -> None:
     invocation = {
         "source_commit": COMMIT,
         "build_cwd": SOURCE,
-        "build_environment": {"CARGO_TARGET_DIR": TARGET},
+        "build_environment": {
+            "CARGO_TARGET_DIR": TARGET,
+            "allowed_cargo_config": f"{SOURCE}/.cargo/config.toml",
+            "external_cargo_configs": "rejected",
+        },
         "process_fence_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
-        "daemon_environment": {"RUST_LOG": "info"},
+        "runtime_environments": {
+            "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
+            "harness": {"LC_ALL": "C", "TZ": "UTC"},
+            "health": {"LC_ALL": "C", "TZ": "UTC"},
+        },
         "health_probe": {"timeout_seconds": 10, "interval_milliseconds": 50},
         "commands": {
             "archive": [
@@ -251,7 +285,12 @@ def make_receipt(root: Path) -> None:
                 "--no-same-permissions",
             ],
             "build_daemon_cli": [
-                "cargo",
+                "timeout",
+                "--foreground",
+                "--signal=TERM",
+                "--kill-after=30s",
+                "1800",
+                "<CARGO_COMMAND>",
                 "build",
                 "--release",
                 "--locked",
@@ -265,14 +304,32 @@ def make_receipt(root: Path) -> None:
                 "rbgp",
             ],
             "build_harness": [
-                "cargo",
+                "timeout",
+                "--foreground",
+                "--signal=TERM",
+                "--kill-after=30s",
+                "1800",
+                "<CARGO_COMMAND>",
                 "build",
                 "--release",
                 "--locked",
                 "--manifest-path",
                 "bench/scale/reloadstall/Cargo.toml",
             ],
+            "build_fence": [
+                "python3",
+                f"{SOURCE}/bench/scale/reloadstall/build_fence.py",
+                "--source-root",
+                SOURCE,
+                "--cargo-home",
+                "<CARGO_HOME>",
+            ],
             "generate": [
+                "timeout",
+                "--foreground",
+                "--signal=TERM",
+                "--kill-after=5s",
+                "60",
                 "python3",
                 f"{SOURCE}/bench/scale/reloadstall/gen-scenario.py",
                 "700",
@@ -289,14 +346,42 @@ def make_receipt(root: Path) -> None:
                 "--root",
                 TARGET,
             ],
-            "daemon": [f"{TARGET}/release/rustbgpd", f"{RUNTIME}/config.toml"],
+            "daemon": [
+                "setsid",
+                "env",
+                "-i",
+                "LC_ALL=C",
+                "TZ=UTC",
+                "RUST_LOG=info",
+                f"{TARGET}/release/rustbgpd",
+                f"{RUNTIME}/config.toml",
+            ],
             "health": [
+                "timeout",
+                "--foreground",
+                "--signal=TERM",
+                "--kill-after=1s",
+                "10",
+                "env",
+                "-i",
+                "LC_ALL=C",
+                "TZ=UTC",
                 f"{TARGET}/release/rbgp",
                 "--addr",
                 f"unix://{RUNTIME}/grpc.sock",
                 "health",
             ],
             "harness": [
+                "setsid",
+                "timeout",
+                "--foreground",
+                "--signal=TERM",
+                "--kill-after=30s",
+                "4200",
+                "env",
+                "-i",
+                "LC_ALL=C",
+                "TZ=UTC",
                 f"{TARGET}/release/reloadstall",
                 "700",
                 "400400",
@@ -332,6 +417,16 @@ def make_receipt(root: Path) -> None:
         },
         "runtime_dir": RUNTIME,
         "output_dir": OUTPUT,
+        "timeouts_seconds": {
+            "build_each": 1800,
+            "scenario_generation": 60,
+            "harness_outer": 4200,
+            "stub_connect_open": 15,
+            "overall_establishment": 120,
+            "initial_convergence": 120,
+            "per_reload": 900,
+            "quiesce": 20,
+        },
         "scenario": {
             "peers": 700,
             "prefixes": 400400,
@@ -361,6 +456,9 @@ def make_receipt(root: Path) -> None:
             "daemon_exit": 0,
             "health_samples": 1,
             "health_failures": 0,
+            "parse_errors": 0,
+            "base_withdrawals": 0,
+            "marker_conflicts": 0,
         },
     }
     write(root / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -487,6 +585,12 @@ class ReceiptValidatorTests(unittest.TestCase):
         )
         self.assert_invalid("violates the precommitted")
 
+    def test_nonzero_defect_counter_fails(self) -> None:
+        self.mutate_text(
+            "harness.log", "base_withdrawals=0", "base_withdrawals=1"
+        )
+        self.assert_invalid("zero-defect counters")
+
     def test_timeout_marker_fails_despite_success_manifest(self) -> None:
         with (self.root / "harness.log").open("a", encoding="utf-8") as handle:
             handle.write("reload 4 TIMEOUT waiting for re-advertisement\n")
@@ -540,20 +644,60 @@ class ReceiptValidatorTests(unittest.TestCase):
         resign(self.root)
         self.assert_invalid("exactly 700 neighbors")
 
+    def test_config_extra_top_level_mapping_fails(self) -> None:
+        path = self.root / "scenario/config.toml"
+        write(path, path.read_text(encoding="utf-8") + "\n[extra]\nvalue = 1\n")
+        resign(self.root)
+        self.assert_invalid("config keys")
+
+    def test_config_extra_global_mapping_fails(self) -> None:
+        self.mutate_text("scenario/config.toml", "asn = 65500", "asn = 65500\nworkers = 4")
+        self.assert_invalid("config.global keys")
+
+    def test_config_extra_neighbor_mapping_fails(self) -> None:
+        self.mutate_text(
+            "scenario/config.toml", "hold_time = 180", "hold_time = 180\npassive = true"
+        )
+        self.assert_invalid("neighbor 0 keys")
+
+    def test_config_policy_mapping_mismatch_fails(self) -> None:
+        self.mutate_text(
+            "scenario/config.toml",
+            'export_chain = ["member-out"]',
+            'export_chain = ["member-out", "extra"]',
+        )
+        self.assert_invalid("config.policy")
+
+    def test_config_grpc_mapping_extra_fails(self) -> None:
+        self.mutate_text(
+            "scenario/config.toml",
+            f'path = "{RUNTIME}/grpc.sock"',
+            f'path = "{RUNTIME}/grpc.sock"\nmode = 438',
+        )
+        self.assert_invalid("grpc_uds keys")
+
+    def test_policy_extra_term_fails(self) -> None:
+        self.mutate_text(
+            "scenario/gen-a.rpol",
+            "    term default { accept }",
+            "    term unexpected { accept }\n    term default { accept }",
+        )
+        self.assert_invalid("generation A")
+
     def test_identical_policy_generations_fail(self) -> None:
         write(
             self.root / "scenario/gen-b.rpol",
             (self.root / "scenario/gen-a.rpol").read_text(encoding="utf-8"),
         )
         resign(self.root)
-        self.assert_invalid("generation B does not carry")
+        self.assert_invalid("generation B")
 
     def test_invocation_shape_mismatch_fails(self) -> None:
         def mutate(value) -> None:
-            value["commands"]["harness"][1] = "699"
+            value["commands"]["harness"][11] = "699"
 
         self.mutate_json("invocation.json", mutate)
-        self.assert_invalid("does not pin the 700x400,400 shape")
+        self.assert_invalid("commands.harness")
 
     def test_unlocked_build_invocation_fails(self) -> None:
         def mutate(value) -> None:
@@ -561,6 +705,27 @@ class ReceiptValidatorTests(unittest.TestCase):
 
         self.mutate_json("invocation.json", mutate)
         self.assert_invalid("build_harness")
+
+    def test_build_timeout_mismatch_fails(self) -> None:
+        def mutate(value) -> None:
+            value["commands"]["build_harness"][4] = "1799"
+
+        self.mutate_json("invocation.json", mutate)
+        self.assert_invalid("build_harness")
+
+    def test_harness_outer_timeout_mismatch_fails(self) -> None:
+        def mutate(value) -> None:
+            value["commands"]["harness"][5] = "4199"
+
+        self.mutate_json("invocation.json", mutate)
+        self.assert_invalid("commands.harness")
+
+    def test_runtime_environment_extra_fails(self) -> None:
+        def mutate(value) -> None:
+            value["runtime_environments"]["daemon"]["LD_PRELOAD"] = "/tmp/x.so"
+
+        self.mutate_json("invocation.json", mutate)
+        self.assert_invalid("runtime_environments")
 
     def test_high_load_fails(self) -> None:
         self.mutate_text("load-before.tsv", "4\t0.5", "4\t2.0")
@@ -603,6 +768,21 @@ class ReceiptValidatorTests(unittest.TestCase):
             "runtime_dir=<RUNTIME_DIR>\npid=1234",
         )
         self.assert_invalid("unsanitized daemon PID")
+
+    def test_provenance_whitespace_daemon_pid_fails(self) -> None:
+        self.mutate_text(
+            "provenance.txt",
+            "runtime_dir=<RUNTIME_DIR>",
+            "runtime_dir=<RUNTIME_DIR>\ndaemon pid 1234",
+        )
+        self.assert_invalid("unsanitized daemon PID")
+
+    def test_manifest_timeout_mismatch_fails(self) -> None:
+        self.mutate_json(
+            "manifest.json",
+            lambda value: value["timeouts_seconds"].update(harness_outer=4199),
+        )
+        self.assert_invalid("timeouts_seconds")
 
     def test_malformed_binary_hash_fails(self) -> None:
         self.mutate_text(

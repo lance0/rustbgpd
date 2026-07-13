@@ -52,7 +52,19 @@ class ProcessFenceTests(unittest.TestCase):
                 "/home/lance/projects/rustbgpd-next/target/release/new_benchmark",
             )
         )
-        self.assertEqual(found[0][1], "rustbgpd-target-binary")
+        self.assertEqual(found[0][1], "rustbgpd-root-executable")
+
+    def test_unknown_native_binary_anywhere_under_root_is_detected(self) -> None:
+        found = self.competitors(
+            process(
+                20,
+                1,
+                "helper",
+                f"{ROOT}/tools/helper",
+                exe=f"{ROOT}/tools/helper",
+            )
+        )
+        self.assertEqual(found[0][1], "rustbgpd-root-executable")
 
     def test_interpreted_repo_benchmark_is_detected(self) -> None:
         found = self.competitors(
@@ -73,6 +85,12 @@ class ProcessFenceTests(unittest.TestCase):
         )
         self.assertEqual(found[0][1], "interpreted-rustbgpd-benchmark")
 
+    def test_interpreted_pyc_under_bench_is_detected(self) -> None:
+        found = self.competitors(
+            process(20, 1, "python3", "python3", f"{ROOT}/bench/scale/cache.pyc")
+        )
+        self.assertEqual(found[0][1], "interpreted-rustbgpd-benchmark")
+
     def test_proc_exe_catches_target_binary_hidden_by_argv(self) -> None:
         found = self.competitors(
             process(
@@ -83,7 +101,7 @@ class ProcessFenceTests(unittest.TestCase):
                 exe=f"{ROOT}/target/release/new_benchmark",
             )
         )
-        self.assertEqual(found[0][1], "rustbgpd-target-binary")
+        self.assertEqual(found[0][1], "rustbgpd-root-executable")
 
     def test_descendant_of_competitor_is_detected(self) -> None:
         found = self.competitors(
@@ -97,6 +115,20 @@ class ProcessFenceTests(unittest.TestCase):
         found = self.competitors(
             process(10, 1, "cargo", "cargo", "run"),
             process(11, 10, "python3", "python3", "process_fence.py"),
+            ignored={10, 11},
+        )
+        self.assertEqual(found, [])
+
+    def test_ignored_native_and_pyc_ancestry_stays_ignored(self) -> None:
+        found = self.competitors(
+            process(
+                10,
+                1,
+                "helper",
+                f"{ROOT}/tools/helper",
+                exe=f"{ROOT}/tools/helper",
+            ),
+            process(11, 10, "python3", "python3", f"{ROOT}/bench/cache.pyc"),
             ignored={10, 11},
         )
         self.assertEqual(found, [])

@@ -38,6 +38,9 @@ readonly reloads=4
 readonly control_seconds=30
 readonly load_one_max=2.0
 readonly required_governor=performance
+readonly build_timeout_seconds=1800
+readonly generation_timeout_seconds=60
+readonly harness_timeout_seconds=4200
 
 while (($#)); do
   case "$1" in
@@ -83,19 +86,12 @@ done
 }
 
 for command in \
-  awk cargo cat chmod cmp cp date find flock git mkdir mktemp python3 rm rustc \
-  sha256sum sleep ss tail tar timeout touch uname xargs; do
+  awk cargo cat chmod cmp cp date env find flock git mkdir mktemp python3 readlink \
+  rm rustc rustup setsid sha256sum sleep ss tail tar timeout touch uname xargs; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'error: required command is missing: %s\n' "$command" >&2
     exit 1
   }
-done
-for variable in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR; do
-  if [[ -n ${!variable:-} ]]; then
-    printf 'error: %s must be unset for the retained build (got a non-empty value)\n' \
-      "$variable" >&2
-    exit 2
-  fi
 done
 
 repo_root=$(git rev-parse --show-toplevel)
@@ -121,6 +117,31 @@ source_status=$(git status --porcelain=v1 --untracked-files=normal)
   exit 2
 }
 git diff --check "$source_sha^" "$source_sha" >/dev/null
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
+
+cargo_command=$(command -v cargo)
+rustc_command=$(command -v rustc)
+rustup_command=$(command -v rustup)
+cargo_resolved=$(readlink -f "$cargo_command")
+rustc_resolved=$(readlink -f "$rustc_command")
+rustup_resolved=$(readlink -f "$rustup_command")
+active_toolchain=$(rustup show active-toolchain)
+rustc_sysroot=$(rustc --print sysroot)
+cargo_home=${CARGO_HOME:-${HOME}/.cargo}
+[[ ${HOME:-} == /* ]] || {
+  printf 'error: HOME must be an absolute path for the retained build: %s\n' \
+    "${HOME:-<unset>}" >&2
+  exit 2
+}
+[[ $cargo_home == /* ]] || {
+  printf 'error: CARGO_HOME must resolve from an absolute path: %s\n' "$cargo_home" >&2
+  exit 2
+}
+if [[ -n ${RUSTUP_HOME:-} && $RUSTUP_HOME != /* ]]; then
+  printf 'error: RUSTUP_HOME must be absolute when set: %s\n' "$RUSTUP_HOME" >&2
+  exit 2
+fi
 
 case "$output_dir" in
   /*) ;;
@@ -156,19 +177,69 @@ build_target="$scratch/target"
 host_name=$(uname -n)
 daemon_pid=
 health_pid=
+harness_pid=
+cleanup_active=0
+
+wait_pid_bounded() {
+  local pid=$1
+  local seconds=$2
+  timeout --foreground --signal=TERM --kill-after=1s "$seconds" \
+    tail --pid="$pid" -f /dev/null >/dev/null 2>&1
+}
+
+terminate_pid_bounded() {
+  local label=$1
+  local pid=$2
+  local seconds=$3
+  local scope=${4:-pid}
+  local target=$pid
+  local rc
+  [[ $scope == group ]] && target="-$pid"
+  kill -TERM -- "$target" >/dev/null 2>&1 || true
+  if ! wait_pid_bounded "$pid" "$seconds"; then
+    printf 'cleanup: %s pid %s exceeded %ss; sending KILL\n' \
+      "$label" "$pid" "$seconds" >&2
+    kill -KILL -- "$target" >/dev/null 2>&1 || true
+    wait_pid_bounded "$pid" 2 || true
+  fi
+  if wait "$pid" >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  return "$rc"
+}
+
 cleanup() {
+  ((cleanup_active == 0)) || return
+  cleanup_active=1
+  trap - EXIT INT TERM
   set +e
+  if [[ -n ${harness_pid:-} ]]; then
+    terminate_pid_bounded harness "$harness_pid" 5 group || true
+    harness_pid=
+  fi
   if [[ -n ${health_pid:-} ]]; then
     touch "$scratch/health.stop" >/dev/null 2>&1 || true
-    wait "$health_pid" >/dev/null 2>&1 || true
+    terminate_pid_bounded health-probe "$health_pid" 12 || true
+    health_pid=
   fi
   if [[ -n ${daemon_pid:-} ]]; then
-    kill -TERM "$daemon_pid" >/dev/null 2>&1 || true
-    wait "$daemon_pid" >/dev/null 2>&1 || true
+    terminate_pid_bounded daemon "$daemon_pid" 30 group || true
+    daemon_pid=
   fi
   rm -rf "$scratch" "$runtime_dir"
 }
-trap cleanup EXIT INT TERM
+
+on_signal() {
+  local status=$1
+  trap - INT TERM
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 mkdir "$output_dir"
 mkdir "$output_dir/scenario" "$output_dir/sources" "$source_root" "$build_target"
@@ -189,6 +260,8 @@ tar --extract --file="$source_archive" --directory="$source_root" \
   --no-same-owner --no-same-permissions
 cp "$source_root/bench/scale/reloadstall/gen-scenario.py" \
   "$output_dir/sources/gen-scenario.py"
+cp "$source_root/bench/scale/reloadstall/build_fence.py" \
+  "$output_dir/sources/build_fence.py"
 cp "$source_root/bench/scale/reloadstall/process_fence.py" \
   "$output_dir/sources/process_fence.py"
 cp "$source_root/bench/scale/reloadstall/src/main.rs" \
@@ -200,6 +273,10 @@ cp "$source_root/bench/scale/reloadstall/validate_receipt.py" \
 source_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
 find "$source_root" -type f -exec chmod a-w {} +
 chmod a-w "$source_archive"
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+    --source-root "$source_root" --cargo-home "$cargo_home" \
+    >"$scratch/build-fence.txt"
 
 sanitize_text() {
   local input=$1
@@ -250,8 +327,16 @@ Path(sys.argv[2]).write_text(text, encoding="utf-8")
 PY
 }
 
-build_daemon_cli=(cargo build --release --locked --package rustbgpd --bin rustbgpd --package rustbgpctl --bin rbgp)
-build_harness=(cargo build --release --locked --manifest-path bench/scale/reloadstall/Cargo.toml)
+build_daemon_cli=(
+  timeout --foreground --signal=TERM --kill-after=30s "$build_timeout_seconds"
+  "$cargo_command" build --release --locked --package rustbgpd --bin rustbgpd
+  --package rustbgpctl --bin rbgp
+)
+build_harness=(
+  timeout --foreground --signal=TERM --kill-after=30s "$build_timeout_seconds"
+  "$cargo_command" build --release --locked
+  --manifest-path bench/scale/reloadstall/Cargo.toml
+)
 {
   printf '+ cd %q\n' "$source_root"
   printf '+ CARGO_TARGET_DIR=%q ' "$build_target"
@@ -357,6 +442,7 @@ if ss -H -ltn | awk -v suffix=":${listen_port}" '$4 ~ suffix "$" { found=1 } END
   exit 75
 fi
 generator=(
+  timeout --foreground --signal=TERM --kill-after=5s "$generation_timeout_seconds"
   python3 "$source_root/bench/scale/reloadstall/gen-scenario.py"
   "$peers" "$runtime_dir" "$listen_port"
 )
@@ -372,12 +458,21 @@ cp "$runtime_dir/gen-b.rpol" "$output_dir/scenario/gen-b.rpol"
 cp "$runtime_dir/member.rpol" "$output_dir/scenario/member.initial.rpol"
 sanitize_text "$scratch/build.raw.log" "$output_dir/build.log"
 
-daemon_command=("$daemon_bin" "$runtime_dir/config.toml")
-health_command=("$cli_bin" --addr "unix://$runtime_dir/grpc.sock" health)
-harness_command=(
+runtime_environment=(env -i LC_ALL=C TZ=UTC)
+daemon_command=(setsid "${runtime_environment[@]}" RUST_LOG=info "$daemon_bin" "$runtime_dir/config.toml")
+health_command=(
+  timeout --foreground --signal=TERM --kill-after=1s 10
+  "${runtime_environment[@]}" "$cli_bin" --addr "unix://$runtime_dir/grpc.sock" health
+)
+harness_payload=(
   "$harness_bin" "$peers" "$prefixes" "$listen_port" PLACEHOLDER_PID
   "$runtime_dir/member.rpol" "$runtime_dir/gen-a.rpol" "$runtime_dir/gen-b.rpol"
   "$reloads" "$control_seconds"
+)
+harness_command=(
+  setsid
+  timeout --foreground --signal=TERM --kill-after=30s "$harness_timeout_seconds"
+  "${runtime_environment[@]}" "${harness_payload[@]}"
 )
 
 SOURCE_COMMIT=$source_sha \
@@ -393,8 +488,17 @@ output = "<OUTPUT_DIR>"
 payload = {
     "source_commit": os.environ["SOURCE_COMMIT"],
     "build_cwd": source,
-    "build_environment": {"CARGO_TARGET_DIR": target},
+    "build_environment": {
+        "CARGO_TARGET_DIR": target,
+        "allowed_cargo_config": f"{source}/.cargo/config.toml",
+        "external_cargo_configs": "rejected",
+    },
     "process_fence_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
+    "runtime_environments": {
+        "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
+        "harness": {"LC_ALL": "C", "TZ": "UTC"},
+        "health": {"LC_ALL": "C", "TZ": "UTC"},
+    },
     "commands": {
         "archive": [
             "git", "archive", "--format=tar",
@@ -405,27 +509,40 @@ payload = {
             f"--directory={source}", "--no-same-owner", "--no-same-permissions",
         ],
         "build_daemon_cli": [
-            "cargo", "build", "--release", "--locked", "--package", "rustbgpd",
-            "--bin", "rustbgpd", "--package", "rustbgpctl", "--bin", "rbgp",
+            "timeout", "--foreground", "--signal=TERM", "--kill-after=30s", "1800",
+            "<CARGO_COMMAND>", "build", "--release", "--locked", "--package",
+            "rustbgpd", "--bin", "rustbgpd", "--package", "rustbgpctl", "--bin", "rbgp",
         ],
         "build_harness": [
-            "cargo", "build", "--release", "--locked", "--manifest-path",
-            "bench/scale/reloadstall/Cargo.toml",
+            "timeout", "--foreground", "--signal=TERM", "--kill-after=30s", "1800",
+            "<CARGO_COMMAND>", "build", "--release", "--locked",
+            "--manifest-path", "bench/scale/reloadstall/Cargo.toml",
+        ],
+        "build_fence": [
+            "python3", f"{source}/bench/scale/reloadstall/build_fence.py",
+            "--source-root", source, "--cargo-home", "<CARGO_HOME>",
         ],
         "generate": [
-            "python3", f"{source}/bench/scale/reloadstall/gen-scenario.py",
-            "700", runtime, "1790",
+            "timeout", "--foreground", "--signal=TERM", "--kill-after=5s", "60",
+            "python3", f"{source}/bench/scale/reloadstall/gen-scenario.py", "700",
+            runtime, "1790",
         ],
         "process_fence": [
             "python3", f"{source}/bench/scale/reloadstall/process_fence.py",
             "--root", "<REPO_ROOT>", "--root", source, "--root", target,
         ],
-        "daemon": [f"{target}/release/rustbgpd", f"{runtime}/config.toml"],
+        "daemon": [
+            "setsid", "env", "-i", "LC_ALL=C", "TZ=UTC", "RUST_LOG=info",
+            f"{target}/release/rustbgpd", f"{runtime}/config.toml",
+        ],
         "health": [
+            "timeout", "--foreground", "--signal=TERM", "--kill-after=1s", "10",
+            "env", "-i", "LC_ALL=C", "TZ=UTC",
             f"{target}/release/rbgp", "--addr", f"unix://{runtime}/grpc.sock", "health",
         ],
         "harness": [
-            f"{target}/release/reloadstall",
+            "setsid", "timeout", "--foreground", "--signal=TERM", "--kill-after=30s", "4200",
+            "env", "-i", "LC_ALL=C", "TZ=UTC", f"{target}/release/reloadstall",
             "700", "400400", "1790", "<DAEMON_PID>", f"{runtime}/member.rpol",
             f"{runtime}/gen-a.rpol", f"{runtime}/gen-b.rpol", "4", "30",
         ],
@@ -434,7 +551,6 @@ payload = {
         ],
     },
     "health_probe": {"timeout_seconds": 10, "interval_milliseconds": 50},
-    "daemon_environment": {"RUST_LOG": "info"},
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
@@ -451,6 +567,8 @@ verify_exact_sources() {
   }
   cmp --silent "$source_root/bench/scale/reloadstall/gen-scenario.py" \
   "$output_dir/sources/gen-scenario.py"
+  cmp --silent "$source_root/bench/scale/reloadstall/build_fence.py" \
+    "$output_dir/sources/build_fence.py"
   cmp --silent "$source_root/bench/scale/reloadstall/process_fence.py" \
     "$output_dir/sources/process_fence.py"
   cmp --silent "$source_root/bench/scale/reloadstall/src/main.rs" \
@@ -489,9 +607,14 @@ printf 'wall_ns\tload_one\n%s\t%s\n' "$load_wall_ns" "$load_one" \
 preflight_completed_wall_ns=$(date +%s%N)
 
 daemon_start_wall_ns=$(date +%s%N)
-RUST_LOG=info "${daemon_command[@]}" >"$scratch/daemon.raw.log" 2>&1 &
+"${daemon_command[@]}" >"$scratch/daemon.raw.log" 2>&1 &
 daemon_pid=$!
-harness_command[4]=$daemon_pid
+harness_payload[4]=$daemon_pid
+harness_command=(
+  setsid
+  timeout --foreground --signal=TERM --kill-after=30s "$harness_timeout_seconds"
+  "${runtime_environment[@]}" "${harness_payload[@]}"
+)
 
 ready=0
 for _ in {1..600}; do
@@ -501,7 +624,8 @@ for _ in {1..600}; do
     exit 1
   fi
   if [[ -S $runtime_dir/grpc.sock ]] \
-    && timeout 5 "${health_command[@]}" >"$scratch/initial-health.log" 2>&1; then
+    && timeout --foreground --signal=TERM --kill-after=1s 5 \
+      "${health_command[@]}" >"$scratch/initial-health.log" 2>&1; then
     ready=1
     break
   fi
@@ -515,13 +639,19 @@ done
 printf 'wall_ns\telapsed_us\texit_code\n' >"$output_dir/health.tsv"
 : >"$output_dir/health-errors.log"
 health_probe() {
+  local probe_pid=
+  trap 'if [[ -n ${probe_pid:-} ]]; then kill -TERM "$probe_pid" >/dev/null 2>&1 || true; wait "$probe_pid" >/dev/null 2>&1 || true; fi; exit 143' TERM INT
   while [[ ! -e $scratch/health.stop ]] && kill -0 "$daemon_pid" 2>/dev/null; do
     local started ended rc elapsed
     started=$(date +%s%N)
-    set +e
-    timeout 10 "${health_command[@]}" >/dev/null 2>>"$output_dir/health-errors.log"
-    rc=$?
-    set -e
+    "${health_command[@]}" >/dev/null 2>>"$output_dir/health-errors.log" &
+    probe_pid=$!
+    if wait "$probe_pid"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    probe_pid=
     ended=$(date +%s%N)
     elapsed=$(((ended - started) / 1000))
     ((elapsed > 0)) || elapsed=1
@@ -532,12 +662,20 @@ health_probe() {
 health_probe &
 health_pid=$!
 
-set +e
-"${harness_command[@]}" >"$scratch/harness.raw.log" 2>&1
-harness_exit=$?
-set -e
+"${harness_command[@]}" >"$scratch/harness.raw.log" 2>&1 &
+harness_pid=$!
+if wait "$harness_pid"; then
+  harness_exit=0
+else
+  harness_exit=$?
+fi
+harness_pid=
 touch "$scratch/health.stop"
-wait "$health_pid" >/dev/null 2>&1 || true
+if wait_pid_bounded "$health_pid" 12; then
+  wait "$health_pid" >/dev/null 2>&1 || true
+else
+  terminate_pid_bounded health-probe "$health_pid" 12 || true
+fi
 health_pid=
 
 daemon_alive_after_harness=false
@@ -552,11 +690,11 @@ sanitize_text "$scratch/daemon.run-window.raw.log" "$output_dir/daemon.log" "$da
 
 daemon_exit=1
 if [[ $daemon_alive_after_harness == true ]]; then
-  kill -TERM "$daemon_pid"
-  set +e
-  wait "$daemon_pid"
-  daemon_exit=$?
-  set -e
+  if terminate_pid_bounded daemon "$daemon_pid" 30 group; then
+    daemon_exit=0
+  else
+    daemon_exit=$?
+  fi
 fi
 daemon_pid=
 
@@ -597,11 +735,25 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'host_lock=<HOST_LOCK>\n'
   printf 'runtime_dir=<RUNTIME_DIR>\n'
   printf 'output_dir=<OUTPUT_DIR>\n'
+  printf 'cargo_command=%s\n' "$cargo_command"
+  printf 'cargo_resolved=%s\n' "$cargo_resolved"
+  printf 'rustc_command=%s\n' "$rustc_command"
+  printf 'rustc_resolved=%s\n' "$rustc_resolved"
+  printf 'rustup_command=%s\n' "$rustup_command"
+  printf 'rustup_resolved=%s\n' "$rustup_resolved"
+  printf 'active_toolchain=%s\n' "$active_toolchain"
+  printf 'rustc_sysroot=%s\n' "$rustc_sysroot"
+  printf 'allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml\n'
+  printf 'external_cargo_configs=<none>\n'
+  printf 'build_override_fence=clear\n'
+  printf 'daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n'
+  printf 'harness_environment=env -i LC_ALL=C TZ=UTC\n'
+  printf 'health_environment=env -i LC_ALL=C TZ=UTC\n'
   git show --no-patch \
     --format='source_parent=%P%nsource_author_date=%aI%nsource_commit_date=%cI%nsource_subject=%s' \
     "$source_sha"
-  rustc -Vv
-  cargo -V
+  "$rustc_command" -Vv
+  "$cargo_command" -V
   uname -srmo
   if command -v lscpu >/dev/null 2>&1; then
     lscpu
@@ -610,9 +762,9 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
     cat /etc/os-release
   fi
   for variable in \
-    RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR CARGO_HOME \
-    RUSTUP_HOME RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER CC CFLAGS LDFLAGS \
-    SOURCE_DATE_EPOCH; do
+    RUSTFLAGS RUSTDOCFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+    CARGO_ENCODED_RUSTFLAGS CARGO_INCREMENTAL CARGO_TARGET_DIR CARGO_HOME \
+    RUSTUP_HOME RUSTUP_TOOLCHAIN CC CFLAGS LDFLAGS SOURCE_DATE_EPOCH; do
     printf 'environment_%s=%s\n' "$variable" "${!variable-<unset>}"
   done
   printf 'root_Cargo.lock_sha256=%s\n' \
@@ -651,6 +803,16 @@ manifest = {
     },
     "runtime_dir": "<RUNTIME_DIR>",
     "output_dir": "<OUTPUT_DIR>",
+    "timeouts_seconds": {
+        "build_each": 1800,
+        "scenario_generation": 60,
+        "harness_outer": 4200,
+        "stub_connect_open": 15,
+        "overall_establishment": 120,
+        "initial_convergence": 120,
+        "per_reload": 900,
+        "quiesce": 20,
+    },
     "scenario": {
         "peers": 700,
         "prefixes": 400400,
@@ -682,6 +844,9 @@ manifest = {
         "daemon_exit": int(os.environ["DAEMON_EXIT"]),
         "health_samples": int(os.environ["HEALTH_SAMPLES"]),
         "health_failures": int(os.environ["HEALTH_FAILURES"]),
+        "parse_errors": 0,
+        "base_withdrawals": 0,
+        "marker_conflicts": 0,
     },
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:

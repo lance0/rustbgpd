@@ -44,6 +44,10 @@ const NLRI_PER_MSG: usize = 900;
 const HOLD_TIME: u16 = 180;
 const COMMUNITY_GEN_A: u32 = (65_500 << 16) | 1_000;
 const COMMUNITY_GEN_B: u32 = (65_500 << 16) | 2_000;
+const STUB_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const ESTABLISHMENT_TIMEOUT: Duration = Duration::from_secs(120);
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
+const HEALTH_POLL: Duration = Duration::from_millis(100);
 
 /// One received-UPDATE observation.
 #[derive(Clone, Copy)]
@@ -121,10 +125,53 @@ struct Ctx {
     /// Daemon messages the stub failed to frame or decode — a daemon defect that
     /// invalidates the run (see the reader and the exit check in `main`).
     parse_errors: AtomicU64,
+    /// Base-table withdrawals are forbidden during this announce-only scenario.
+    base_withdrawals: AtomicU64,
+    /// UPDATEs carrying both the active and inactive generation markers.
+    marker_conflicts: AtomicU64,
 }
 
 fn now_us(ctx: &Ctx) -> u64 {
     u64::try_from(ctx.t0.elapsed().as_micros()).unwrap()
+}
+
+fn live_sessions(ctx: &Ctx) -> usize {
+    ctx.obs
+        .iter()
+        .filter(|observer| observer.established.load(Ordering::Relaxed))
+        .count()
+}
+
+fn require_healthy(ctx: &Ctx, phase: &str) {
+    let sessions = live_sessions(ctx);
+    let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+    let base_withdrawals = ctx.base_withdrawals.load(Ordering::Relaxed);
+    let marker_conflicts = ctx.marker_conflicts.load(Ordering::Relaxed);
+    if sessions != ctx.n_peers as usize
+        || parse_errors != 0
+        || base_withdrawals != 0
+        || marker_conflicts != 0
+    {
+        eprintln!(
+            "FAIL: {phase} health defect: sessions_up={sessions}/{} parse_errors={parse_errors} \
+             base_withdrawals={base_withdrawals} marker_conflicts={marker_conflicts}",
+            ctx.n_peers
+        );
+        std::process::exit(1);
+    }
+}
+
+async fn guarded_sleep(ctx: &Ctx, duration: Duration, phase: &str) {
+    let deadline = Instant::now() + duration;
+    loop {
+        require_healthy(ctx, phase);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(remaining.min(HEALTH_POLL)).await;
+    }
+    require_healthy(ctx, phase);
 }
 
 fn wall_us() -> u128 {
@@ -183,6 +230,15 @@ fn observe_generation(
             progress.observe(index, t_us);
         }
     }
+}
+
+fn generation_marker_conflict(expected: u32, communities: &[u32]) -> bool {
+    let inactive = match expected {
+        COMMUNITY_GEN_A => COMMUNITY_GEN_B,
+        COMMUNITY_GEN_B => COMMUNITY_GEN_A,
+        _ => return false,
+    };
+    communities.contains(&expected) && communities.contains(&inactive)
 }
 
 fn churn_prefix(churner: u32, j: u32) -> Ipv4Prefix {
@@ -434,6 +490,20 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         };
                         let mut base = 0u32;
                         let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
+                        let total_prefixes = rctx.n_peers * rctx.per_peer;
+                        let withdrawn_base = parsed
+                            .withdrawn
+                            .iter()
+                            .filter(|entry| {
+                                base_prefix_index(entry.prefix, total_prefixes).is_some()
+                            })
+                            .count();
+                        if withdrawn_base != 0 {
+                            rctx.base_withdrawals.fetch_add(
+                                u64::try_from(withdrawn_base).unwrap(),
+                                Ordering::Relaxed,
+                            );
+                        }
                         for e in &parsed.announced {
                             let first = e.prefix.addr.octets()[0];
                             if (20..30).contains(&first) {
@@ -458,8 +528,10 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                             *ob.last_comms.lock().unwrap() = communities.to_vec();
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
+                            if generation_marker_conflict(expected, communities) {
+                                rctx.marker_conflicts.fetch_add(1, Ordering::Relaxed);
+                            }
                             if expected != 0 && communities.contains(&expected) {
-                                let total_prefixes = rctx.n_peers * rctx.per_peer;
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
                                     for e in &parsed.announced {
@@ -631,28 +703,52 @@ fn main() {
                 })
                 .collect(),
             parse_errors: AtomicU64::new(0),
+            base_withdrawals: AtomicU64::new(0),
+            marker_conflicts: AtomicU64::new(0),
         });
         println!("# reloadstall peers={n_peers} prefixes={total} per_peer={per_peer} pid={pid}");
 
         // --- Establish all sessions (waves of 64). ---
-        let mut txs: Vec<mpsc::Sender<Message>> = Vec::with_capacity(n_peers as usize);
-        for wave in (0..n_peers).collect::<Vec<_>>().chunks(64) {
-            let mut handles = Vec::new();
-            for &i in wave {
-                let c = Arc::clone(&ctx);
-                handles.push((i, tokio::spawn(establish_stub(c, i))));
-            }
-            for (i, h) in handles {
-                match h.await.unwrap() {
-                    Ok(tx) => txs.push(tx),
-                    Err(e) => {
-                        eprintln!("stub {i} failed: {e}");
-                        std::process::exit(1);
+        let establishment = tokio::time::timeout(ESTABLISHMENT_TIMEOUT, async {
+            let mut txs: Vec<mpsc::Sender<Message>> = Vec::with_capacity(n_peers as usize);
+            for wave in (0..n_peers).collect::<Vec<_>>().chunks(64) {
+                let mut handles = Vec::new();
+                for &i in wave {
+                    let c = Arc::clone(&ctx);
+                    handles.push((
+                        i,
+                        tokio::spawn(async move {
+                            tokio::time::timeout(STUB_OPEN_TIMEOUT, establish_stub(c, i)).await
+                        }),
+                    ));
+                }
+                for (i, handle) in handles {
+                    match handle.await {
+                        Ok(Ok(Ok(tx))) => txs.push(tx),
+                        Ok(Ok(Err(error))) => return Err(format!("stub {i} failed: {error}")),
+                        Ok(Err(_)) => {
+                            return Err(format!("stub {i} connect/OPEN exceeded 15 seconds"));
+                        }
+                        Err(error) => return Err(format!("stub {i} task failed: {error}")),
                     }
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+            Ok::<_, String>(txs)
+        })
+        .await;
+        let txs = match establishment {
+            Ok(Ok(txs)) => txs,
+            Ok(Err(error)) => {
+                eprintln!("FAIL: {error}");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("FAIL: overall establishment exceeded 120 seconds");
+                std::process::exit(1);
+            }
+        };
+        require_healthy(&ctx, "post-establishment");
         println!(
             "established {} at {:.1}s",
             txs.len(),
@@ -668,8 +764,10 @@ fn main() {
         }
         // Converged: every observer holds the table minus its own slice.
         let expected = u64::from(total - per_peer);
+        let convergence_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
         loop {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(HEALTH_POLL).await;
+            require_healthy(&ctx, "initial convergence");
             let min = ctx
                 .obs
                 .iter()
@@ -679,7 +777,14 @@ fn main() {
             if min >= expected {
                 break;
             }
+            if Instant::now() >= convergence_deadline {
+                eprintln!(
+                    "FAIL: initial convergence exceeded 120 seconds: min={min} target={expected}"
+                );
+                std::process::exit(1);
+            }
         }
+        require_healthy(&ctx, "post-convergence");
         println!(
             "converged (>= {expected}/observer) at {:.1}s rss_mib={}",
             ctx.t0.elapsed().as_secs_f64(),
@@ -713,11 +818,11 @@ fn main() {
             });
         }
         // Let churn reach steady state.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        guarded_sleep(&ctx, Duration::from_secs(3), "churn warmup").await;
 
         // --- Control window. ---
         let cs = now_us(&ctx);
-        tokio::time::sleep(Duration::from_secs(control_secs)).await;
+        guarded_sleep(&ctx, Duration::from_secs(control_secs), "control window").await;
         let ce = now_us(&ctx);
         let gaps: Vec<f64> = (0..n_peers as usize)
             .map(|i| max_gap_ms(&ctx, i, cs, ce, true))
@@ -761,7 +866,8 @@ fn main() {
             let deadline = Instant::now() + Duration::from_secs(900);
             let mut ticks = 0u32;
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(HEALTH_POLL).await;
+                require_healthy(&ctx, &format!("reload {r}"));
                 let done = (0..n_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
@@ -841,23 +947,25 @@ fn main() {
             // Keep observing the session through the quiesce interval. In
             // particular, the final cycle must not report a stale `true` just
             // before a reader or writer notices a closed transport.
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            let up = ctx
-                .obs
-                .iter()
-                .filter(|o| o.established.load(Ordering::Relaxed))
-                .count();
+            guarded_sleep(
+                &ctx,
+                Duration::from_secs(20),
+                &format!("reload {r} quiesce"),
+            )
+            .await;
+            let up = live_sessions(&ctx);
             println!("reload {r} sessions_up {up}/{n_peers}");
         }
 
-        println!("done rss_mib={}", rss_mib(pid));
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
-        if parse_errors > 0 {
-            eprintln!(
-                "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
-            );
-            std::process::exit(1);
-        }
+        let base_withdrawals = ctx.base_withdrawals.load(Ordering::Relaxed);
+        let marker_conflicts = ctx.marker_conflicts.load(Ordering::Relaxed);
+        require_healthy(&ctx, "final");
+        println!(
+            "defects parse_errors={parse_errors} base_withdrawals={base_withdrawals} \
+             marker_conflicts={marker_conflicts}"
+        );
+        println!("done rss_mib={}", rss_mib(pid));
         std::process::exit(0);
     });
 }
@@ -917,6 +1025,26 @@ mod tests {
         );
         assert_eq!(progress.unique, 1);
         assert_eq!(progress.completed_at_us, Some(20));
+    }
+
+    #[test]
+    fn generation_marker_conflict_requires_active_and_inactive_markers() {
+        assert!(generation_marker_conflict(
+            COMMUNITY_GEN_A,
+            &[COMMUNITY_GEN_A, COMMUNITY_GEN_B]
+        ));
+        assert!(generation_marker_conflict(
+            COMMUNITY_GEN_B,
+            &[COMMUNITY_GEN_B, COMMUNITY_GEN_A]
+        ));
+        assert!(!generation_marker_conflict(
+            COMMUNITY_GEN_A,
+            &[COMMUNITY_GEN_A]
+        ));
+        assert!(!generation_marker_conflict(
+            0,
+            &[COMMUNITY_GEN_A, COMMUNITY_GEN_B]
+        ));
     }
 
     #[test]

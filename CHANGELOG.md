@@ -245,17 +245,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and max-operation controls replay an individual failure without allowing an
   unbounded run. (LAN-357)
 
-- **Reload UPDATE-stall receipt re-run and re-validated.**
-  `docs/perf/reload-stall-2026-07.md` replaces the July run that was withdrawn
-  as not-acceptance evidence. The corrected harness counts unique re-advertised
-  prefixes carrying the new policy community (no duplicate over-count), and the
-  run is on the outbound size-chunking fix above. The numbers land where the
+- **Reload UPDATE-stall receipt harness corrected and hardened for a retained
+  rerun.** The corrected historical run counts unique re-advertised prefixes
+  carrying the new policy community (no duplicate over-count) and ran on the
+  outbound size-chunking fix above. Its diagnostic numbers land where the
   withdrawn run did — stall p50 0.76 s (0.82 s worst case), full
   re-advertisement ~155 s p50 / ~308 s wall (~0.44 s/peer) at 700 clients ×
-  400,400 routes — but are now trustworthy: every one of the 700 clients
-  verifiably received the full re-advertised table under the new policy. The
-  daemon-side scenario generator is committed at
-  `bench/scale/reloadstall/gen-scenario.py`.
+  400,400 routes — but remain non-acceptance evidence because their complete
+  inputs and outputs were not retained. The revision-pinned wrapper under
+  `bench/scale/reloadstall/` now fails closed on source, build, runtime,
+  liveness, parsing, and scenario defects and emits a validator-checked durable
+  bundle for the pending acceptance rerun. The daemon-side scenario generator
+  is committed at `bench/scale/reloadstall/gen-scenario.py`. (LAN-350)
 
 ## [0.51.0] — 2026-07-11
 

@@ -115,16 +115,17 @@ def direct_reason(process: Process, roots: tuple[str, ...]) -> str | None:
         return f"known-executable:{known[0]}"
 
     argv0 = normalized_name(process.argv[0]) if process.argv else ""
+    # New native tools must fail closed without first being added to a name
+    # inventory. `/proc/<pid>/exe` is authoritative; argv[0] covers the same
+    # case when procfs hides the executable symlink.
     executable_paths = [process.exe]
-    executable_paths.extend(argument_path(process, argument) for argument in process.argv)
+    if process.argv:
+        executable_paths.append(argument_path(process, process.argv[0]))
     for normalized in executable_paths:
         if not normalized:
             continue
-        if (
-            (is_within(normalized, roots) or RUSTBGPD_TREE_RE.search(normalized))
-            and TARGET_BINARY_RE.search(normalized)
-        ):
-            return "rustbgpd-target-binary"
+        if is_within(normalized, roots) or RUSTBGPD_TREE_RE.search(normalized):
+            return "rustbgpd-root-executable"
 
     # Interpreters and launchers hide the executable in argv[1+]. Catch repo
     # benchmark scripts without classifying an editor merely because it opened
