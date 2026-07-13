@@ -904,39 +904,67 @@ impl Config {
             }
         }
 
-        // A prefix MKT creates an authentication boundary in the kernel. Until
-        // Linux precedence for overlapping MKTs is proven and modeled, every
-        // protected dynamic range must be disjoint from all other dynamic
-        // ranges and static peers. This prevents longest-prefix application
-        // matching from disagreeing with listener authentication.
-        for (i, protected) in self.dynamic_neighbors.iter().enumerate() {
-            if protected.tcp_ao.is_none() {
-                continue;
-            }
-            let protected_prefix = parsed_dynamic_prefixes[i];
-            for (j, other_prefix) in parsed_dynamic_prefixes.iter().copied().enumerate() {
-                if i != j && dynamic_prefixes_intersect(protected_prefix, other_prefix) {
+        // Linux may inherit every covering MKT onto an accepted child. Permit
+        // overlapping TCP-AO owners only when their directional ID namespaces
+        // are disjoint; the listener then reconciles the complete owned union
+        // while static-exact/dynamic-LPM selects Current and RNext ownership.
+        // Any AO/plaintext or AO/MD5 overlap remains fail-closed.
+        for (i, left) in self.dynamic_neighbors.iter().enumerate() {
+            for (j, right) in self.dynamic_neighbors.iter().enumerate().skip(i + 1) {
+                if !dynamic_prefixes_intersect(
+                    parsed_dynamic_prefixes[i],
+                    parsed_dynamic_prefixes[j],
+                ) || (left.tcp_ao.is_none() && right.tcp_ao.is_none())
+                {
+                    continue;
+                }
+                let (Some(left_ao), Some(right_ao)) = (&left.tcp_ao, &right.tcp_ao) else {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
-                            "dynamic_neighbors[{i}]: TCP-AO range {:?} overlaps \
-                             dynamic_neighbors[{j}] {:?}; protected ranges must be disjoint",
-                            protected.prefix, self.dynamic_neighbors[j].prefix
+                            "dynamic_neighbors[{i}] {:?} and dynamic_neighbors[{j}] {:?} \
+                             overlap across a TCP-AO and non-TCP-AO authentication boundary",
+                            left.prefix, right.prefix
+                        ),
+                    });
+                };
+                if let Some(direction) = tcp_ao_overlap_id_collision(left_ao, right_ao) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?} and dynamic_neighbors[{j}] {:?} \
+                             overlap with a TCP-AO {direction} collision; overlapping owners \
+                             require disjoint SendID and RecvID sets",
+                            left.prefix, right.prefix
                         ),
                     });
                 }
             }
+
             for neighbor in &self.neighbors {
                 let Ok(address) = neighbor.address.parse::<IpAddr>() else {
                     continue;
                 };
                 let host_prefix = (address, if address.is_ipv4() { 32 } else { 128 });
-                if dynamic_prefixes_intersect(protected_prefix, host_prefix) {
+                if !dynamic_prefixes_intersect(parsed_dynamic_prefixes[i], host_prefix)
+                    || (left.tcp_ao.is_none() && neighbor.tcp_ao.is_none())
+                {
+                    continue;
+                }
+                let (Some(dynamic_ao), Some(static_ao)) = (&left.tcp_ao, &neighbor.tcp_ao) else {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
-                            "dynamic_neighbors[{i}]: TCP-AO range {:?} contains static \
-                             neighbor {:?}; static and dynamic authentication boundaries \
-                             must be disjoint",
-                            protected.prefix, neighbor.address
+                            "dynamic_neighbors[{i}] TCP-AO boundary {:?} overlaps static \
+                             neighbor {:?} across a TCP-AO and non-TCP-AO authentication boundary",
+                            left.prefix, neighbor.address
+                        ),
+                    });
+                };
+                if let Some(direction) = tcp_ao_overlap_id_collision(dynamic_ao, static_ao) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?} and static neighbor {:?} overlap \
+                             with a TCP-AO {direction} collision; overlapping owners require \
+                             disjoint SendID and RecvID sets",
+                            left.prefix, neighbor.address
                         ),
                     });
                 }
@@ -1866,6 +1894,21 @@ fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoKeyringConfig) -> Result<
         });
     }
     Ok(())
+}
+
+fn tcp_ao_overlap_id_collision(
+    left: &TcpAoKeyringConfig,
+    right: &TcpAoKeyringConfig,
+) -> Option<&'static str> {
+    let right_send = right.iter().map(|key| key.send_id).collect::<HashSet<_>>();
+    if left.iter().any(|key| right_send.contains(&key.send_id)) {
+        return Some("SendID");
+    }
+    let right_recv = right.iter().map(|key| key.recv_id).collect::<HashSet<_>>();
+    if left.iter().any(|key| right_recv.contains(&key.recv_id)) {
+        return Some("RecvID");
+    }
+    None
 }
 
 fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {

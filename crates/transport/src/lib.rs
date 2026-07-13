@@ -37,7 +37,10 @@ pub use handle::{
     PeerShutdownError, SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionRole, StateQueryOutcome,
 };
-pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
+pub use listener::{
+    AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey,
+    TcpAoListenerOwnerKind,
+};
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::import_decision_cache::{

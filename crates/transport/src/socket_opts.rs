@@ -226,6 +226,22 @@ struct TcpAoMktCore {
 }
 
 #[cfg(target_os = "linux")]
+struct TcpAoMktMetadata {
+    peer: IpAddr,
+    prefix_len: u8,
+    preferred: bool,
+    deprecated: bool,
+}
+
+/// One configured listener owner used to build an owned-union receipt.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) peer: IpAddr,
+    pub(crate) prefix_len: u8,
+    pub(crate) keyring: &'a TcpAoKeyring,
+}
+
+#[cfg(target_os = "linux")]
 impl PartialEq for TcpAoMktCore {
     fn eq(&self, other: &Self) -> bool {
         self.send_id == other.send_id
@@ -248,10 +264,18 @@ impl Eq for TcpAoMktCore {}
 #[cfg(target_os = "linux")]
 pub(crate) struct TcpAoMktReceipt {
     cores: Vec<TcpAoMktCore>,
+    metadata: Vec<TcpAoMktMetadata>,
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct TcpAoMktReceipt;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) peer: std::net::IpAddr,
+    pub(crate) prefix_len: u8,
+    pub(crate) keyring: &'a crate::config::TcpAoKeyring,
+}
 
 #[cfg(target_os = "linux")]
 impl Drop for TcpAoGetSockOpt {
@@ -817,6 +841,12 @@ fn receipt_from_raw_inventory(
     }
     Ok(TcpAoMktReceipt {
         cores: vec![mkt_core(matching[0])?],
+        metadata: vec![TcpAoMktMetadata {
+            peer,
+            prefix_len,
+            preferred: config.preferred,
+            deprecated: config.deprecated,
+        }],
     })
 }
 
@@ -829,6 +859,7 @@ fn keyring_receipt_from_raw_inventory(
     exact_inventory: bool,
 ) -> io::Result<TcpAoMktReceipt> {
     let mut cores = Vec::with_capacity(keyring.0.len());
+    let mut metadata = Vec::with_capacity(keyring.0.len());
     let mut used = vec![false; keys.len()];
     for config in keyring {
         let mut found = None;
@@ -851,6 +882,12 @@ fn keyring_receipt_from_raw_inventory(
         })?;
         used[index] = true;
         cores.push(mkt_core(&keys[index])?);
+        metadata.push(TcpAoMktMetadata {
+            peer,
+            prefix_len,
+            preferred: config.preferred,
+            deprecated: config.deprecated,
+        });
     }
     if exact_inventory && used.iter().any(|matched| !matched) {
         return Err(io::Error::new(
@@ -858,7 +895,49 @@ fn keyring_receipt_from_raw_inventory(
             "TCP-AO kernel MKT inventory contains a foreign key",
         ));
     }
-    Ok(TcpAoMktReceipt { cores })
+    Ok(TcpAoMktReceipt { cores, metadata })
+}
+
+#[cfg(target_os = "linux")]
+fn owned_receipt_from_raw_inventory(
+    keys: &[TcpAoGetSockOpt],
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    let expected_len = owners.iter().map(|owner| owner.keyring.0.len()).sum();
+    let mut cores = Vec::with_capacity(expected_len);
+    let mut metadata = Vec::with_capacity(expected_len);
+    let mut used = vec![false; keys.len()];
+    for owner in owners {
+        for config in owner.keyring {
+            let mut found = None;
+            for (index, raw) in keys.iter().enumerate() {
+                if !used[index] && raw_matches_owner(raw, owner.peer, owner.prefix_len, config)? {
+                    if found.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "TCP-AO listener inventory contains a duplicate owned key",
+                        ));
+                    }
+                    found = Some(index);
+                }
+            }
+            let index = found.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO listener inventory is missing an owned key",
+                )
+            })?;
+            used[index] = true;
+            cores.push(mkt_core(&keys[index])?);
+            metadata.push(TcpAoMktMetadata {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                preferred: config.preferred,
+                deprecated: config.deprecated,
+            });
+        }
+    }
+    Ok(TcpAoMktReceipt { cores, metadata })
 }
 
 /// Capture the kernel-normalized cryptographic identity of one configured
@@ -892,18 +971,23 @@ pub(crate) fn capture_tcp_ao_keyring_receipt(
 }
 
 #[cfg(target_os = "linux")]
-fn target_record_matches_owner(
-    raw: &TcpAoGetSockOpt,
+pub(crate) fn capture_tcp_ao_owned_receipt(
+    socket: &impl AsRawFd,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    owned_receipt_from_raw_inventory(&keys, owners)
+}
+
+#[cfg(target_os = "linux")]
+fn target_record_matches_receipt_entry(
+    state: &TcpAoKeyState,
     connected_peer: IpAddr,
-    owner_peer: IpAddr,
-    owner_prefix_len: u8,
-) -> io::Result<bool> {
-    let state = decode_tcp_ao_key_state(raw)?;
+    metadata: &TcpAoMktMetadata,
+) -> bool {
     let exact_prefix = if connected_peer.is_ipv4() { 32 } else { 128 };
-    Ok(
-        (state.peer == owner_peer && state.prefix_len == owner_prefix_len)
-            || (state.peer == connected_peer && state.prefix_len == exact_prefix),
-    )
+    (state.peer == metadata.peer && state.prefix_len == metadata.prefix_len)
+        || (state.peer == connected_peer && state.prefix_len == exact_prefix)
 }
 
 #[cfg(target_os = "linux")]
@@ -912,9 +996,6 @@ fn annotate_tcp_ao_receipt(
     keys: &[TcpAoGetSockOpt],
     receipt: &TcpAoMktReceipt,
     connected_peer: IpAddr,
-    owner_peer: IpAddr,
-    owner_prefix_len: u8,
-    keyring: &TcpAoKeyring,
 ) -> io::Result<()> {
     let mut states = keys
         .iter()
@@ -923,9 +1004,6 @@ fn annotate_tcp_ao_receipt(
     let mut matching = Vec::new();
     let mut expected_matched = vec![false; receipt.cores.len()];
     for (index, raw) in keys.iter().enumerate() {
-        if !target_record_matches_owner(raw, connected_peer, owner_peer, owner_prefix_len)? {
-            continue;
-        }
         let core = mkt_core(raw)?;
         if let Some(expected_index) =
             receipt
@@ -933,11 +1011,17 @@ fn annotate_tcp_ao_receipt(
                 .iter()
                 .enumerate()
                 .position(|(expected_index, expected)| {
-                    !expected_matched[expected_index] && core == *expected
+                    !expected_matched[expected_index]
+                        && target_record_matches_receipt_entry(
+                            &states[index],
+                            connected_peer,
+                            &receipt.metadata[expected_index],
+                        )
+                        && core == *expected
                 })
         {
             expected_matched[expected_index] = true;
-            matching.push(index);
+            matching.push((index, expected_index));
         }
     }
     // A connected socket must inherit exactly the complete expected-owned
@@ -952,25 +1036,12 @@ fn annotate_tcp_ao_receipt(
             "TCP-AO connected-socket MKT inventory differs from its kernel-normalized source",
         ));
     }
-    for matched in matching {
-        states[matched].peer = owner_peer;
-        states[matched].prefix_len = owner_prefix_len;
-        let state = &mut states[matched];
-        let config = keyring
-            .iter()
-            .find(|config| {
-                state.send_id == config.send_id
-                    && state.recv_id == config.recv_id
-                    && state.algorithm == config.algorithm
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "TCP-AO connected-socket key lacks configured metadata",
-                )
-            })?;
-        state.preferred = config.preferred;
-        state.deprecated = config.deprecated;
+    for (matched, expected) in matching {
+        let metadata = &receipt.metadata[expected];
+        states[matched].peer = metadata.peer;
+        states[matched].prefix_len = metadata.prefix_len;
+        states[matched].preferred = metadata.preferred;
+        states[matched].deprecated = metadata.deprecated;
     }
     states.sort_by_key(|key| (key.peer, key.prefix_len, key.send_id, key.recv_id));
     info.keys = states;
@@ -986,23 +1057,12 @@ pub(crate) fn get_tcp_ao_info_for_receipt(
     socket: &impl AsRawFd,
     receipt: &TcpAoMktReceipt,
     connected_peer: IpAddr,
-    owner_peer: IpAddr,
-    owner_prefix_len: u8,
-    keyring: &TcpAoKeyring,
 ) -> io::Result<TcpAoInfoSnapshot> {
     let (mut info, keys) = get_tcp_ao_snapshot_with(
         || get_tcp_ao_info_only(socket),
         || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
     )?;
-    annotate_tcp_ao_receipt(
-        &mut info,
-        &keys,
-        receipt,
-        connected_peer,
-        owner_peer,
-        owner_prefix_len,
-        keyring,
-    )?;
+    annotate_tcp_ao_receipt(&mut info, &keys, receipt, connected_peer)?;
     Ok(info)
 }
 
@@ -1089,13 +1149,24 @@ pub(crate) fn capture_tcp_ao_keyring_receipt<T>(
 }
 
 #[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_tcp_ao_owned_receipt<T>(
+    _socket: &T,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    for owner in owners {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn get_tcp_ao_info_for_receipt<T>(
     _socket: &T,
     _receipt: &TcpAoMktReceipt,
     _connected_peer: std::net::IpAddr,
-    _owner_peer: std::net::IpAddr,
-    _owner_prefix_len: u8,
-    _keyring: &crate::config::TcpAoKeyring,
 ) -> io::Result<TcpAoInfoSnapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -1600,20 +1671,18 @@ mod tests {
         listener_raw.pkt_good = 0;
         let receipt =
             receipt_from_raw_inventory(&[listener_raw], owner, 24, &config, false).unwrap();
-        let keyring = TcpAoKeyring(vec![config.clone()]);
 
         let mut child_raw = raw_dump_key(connected, "hmac(sha256)", b"secret");
         child_raw.pkt_good = 101;
         let keys = vec![child_raw];
         let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
-        annotate_tcp_ao_receipt(&mut info, &keys, &receipt, connected, owner, 24, &keyring)
-            .unwrap();
+        annotate_tcp_ao_receipt(&mut info, &keys, &receipt, connected).unwrap();
         assert!(info.keys[0].preferred);
         assert_eq!(info.keys[0].peer, owner);
         assert_eq!(info.keys[0].prefix_len, 24);
 
         assert_eq!(
-            annotate_tcp_ao_receipt(&mut info, &[], &receipt, connected, owner, 24, &keyring,)
+            annotate_tcp_ao_receipt(&mut info, &[], &receipt, connected)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
@@ -1621,17 +1690,9 @@ mod tests {
 
         let wrong_secret = vec![raw_dump_key(connected, "hmac(sha256)", b"wrong")];
         assert_eq!(
-            annotate_tcp_ao_receipt(
-                &mut info,
-                &wrong_secret,
-                &receipt,
-                connected,
-                owner,
-                24,
-                &keyring,
-            )
-            .unwrap_err()
-            .kind(),
+            annotate_tcp_ao_receipt(&mut info, &wrong_secret, &receipt, connected)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
 
@@ -1640,7 +1701,7 @@ mod tests {
             raw_dump_key(IpAddr::from([192, 0, 2, 2]), "hmac(sha256)", b"other"),
         ];
         assert_eq!(
-            annotate_tcp_ao_receipt(&mut info, &extra, &receipt, connected, owner, 24, &keyring,)
+            annotate_tcp_ao_receipt(&mut info, &extra, &receipt, connected)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
@@ -1658,11 +1719,9 @@ mod tests {
             }
             let wrong = vec![wrong];
             assert_eq!(
-                annotate_tcp_ao_receipt(
-                    &mut info, &wrong, &receipt, connected, owner, 24, &keyring,
-                )
-                .unwrap_err()
-                .kind(),
+                annotate_tcp_ao_receipt(&mut info, &wrong, &receipt, connected)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::PermissionDenied
             );
         }
@@ -1741,16 +1800,8 @@ mod tests {
             pkt_dropped_icmp: 0,
         };
         let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
-        annotate_tcp_ao_receipt(
-            &mut info,
-            &[child_first, child_second],
-            &receipt,
-            connected,
-            owner,
-            24,
-            &ring,
-        )
-        .unwrap();
+        annotate_tcp_ao_receipt(&mut info, &[child_first, child_second], &receipt, connected)
+            .unwrap();
         assert_eq!(info.keys.len(), 2);
         assert!(
             info.keys
@@ -1769,7 +1820,108 @@ mod tests {
 
         let missing = vec![raw_dump_key(connected, "hmac(sha256)", b"old")];
         assert_eq!(
-            annotate_tcp_ao_receipt(&mut info, &missing, &receipt, connected, owner, 24, &ring,)
+            annotate_tcp_ao_receipt(&mut info, &missing, &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn tcp_ao_owned_union_receipt_requires_exact_child_inventory_and_keeps_owners() {
+        let connected = IpAddr::from([192, 0, 2, 9]);
+        let covering_peer = IpAddr::from([192, 0, 2, 0]);
+        let covering = TcpAoKeyring(vec![TcpAoConfig {
+            key: "covering".into(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }]);
+        let exact = TcpAoKeyring(vec![TcpAoConfig {
+            key: "exact".into(),
+            send_id: 8,
+            recv_id: 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        }]);
+        let owners = [
+            TcpAoMktOwner {
+                peer: covering_peer,
+                prefix_len: 24,
+                keyring: &covering,
+            },
+            TcpAoMktOwner {
+                peer: connected,
+                prefix_len: 32,
+                keyring: &exact,
+            },
+        ];
+        let mut listener_covering = raw_dump_key(covering_peer, "hmac(sha256)", b"covering");
+        listener_covering.prefix = 24;
+        let mut listener_exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+        listener_exact.sndid = 8;
+        listener_exact.rcvid = 10;
+        let receipt =
+            owned_receipt_from_raw_inventory(&[listener_covering, listener_exact], &owners)
+                .unwrap();
+
+        let child_covering = raw_dump_key(connected, "hmac(sha256)", b"covering");
+        let mut child_exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+        child_exact.sndid = 8;
+        child_exact.rcvid = 10;
+        let mut info = TcpAoInfoSnapshot::from_raw(&TcpAoInfoOpt {
+            flags: 0,
+            reserved2: 0,
+            current_key: 0,
+            rnext: 0,
+            pkt_good: 0,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+        annotate_tcp_ao_receipt(
+            &mut info,
+            &[child_covering, child_exact],
+            &receipt,
+            connected,
+        )
+        .unwrap();
+        assert_eq!(info.keys.len(), 2);
+        assert!(
+            info.keys.iter().any(|key| {
+                key.peer == covering_peer && key.prefix_len == 24 && key.send_id == 7
+            })
+        );
+        assert!(info.keys.iter().any(|key| {
+            key.peer == connected && key.prefix_len == 32 && key.send_id == 8 && key.preferred
+        }));
+
+        let missing = [raw_dump_key(connected, "hmac(sha256)", b"covering")];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &missing, &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let mut foreign = raw_dump_key(connected, "hmac(sha256)", b"foreign");
+        foreign.sndid = 99;
+        foreign.rcvid = 100;
+        let extra = [
+            raw_dump_key(connected, "hmac(sha256)", b"covering"),
+            {
+                let mut exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+                exact.sndid = 8;
+                exact.rcvid = 10;
+                exact
+            },
+            foreign,
+        ];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &extra, &receipt, connected)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied

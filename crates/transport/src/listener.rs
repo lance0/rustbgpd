@@ -27,12 +27,25 @@ pub struct AcceptedConnection {
 /// TCP-AO key to install on the inbound listener socket.
 #[derive(Clone)]
 pub struct TcpAoListenerKey {
+    /// Configuration owner kind. This remains explicit even for host-length
+    /// dynamic ranges so passive-open resolution never infers ownership from
+    /// prefix length.
+    pub owner: TcpAoListenerOwnerKind,
     /// Remote network address matched by this listener MKT.
     pub peer: IpAddr,
     /// Prefix length for the remote network.
     pub prefix_len: u8,
     /// TCP-AO key configuration for the peer.
     pub config: TcpAoKeyring,
+}
+
+/// Configuration owner of a listener MKT selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpAoListenerOwnerKind {
+    /// Exact static-neighbor address.
+    Static,
+    /// Dynamic-neighbor prefix, including `/32` and `/128` ranges.
+    Dynamic,
 }
 
 /// Socket options installed before the BGP listener enters `listen(2)`.
@@ -50,29 +63,11 @@ pub struct BgpListener {
     tcp_ao_keys: TcpAoListenerKeyIndex,
 }
 
-/// Resolved ownership of an accepted peer's listener MKT under the current
-/// disjoint configuration contract.
-///
-/// Phase 2 must add an explicit static/dynamic owner kind: a host-length
-/// dynamic prefix is indistinguishable in today's public listener-key shape.
-enum TcpAoListenerOwner<'a> {
-    HostPrefix(&'a TcpAoListenerKey),
-    ShorterPrefix(&'a TcpAoListenerKey),
-}
-
-impl TcpAoListenerOwner<'_> {
-    fn key(&self) -> &TcpAoListenerKey {
-        match self {
-            Self::HostPrefix(key) | Self::ShorterPrefix(key) => key,
-        }
-    }
-}
-
 /// Immutable, family-split owner index for listener MKTs.
 ///
-/// Resolution is deterministic: host-length selector first, otherwise
-/// longest-prefix match. Once owner kind is explicit, the same buckets support
-/// the required static-exact-first/dynamic-LPM rule without collapsing any MKT.
+/// Resolution is deterministic: static exact match first, otherwise dynamic
+/// longest-prefix match. Owner kind is explicit so a dynamic `/32` or `/128`
+/// remains dynamic and cannot shadow a static neighbor by insertion order.
 struct TcpAoListenerKeyIndex {
     keys: Vec<TcpAoListenerKey>,
     v4: Vec<HashMap<u32, Vec<usize>>>,
@@ -106,70 +101,73 @@ impl TcpAoListenerKeyIndex {
         index
     }
 
-    fn resolve(&self, addr: IpAddr) -> Option<TcpAoListenerOwner<'_>> {
-        let (exact, dynamic) = match addr {
+    fn resolve(&self, addr: IpAddr) -> Option<&TcpAoListenerKey> {
+        let (static_exact, dynamic) = match addr {
             IpAddr::V4(addr) => {
                 let value = u32::from(addr);
-                let exact = self.v4[32]
+                let static_exact = self.v4[32]
                     .get(&value)
-                    .and_then(|indices| indices.first())
+                    .into_iter()
+                    .flatten()
+                    .find(|index| self.keys[**index].owner == TcpAoListenerOwnerKind::Static)
                     .copied();
-                let dynamic =
-                    self.v4[..32]
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .find_map(|(prefix_len, bucket)| {
-                            bucket
-                                .get(&mask_v4(
-                                    value,
-                                    u8::try_from(prefix_len).expect("IPv4 index is bounded to 32"),
-                                ))
-                                .and_then(|indices| indices.first())
-                                .copied()
-                        });
-                (exact, dynamic)
+                let dynamic = self
+                    .v4
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(prefix_len, bucket)| {
+                        bucket
+                            .get(&mask_v4(
+                                value,
+                                u8::try_from(prefix_len).expect("IPv4 index is bounded to 32"),
+                            ))
+                            .into_iter()
+                            .flatten()
+                            .find(|index| {
+                                self.keys[**index].owner == TcpAoListenerOwnerKind::Dynamic
+                            })
+                            .copied()
+                    });
+                (static_exact, dynamic)
             }
             IpAddr::V6(addr) => {
                 let value = u128::from(addr);
-                let exact = self.v6[128]
+                let static_exact = self.v6[128]
                     .get(&value)
-                    .and_then(|indices| indices.first())
+                    .into_iter()
+                    .flatten()
+                    .find(|index| self.keys[**index].owner == TcpAoListenerOwnerKind::Static)
                     .copied();
-                let dynamic =
-                    self.v6[..128]
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .find_map(|(prefix_len, bucket)| {
-                            bucket
-                                .get(&mask_v6(
-                                    value,
-                                    u8::try_from(prefix_len).expect("IPv6 index is bounded to 128"),
-                                ))
-                                .and_then(|indices| indices.first())
-                                .copied()
-                        });
-                (exact, dynamic)
+                let dynamic = self
+                    .v6
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(prefix_len, bucket)| {
+                        bucket
+                            .get(&mask_v6(
+                                value,
+                                u8::try_from(prefix_len).expect("IPv6 index is bounded to 128"),
+                            ))
+                            .into_iter()
+                            .flatten()
+                            .find(|index| {
+                                self.keys[**index].owner == TcpAoListenerOwnerKind::Dynamic
+                            })
+                            .copied()
+                    });
+                (static_exact, dynamic)
             }
         };
-        if let Some(index) = exact {
-            self.keys.get(index).map(TcpAoListenerOwner::HostPrefix)
-        } else {
-            dynamic
-                .and_then(|index| self.keys.get(index))
-                .map(TcpAoListenerOwner::ShorterPrefix)
-        }
+        static_exact
+            .or(dynamic)
+            .and_then(|index| self.keys.get(index))
     }
 
     /// Return every configured protected owner whose selector covers `addr`.
-    /// Validation currently makes this a singleton. Keeping the complete seam
-    /// here prevents the keyring tranche from accidentally treating inherited
-    /// keys from a less-specific, still-configured protected owner as foreign.
-    #[allow(
-        dead_code,
-        reason = "consumed by the following overlap/keyring tranche"
-    )]
+    /// Every returned owner's MKT inventory is expected on an accepted child;
+    /// the resolved owner controls Current/RNext selection.
     fn owned_union(&self, addr: IpAddr) -> Vec<&TcpAoListenerKey> {
         match addr {
             IpAddr::V4(addr) => self
@@ -320,29 +318,27 @@ impl BgpListener {
         let Some(owner) = self.tcp_ao_keys.resolve(peer_ip) else {
             return Ok(None);
         };
-        let key = owner.key();
+        let key = owner;
+        let covering_owners = self.tcp_ao_keys.owned_union(peer_ip);
+        let receipt_owners = covering_owners
+            .iter()
+            .map(|owned| crate::socket_opts::TcpAoMktOwner {
+                peer: owned.peer,
+                prefix_len: owned.prefix_len,
+                keyring: &owned.config,
+            })
+            .collect::<Vec<_>>();
 
-        // Compare the accepted child's inventory to a fresh raw listener
-        // receipt. No secret-bearing receipt survives this accept operation.
-        let receipt = crate::socket_opts::capture_tcp_ao_keyring_receipt(
-            &self.listener,
-            key.peer,
-            key.prefix_len,
-            &key.config,
-            false,
-        )?;
-        let initial = crate::socket_opts::get_tcp_ao_info_for_receipt(
-            stream,
-            &receipt,
-            peer_ip,
-            key.peer,
-            key.prefix_len,
-            &key.config,
-        )?;
+        // Compare the accepted child's inventory to the union of every
+        // configured owner whose selector covers this peer. No secret-bearing
+        // receipt survives this accept operation.
+        let receipt =
+            crate::socket_opts::capture_tcp_ao_owned_receipt(&self.listener, &receipt_owners)?;
+        let initial = crate::socket_opts::get_tcp_ao_info_for_receipt(stream, &receipt, peer_ip)?;
         // Validate the handshake-selected Current and initial RNext before
         // mutating either selection. Both must identify the resolved owner's
         // inherited MKT; a deprecated key remains valid when peer-selected.
-        ensure_accepted_tcp_ao_info_valid(&initial, false)?;
+        ensure_accepted_tcp_ao_info_valid(&initial, key, false)?;
 
         let selected_key = key.config.selected().ok_or_else(|| {
             std::io::Error::new(
@@ -351,15 +347,8 @@ impl BgpListener {
             )
         })?;
         crate::socket_opts::set_tcp_ao_rnext(stream, selected_key.recv_id)?;
-        let info = crate::socket_opts::get_tcp_ao_info_for_receipt(
-            stream,
-            &receipt,
-            peer_ip,
-            key.peer,
-            key.prefix_len,
-            &key.config,
-        )?;
-        ensure_accepted_tcp_ao_info_valid(&info, true)?;
+        let info = crate::socket_opts::get_tcp_ao_info_for_receipt(stream, &receipt, peer_ip)?;
+        ensure_accepted_tcp_ao_info_valid(&info, key, true)?;
         info!(
             peer = %peer_ip,
             current_key = info.current_key,
@@ -381,9 +370,10 @@ impl BgpListener {
 
 fn ensure_accepted_tcp_ao_info_valid(
     info: &TcpAoInfoSnapshot,
+    owner: &TcpAoListenerKey,
     require_nondeprecated_rnext: bool,
 ) -> std::io::Result<()> {
-    if accepted_tcp_ao_info_is_valid(info, require_nondeprecated_rnext) {
+    if accepted_tcp_ao_info_is_valid(info, owner, require_nondeprecated_rnext) {
         Ok(())
     } else {
         Err(std::io::Error::new(
@@ -404,20 +394,30 @@ fn ensure_accepted_tcp_ao_info_valid(
 
 fn accepted_tcp_ao_info_is_valid(
     info: &TcpAoInfoSnapshot,
+    owner: &TcpAoListenerKey,
     require_nondeprecated_rnext: bool,
 ) -> bool {
+    let selected_rnext = owner.config.selected().map(|key| key.recv_id);
     let current = info
         .keys
         .iter()
-        .filter(|key| key.is_current && key.send_id == info.current_key)
+        .filter(|key| {
+            key.peer == owner.peer
+                && key.prefix_len == owner.prefix_len
+                && key.is_current
+                && key.send_id == info.current_key
+        })
         .collect::<Vec<_>>();
     let rnext = info
         .keys
         .iter()
         .filter(|key| {
             key.is_rnext
+                && key.peer == owner.peer
+                && key.prefix_len == owner.prefix_len
                 && key.recv_id == info.rnext_key
-                && (!require_nondeprecated_rnext || !key.deprecated)
+                && (!require_nondeprecated_rnext
+                    || (!key.deprecated && selected_rnext == Some(key.recv_id)))
         })
         .collect::<Vec<_>>();
     info.has_current_key
@@ -538,6 +538,17 @@ mod tests {
         .into()
     }
 
+    fn tcp_ao_owner() -> TcpAoListenerKey {
+        let mut config = tcp_ao_config();
+        config.0[0].recv_id = 9;
+        TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Static,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            prefix_len: 32,
+            config,
+        }
+    }
+
     fn tcp_ao_info(current_key: u8, pkt_good: u64) -> TcpAoInfoSnapshot {
         TcpAoInfoSnapshot {
             has_current_key: true,
@@ -572,11 +583,13 @@ mod tests {
     fn prefix_mkt_matching_covers_v4_and_v6_without_cross_family_matches() {
         let config = tcp_ao_config();
         let v4 = TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Dynamic,
             peer: "192.0.2.0".parse().unwrap(),
             prefix_len: 24,
             config: config.clone(),
         };
         let v6 = TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Dynamic,
             peer: "2001:db8::".parse().unwrap(),
             prefix_len: 32,
             config,
@@ -593,16 +606,19 @@ mod tests {
         let config = tcp_ao_config();
         let keys = vec![
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "192.0.2.9".parse().unwrap(),
                 prefix_len: 32,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "198.51.100.0".parse().unwrap(),
                 prefix_len: 24,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "2001:db8:1::".parse().unwrap(),
                 prefix_len: 48,
                 config,
@@ -620,12 +636,9 @@ mod tests {
 
         for probe in probes.map(|probe| probe.parse::<IpAddr>().unwrap()) {
             let linear = keys.iter().position(|key| key.covers(probe));
-            let indexed = index.resolve(probe).and_then(|owner| {
-                index
-                    .keys
-                    .iter()
-                    .position(|key| std::ptr::eq(key, owner.key()))
-            });
+            let indexed = index
+                .resolve(probe)
+                .and_then(|owner| index.keys.iter().position(|key| std::ptr::eq(key, owner)));
             assert_eq!(indexed, linear, "{probe}");
         }
     }
@@ -635,16 +648,19 @@ mod tests {
         let config = tcp_ao_config();
         let keys = vec![
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "10.0.0.0".parse().unwrap(),
                 prefix_len: 8,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "10.20.0.0".parse().unwrap(),
                 prefix_len: 16,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Static,
                 peer: "10.20.30.40".parse().unwrap(),
                 prefix_len: 32,
                 config,
@@ -661,12 +677,52 @@ mod tests {
             let actual = index
                 .keys
                 .iter()
-                .position(|key| std::ptr::eq(key, owner.key()))
+                .position(|key| std::ptr::eq(key, owner))
                 .unwrap();
             assert_eq!(actual, expected, "{probe}");
-            assert_eq!(matches!(owner, TcpAoListenerOwner::HostPrefix(_)), exact);
+            assert_eq!(owner.owner == TcpAoListenerOwnerKind::Static, exact);
         }
         assert!(index.resolve("203.0.113.1".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn listener_owner_identity_keeps_host_length_dynamic_below_static_exact() {
+        let config = tcp_ao_config();
+        let keys = vec![
+            TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
+                peer: "192.0.2.9".parse().unwrap(),
+                prefix_len: 32,
+                config: config.clone(),
+            },
+            TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Static,
+                peer: "192.0.2.9".parse().unwrap(),
+                prefix_len: 32,
+                config: config.clone(),
+            },
+            TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
+                peer: "2001:db8::9".parse().unwrap(),
+                prefix_len: 128,
+                config: config.clone(),
+            },
+            TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Static,
+                peer: "2001:db8::9".parse().unwrap(),
+                prefix_len: 128,
+                config,
+            },
+        ];
+        let index = TcpAoListenerKeyIndex::new(keys);
+        let reversed = TcpAoListenerKeyIndex::new(index.keys.iter().cloned().rev().collect());
+        for candidate in [&index, &reversed] {
+            for address in ["192.0.2.9", "2001:db8::9"] {
+                let owner = candidate.resolve(address.parse().unwrap()).unwrap();
+                assert_eq!(owner.owner, TcpAoListenerOwnerKind::Static, "{address}");
+                assert_eq!(candidate.owned_union(address.parse().unwrap()).len(), 2);
+            }
+        }
     }
 
     #[test]
@@ -674,16 +730,19 @@ mod tests {
         let config = tcp_ao_config();
         let keys = vec![
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "10.0.0.0".parse().unwrap(),
                 prefix_len: 8,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "10.20.0.0".parse().unwrap(),
                 prefix_len: 16,
                 config: config.clone(),
             },
             TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Dynamic,
                 peer: "10.20.0.0".parse().unwrap(),
                 prefix_len: 16,
                 config,
@@ -697,46 +756,84 @@ mod tests {
 
     #[test]
     fn protected_accept_requires_expected_keys_and_clean_auth_counters() {
+        let owner = tcp_ao_owner();
         let mut valid = tcp_ao_info(7, 0);
         valid.has_rnext_key = true;
         valid.rnext_key = 9;
-        assert!(accepted_tcp_ao_info_is_valid(&valid, false));
-        assert!(accepted_tcp_ao_info_is_valid(&valid, true));
+        assert!(accepted_tcp_ao_info_is_valid(&valid, &owner, false));
+        assert!(accepted_tcp_ao_info_is_valid(&valid, &owner, true));
         let mut bad = valid.clone();
         bad.pkt_bad = 1;
-        assert!(!accepted_tcp_ao_info_is_valid(&bad, false));
+        assert!(!accepted_tcp_ao_info_is_valid(&bad, &owner, false));
         let mut missing = valid;
         missing.pkt_key_not_found = 1;
-        assert!(!accepted_tcp_ao_info_is_valid(&missing, false));
+        assert!(!accepted_tcp_ao_info_is_valid(&missing, &owner, false));
 
         let mut wrong_current = tcp_ao_info(7, 0);
         wrong_current.has_rnext_key = true;
         wrong_current.rnext_key = 9;
         wrong_current.current_key = 8;
-        assert!(!accepted_tcp_ao_info_is_valid(&wrong_current, false));
+        assert!(!accepted_tcp_ao_info_is_valid(
+            &wrong_current,
+            &owner,
+            false
+        ));
 
         let mut wrong_rnext = tcp_ao_info(7, 0);
         wrong_rnext.has_rnext_key = true;
         wrong_rnext.rnext_key = 8;
-        assert!(!accepted_tcp_ao_info_is_valid(&wrong_rnext, false));
+        assert!(!accepted_tcp_ao_info_is_valid(&wrong_rnext, &owner, false));
     }
 
     #[test]
     fn protected_accept_initial_validation_allows_deprecated_current() {
+        let owner = tcp_ao_owner();
         let mut info = tcp_ao_info(7, 0);
         info.has_rnext_key = true;
         info.rnext_key = 9;
         info.keys[0].deprecated = true;
-        assert!(accepted_tcp_ao_info_is_valid(&info, false));
-        assert!(!accepted_tcp_ao_info_is_valid(&info, true));
+        assert!(accepted_tcp_ao_info_is_valid(&info, &owner, false));
+        assert!(!accepted_tcp_ao_info_is_valid(&info, &owner, true));
     }
 
     #[test]
     fn protected_accept_allows_deprecated_current_but_requires_selected_final_rnext() {
+        let mut owner = tcp_ao_owner();
+        owner.config.0[0].deprecated = true;
+        owner.config.0.push(TcpAoConfig {
+            key: "selected".to_string(),
+            send_id: 8,
+            recv_id: 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        });
+        owner.config.0.push(TcpAoConfig {
+            key: "other".to_string(),
+            send_id: 9,
+            recv_id: 11,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        });
         let mut info = tcp_ao_info(7, 0);
         info.has_rnext_key = true;
-        info.rnext_key = 10;
+        info.rnext_key = 11;
         info.keys[0].deprecated = true;
+        info.keys.push(crate::TcpAoKeyState {
+            peer: info.keys[0].peer,
+            prefix_len: info.keys[0].prefix_len,
+            send_id: 9,
+            recv_id: 11,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            is_current: false,
+            is_rnext: true,
+            preferred: false,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: 0,
+            pkt_bad: 0,
+        });
         info.keys.push(crate::TcpAoKeyState {
             peer: info.keys[0].peer,
             prefix_len: info.keys[0].prefix_len,
@@ -744,7 +841,7 @@ mod tests {
             recv_id: 10,
             algorithm: TcpAoAlgorithm::HmacSha256,
             is_current: false,
-            is_rnext: true,
+            is_rnext: false,
             preferred: true,
             deprecated: false,
             vrf_ifindex: None,
@@ -752,12 +849,46 @@ mod tests {
             pkt_bad: 0,
         });
         info.keys[0].is_rnext = false;
-        assert!(accepted_tcp_ao_info_is_valid(&info, false));
-        assert!(accepted_tcp_ao_info_is_valid(&info, true));
+        assert!(accepted_tcp_ao_info_is_valid(&info, &owner, false));
+        assert!(
+            !accepted_tcp_ao_info_is_valid(&info, &owner, true),
+            "an unselected non-deprecated RNext must not satisfy final validation"
+        );
 
-        info.keys[1].deprecated = true;
-        assert!(accepted_tcp_ao_info_is_valid(&info, false));
-        assert!(!accepted_tcp_ao_info_is_valid(&info, true));
+        info.rnext_key = 10;
+        info.keys[1].is_rnext = false;
+        info.keys[2].is_rnext = true;
+        assert!(accepted_tcp_ao_info_is_valid(&info, &owner, true));
+    }
+
+    #[test]
+    fn protected_accept_selection_must_belong_to_resolved_owner() {
+        let owner = tcp_ao_owner();
+        let mut info = tcp_ao_info(7, 0);
+        info.has_rnext_key = true;
+        info.rnext_key = 9;
+        info.keys[0].peer = "192.0.2.0".parse().unwrap();
+        info.keys[0].prefix_len = 24;
+        assert!(
+            !accepted_tcp_ao_info_is_valid(&info, &owner, false),
+            "Current/RNext selected from a covering owner must not satisfy the static owner"
+        );
+
+        info.keys.push(crate::TcpAoKeyState {
+            peer: owner.peer,
+            prefix_len: owner.prefix_len,
+            send_id: 8,
+            recv_id: 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            is_current: false,
+            is_rnext: false,
+            preferred: true,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: 0,
+            pkt_bad: 0,
+        });
+        assert!(!accepted_tcp_ao_info_is_valid(&info, &owner, false));
     }
 
     #[tokio::test]
@@ -768,6 +899,7 @@ mod tests {
         second.recv_id = 2;
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Static,
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
                 prefix_len: 32,
                 config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
@@ -797,6 +929,7 @@ mod tests {
         second.recv_id = 2;
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
+                owner: TcpAoListenerOwnerKind::Static,
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
                 prefix_len: 32,
                 config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
@@ -829,40 +962,69 @@ mod tests {
 
     /// Bounded privileged/kernel receipt for GitHub #158. Run on a Linux host
     /// with `CONFIG_TCP_AO=y`:
-    /// `cargo test -p rustbgpd-transport dynamic_prefix_tcp_ao_kernel_receipt -- --ignored`
+    /// `cargo test -p rustbgpd-transport dynamic_prefix_tcp_ao_two_key_kernel_receipt -- --ignored`
     #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
-    async fn dynamic_prefix_tcp_ao_kernel_receipt() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "privileged receipt covers the complete two-key kernel lifecycle"
+    )]
+    async fn dynamic_prefix_tcp_ao_two_key_kernel_receipt() {
         use std::time::Duration;
 
         fn connect_from(
             source: Ipv4Addr,
             destination: SocketAddr,
-            tcp_ao: Option<&TcpAoConfig>,
+            tcp_ao: Option<&TcpAoKeyring>,
         ) -> std::io::Result<Socket> {
             let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
             socket.bind(&SockAddr::from(SocketAddr::new(source.into(), 0)))?;
-            if let Some(config) = tcp_ao {
-                crate::socket_opts::set_tcp_ao_config(
-                    &socket,
-                    destination.ip(),
-                    32,
-                    config,
-                    crate::socket_opts::TcpAoSocketRole::ActiveOpen,
-                )?;
+            if let Some(keyring) = tcp_ao {
+                for (index, config) in keyring.startup_order().into_iter().enumerate() {
+                    let role = if index == 0 {
+                        crate::socket_opts::TcpAoSocketRole::ActiveOpen
+                    } else {
+                        crate::socket_opts::TcpAoSocketRole::Listener
+                    };
+                    crate::socket_opts::set_tcp_ao_config(
+                        &socket,
+                        destination.ip(),
+                        32,
+                        config,
+                        role,
+                    )?;
+                }
             }
             socket.connect_timeout(&SockAddr::from(destination), Duration::from_secs(2))?;
             Ok(socket)
         }
 
-        let config = tcp_ao_config();
+        let config = TcpAoKeyring(vec![
+            TcpAoConfig {
+                key: "kernel-receipt-old-secret".to_string(),
+                send_id: 1,
+                recv_id: 1,
+                algorithm: TcpAoAlgorithm::HmacSha256,
+                preferred: false,
+                deprecated: true,
+            },
+            TcpAoConfig {
+                key: "kernel-receipt-next-secret".to_string(),
+                send_id: 2,
+                recv_id: 2,
+                algorithm: TcpAoAlgorithm::HmacSha256,
+                preferred: true,
+                deprecated: false,
+            },
+        ]);
         let (accept_tx, mut accept_rx) = mpsc::channel(4);
         let listener = BgpListener::bind_with_options(
             "127.0.0.1:0".parse().unwrap(),
             accept_tx,
             ListenerSocketOptions {
                 tcp_ao_keys: vec![TcpAoListenerKey {
+                    owner: TcpAoListenerOwnerKind::Dynamic,
                     peer: "127.0.0.0".parse().unwrap(),
                     prefix_len: 24,
                     config: config.clone(),
@@ -879,7 +1041,7 @@ mod tests {
             connect_from(
                 "127.0.0.2".parse().unwrap(),
                 destination,
-                signed_config.selected(),
+                Some(&signed_config),
             )
         })
         .await
@@ -894,16 +1056,41 @@ mod tests {
             "127.0.0.2".parse::<IpAddr>().unwrap()
         );
         let info = accepted.tcp_ao_info.as_ref().expect("accepted AO snapshot");
-        assert_eq!(info.keys.len(), 1);
-        let key = &info.keys[0];
-        assert_eq!(key.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
-        assert_eq!(key.prefix_len, 24);
-        let config = config.selected().unwrap();
-        assert_eq!(key.send_id, config.send_id);
-        assert_eq!(key.recv_id, config.recv_id);
-        assert_eq!(key.algorithm, config.algorithm);
-        assert!(key.is_current);
-        assert!(key.is_rnext);
+        assert_eq!(info.current_key, 2);
+        assert_eq!(info.rnext_key, 2);
+        assert_eq!(info.keys.len(), 2, "GET_KEYS must return the complete ring");
+        for key in &info.keys {
+            assert_eq!(key.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
+            assert_eq!(key.prefix_len, 24);
+            assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha256);
+        }
+        let old = &info.keys[0];
+        assert_eq!((old.send_id, old.recv_id), (1, 1));
+        assert!(old.deprecated);
+        assert!(!old.preferred);
+        assert!(!old.is_current);
+        assert!(!old.is_rnext);
+        let selected = &info.keys[1];
+        assert_eq!((selected.send_id, selected.recv_id), (2, 2));
+        assert!(selected.preferred);
+        assert!(!selected.deprecated);
+        assert!(selected.is_current);
+        assert!(selected.is_rnext);
+        let rendered = format!("{info:?}");
+        assert!(!rendered.contains("kernel-receipt-old-secret"));
+        assert!(!rendered.contains("kernel-receipt-next-secret"));
+
+        let mut mismatched = config.clone();
+        mismatched.0[1].key = "kernel-receipt-wrong-secret".to_string();
+        let protected_mismatch = tokio::task::spawn_blocking(move || {
+            connect_from("127.0.0.3".parse().unwrap(), destination, Some(&mismatched))
+        })
+        .await
+        .unwrap();
+        assert!(
+            protected_mismatch.is_err(),
+            "selected-key secret mismatch must fail closed"
+        );
 
         let protected_unsigned = tokio::task::spawn_blocking(move || {
             connect_from("127.0.0.3".parse().unwrap(), destination, None)

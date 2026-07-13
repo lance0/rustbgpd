@@ -5637,7 +5637,7 @@ peer_group = "ix-members"
     .unwrap_err();
     assert!(
         err.to_string()
-            .contains("protected ranges must be disjoint")
+            .contains("TCP-AO and non-TCP-AO authentication boundary")
     );
 }
 
@@ -5658,7 +5658,152 @@ remote_asn = 65002
     .unwrap_err();
     assert!(
         err.to_string()
-            .contains("static and dynamic authentication boundaries must be disjoint")
+            .contains("TCP-AO and non-TCP-AO authentication boundary")
+    );
+}
+
+#[test]
+fn overlapping_tcp_ao_owners_require_directionally_disjoint_ids() {
+    let allowed = dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "covering", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.128/25"
+peer_group = "ix-members"
+tcp_ao = { key = "specific", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+"#,
+    );
+    parse(&allowed).expect("disjoint directional IDs permit overlapping AO owners");
+
+    for (send_id, recv_id, expected) in [(1, 12, "SendID"), (2, 11, "RecvID")] {
+        let candidate = allowed.replace(
+            "send_id = 2, recv_id = 12",
+            &format!("send_id = {send_id}, recv_id = {recv_id}"),
+        );
+        let err = parse(&candidate).unwrap_err().to_string();
+        assert!(err.contains(expected), "{err}");
+        assert!(err.contains("disjoint SendID and RecvID"), "{err}");
+    }
+}
+
+#[test]
+fn overlapping_static_exact_and_dynamic_tcp_ao_requires_disjoint_ids() {
+    let source = dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "range", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "10.0.0.42"
+remote_asn = 65002
+tcp_ao = { key = "exact", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+"#,
+    );
+    parse(&source).expect("static exact AO may overlap with disjoint IDs");
+
+    let err = parse(&source.replace("send_id = 2", "send_id = 1"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("SendID"), "{err}");
+}
+
+#[test]
+fn overlapping_ipv6_tcp_ao_owners_follow_the_same_directional_id_rules() {
+    let source = dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "2001:db8::/64"
+peer_group = "ix-members"
+tcp_ao = { key = "range", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "2001:db8::42"
+remote_asn = 65002
+tcp_ao = { key = "exact", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+"#,
+    );
+    parse(&source).expect("IPv6 static and dynamic AO owners may overlap with disjoint IDs");
+
+    let err = parse(&source.replace("recv_id = 12", "recv_id = 11"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("RecvID"), "{err}");
+}
+
+#[test]
+fn tcp_ao_overlap_with_static_inherited_md5_fails_closed() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[peer_groups.legacy]
+md5_password = "legacy"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "range", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "10.0.0.42"
+peer_group = "legacy"
+remote_asn = 65002
+"#,
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("TCP-AO and non-TCP-AO authentication boundary"),
+        "{err}"
+    );
+}
+
+#[test]
+fn tcp_ao_overlap_with_static_md5_fails_closed() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+tcp_ao = { key = "range", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+
+[[neighbors]]
+address = "10.0.0.42"
+remote_asn = 65002
+md5_password = "legacy"
+"#,
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("TCP-AO and non-TCP-AO authentication boundary"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plaintext_dynamic_overlap_with_static_tcp_ao_fails_closed() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+
+[[neighbors]]
+address = "10.0.0.42"
+remote_asn = 65002
+tcp_ao = { key = "exact", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+"#,
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("TCP-AO and non-TCP-AO authentication boundary"),
+        "{err}"
     );
 }
 

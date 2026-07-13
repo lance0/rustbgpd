@@ -516,6 +516,25 @@ fn runtime_dynamic_crud_rejects_startup_pinned_tcp_ao_ranges_and_overlaps() {
     assert!(delete_err.to_string().contains("startup-pinned"));
 }
 
+#[test]
+fn runtime_dynamic_add_rejects_static_tcp_ao_neighbor_coverage() {
+    let mut mgr = dynamic_test_manager();
+    let mut neighbor = config_neighbor("10.20.30.40".parse().unwrap(), 65002);
+    neighbor.tcp_ao = Some(test_tcp_ao().into());
+    mgr.current_config.neighbors.push(neighbor);
+
+    let err = mgr
+        .add_dynamic_range("10.0.0.0/8".into(), "ix-members".into(), 0, None)
+        .expect_err("runtime range must not introduce plaintext over static TCP-AO");
+    assert!(err.to_string().contains("static TCP-AO neighbor"), "{err}");
+    assert!(
+        mgr.dynamic_ranges
+            .iter()
+            .all(|range| range.addr != "10.0.0.0".parse::<IpAddr>().unwrap()),
+        "rejected range must not mutate runtime state"
+    );
+}
+
 #[tokio::test]
 async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_config() {
     let (tx, rx) = mpsc::channel(16);

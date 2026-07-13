@@ -764,27 +764,17 @@ fn inspect_active_tcp_ao(
     peer_label: &str,
     receipt: Option<&crate::socket_opts::TcpAoMktReceipt>,
 ) -> std::io::Result<Option<crate::TcpAoInfoSnapshot>> {
-    let Some(tcp_ao) = config.tcp_ao.as_ref() else {
+    if config.tcp_ao.is_none() {
         return Ok(None);
-    };
+    }
     let receipt = receipt.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "TCP-AO active-open inspection lacks its pre-connect kernel receipt",
         )
     })?;
-    match crate::socket_opts::get_tcp_ao_info_for_receipt(
-        stream,
-        receipt,
-        config.remote_addr.ip(),
-        config.remote_addr.ip(),
-        if config.remote_addr.is_ipv4() {
-            32
-        } else {
-            128
-        },
-        tcp_ao,
-    ) {
+    match crate::socket_opts::get_tcp_ao_info_for_receipt(stream, receipt, config.remote_addr.ip())
+    {
         Ok(info) => {
             info!(
                 peer = %peer_label,

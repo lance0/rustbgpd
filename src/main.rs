@@ -58,7 +58,7 @@ use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
     BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
-    TcpAoKeyring, TcpAoListenerKey,
+    TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -610,6 +610,7 @@ fn tcp_ao_listener_key_for_neighbor(
         return None;
     }
     Some(TcpAoListenerKey {
+        owner: TcpAoListenerOwnerKind::Static,
         peer,
         prefix_len: if peer.is_ipv4() { 32 } else { 128 },
         config: tcp_ao.clone(),
@@ -626,6 +627,7 @@ fn tcp_ao_listener_key_for_dynamic_range(
         return None;
     }
     Some(TcpAoListenerKey {
+        owner: TcpAoListenerOwnerKind::Dynamic,
         peer,
         prefix_len,
         config: TcpAoKeyring(
