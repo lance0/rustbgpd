@@ -2,9 +2,119 @@
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
+
+/// Monotonic identity for one immutable TCP-AO desired inventory.
+///
+/// Generation one is the socket inventory installed at daemon startup. Live
+/// add-only rotation publishes later generations only after every configured
+/// owner has passed preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TcpAoRotationGeneration(u64);
+
+impl TcpAoRotationGeneration {
+    /// Startup inventory generation.
+    pub const STARTUP: Self = Self(1);
+
+    /// Construct a checked generation from an operator/runtime value.
+    #[must_use]
+    pub const fn new(value: u64) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
+    }
+
+    /// Raw generation value used by API projections.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Next desired generation. Saturation is fail-closed: callers can detect
+    /// that no distinct successor exists instead of wrapping to startup.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+/// Operator-visible phase of the non-destructive TCP-AO rotation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpAoRotationPhase {
+    /// Desired and applied inventories are equal; no mutation is pending.
+    Idle,
+    /// A successor inventory is being installed without selecting or deleting
+    /// any MKT.
+    AddOnly,
+    /// The add-only attempt failed. Old usable MKTs remain installed; the
+    /// generation must be retried or the daemon restarted.
+    AddOnlyFailed,
+}
+
+impl TcpAoRotationPhase {
+    /// Stable wire/CLI spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::AddOnly => "add_only",
+            Self::AddOnlyFailed => "add_only_failed",
+        }
+    }
+}
+
+/// Secret-free, truthful desired/applied TCP-AO rotation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpAoRotationStatus {
+    /// Immutable inventory requested by the current/retryable rollout.
+    pub desired: TcpAoRotationGeneration,
+    /// Inventory completely applied to this owner/session.
+    pub applied: TcpAoRotationGeneration,
+    /// Current rollout phase.
+    pub phase: TcpAoRotationPhase,
+    /// Secret-free actionable failure detail.
+    pub last_error: Option<String>,
+}
+
+/// One configured selector/keyring in an established session's desired
+/// accepted-socket inventory. Covering owners remain separate so overlapping
+/// dynamic ranges are reconciled as their complete union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpAoRotationOwner {
+    /// Configured listener selector network.
+    pub peer: IpAddr,
+    /// Configured listener selector prefix length.
+    pub prefix_len: u8,
+    /// Complete ordered desired keyring for this owner.
+    pub keyring: TcpAoKeyring,
+}
+
+/// Immutable per-session projection of a global add-only generation.
+#[derive(Debug, Clone)]
+pub struct TcpAoSessionGeneration {
+    /// Global immutable inventory identity.
+    pub generation: TcpAoRotationGeneration,
+    /// Exact static owner used by active-open sockets. Dynamic peers have no
+    /// active-open target.
+    pub active_keyring: Option<TcpAoKeyring>,
+    /// Full owned union used by protected accepted sockets.
+    pub accepted_owners: Arc<[TcpAoRotationOwner]>,
+}
+
+impl Default for TcpAoRotationStatus {
+    fn default() -> Self {
+        Self {
+            desired: TcpAoRotationGeneration::STARTUP,
+            applied: TcpAoRotationGeneration::STARTUP,
+            phase: TcpAoRotationPhase::Idle,
+            last_error: None,
+        }
+    }
+}
 
 /// Maximum TCP-AO Master Key Tuples that may be installed on and inspected
 /// from one listener socket.
@@ -91,7 +201,7 @@ impl fmt::Debug for TcpAoConfig {
     }
 }
 
-/// Ordered TCP-AO startup keyring for one peer or listener selector.
+/// Ordered TCP-AO keyring for one peer or listener selector.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TcpAoKeyring(pub Vec<TcpAoConfig>);
 
@@ -257,6 +367,19 @@ impl TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_ao_rotation_generation_is_nonzero_monotonic_and_checked() {
+        assert!(TcpAoRotationGeneration::new(0).is_none());
+        assert_eq!(TcpAoRotationGeneration::STARTUP.as_u64(), 1);
+        assert_eq!(TcpAoRotationGeneration::STARTUP.next().unwrap().as_u64(), 2);
+        assert!(
+            TcpAoRotationGeneration::new(u64::MAX)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
 
     #[test]
     fn tcp_ao_config_debug_redacts_key() {

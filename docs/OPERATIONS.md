@@ -935,6 +935,12 @@ copy raw key bytes into a private temporary buffer; rustbgpd compares accepted
 sockets against the complete configured keyring without logging the bytes and
 zeroizes every temporary on success, error, retry, and unwind.
 
+The same neighbor view reports TCP-AO rotation `desired`, `applied`, and
+`phase` values. `idle` means the peer has acknowledged the desired immutable
+inventory; `add_only` is an in-progress successor install; and
+`add_only_failed` includes a secret-free actionable error. A failed add-only
+generation does not select or delete keys and is safe to retry with SIGHUP.
+
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
 an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound
 TCP-AO MKTs (`TCP_AO_KEYF_IFINDEX` clear), so Linux may match them in any L3
@@ -1253,9 +1259,10 @@ install keys on this host. `unsupported` / `probe_failed` means any configured
 static-neighbor or direct dynamic-prefix `tcp_ao` keyring will fail closed
 instead of falling back to unauthenticated sessions: listener failures abort
 startup, while active-open failures reject that connect attempt and retry
-later. TCP-AO key additions, removals, edits, and reordering are
-restart-required because Linux requires the keys to exist when active-open or
-passive-listener sockets are created. Live rotation remains LAN-16 / #159.
+later. SIGHUP can append non-preferred successor keys to unchanged static and
+dynamic owner keyrings without changing Current/RNext. Selection,
+deprecation, deletion, editing/reordering existing keys, and protected-owner
+CRUD remain restart-required.
 
 `rbgp neighbor <address>` reads TCP-AO KeyIDs and verification counters from
 the live connected socket on every query. Inspection failure is reported as

@@ -36,6 +36,7 @@ mod lifecycle;
 mod notifications;
 mod policy;
 mod reconcile;
+mod rotation;
 mod snapshot;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -118,6 +119,10 @@ struct ManagedPeer {
     /// Durable, non-secret TCP-AO protection identity used when the bounded
     /// session-state query times out or the task has exited.
     tcp_ao_protected: bool,
+    /// Desired/applied global TCP-AO inventory generation as observed by this
+    /// peer's session command. Kept outside the session query so a wedged task
+    /// cannot make a failed rotation look applied.
+    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
     /// Canonical `[[dynamic_neighbors]]` range that accepted this peer.
     ///
     /// Static peers are `None`. Dynamic peers keep the accepted range even if
@@ -169,6 +174,20 @@ struct ManagedPeer {
     /// would come up advertising untagged routes during the very
     /// maintenance window the toggle was supposed to cover.
     advertise_graceful_shutdown: bool,
+}
+
+/// Exact global inventory bound to an in-progress or failed TCP-AO
+/// generation. Retained until commit so a same-generation retry cannot change
+/// key material after any listener/session may already have installed a
+/// prefix of the original candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TcpAoDesiredInventory {
+    generation: rustbgpd_transport::TcpAoRotationGeneration,
+    listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+    static_keyrings: Vec<(
+        rustbgpd_api::peer_types::PeerKey,
+        rustbgpd_transport::TcpAoKeyring,
+    )>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +265,17 @@ pub struct PeerManager {
     /// are skipped lazily when the bounded table needs to evict.
     dead_lettered_pending_order: VecDeque<IpAddr>,
     next_session_id: u64,
+    /// Globally committed TCP-AO inventory generation. Protected accepts from
+    /// a newer listener generation are rejected until established-session
+    /// add-only convergence commits the same generation here.
+    tcp_ao_generation: rustbgpd_transport::TcpAoRotationGeneration,
+    /// Global add-only phase gates protected accepts between preflight and
+    /// established-session commit so no new session can escape the preflight
+    /// inventory.
+    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
+    /// Immutable candidate retained across preflight/apply failure and cleared
+    /// only after the peer-manager generation globally commits.
+    tcp_ao_desired_inventory: Option<TcpAoDesiredInventory>,
     /// ADR-0067 step 4 — RFC 5882 coupling. `PeerManager` owns the desired BFD
     /// session set; the BFD actor is a pure session-runner that reconciles it.
     /// `None` when no neighbor configures BFD.
@@ -413,6 +443,9 @@ impl PeerManager {
             dead_lettered_pending: HashMap::new(),
             dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,
+            tcp_ao_generation: rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
+            tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
+            tcp_ao_desired_inventory: None,
             current_config,
             bfd_coupling: None,
             event_history: None,
@@ -796,8 +829,20 @@ impl PeerManager {
                             let result = self.set_graceful_shutdown(peer, enabled).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info } => {
-                            self.handle_inbound(stream, peer_addr, tcp_ao_info).await;
+                        PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info, tcp_ao_generation } => {
+                            self.handle_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
+                        }
+                        PeerManagerCommand::ApplyTcpAoAddOnly { generation, listener_keys, static_keyrings, reply } => {
+                            let result = self.apply_tcp_ao_add_only(generation, &listener_keys, &static_keyrings).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::PreflightTcpAoAddOnly { generation, listener_keys, static_keyrings, reply } => {
+                            let result = self.preflight_tcp_ao_add_only(generation, &listener_keys, &static_keyrings).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::MarkTcpAoAddOnlyFailed { generation, error, reply } => {
+                            self.mark_tcp_ao_add_only_failed(generation, &error);
+                            let _ = reply.send(Ok(()));
                         }
                         PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
                             let result = self.reconcile_peers(added, removed, changed).await;

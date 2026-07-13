@@ -5,7 +5,7 @@ use rustbgpd_api::peer_types::{
     SessionLifecycleEventType,
 };
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::PeerSessionState;
+use rustbgpd_transport::{PeerSessionState, TcpAoRotationStatus};
 use rustbgpd_wire::{
     Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
 };
@@ -580,6 +580,7 @@ async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_confi
             pkt_dropped_icmp: 0,
             keys: Vec::new(),
         }),
+        tcp_ao_generation: Some(rustbgpd_transport::TcpAoRotationGeneration::STARTUP),
     })
     .await
     .unwrap();
@@ -801,6 +802,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
         stream: server_stream,
         peer_addr: remote_addr,
         tcp_ao_info: None,
+        tcp_ao_generation: None,
     })
     .await
     .unwrap();
@@ -829,6 +831,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
         stream: server_stream,
         peer_addr: remote_addr,
         tcp_ao_info: None,
+        tcp_ao_generation: None,
     })
     .await
     .unwrap();
@@ -1109,6 +1112,7 @@ fn insert_test_managed_peer_with_asn(
             accepted_dynamic_range: None,
             pending_refresh,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -1149,6 +1153,7 @@ fn insert_test_scoped_managed_peer(
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -1820,6 +1825,7 @@ fn insert_test_dynamic_managed_peer(
             }),
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -5218,6 +5224,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             accepted_dynamic_range: None,
             pending_refresh: true,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7023,6 +7030,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7196,6 +7204,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7379,6 +7388,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7581,6 +7591,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7808,6 +7819,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -7965,6 +7977,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
             accepted_dynamic_range: None,
             pending_refresh: false,
             pending_export_apply: false,
+            tcp_ao_rotation: TcpAoRotationStatus::default(),
             advertise_graceful_shutdown: false,
         },
     );
@@ -8110,7 +8123,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr, None).await;
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
     assert!(
         mgr.peers
             .get(&key(peer_addr))
@@ -8268,7 +8282,8 @@ async fn inbound_state_query_timeout_keeps_existing_session() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr, None).await;
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
     assert_eq!(
@@ -8342,7 +8357,8 @@ async fn inbound_after_session_task_exit_takes_accept_path() {
     let (server_stream, remote_addr) = listener.accept().await.unwrap();
     let mut client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, remote_addr, None).await;
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
     assert_ne!(
@@ -8829,7 +8845,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
         .await;
 
     assert_eq!(
@@ -8916,7 +8932,7 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
         .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).unwrap();
@@ -8974,7 +8990,7 @@ async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
     let client_stream = client.await.unwrap();
 
     let link_local: IpAddr = "fe80::1".parse().unwrap();
-    mgr.handle_inbound(server_stream, sock(link_local), None)
+    mgr.handle_inbound(server_stream, sock(link_local), None, None)
         .await;
 
     assert_eq!(
@@ -9079,7 +9095,7 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
         .await;
     assert_eq!(mgr.dynamic_peer_count, 1);
 
@@ -9126,7 +9142,8 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, sock(peer_addr2), None).await;
+    mgr.handle_inbound(server2, sock(peer_addr2), None, None)
+        .await;
 
     let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
@@ -9170,7 +9187,7 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     let client_stream = client.await.unwrap();
     let peer_addr = remote_addr.ip();
 
-    mgr.handle_inbound(server_stream, sock(peer_addr), None)
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
         .await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     mgr.peers
@@ -9211,7 +9228,8 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
         "test relies on both incarnations sharing an IpAddr key"
     );
 
-    mgr.handle_inbound(server2, sock(peer_addr2), None).await;
+    mgr.handle_inbound(server2, sock(peer_addr2), None, None)
+        .await;
 
     let managed2 = mgr.peers.get(&key(peer_addr2)).expect("re-established");
     assert!(
@@ -9828,7 +9846,8 @@ async fn strict_bfd_drops_inbound_until_up() {
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, sock(peer), None).await;
+    mgr.handle_inbound(server_stream, sock(peer), None, None)
+        .await;
 
     // The inbound was dropped: the managed session was neither replaced nor
     // given a pending collision candidate, so no BGP session started.
@@ -9868,7 +9887,8 @@ async fn nonstrict_bfd_down_drops_inbound_while_held() {
     let (server_stream, _real_addr) = listener.accept().await.unwrap();
     let _client_stream = client.await.unwrap();
 
-    mgr.handle_inbound(server_stream, sock(peer), None).await;
+    mgr.handle_inbound(server_stream, sock(peer), None, None)
+        .await;
 
     let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(

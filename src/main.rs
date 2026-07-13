@@ -71,7 +71,7 @@ use crate::config::{
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{
-    apply_reload_outcome, reload_config, run_config_bridge, runtime_config_snapshot,
+    apply_reload_outcome, reload_config_with_tcp_ao, run_config_bridge, runtime_config_snapshot,
 };
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
@@ -2892,8 +2892,10 @@ async fn run<T>(
 
     let tcp_ao_listener_required = !listener_options.tcp_ao_keys.is_empty();
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
+    let mut tcp_ao_listener_handle = None;
     match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
         Ok(listener) => {
+            tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
             let listener_peer_mgr_tx = peer_mgr_tx.clone();
             let listener_gate = daemon_gate.clone();
             tokio::spawn(async move {
@@ -2912,6 +2914,7 @@ async fn run<T>(
                             stream: conn.stream,
                             peer_addr: conn.peer_addr,
                             tcp_ao_info: conn.tcp_ao_info,
+                            tcp_ao_generation: conn.tcp_ao_generation,
                         })
                         .await
                     {
@@ -3095,6 +3098,7 @@ async fn run<T>(
                 let bridge_replace = bridge_replace_tx.clone();
                 let grpc_credentials = grpc_credentials.clone();
                 let reload_metrics = metrics.clone();
+                let tcp_ao_listener = tcp_ao_listener_handle.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
                     if let Err(error) = config_transaction_controller
@@ -3129,7 +3133,7 @@ async fn run<T>(
                             return None;
                         }
                     };
-                    let reloaded = reload_config(
+                    let reloaded = reload_config_with_tcp_ao(
                         &path,
                         &snapshot,
                         live_tcp.as_ref(),
@@ -3137,6 +3141,7 @@ async fn run<T>(
                         &pm_tx,
                         fib_cmd.as_ref(),
                         Some(&evpn_runtime_reload_apply),
+                        tcp_ao_listener.as_ref(),
                     )
                     .await?;
                     Some(apply_reload_outcome(reloaded, &pm_internal, bridge_replace.as_ref()).await)

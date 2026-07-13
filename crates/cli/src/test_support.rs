@@ -739,6 +739,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             paths_limits: Vec::new(),
             effective_distribution_mode: server_proto::EffectiveDistributionMode::AddPath.into(),
             selection_deferral: Vec::new(),
+            tcp_ao_desired_generation: 1,
+            tcp_ao_applied_generation: 1,
+            tcp_ao_rotation_phase: "idle".to_string(),
+            tcp_ao_rotation_error: String::new(),
         }))
     }
 

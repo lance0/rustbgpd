@@ -147,6 +147,7 @@ impl PeerManager {
                 pending_inbound: None,
                 is_dynamic: false,
                 tcp_ao_protected,
+                tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
                 accepted_dynamic_range: None,
                 pending_refresh: false,
                 pending_export_apply: false,

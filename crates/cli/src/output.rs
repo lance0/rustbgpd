@@ -241,6 +241,11 @@ pub struct JsonNeighborDetail {
     pub last_error: String,
     pub authentication: String,
     pub tcp_ao_health: String,
+    pub tcp_ao_desired_generation: u64,
+    pub tcp_ao_applied_generation: u64,
+    pub tcp_ao_rotation_phase: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tcp_ao_rotation_error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_ao: Option<JsonTcpAoState>,
     pub description: String,
@@ -1155,6 +1160,10 @@ mod tests {
             last_error: String::new(),
             authentication: "tcp_ao".to_string(),
             tcp_ao_health: "unavailable".to_string(),
+            tcp_ao_desired_generation: 2,
+            tcp_ao_applied_generation: 1,
+            tcp_ao_rotation_phase: "add_only".to_string(),
+            tcp_ao_rotation_error: String::new(),
             tcp_ao: Some(JsonTcpAoState {
                 current_key_id: Some(7),
                 rnext_key_id: Some(9),
@@ -1240,6 +1249,9 @@ mod tests {
         assert_eq!(value["role_negotiated"], true);
         assert_eq!(value["authentication"], "tcp_ao");
         assert_eq!(value["tcp_ao_health"], "unavailable");
+        assert_eq!(value["tcp_ao_desired_generation"], 2);
+        assert_eq!(value["tcp_ao_applied_generation"], 1);
+        assert_eq!(value["tcp_ao_rotation_phase"], "add_only");
         assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
         assert!(value.to_string().find("secret").is_none());
         assert_eq!(value["otc_routes_blocked"], 3);

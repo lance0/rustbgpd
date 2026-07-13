@@ -459,7 +459,7 @@
           "minimum": 0
         },
         "tcp_ao": {
-          "description": "TCP-AO key installed as a prefix MKT on the passive listener at startup.\nDynamic ranges never inherit authentication from their peer group.",
+          "description": "TCP-AO keyring installed as prefix MKTs on the passive listener and\ninherited accepted sockets. Nonpreferred successor keys may be appended\nlive with SIGHUP. Dynamic ranges never inherit authentication from their\npeer group.",
           "anyOf": [
             {
               "$ref": "#/$defs/TcpAoKeyringConfig"
@@ -1792,7 +1792,7 @@
           ]
         },
         "tcp_ao": {
-          "description": "Static-neighbor TCP-AO (RFC 5925) configuration. Installed on\nstartup active-open sockets and the passive listener when configured.",
+          "description": "Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open\nsockets and the passive listener when configured. Nonpreferred\nsuccessor keys may be appended live with SIGHUP.",
           "anyOf": [
             {
               "$ref": "#/$defs/TcpAoKeyringConfig"
@@ -2426,7 +2426,7 @@
           "type": "string"
         },
         "deprecated": {
-          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. Live rotation remains deferred.",
+          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. Changing this flag on an existing live MKT remains\nrestart-required.",
           "type": "boolean",
           "default": false
         },
@@ -2435,7 +2435,7 @@
           "type": "string"
         },
         "preferred": {
-          "description": "Mark this key as the preferred current send key for startup socket\ninstallation. Runtime key rotation remains deferred.",
+          "description": "Mark this key as the preferred current send key for socket installation.\nChanging the preferred selection on live sockets remains\nrestart-required.",
           "type": "boolean",
           "default": false
         },

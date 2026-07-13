@@ -2,7 +2,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::{PeerHandle, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot};
+use rustbgpd_transport::{
+    PeerHandle, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot, TcpAoRotationGeneration,
+};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -10,12 +12,25 @@ use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
 };
 
+fn tcp_ao_accept_generation_valid(
+    protected: bool,
+    accepted: Option<TcpAoRotationGeneration>,
+    rotation: &rustbgpd_transport::TcpAoRotationStatus,
+) -> bool {
+    if protected && rotation.phase == rustbgpd_transport::TcpAoRotationPhase::AddOnly {
+        return false;
+    }
+    matches!((protected, accepted), (false, None))
+        || matches!((protected, accepted), (true, Some(generation)) if generation == rotation.applied)
+}
+
 impl PeerManager {
     pub(super) async fn spawn_pending_inbound(
         &mut self,
         peer_key: PeerKey,
         stream: TcpStream,
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
+        tcp_ao_generation: TcpAoRotationGeneration,
     ) -> bool {
         let peer_addr = peer_key.address;
         if self
@@ -35,7 +50,7 @@ impl PeerManager {
         let export_policy = managed.export_policy.clone();
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
+        let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
             transport_config,
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -51,6 +66,7 @@ impl PeerManager {
             SessionIdentity::inbound_candidate(session_id),
             self.transport_event_sink.clone(),
             tcp_ao_info,
+            tcp_ao_generation,
         );
 
         if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
@@ -111,8 +127,36 @@ impl PeerManager {
         stream: TcpStream,
         peer_addr: SocketAddr,
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
+        tcp_ao_generation: Option<TcpAoRotationGeneration>,
     ) {
         let peer_ip = peer_addr.ip();
+        if !tcp_ao_accept_generation_valid(
+            tcp_ao_info.is_some(),
+            tcp_ao_generation,
+            &self.tcp_ao_rotation,
+        ) {
+            if tcp_ao_info.is_some()
+                && self.tcp_ao_rotation.phase == rustbgpd_transport::TcpAoRotationPhase::AddOnly
+            {
+                warn!(
+                    %peer_ip,
+                    desired_generation = self.tcp_ao_rotation.desired.as_u64(),
+                    applied_generation = self.tcp_ao_rotation.applied.as_u64(),
+                    "rejecting protected inbound connection while TCP-AO generation preflight/apply is in progress"
+                );
+            } else if let Some(generation) = tcp_ao_generation {
+                warn!(
+                    %peer_ip,
+                    accepted_generation = generation.as_u64(),
+                    applied_generation = self.tcp_ao_generation.as_u64(),
+                    "rejecting protected inbound connection from a stale or partially applied TCP-AO generation"
+                );
+            } else {
+                warn!(%peer_ip, "rejecting inbound connection with inconsistent TCP-AO generation metadata");
+            }
+            return;
+        }
+        let accepted_generation = tcp_ao_generation.unwrap_or(self.tcp_ao_generation);
         let peer_key = self.inbound_peer_key(peer_addr);
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
@@ -198,7 +242,7 @@ impl PeerManager {
                 let tcp_ao_protected = tcp_ao_info.is_some();
 
                 let session_id = self.allocate_session_id();
-                let handle = PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
+                let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -214,6 +258,7 @@ impl PeerManager {
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
                     tcp_ao_info,
+                    accepted_generation,
                 );
 
                 if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
@@ -246,6 +291,12 @@ impl PeerManager {
                     pending_inbound: None,
                     is_dynamic: true,
                     tcp_ao_protected,
+                    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
+                        desired: accepted_generation,
+                        applied: accepted_generation,
+                        phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+                        last_error: None,
+                    },
                     accepted_dynamic_range: Some(accepted_dynamic_range),
                     pending_refresh: false,
                     pending_export_apply: false,
@@ -361,8 +412,13 @@ impl PeerManager {
         match fsm_state {
             SessionState::Idle => {
                 // Accept immediately — no collision possible
-                self.replace_with_inbound(peer_key.clone(), stream, tcp_ao_info)
-                    .await;
+                self.replace_with_inbound(
+                    peer_key.clone(),
+                    stream,
+                    tcp_ao_info,
+                    accepted_generation,
+                )
+                .await;
             }
             SessionState::Established => {
                 // Already established — drop inbound (no collision)
@@ -373,15 +429,25 @@ impl PeerManager {
                 // deadlocks simultaneous active-open: both outbound sessions
                 // wait for OPEN while both accepted inbound sockets sit inert.
                 info!(%peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
-                self.spawn_pending_inbound(peer_key.clone(), stream, tcp_ao_info)
-                    .await;
+                self.spawn_pending_inbound(
+                    peer_key.clone(),
+                    stream,
+                    tcp_ao_info,
+                    accepted_generation,
+                )
+                .await;
             }
             SessionState::OpenConfirm => {
                 // We already have router-id from negotiation; start a live
                 // inbound candidate and resolve immediately.
                 let remote_router_id = current_state.and_then(|s| s.remote_router_id);
                 let started = self
-                    .spawn_pending_inbound(peer_key.clone(), stream, tcp_ao_info)
+                    .spawn_pending_inbound(
+                        peer_key.clone(),
+                        stream,
+                        tcp_ao_info,
+                        accepted_generation,
+                    )
                     .await;
                 if let Some(rid) = remote_router_id {
                     if started {
@@ -495,6 +561,7 @@ impl PeerManager {
         peer_key: PeerKey,
         stream: TcpStream,
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
+        tcp_ao_generation: TcpAoRotationGeneration,
     ) {
         let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
@@ -510,7 +577,7 @@ impl PeerManager {
             let old_session_id = managed.session_id;
             let old_handle = std::mem::replace(
                 &mut managed.handle,
-                PeerHandle::spawn_inbound_with_event_sink_and_identity_and_lifecycle(
+                PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     managed.transport_config.clone(),
                     self.metrics.clone(),
                     self.rib_tx.clone(),
@@ -526,6 +593,7 @@ impl PeerManager {
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
                     tcp_ao_info,
+                    tcp_ao_generation,
                 ),
             );
             managed.session_id = session_id;
@@ -554,5 +622,42 @@ impl PeerManager {
         } else {
             info!(%peer_addr, "inbound session started");
         }
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn protected_accept_requires_exact_applied_generation() {
+        let one = TcpAoRotationGeneration::STARTUP;
+        let two = TcpAoRotationGeneration::new(2).unwrap();
+        let idle = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: two,
+            phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+            last_error: None,
+        };
+        assert!(tcp_ao_accept_generation_valid(true, Some(two), &idle));
+        assert!(!tcp_ao_accept_generation_valid(true, Some(one), &idle));
+        assert!(!tcp_ao_accept_generation_valid(true, None, &idle));
+        assert!(tcp_ao_accept_generation_valid(false, None, &idle));
+        assert!(!tcp_ao_accept_generation_valid(false, Some(two), &idle));
+
+        let applying = rustbgpd_transport::TcpAoRotationStatus {
+            phase: rustbgpd_transport::TcpAoRotationPhase::AddOnly,
+            ..idle
+        };
+        assert!(!tcp_ao_accept_generation_valid(true, Some(two), &applying));
+
+        let failed = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: one,
+            phase: rustbgpd_transport::TcpAoRotationPhase::AddOnlyFailed,
+            last_error: Some("listener apply failed".to_string()),
+        };
+        assert!(tcp_ao_accept_generation_valid(true, Some(one), &failed));
+        assert!(!tcp_ao_accept_generation_valid(true, Some(two), &failed));
     }
 }

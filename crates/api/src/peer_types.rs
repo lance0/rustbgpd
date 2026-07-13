@@ -856,6 +856,36 @@ pub enum PeerManagerCommand {
         /// Initial TCP-AO inspection tied to this accepted stream. The session
         /// refreshes it when state is queried.
         tcp_ao_info: Option<rustbgpd_transport::TcpAoInfoSnapshot>,
+        /// Listener generation that reconciled this protected child. `None`
+        /// for plaintext/MD5 accepts.
+        tcp_ao_generation: Option<rustbgpd_transport::TcpAoRotationGeneration>,
+    },
+    /// Apply the established-session portion of one globally preflighted
+    /// add-only TCP-AO generation.
+    ApplyTcpAoAddOnly {
+        generation: rustbgpd_transport::TcpAoRotationGeneration,
+        /// Complete desired listener owner inventory. The peer manager derives
+        /// exact active-open and covering accepted-socket projections from it.
+        listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        /// Desired exact keyrings for static active-open peers, including
+        /// families that do not share the process listener socket.
+        static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Validate every currently managed protected session target before the
+    /// listener socket is mutated.
+    PreflightTcpAoAddOnly {
+        generation: rustbgpd_transport::TcpAoRotationGeneration,
+        listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Publish a failed global add-only phase when listener application fails
+    /// after session preflight has already advertised the desired generation.
+    MarkTcpAoAddOnlyFailed {
+        generation: rustbgpd_transport::TcpAoRotationGeneration,
+        error: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Reconcile peers after config reload (add/remove/change).
     ReconcilePeers {
@@ -1830,6 +1860,8 @@ pub struct PeerInfo {
     /// including `KeyID` validity flags and cumulative verification counters.
     /// Health classification is derived at the protobuf/API boundary.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
+    /// Desired/applied add-only rotation generation and actionable failure.
+    pub tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
     /// True when the per-peer session-state query did not complete in time

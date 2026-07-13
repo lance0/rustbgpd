@@ -103,6 +103,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             last_error: n.last_error.clone(),
             authentication: authentication_label(n.authentication).to_string(),
             tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
+            tcp_ao_desired_generation: n.tcp_ao_desired_generation,
+            tcp_ao_applied_generation: n.tcp_ao_applied_generation,
+            tcp_ao_rotation_phase: n.tcp_ao_rotation_phase.clone(),
+            tcp_ao_rotation_error: n.tcp_ao_rotation_error.clone(),
             tcp_ao: n.tcp_ao.as_ref().map(|ao| JsonTcpAoState {
                 current_key_id: ao.current_key_id,
                 rnext_key_id: ao.rnext_key_id,
@@ -300,6 +304,13 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
                 "TCP-AO Health:        {}",
                 tcp_ao_health_label(n.tcp_ao_health)
             );
+            println!(
+                "TCP-AO Rotation:      desired={} applied={} phase={}",
+                n.tcp_ao_desired_generation, n.tcp_ao_applied_generation, n.tcp_ao_rotation_phase
+            );
+            if !n.tcp_ao_rotation_error.is_empty() {
+                println!("TCP-AO Rotation Error: {}", n.tcp_ao_rotation_error);
+            }
         }
         if let Some(ao) = &n.tcp_ao {
             println!(

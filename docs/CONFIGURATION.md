@@ -527,7 +527,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6 |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `tcp_ao`               | table or array | no | -- | Ordered TCP-AO startup keyring for static neighbors (RFC 5925; Linux, restart-required edits) |
+| `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append-only non-preferred successors can be installed on SIGHUP) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
@@ -567,7 +567,7 @@ families = ["ipv4_unicast"]
 ```
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted directly on static `[[neighbors]]` and
-on `[[dynamic_neighbors]]` ranges. It is an ordered startup keyring containing
+on `[[dynamic_neighbors]]` ranges. It is an ordered keyring containing
 one to 256 Master Key Tuples (MKTs). The legacy singleton table remains valid
 and is also the canonical serialized shape for a one-key ring. Configure two or
 more keys as an ordered array of inline tables.
@@ -606,16 +606,26 @@ rejected. Across all static and dynamic owners, each address family may install
 at most 4,096 listener MKTs; larger configurations are rejected before listener
 startup so accepted-socket inventory inspection remains complete.
 
-Linux TCP-AO MKTs are socket state, so adding, removing, editing, or reordering
-keyring entries is restart-required. On SIGHUP, rustbgpd pins the live neighbor
-back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
-restart-required in `--diff` / config-diff JSON, pins peer-group and policy
-dependencies referenced by the pinned TCP-AO neighbors and restart-required
-global fields that affect neighbor validation to the live snapshot for that
-reload, and leaves the edited TOML, including its requested key order, as the
-desired config for the next daemon restart. Runtime deletion of a configured
-TCP-AO neighbor is also rejected until listener MKT deletion and live rotation
-land in LAN-16 / #159.
+Linux TCP-AO MKTs are socket state. On SIGHUP, rustbgpd can live-install a
+strict add-only successor generation when every protected static and dynamic
+owner is unchanged, every existing key remains byte-for-byte in declaration
+order, and every appended key has `preferred = false`. The daemon globally
+preflights capacity and every managed protected session, adds keys without
+changing Current/RNext, verifies the complete listener and connected-socket
+inventories, and generation-fences newly accepted protected sockets until all
+managed sessions converge. Changing selection, marking an existing key
+deprecated, removing/editing/reordering a key, or changing a protected owner
+remains restart-required and is pinned to the live snapshot. Runtime deletion
+of a configured TCP-AO neighbor also remains rejected.
+
+If an add-only apply fails, the old selectable keys remain usable and the same
+desired generation is retryable with another SIGHUP. Some successor MKTs may
+already be present; retries accept them only when their kernel-normalized key
+material is identical. Protected inbound accepts can be rejected while a
+partially applied generation is fenced. Inspect per-neighbor
+`tcp_ao_desired_generation`, `tcp_ao_applied_generation`,
+`tcp_ao_rotation_phase`, and `tcp_ao_rotation_error` in JSON, or the equivalent
+`TCP-AO Rotation` rows in human output.
 
 `tcp_ao` is mutually exclusive with `md5_password`, including an inherited
 peer-group MD5 password. It is not available in `[peer_groups.*]`; dynamic
@@ -659,9 +669,9 @@ unique. At most one entry may be `preferred`; a preferred key cannot also be
 `deprecated`; and at least one entry must be non-deprecated. If there is no
 preferred entry, declaration order is significant because the first
 non-deprecated key is selected. Reordering is therefore a restart-required
-configuration change. These startup keyrings support coordinated rollover
-across a restart; changing selection or installing/removing an MKT on live
-sockets remains deferred to LAN-16 / #159.
+configuration change. Appending a non-preferred successor can be installed
+live on SIGHUP; selecting it, deprecating an existing key, and deleting an MKT
+remain restart-coordinated.
 
 ### BFD (RFC 5880 / 5881 / 5882)
 
@@ -896,7 +906,7 @@ Dynamic peers:
 | `peer_group`  | string | yes      | --      | Peer group whose settings dynamic peers inherit |
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
-| `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux startup-only and restart-required |
+| `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux; append-only non-preferred successors can be installed on SIGHUP |
 
 When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the

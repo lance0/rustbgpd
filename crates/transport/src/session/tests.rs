@@ -33,6 +33,138 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
         config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     )
 }
+
+#[test]
+fn recreated_active_session_starts_at_committed_tcp_ao_generation() {
+    let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let generation = crate::TcpAoRotationGeneration::new(7).unwrap();
+    let session = PeerSession::new_at_tcp_ao_generation(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        generation,
+    );
+    assert_eq!(session.tcp_ao_generation, generation);
+}
+
+#[test]
+fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
+    let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let old = crate::TcpAoConfig {
+        key: "old-secret".to_string(),
+        send_id: 1,
+        recv_id: 11,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: false,
+    };
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![old.clone()]));
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut session = PeerSession::new_at_tcp_ao_generation(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+    let mut successor = old.clone();
+    successor.key = "successor-secret".to_string();
+    successor.send_id = 2;
+    successor.recv_id = 12;
+    let generation_two = crate::TcpAoRotationGeneration::new(2).unwrap();
+    session
+        .apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+            generation: generation_two,
+            active_keyring: Some(crate::TcpAoKeyring(vec![old.clone(), successor])),
+            accepted_owners: Vec::new().into(),
+        })
+        .unwrap();
+    assert_eq!(session.tcp_ao_generation, generation_two);
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 2);
+
+    let skipped = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+        generation: crate::TcpAoRotationGeneration::new(4).unwrap(),
+        active_keyring: Some(crate::TcpAoKeyring(vec![old.clone()])),
+        accepted_owners: Vec::new().into(),
+    });
+    assert!(skipped.is_err());
+
+    let removal = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+        generation: crate::TcpAoRotationGeneration::new(3).unwrap(),
+        active_keyring: Some(crate::TcpAoKeyring(vec![old])),
+        accepted_owners: Vec::new().into(),
+    });
+    assert!(removal.is_err());
+    assert_eq!(session.tcp_ao_generation, generation_two);
+}
+
+#[test]
+fn disconnected_protected_session_cannot_advance_without_active_owner_inventory() {
+    let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![crate::TcpAoConfig {
+        key: "old-secret".to_string(),
+        send_id: 1,
+        recv_id: 11,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: false,
+    }]));
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut session = PeerSession::new_at_tcp_ao_generation(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+    let result = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: None,
+        accepted_owners: Vec::new().into(),
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+    assert!(session.config.tcp_ao.is_some());
+}
+
 fn make_test_session_with_rib(
     local_asn: u32,
     remote_asn: u32,
@@ -341,6 +473,60 @@ async fn shutdown_aborts_inflight_connect_task() {
         ControlFlow::Break(())
     );
     assert!(session.connect_task.is_none());
+}
+
+#[tokio::test]
+async fn tcp_ao_generation_does_not_advance_past_inflight_old_inventory_connect() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let old = crate::TcpAoConfig {
+        key: "old-secret".to_string(),
+        send_id: 1,
+        recv_id: 11,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: false,
+    };
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![old.clone()]));
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut session = PeerSession::new_at_tcp_ao_generation(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+    session.connect_task = Some(tokio::spawn(async {
+        std::future::pending::<ConnectResult>().await
+    }));
+    let mut successor = old.clone();
+    successor.key = "successor-secret".to_string();
+    successor.send_id = 2;
+    successor.recv_id = 12;
+    let result = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
+        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: Some(crate::TcpAoKeyring(vec![old, successor])),
+        accepted_owners: Vec::new().into(),
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 1);
+    assert!(session.connect_task.is_some());
+    session.close_tcp();
 }
 #[tokio::test]
 async fn session_established_emits_bmp_peer_up() {
@@ -1313,6 +1499,7 @@ async fn accepted_query_test_session_with_config(
         false,
         crate::SessionIdentity::default(),
         tcp_ao_info,
+        crate::TcpAoRotationGeneration::STARTUP,
     )
 }
 

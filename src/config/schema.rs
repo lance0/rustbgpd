@@ -280,8 +280,10 @@ pub struct DynamicNeighborConfig {
     /// Description applied to dynamic peers from this range.
     #[serde(default)]
     pub description: Option<String>,
-    /// TCP-AO key installed as a prefix MKT on the passive listener at startup.
-    /// Dynamic ranges never inherit authentication from their peer group.
+    /// TCP-AO keyring installed as prefix MKTs on the passive listener and
+    /// inherited accepted sockets. Nonpreferred successor keys may be appended
+    /// live with SIGHUP. Dynamic ranges never inherit authentication from their
+    /// peer group.
     #[serde(default)]
     pub tcp_ao: Option<TcpAoKeyringConfig>,
 }
@@ -682,8 +684,9 @@ pub struct Neighbor {
     pub max_prefixes: Option<u32>,
     /// TCP MD5 signature password (RFC 2385).
     pub md5_password: Option<String>,
-    /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
-    /// startup active-open sockets and the passive listener when configured.
+    /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
+    /// sockets and the passive listener when configured. Nonpreferred
+    /// successor keys may be appended live with SIGHUP.
     pub tcp_ao: Option<TcpAoKeyringConfig>,
     /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
     /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
@@ -787,14 +790,16 @@ pub struct TcpAoConfig {
     pub recv_id: u8,
     /// Linux TCP-AO MAC/KDF algorithm name, e.g. `"hmac(sha256)"`.
     pub algorithm: String,
-    /// Mark this key as the preferred current send key for startup socket
-    /// installation. Runtime key rotation remains deferred.
+    /// Mark this key as the preferred current send key for socket installation.
+    /// Changing the preferred selection on live sockets remains
+    /// restart-required.
     #[serde(default)]
     pub preferred: bool,
     /// Mark this key as deprecated for local startup selection and health
     /// metadata. Deprecated keys are still installed and may remain usable
     /// when peer-selected, but rustbgpd never selects one as its startup
-    /// fallback. Live rotation remains deferred.
+    /// fallback. Changing this flag on an existing live MKT remains
+    /// restart-required.
     #[serde(default)]
     pub deprecated: bool,
 }
@@ -812,8 +817,9 @@ impl fmt::Debug for TcpAoConfig {
     }
 }
 
-/// Ordered TCP-AO startup keyring. A singleton retains the legacy table wire
-/// shape; two or more entries use an ordered array of tables.
+/// Ordered TCP-AO keyring. A singleton retains the legacy table wire shape;
+/// two or more entries use an ordered array of tables. Live reload supports
+/// appending nonpreferred successor keys without redefining existing entries.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TcpAoKeyringConfig(pub Vec<TcpAoConfig>);
 

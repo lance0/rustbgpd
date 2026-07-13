@@ -71,6 +71,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         last_error: String::new(),
         authentication: "plaintext".to_string(),
         tcp_ao_info: None,
+        tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
         is_dynamic: false,
         stale: false,
     }

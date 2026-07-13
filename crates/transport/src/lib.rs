@@ -29,7 +29,8 @@ pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 
 pub use config::{
     RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring,
-    TransportConfig,
+    TcpAoRotationGeneration, TcpAoRotationOwner, TcpAoRotationPhase, TcpAoRotationStatus,
+    TcpAoSessionGeneration, TransportConfig,
 };
 pub use error::TransportError;
 pub use event_sink::{
@@ -41,8 +42,8 @@ pub use handle::{
     SessionNotificationDirection, SessionNotificationEvent, SessionRole, StateQueryOutcome,
 };
 pub use listener::{
-    AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey,
-    TcpAoListenerOwnerKind,
+    AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerGeneration,
+    TcpAoListenerHandle, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).

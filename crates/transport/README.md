@@ -19,9 +19,10 @@ events.
 - **TCP MD5 signatures** (RFC 2385) and **GTSM** (RFC 5082) via raw
   socket options
 - **TCP-AO** (RFC 5925) — ordered static-neighbor and direct dynamic-prefix
-  startup keyrings are installed on active-open and accept sockets, plus
-  `GlobalService.GetGlobal` / `rbgp global` capability status; keyring edits
-  require restart and live rotation remains tracked in LAN-16 / #159
+  keyrings are installed on active-open and accept sockets, with fail-closed
+  inspection and `GlobalService.GetGlobal` / `rbgp global` capability status;
+  SIGHUP can append nonpreferred successor keys, while selection, deprecation,
+  deletion, and protected-owner changes remain restart-required
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
 - **Import-decision explain** (ADR-0073) — a bounded per-session LRU

@@ -11704,14 +11704,19 @@ fn reload_matrix_rows_for<'a>(matrix: &'a str, field: &str) -> Vec<&'a str> {
 /// `log_level` is now genuinely live (re-applied on SIGHUP via the
 /// telemetry tracing reload handle), so the doc claim is finally true; if
 /// someone regresses it back to inert and re-marks the row restart-required
-/// (or vice versa) this fails. `tcp_ao` and `bfd` pin the restart-required
-/// side so a blanket "mark everything live" edit also fails.
+/// (or vice versa) this fails. `tcp_ao` pins its deliberately narrow SIGHUP
+/// exception: only a strictly add-only successor generation is live, while
+/// every other edit remains restart-required. `bfd` pins the unconditional
+/// restart-required side so a blanket "mark everything live" edit also fails.
 #[test]
 fn reload_matrix_pins_load_bearing_field_classes() {
     let matrix = load_reload_matrix();
     for (field, class_cell) in [
         ("log_level", "| live |"),
-        ("tcp_ao", "| restart-required |"),
+        (
+            "tcp_ao",
+            "| live (add-only generation) / otherwise restart-required |",
+        ),
         ("bfd", "| restart-required |"),
     ] {
         let rows = reload_matrix_rows_for(&matrix, field);

@@ -88,9 +88,12 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
 - The passive BGP listener is created through `socket2`, installs configured
   static-neighbor and direct dynamic-prefix TCP-AO keyrings before `listen()`,
   and fails closed if any key cannot be installed.
-- SIGHUP additions, removals, edits, or reordering of `tcp_ao` keyrings are
-  restart-required and pinned to the live startup snapshot along with
-  validation-affecting startup dependencies.
+- SIGHUP can install an immutable add-only successor generation when protected
+  owners and existing key material/order are unchanged and every appended MKT
+  is non-preferred. Listener and managed session inventories are globally
+  preflighted, completely verified, and fenced by generation. Selection,
+  deprecation, deletion, edits/reordering, and protected-owner changes remain
+  restart-required and pinned.
 - Runtime deletion of a configured TCP-AO neighbor is rejected until listener
   MKT deletion / live rotation support exists.
 - Protected active-open and accepted passive sockets are inspected with
@@ -120,16 +123,15 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   always verify it completely. Runtime range CRUD cannot mutate or overlap a
   protected range.
 
-Ordered startup keyrings are now supported. A singleton retains the legacy
+Ordered keyrings are now supported. A singleton retains the legacy
 table shape; multi-key rings are ordered arrays. The preferred key, or the
 first declared non-deprecated key, is selected for startup transmission, while
 every MKT is installed and reconciled. At most one key may be preferred, each
 direction's KeyIDs must be unique within the ring, and at least one key must be
 non-deprecated.
 
-Still deferred: live key rotation / deletion on an already-listening socket
-(LAN-16 / #159) and peer-group inheritance. API/CLI neighbor state exposes
-redacted live inspection results (KeyIDs, validity flags, per-key inventory,
-and counters) for
-static and direct dynamic-prefix protected sessions; runtime protected-range
-CRUD remains restart-gated.
+Still deferred: live key selection, deprecation, deletion, and protected-owner
+CRUD, plus peer-group inheritance. API/CLI neighbor state exposes redacted live
+inspection results (KeyIDs, validity flags, per-key inventory, and counters)
+and secret-free desired/applied generation, phase, and failure details for
+static and direct dynamic-prefix protected sessions.
