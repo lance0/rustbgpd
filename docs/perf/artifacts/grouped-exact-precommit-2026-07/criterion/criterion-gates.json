@@ -1,0 +1,91 @@
+{
+  "attempts": 2,
+  "base_commit": "b2ec55f21364978f26662b1ec35fd47ddcfce9a6",
+  "benchmark": "fanout",
+  "ci_gates": [
+    {
+      "attempt": 1,
+      "conservative_ci95_high_percent": -33.549581131,
+      "passed": true,
+      "peers": 64,
+      "policy": "no_policy"
+    },
+    {
+      "attempt": 2,
+      "conservative_ci95_high_percent": -34.202767182,
+      "passed": true,
+      "peers": 64,
+      "policy": "no_policy"
+    },
+    {
+      "attempt": 1,
+      "conservative_ci95_high_percent": -35.938580567,
+      "passed": true,
+      "peers": 256,
+      "policy": "no_policy"
+    },
+    {
+      "attempt": 2,
+      "conservative_ci95_high_percent": -36.229136569,
+      "passed": true,
+      "peers": 256,
+      "policy": "no_policy"
+    },
+    {
+      "attempt": 1,
+      "conservative_ci95_high_percent": -31.536872256,
+      "passed": true,
+      "peers": 64,
+      "policy": "with_policy"
+    },
+    {
+      "attempt": 2,
+      "conservative_ci95_high_percent": -32.639923744,
+      "passed": true,
+      "peers": 64,
+      "policy": "with_policy"
+    },
+    {
+      "attempt": 1,
+      "conservative_ci95_high_percent": -32.297853208,
+      "passed": true,
+      "peers": 256,
+      "policy": "with_policy"
+    },
+    {
+      "attempt": 2,
+      "conservative_ci95_high_percent": -34.191231039,
+      "passed": true,
+      "peers": 256,
+      "policy": "with_policy"
+    }
+  ],
+  "feature_set": [
+    "bench-internals"
+  ],
+  "filter": "distribute_fanout",
+  "governor": "performance",
+  "head_commit": "ea579bea4ad6602dc719a1664441f04330c5ef64",
+  "matrix_rows": 16,
+  "one_peer_gates": [
+    {
+      "mean_delta_percent": -7.760177959,
+      "passed": true,
+      "policy": "no_policy",
+      "strict_upper_bound_percent": 5.0
+    },
+    {
+      "mean_delta_percent": -7.851923032,
+      "passed": true,
+      "policy": "with_policy",
+      "strict_upper_bound_percent": 5.0
+    }
+  ],
+  "overall_verdict": "pass",
+  "package": "rustbgpd-transport",
+  "pin_sha256": "26df4b9daa7db9e4679f2ce4002021b5a37a42772fd9de03c0169eacfe8abe3e",
+  "production_diff_sha256": "363ca576015ced26223b72b109acede0b88c1859db4cffb5c702d3d95ba236c4",
+  "schema": "rustbgpd.lan395-criterion-receipt.v1",
+  "taskset_core": 5,
+  "tooling_commit": "e6c6ea75819869cb2cd188711891459f8991d51d"
+}

@@ -202,6 +202,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
+  Ordinary grouped members whose exact probes all succeed no longer rebuild
+  candidate keys or walk and allocate the group's prior advertised set; that
+  work is deferred to the rejection/overlay fallback that actually needs it.
+  Per-target wire ceiling and generation checks remain mandatory, and resync,
+  regroup, VPN/mixed-family, malformed, rejected, and non-shared paths retain
+  the full reconciliation path. A pinned two-attempt Criterion matrix improves
+  64/256-peer fanout by 32%..36% with no one-peer regression, while the sealed
+  16-cell manager flood/churn matrix improves 197%..649%. Exact inputs,
+  counterbalancing, preflights, confidence gates, and checksummed artifacts are
+  retained in the performance receipt. (LAN-395)
+
 - **Update-group correctness now has a parameterized fixed-scenario
   differential corpus.** The grouped manager path and forced-per-peer oracle
   are compared with explicit exact-stream or normalized semantic-effect plus
