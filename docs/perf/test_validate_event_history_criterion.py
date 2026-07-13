@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the LAN-393 Criterion matrix validator."""
+"""Adversarial tests for the event-history producer Criterion matrix validator."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("validate-lan393-criterion.py")
-SPEC = importlib.util.spec_from_file_location("lan393_criterion", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("validate-event-history-criterion.py")
+SPEC = importlib.util.spec_from_file_location("event_history_criterion", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 criterion = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = criterion
@@ -59,8 +59,8 @@ class CriterionValidatorTests(unittest.TestCase):
     def test_exact_matrix_and_both_gates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
-            base = criterion.inventory(root, "lan393-baseline")
+            populate(root, "event-history-baseline")
+            base = criterion.inventory(root, "event-history-baseline")
             self.assertTrue(criterion.gate_baseline(base)["manager_proceed_pass"])
 
             populate(root, "new", candidate=True)
@@ -70,48 +70,48 @@ class CriterionValidatorTests(unittest.TestCase):
     def test_missing_extra_duplicate_and_nonfinite_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
-            victim = next(root.glob("**/lan393-baseline/benchmark.json"))
+            populate(root, "event-history-baseline")
+            victim = next(root.glob("**/event-history-baseline/benchmark.json"))
             victim.unlink()
             with self.assertRaises(SystemExit):
-                criterion.inventory(root, "lan393-baseline")
+                criterion.inventory(root, "event-history-baseline")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
-            write_case(root, "unexpected/case", "lan393-baseline", 1.0)
+            populate(root, "event-history-baseline")
+            write_case(root, "unexpected/case", "event-history-baseline", 1.0)
             with self.assertRaises(SystemExit):
-                criterion.inventory(root, "lan393-baseline")
+                criterion.inventory(root, "event-history-baseline")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
-            duplicate = root / "duplicate" / "lan393-baseline"
+            populate(root, "event-history-baseline")
+            duplicate = root / "duplicate" / "event-history-baseline"
             duplicate.mkdir(parents=True)
-            original = next(root.glob("**/lan393-baseline/benchmark.json"))
+            original = next(root.glob("**/event-history-baseline/benchmark.json"))
             (duplicate / "benchmark.json").write_bytes(original.read_bytes())
             (duplicate / "estimates.json").write_bytes(
                 original.with_name("estimates.json").read_bytes()
             )
             with self.assertRaises(SystemExit):
-                criterion.inventory(root, "lan393-baseline")
+                criterion.inventory(root, "event-history-baseline")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
-            estimates = next(root.glob("**/lan393-baseline/estimates.json"))
+            populate(root, "event-history-baseline")
+            estimates = next(root.glob("**/event-history-baseline/estimates.json"))
             data = json.loads(estimates.read_text(encoding="utf-8"))
             data["mean"]["point_estimate"] = float("nan")
             estimates.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(SystemExit):
-                criterion.inventory(root, "lan393-baseline")
+                criterion.inventory(root, "event-history-baseline")
 
     def test_candidate_gate_rejects_regressions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            populate(root, "lan393-baseline")
+            populate(root, "event-history-baseline")
             populate(root, "new", candidate=True)
-            base = criterion.inventory(root, "lan393-baseline")
+            base = criterion.inventory(root, "event-history-baseline")
             head = criterion.inventory(root, "new")
             self.assertTrue(criterion.gate_candidate(base, head)["candidate_acceptance_pass"])
 

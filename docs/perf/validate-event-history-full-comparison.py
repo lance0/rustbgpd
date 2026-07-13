@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine LAN-393 enabled/disabled daemon receipts into the final gate."""
+"""Combine event-history producer enabled/disabled daemon receipts into the final gate."""
 
 from __future__ import annotations
 

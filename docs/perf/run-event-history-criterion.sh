@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exact-ref, privacy-safe Criterion receipt driver for LAN-393.
+# Exact-ref, privacy-safe Criterion receipt driver for event-history producer.
 set -euo pipefail
 
 usage() {
@@ -13,19 +13,19 @@ case "$PHASE" in baseline | candidate) ;; *) usage ;; esac
 
 ROOT=$(git rev-parse --show-toplevel)
 ARTIFACT_DIR=${ARTIFACT_DIR:-$ROOT/docs/perf/artifacts/event-history-producer-2026-07}
-STATE_DIR=${LAN393_STATE_DIR:-$ROOT/target/lan393-criterion-state}
+STATE_DIR=${EVENT_HISTORY_PERF_STATE_DIR:-$ROOT/target/event-history-criterion-state}
 BASELINE_REF=refs/remotes/origin/main
-BASELINE_NAME=lan393-exact-baseline
-FENCE=$ROOT/docs/perf/lan393-host-fence.sh
-VALIDATOR_REL=docs/perf/validate-lan393-criterion.py
-PERF_VALIDATOR_REL=docs/perf/validate-lan393-perf.py
-FULL_COMPARISON_REL=docs/perf/validate-lan393-full-comparison.py
-RECEIPT_VALIDATOR_REL=docs/perf/validate-lan393-receipt.py
+BASELINE_NAME=event-history-exact-baseline
+FENCE=$ROOT/docs/perf/event-history-host-fence.sh
+VALIDATOR_REL=docs/perf/validate-event-history-criterion.py
+PERF_VALIDATOR_REL=docs/perf/validate-event-history-perf.py
+FULL_COMPARISON_REL=docs/perf/validate-event-history-full-comparison.py
+RECEIPT_VALIDATOR_REL=docs/perf/validate-event-history-receipt.py
 BENCH_REL=crates/api/benches/event_history_producer.rs
 BENCH_SUPPORT_REL=crates/rib/src/manager/bench_support.rs
-DRIVER_REL=docs/perf/run-lan393-criterion.sh
-FULL_DRIVER_REL=docs/perf/run-lan393-full-daemon.sh
-FENCE_REL=docs/perf/lan393-host-fence.sh
+DRIVER_REL=docs/perf/run-event-history-criterion.sh
+FULL_DRIVER_REL=docs/perf/run-event-history-full-daemon.sh
+FENCE_REL=docs/perf/event-history-host-fence.sh
 WRAPPER_REL=docs/perf/bgperf-rustbgpd-ehm-wrapper.sh
 WORK_ROOT=''
 
@@ -42,7 +42,7 @@ cleanup() {
 trap cleanup EXIT
 
 fail() {
-    printf 'LAN-393 Criterion error: %s\n' "$*" >&2
+    printf 'event-history producer Criterion error: %s\n' "$*" >&2
     exit 1
 }
 
@@ -293,7 +293,7 @@ if [[ "$PHASE" == baseline ]]; then
         fail "baseline must run from exact current $BASELINE_REF"
     [[ ! -e "$BASELINE_ENV" ]] || fail "baseline receipt already exists: $BASELINE_ENV"
     if find "$STATE_DIR/criterion" -mindepth 1 -print -quit | grep -q .; then
-        fail 'baseline requires an empty LAN-393 Criterion state directory'
+        fail 'baseline requires an empty event-history producer Criterion state directory'
     fi
     SOURCE_COMMIT=$BASELINE_COMMIT
 else
@@ -310,7 +310,7 @@ else
         fail 'candidate receipt already exists'
 fi
 
-WORK_ROOT=$(mktemp -d /tmp/lan393-criterion-worktrees.XXXXXX)
+WORK_ROOT=$(mktemp -d /tmp/event-history-criterion-worktrees.XXXXXX)
 git -C "$ROOT" worktree add --detach "$WORK_ROOT/base" "$BASELINE_COMMIT" >/dev/null
 if [[ "$PHASE" == candidate ]]; then
     git -C "$ROOT" worktree add --detach "$WORK_ROOT/candidate" "$SOURCE_COMMIT" >/dev/null
@@ -346,16 +346,16 @@ if [[ "$PHASE" == candidate ]]; then
         fail 'candidate build environment differs from baseline'
 fi
 
-# shellcheck source=docs/perf/lan393-host-fence.sh
+# shellcheck source=docs/perf/event-history-host-fence.sh
 source "$FENCE"
-lan393_acquire_host_lock
+event_history_acquire_host_lock
 PREFLIGHT=$ARTIFACT_DIR/microbench-$PHASE-host-preflight.tsv
-lan393_init_host_preflight_log "$PREFLIGHT"
+event_history_init_host_preflight_log "$PREFLIGHT"
 
 TARGET_DIR=$STATE_DIR/targets/$PHASE-$SOURCE_COMMIT
-BUILD_RAW=$(mktemp /tmp/lan393-build.XXXXXX.jsonl)
+BUILD_RAW=$(mktemp /tmp/event-history-build.XXXXXX.jsonl)
 BUILD_RECEIPT=$ARTIFACT_DIR/microbench-$PHASE-bench-build.json
-BINARY_FILE=$(mktemp /tmp/lan393-binary.XXXXXX)
+BINARY_FILE=$(mktemp /tmp/event-history-binary.XXXXXX)
 (
     cd "$SOURCE_DIR"
     CARGO_TARGET_DIR=$TARGET_DIR cargo bench -p rustbgpd-api \
@@ -379,8 +379,8 @@ if [[ "$PHASE" == candidate ]]; then
         fail 'baseline Criterion state changed before candidate run'
 fi
 
-for group in lan393_manager_self_time lan393_sqlite_end_to_end; do
-    lan393_wait_for_idle "$PHASE-$group" "$PREFLIGHT"
+for group in event_history_manager_self_time event_history_sqlite_end_to_end; do
+    event_history_wait_for_idle "$PHASE-$group" "$PREFLIGHT"
     if [[ "$PHASE" == baseline ]]; then
         CRITERION_HOME=$STATE_DIR/criterion "$BENCH_BIN" --bench "$group" \
             --save-baseline "$BASELINE_NAME" --noplot
@@ -451,7 +451,7 @@ ENVIRONMENT=$ARTIFACT_DIR/microbench-$PHASE-environment.txt
     printf 'benchmark_binary_basename=%s\n' "$(basename "$BENCH_BIN")"
     printf 'benchmark_binary_sha256=%s\n' "$BENCH_SHA"
     printf 'host_lock_policy=rustbgpd-shared-user-lock\n'
-    printf 'load_one_max=%s\n' "$LAN393_REQUIRED_LOAD_ONE_MAX"
+    printf 'load_one_max=%s\n' "$EVENT_HISTORY_PERF_REQUIRED_LOAD_ONE_MAX"
     printf 'required_governor=performance\n'
 } >"$ENVIRONMENT"
 if [[ "$PHASE" == candidate ]]; then
@@ -471,4 +471,4 @@ privacy_check "$PHASE"
 } >"$COMPLETION"
 privacy_check "$PHASE"
 write_manifest "$PHASE" "$SOURCE_ARCHIVE"
-printf 'LAN-393 %s Criterion receipt complete: %s\n' "$PHASE" "$VERDICT"
+printf 'event-history producer %s Criterion receipt complete: %s\n' "$PHASE" "$VERDICT"

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Adversarial probes for the retained LAN-393 host-isolation helpers.
+# Adversarial probes for the retained event-history producer host-isolation helpers.
 set -euo pipefail
 
-export LAN393_LOAD_ONE_MAX=999
-# shellcheck source=docs/perf/lan393-host-fence.sh
-source "$(dirname "$0")/lan393-host-fence.sh"
+# Prove the inherited environment cannot relax the fixed receipt noise gate.
+export EVENT_HISTORY_PERF_REQUIRED_LOAD_ONE_MAX=999
+# shellcheck source=docs/perf/event-history-host-fence.sh
+source "$(dirname "$0")/event-history-host-fence.sh"
 
-[[ "$LAN393_REQUIRED_LOAD_ONE_MAX" == 2.0 ]]
+[[ "$EVENT_HISTORY_PERF_REQUIRED_LOAD_ONE_MAX" == 2.0 ]]
 
 # Model the Linux TASK_COMM_LEN truncation used by `ps comm`, plus every
 # repository benchmark family that can continue running after Cargo exits.
@@ -30,11 +31,11 @@ ps() {
         '116 sleep sleep 30'
 }
 
-snapshot=$(lan393_competing_process_snapshot)
+snapshot=$(event_history_competing_process_snapshot)
 [[ $(wc -l <<<"$snapshot") -eq 15 ]]
 [[ "$snapshot" != *'sleep 30'* ]]
 [[ "$snapshot" != *'/repo/'* ]]
 [[ "$snapshot" != *'101 '* ]]
 [[ "$snapshot" == *'event_history_'* ]]
 
-printf '%s\n' 'LAN-393 host-fence adversarial probes passed'
+printf '%s\n' 'event-history producer host-fence adversarial probes passed'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the LAN-393 full-daemon perf classifier."""
+"""Adversarial tests for the event-history producer full-daemon perf classifier."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("validate-lan393-perf.py")
-SPEC = importlib.util.spec_from_file_location("lan393_perf", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("validate-event-history-perf.py")
+SPEC = importlib.util.spec_from_file_location("event_history_perf", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 perf = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(perf)

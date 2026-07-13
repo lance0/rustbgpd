@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the LAN-393 combined full-daemon verdict."""
+"""Tests for the event-history producer combined full-daemon verdict."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("validate-lan393-full-comparison.py")
-SPEC = importlib.util.spec_from_file_location("lan393_full_comparison", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("validate-event-history-full-comparison.py")
+SPEC = importlib.util.spec_from_file_location("event_history_full_comparison", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 comparison = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(comparison)

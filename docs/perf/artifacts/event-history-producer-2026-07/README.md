@@ -1,4 +1,4 @@
-# LAN-393 machine-artifact manifest
+# Event-history producer machine-artifact manifest
 
 This directory is receipt-only. Measurements are intentionally absent until
 the exact drivers in `docs/perf/event-history-producer-2026-07.md` complete on a
@@ -46,7 +46,7 @@ Each of `baseline-enabled`, `baseline-disabled`, `candidate-enabled`, and
 - exact generated scenario/config and explicit enabled/disabled EHM verdict;
 - normalized `barrier_reached=1` evidence for the stopped-wrapper attach point;
   the raw PID-bearing barrier remains private under
-  `target/lan393-private-perf/`;
+  `target/event-history-private-perf/`;
 - raw bgperf log/time series, normalized finite-value result CSV, two exact
   run-scoped BIRD logs, and validator output;
 - post-drain metrics, resource snapshot, daemon log, and cursor/drop/degraded
@@ -63,7 +63,7 @@ once. Later profiles regenerate them only into temporary files and must prove
 byte identity, so no file already bound by an earlier manifest is replaced.
 
 Raw `perf.data` is intentionally not publication material. It remains under
-`target/lan393-private-perf/`; the public receipt binds its digest and retains
+`target/event-history-private-perf/`; the public receipt binds its digest and retains
 the sanitized, classifiable derivatives.
 
 Verify a profile from this directory, for example:

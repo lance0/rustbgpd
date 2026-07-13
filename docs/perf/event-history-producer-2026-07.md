@@ -1,4 +1,4 @@
-# LAN-393 event-history producer measurement gate
+# Event-history producer measurement gate
 
 Status: **harness implemented; measurements pending**. Do not implement the
 producer offload until the baseline proceed gate below is captured on an idle
@@ -6,11 +6,11 @@ host and passes.
 
 The Criterion harness separates two costs:
 
-- `lan393_manager_self_time` measures the synchronous `RibManager::publish_*`
+- `event_history_manager_self_time` measures the synchronous `RibManager::publish_*`
   phase. `noop` is the default-disabled sink. `ehm` is the production EHM sink,
   including route/EVPN conversion, prost encoding, index construction, and the
   bounded non-blocking enqueue.
-- `lan393_sqlite_end_to_end` starts at the same manager helper and stops after
+- `event_history_sqlite_end_to_end` starts at the same manager helper and stops after
   all 256 events are durably committed and observed on EHM's post-commit
   broadcast.
 
@@ -25,10 +25,10 @@ Use the checked-in driver; do not reproduce its steps by hand.
 
 ```bash
 # After this harness commit is merged to current origin/main:
-docs/perf/run-lan393-criterion.sh baseline
+docs/perf/run-event-history-criterion.sh baseline
 
 # Only after an offload candidate exists on a clean descendant commit:
-docs/perf/run-lan393-criterion.sh candidate
+docs/perf/run-event-history-criterion.sh candidate
 ```
 
 The driver fixes the baseline to `refs/remotes/origin/main`, requires the
@@ -64,7 +64,7 @@ the privacy scan pass.
 
 ## Machine gates
 
-`validate-lan393-criterion.py` requires exactly these nine cases and rejects
+`validate-event-history-criterion.py` requires exactly these nine cases and rejects
 missing, duplicate, extra, malformed, non-finite, non-positive, or non-95%-CI
 estimates:
 
@@ -94,12 +94,12 @@ verdict says it failed and implementation stops.
 Run the four profiles in this order:
 
 ```bash
-docs/perf/run-lan393-full-daemon.sh baseline-enabled
-docs/perf/run-lan393-full-daemon.sh baseline-disabled
+docs/perf/run-event-history-full-daemon.sh baseline-enabled
+docs/perf/run-event-history-full-daemon.sh baseline-disabled
 
 # After the candidate Criterion run passes:
-docs/perf/run-lan393-full-daemon.sh candidate-enabled
-docs/perf/run-lan393-full-daemon.sh candidate-disabled
+docs/perf/run-event-history-full-daemon.sh candidate-enabled
+docs/perf/run-event-history-full-daemon.sh candidate-disabled
 ```
 
 The enabled and disabled profiles use the same exact 2-peer x 100k-prefix
@@ -130,12 +130,12 @@ be zero, but the receipt explicitly records timeout evidence as unsupported and
 makes no independent zero-timeout claim.
 
 Perf attaches before the stopped wrapper execs the daemon. Raw `perf.data`
-remains under `target/lan393-private-perf/` and is represented in the public
+remains under `target/event-history-private-perf/` and is represented in the public
 receipt by its SHA-256. The retained report and script have host paths and
 PID/TID/timestamps sanitized. The wrapper's raw PID-bearing readiness barrier
 also remains there; the public receipt retains only `barrier_reached=1` after
 matching it to the namespace identity of the stopped host process.
-`validate-lan393-perf.py` classifies sanitized stacks and emits the exact
+`validate-event-history-perf.py` classifies sanitized stacks and emits the exact
 RIB-manager denominator, EHM producer numerator, percentage, and 5% baseline
 proceed verdict.
 

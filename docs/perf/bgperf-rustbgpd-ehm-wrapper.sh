@@ -1,5 +1,5 @@
 #!/bin/sh
-# Profiling-only bgperf2 entrypoint for the LAN-393 proceed gate.
+# Profiling-only bgperf2 entrypoint for the event-history producer proceed gate.
 set -eu
 
 case "${1:-}" in
@@ -9,7 +9,7 @@ case "${1:-}" in
 esac
 
 config=$1
-mode=${LAN393_EVENT_HISTORY_MODE:-}
+mode=${EVENT_HISTORY_PERF_MODE:-}
 case "$mode" in
     enabled)
         if grep -q '^\[event_history\]$' "$config"; then
@@ -33,7 +33,7 @@ EOF
         fi
         ;;
     *)
-        printf 'LAN393_EVENT_HISTORY_MODE must be enabled or disabled, got %s\n' "$mode" >&2
+        printf 'EVENT_HISTORY_PERF_MODE must be enabled or disabled, got %s\n' "$mode" >&2
         exit 2
         ;;
 esac
@@ -42,6 +42,6 @@ esac
 # PID is not the daemon PID. Stop this exec process at a host-visible barrier;
 # the receipt attaches perf to it and sends SIGCONT. The subsequent exec keeps
 # the same host PID while replacing this shell with the real daemon.
-printf '%s\n' "$$" >"$(dirname "$config")/lan393-profile-ready"
+printf '%s\n' "$$" >"$(dirname "$config")/event-history-profile-ready"
 kill -STOP "$$"
 exec /usr/local/bin/rustbgpd.real "$@"

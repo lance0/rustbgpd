@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial probes for the LAN-393 receipt validators."""
+"""Adversarial probes for the event-history producer receipt validators."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).with_name("validate-lan393-receipt.py")
-SPEC = importlib.util.spec_from_file_location("lan393_receipt", MODULE_PATH)
+MODULE_PATH = Path(__file__).with_name("validate-event-history-receipt.py")
+SPEC = importlib.util.spec_from_file_location("event_history_receipt", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 receipt = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(receipt)
@@ -109,7 +109,7 @@ class ReceiptValidatorTests(unittest.TestCase):
         scenario = root / f"full-daemon-{phase}-{mode}-scenario.yaml"
         log = root / "bgperf.log"
         result = root / "result.csv"
-        run_receipt_dir = root / f"lan393-{phase}-{mode}"
+        run_receipt_dir = root / f"event-history-{phase}-{mode}"
         source_tester_logs = run_receipt_dir / "tester"
         source_tester_logs.mkdir(parents=True)
         source_scenario = run_receipt_dir / "scenario.yaml"
@@ -138,7 +138,7 @@ class ReceiptValidatorTests(unittest.TestCase):
             result=result,
             phase=phase,
             mode=mode,
-            bench_name=f"lan393-{phase}-{mode}",
+            bench_name=f"event-history-{phase}-{mode}",
             run_receipt_dir=run_receipt_dir,
             source_scenario=source_scenario,
             source_tester_log_dir=source_tester_logs,
@@ -421,7 +421,7 @@ class ReceiptValidatorTests(unittest.TestCase):
     def test_tester_logs_are_bound_to_phase_and_bench_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             args = self.bgperf_files(Path(directory))
-            args.bench_name = "lan393-candidate-enabled"
+            args.bench_name = "event-history-candidate-enabled"
             with self.assertRaises(SystemExit):
                 receipt.validate_bgperf(args)
 
@@ -446,8 +446,8 @@ class ReceiptValidatorTests(unittest.TestCase):
                 "sha256:", 1
             )[1],
             "org.rustbgpd.bgperf2.rust-toolchain": "1.95",
-            "org.rustbgpd.lan393.profile-phase": "baseline",
-            "org.rustbgpd.lan393.event-history-mode": "enabled",
+            "org.rustbgpd.event-history.profile-phase": "baseline",
+            "org.rustbgpd.event-history.mode": "enabled",
         }
         inspect = root / "inspect.json"
         inspect.write_text(

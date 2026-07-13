@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and gate the exact LAN-393 Criterion result matrix."""
+"""Validate and gate the exact event-history producer Criterion result matrix."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 SHAPES = ("route_added", "route_policy_filtered", "evpn_best_changed")
-MANAGER_GROUP = "lan393_manager_self_time"
-SQLITE_GROUP = "lan393_sqlite_end_to_end"
+MANAGER_GROUP = "event_history_manager_self_time"
+SQLITE_GROUP = "event_history_sqlite_end_to_end"
 EXPECTED_IDS = {
     *(f"{MANAGER_GROUP}/{shape}/{mode}" for shape in SHAPES for mode in ("noop", "ehm")),
     *(f"{SQLITE_GROUP}/{shape}/full" for shape in SHAPES),
