@@ -650,7 +650,7 @@ async fn create_and_connect(
         debug!(peer = %peer_label, "TCP MD5 authentication configured");
     }
 
-    if let Some(ref tcp_ao) = config.tcp_ao {
+    let tcp_ao_receipt = if let Some(ref tcp_ao) = config.tcp_ao {
         // Active-open sockets install one exact peer MKT as current/rnext; the
         // Linux connect path rejects TCP-AO sockets without a matching MKT,
         // signs the initial SYN with the selected current key, and
@@ -684,8 +684,32 @@ async fn create_and_connect(
                 ),
             )
         })?;
+        let prefix_len = if config.remote_addr.is_ipv4() {
+            32
+        } else {
+            128
+        };
+        let receipt = crate::socket_opts::capture_tcp_ao_mkt_receipt(
+            &socket,
+            config.remote_addr.ip(),
+            prefix_len,
+            tcp_ao,
+            true,
+        )
+        .map_err(|err| {
+            warn!(
+                peer = %peer_label,
+                addr = %config.remote_addr,
+                error = %err,
+                "failed to capture TCP-AO pre-connect kernel receipt; protected session will retry without unauthenticated fallback"
+            );
+            err
+        })?;
         debug!(peer = %peer_label, "TCP-AO authentication configured");
-    }
+        Some(receipt)
+    } else {
+        None
+    };
 
     if config.ttl_security {
         crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
@@ -709,7 +733,8 @@ async fn create_and_connect(
         return Err(err);
     }
 
-    let tcp_ao_info = inspect_active_tcp_ao(&stream, &config, &peer_label);
+    let tcp_ao_info =
+        inspect_active_tcp_ao(&stream, &config, &peer_label, tcp_ao_receipt.as_ref())?;
 
     Ok((stream, tcp_ao_info))
 }
@@ -718,10 +743,21 @@ fn inspect_active_tcp_ao(
     stream: &TcpStream,
     config: &TransportConfig,
     peer_label: &str,
-) -> Option<crate::TcpAoInfoSnapshot> {
-    let tcp_ao = config.tcp_ao.as_ref()?;
-    match crate::socket_opts::get_tcp_ao_info_for_config(
+    receipt: Option<&crate::socket_opts::TcpAoMktReceipt>,
+) -> std::io::Result<Option<crate::TcpAoInfoSnapshot>> {
+    let Some(tcp_ao) = config.tcp_ao.as_ref() else {
+        return Ok(None);
+    };
+    let receipt = receipt.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "TCP-AO active-open inspection lacks its pre-connect kernel receipt",
+        )
+    })?;
+    match crate::socket_opts::get_tcp_ao_info_for_receipt(
         stream,
+        receipt,
+        config.remote_addr.ip(),
         config.remote_addr.ip(),
         if config.remote_addr.is_ipv4() {
             32
@@ -729,7 +765,6 @@ fn inspect_active_tcp_ao(
             128
         },
         tcp_ao,
-        false,
     ) {
         Ok(info) => {
             info!(
@@ -748,7 +783,7 @@ fn inspect_active_tcp_ao(
                 pkt_dropped_icmp = info.pkt_dropped_icmp,
                 "TCP-AO active-open socket inspected"
             );
-            Some(info)
+            Ok(Some(info))
         }
         Err(err) => {
             warn!(
@@ -757,7 +792,13 @@ fn inspect_active_tcp_ao(
                 error = %err,
                 "failed to inspect TCP-AO active-open socket"
             );
-            None
+            Err(std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to reconcile TCP-AO post-connect inventory for peer {peer_label} at {}: {err}",
+                    config.remote_addr
+                ),
+            ))
         }
     }
 }
