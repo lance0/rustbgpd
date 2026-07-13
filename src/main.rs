@@ -49,19 +49,25 @@ mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::Path;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
-use rustbgpd_rib::{RibManager, RibUpdate};
+use rustbgpd_mrt::{
+    WarmBundleDirectory, WarmBundleFamilyV1, WarmBundleIdentityV1, WarmBundlePolicyInputV1,
+    WarmBundleViewKindV1, WarmBundleViewV1, resolved_import_policy_digest_v1, write_warm_bundle,
+};
+use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotView};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
     BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
     TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -77,16 +83,20 @@ use crate::reload::{
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
+    WarmCheckpointCapture, WarmCheckpointSession,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
     ListenerEndpoint, ServeConfig,
 };
+use rustbgpd_wire::{Afi, Safi};
 
 const GR_RESTART_MARKER_V1: u8 = 1;
 const GR_RESTART_MARKER_V2: u8 = 2;
 const MAX_CHECKPOINT_GENERATION_BYTES: usize = 128;
+const WARM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(30);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static WARM_CHECKPOINT_REVISION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ManagedNetdevMetricLabel {
@@ -145,6 +155,14 @@ struct ValidGrRestartMarker {
     /// Present only for durable marker v2. Tranche 2 records this binding but
     /// deliberately has no boot-side cache load or route-serving behavior.
     checkpoint_generation: Option<String>,
+}
+
+#[derive(Debug)]
+struct WarmCheckpointPlan {
+    views: Vec<WarmBundleViewV1>,
+    rib_views: Vec<WarmMrtSnapshotView>,
+    policy_inputs: Vec<WarmBundlePolicyInputV1>,
+    add_path_receive: Vec<rustbgpd_mrt::codec::MrtAddPathReceiveProfile>,
 }
 
 struct BmpRuntime {
@@ -475,6 +493,7 @@ fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
         .iter()
         .filter(|neighbor| neighbor.graceful_restart.unwrap_or(true))
         .map(|neighbor| u64::from(neighbor.gr_restart_time.unwrap_or(120)))
+        .filter(|seconds| *seconds > 0)
         .max()
 }
 
@@ -484,6 +503,7 @@ fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
             .iter()
             .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
             .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            .filter(|seconds| *seconds > 0)
             .max(),
         Err(error) => {
             warn!(
@@ -554,10 +574,6 @@ fn write_gr_restart_marker(path: &Path, expires_at: SystemTime) -> std::io::Resu
 
 /// Publish marker v2 only after the exact referenced warm bundle generation
 /// has committed. No boot-side restore consumes this reference in tranche 2.
-#[allow(
-    dead_code,
-    reason = "wired by the LAN-337 checkpoint coordinator slice"
-)]
 fn write_gr_restart_marker_v2(
     path: &Path,
     expires_at: SystemTime,
@@ -577,6 +593,17 @@ fn write_gr_restart_marker_v2(
         expires_at,
         Some(checkpoint_generation),
         MarkerFaultPoint::None,
+    )
+}
+
+fn write_selected_gr_restart_marker(
+    path: &Path,
+    expires_at: SystemTime,
+    checkpoint_generation: Option<&str>,
+) -> std::io::Result<()> {
+    checkpoint_generation.map_or_else(
+        || write_gr_restart_marker(path, expires_at),
+        |generation| write_gr_restart_marker_v2(path, expires_at, generation),
     )
 }
 
@@ -742,6 +769,220 @@ fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn prepare_warm_bundle_directory(path: &Path) -> Result<WarmBundleDirectory, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(path).map_err(|error| {
+                format!(
+                    "failed to create warm checkpoint directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect warm checkpoint directory {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    WarmBundleDirectory::open(path).map_err(|error| error.to_string())
+}
+
+const fn warm_bundle_family_v1(afi: Afi, safi: Safi) -> Option<WarmBundleFamilyV1> {
+    match (afi, safi) {
+        (Afi::Ipv4, Safi::Unicast) => Some(WarmBundleFamilyV1::Ipv4Unicast),
+        (Afi::Ipv6, Safi::Unicast) => Some(WarmBundleFamilyV1::Ipv6Unicast),
+        (Afi::L2Vpn, Safi::Evpn) => Some(WarmBundleFamilyV1::L2vpnEvpn),
+        _ => None,
+    }
+}
+
+fn build_warm_checkpoint_plan(
+    sessions: &[WarmCheckpointSession],
+) -> Result<WarmCheckpointPlan, String> {
+    let mut views = Vec::new();
+    let mut rib_views = Vec::new();
+    let mut policy_inputs = Vec::new();
+    let mut add_path_receive = Vec::new();
+
+    for session in sessions {
+        if session.peer.interface.is_some() {
+            return Err(format!(
+                "scoped peer {} reached the numbered-only warm checkpoint planner",
+                session.peer
+            ));
+        }
+        let peer = session.peer.address;
+        for &(afi, safi) in &session.peer_gr_families {
+            if !session.negotiated_families.contains(&(afi, safi)) {
+                continue;
+            }
+            let Some(family) = warm_bundle_family_v1(afi, safi) else {
+                continue;
+            };
+            let receives_add_path = session.add_path_receive_families.contains(&(afi, safi));
+            // TABLE_DUMP_V2 has Add-Path subtypes only for unicast. V1
+            // deliberately excludes an EVPN/Add-Path profile rather than
+            // serializing it under ambiguous RIB_GENERIC framing.
+            if family == WarmBundleFamilyV1::L2vpnEvpn && receives_add_path {
+                continue;
+            }
+            let view = WarmBundleViewV1 {
+                kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+                peer,
+                peer_asn: session.peer_asn,
+                peer_router_id: session.peer_router_id,
+                family,
+                add_path_receive: receives_add_path,
+            };
+            policy_inputs.push(WarmBundlePolicyInputV1 {
+                view: view.clone(),
+                canonical_policy: session.canonical_import_policy.clone(),
+            });
+            views.push(view);
+            rib_views.push(WarmMrtSnapshotView {
+                peer,
+                session_id: session.session_id,
+                peer_asn: session.peer_asn,
+                peer_router_id: session.peer_router_id,
+                afi,
+                safi,
+                add_path_receive: receives_add_path,
+            });
+            if receives_add_path {
+                add_path_receive.push(rustbgpd_mrt::codec::MrtAddPathReceiveProfile {
+                    peer,
+                    afi,
+                    safi,
+                });
+            }
+        }
+    }
+
+    views.sort();
+    if views.is_empty() {
+        return Err("warm checkpoint has no eligible peer/family views".to_string());
+    }
+    if views.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("warm checkpoint views are not unique".to_string());
+    }
+    policy_inputs.sort_by(|left, right| left.view.cmp(&right.view));
+    rib_views.sort_by_key(WarmMrtSnapshotView::sort_key);
+    add_path_receive.sort_by_key(|profile| (profile.peer, profile.afi as u16, profile.safi as u8));
+
+    Ok(WarmCheckpointPlan {
+        views,
+        rib_views,
+        policy_inputs,
+        add_path_receive,
+    })
+}
+
+fn effective_config_sha256(effective_redacted_toml: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(effective_redacted_toml.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+async fn publish_warm_checkpoint(
+    capture: WarmCheckpointCapture,
+    rib_query_tx: &mpsc::Sender<RibUpdate>,
+    directory: Arc<WarmBundleDirectory>,
+) -> Result<String, String> {
+    let plan = build_warm_checkpoint_plan(&capture.sessions)?;
+
+    let (rib_reply, rib_rx) = oneshot::channel();
+    rib_query_tx
+        .send(RibUpdate::QueryWarmMrtSnapshot {
+            views: plan.rib_views,
+            reply: rib_reply,
+        })
+        .await
+        .map_err(|_| "RIB actor exited before warm checkpoint query".to_string())?;
+    let snapshot = rib_rx
+        .await
+        .map_err(|_| "RIB actor dropped warm checkpoint query".to_string())??;
+
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?
+        .as_secs();
+    let created_at_utc_seconds = i64::try_from(now_seconds)
+        .map_err(|_| "warm checkpoint timestamp exceeds i64".to_string())?;
+    let mrt_timestamp = u32::try_from(now_seconds)
+        .map_err(|_| "warm checkpoint timestamp exceeds MRT u32".to_string())?;
+    let snapshot_revision = WARM_CHECKPOINT_REVISION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |revision| {
+            revision.checked_add(1)
+        })
+        .map(|prior| prior + 1)
+        .map_err(|_| "warm checkpoint revision exhausted".to_string())?;
+    let checkpoint_generation = uuid::Uuid::new_v4().simple().to_string();
+    let identity = WarmBundleIdentityV1 {
+        checkpoint_generation: checkpoint_generation.clone(),
+        created_at_utc_seconds,
+        snapshot_revision,
+        local_asn: capture.local_asn,
+        local_router_id: capture.local_router_id,
+        peer_index_table_view: checkpoint_generation.clone(),
+        config_sha256: effective_config_sha256(&capture.effective_config_toml),
+        resolved_import_policy: resolved_import_policy_digest_v1(&plan.policy_inputs)
+            .map_err(|error| error.to_string())?,
+        views: plan.views,
+    };
+    let local_router_id = capture.local_router_id;
+    let view_name = checkpoint_generation.clone();
+    let (writer_reply, writer_rx) = oneshot::channel();
+    // Do not use Tokio's blocking pool here. A timed-out spawn_blocking task
+    // cannot be cancelled and the runtime waits for it during shutdown,
+    // defeating the 30-second terminal bound. This dedicated OS thread is
+    // detached if the coordinator deadline fires; daemon teardown continues
+    // immediately and process exit terminates any remaining work. It may
+    // finish an orphan bundle generation in the meantime, but main publishes
+    // marker v2 only after this reply, so a late generation is never selected.
+    std::thread::Builder::new()
+        .name("warm-checkpoint-writer".to_string())
+        .spawn(move || {
+            let result = (|| {
+                let encoded = rustbgpd_mrt::codec::encode_warm_snapshot(
+                    local_router_id,
+                    &view_name,
+                    &snapshot.peers,
+                    &snapshot.routes,
+                    &snapshot.evpn_routes,
+                    mrt_timestamp,
+                    &plan.add_path_receive,
+                )
+                .map_err(|error| error.to_string())?;
+                write_warm_bundle(directory.as_ref(), identity, &encoded)
+                    .map_err(|error| error.to_string())?;
+                Ok::<(), String>(())
+            })();
+            let _ = writer_reply.send(result);
+        })
+        .map_err(|error| format!("failed to spawn warm checkpoint writer: {error}"))?;
+    writer_rx
+        .await
+        .map_err(|_| "warm checkpoint writer exited without a result".to_string())??;
+    Ok(checkpoint_generation)
+}
+
+async fn query_warm_checkpoint_capture(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+) -> Result<WarmCheckpointCapture, String> {
+    let (reply, rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::QueryWarmCheckpointCapture { reply })
+        .await
+        .map_err(|_| "peer manager exited before warm checkpoint query".to_string())?;
+    rx.await
+        .map_err(|_| "peer manager dropped warm checkpoint query".to_string())?
 }
 
 fn tcp_ao_listener_key_for_neighbor(
@@ -1534,6 +1775,32 @@ async fn run<T>(
 
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
+    // This knob and path are restart-required. Pin the verified directory at
+    // startup; later publication is descriptor-relative and cannot be
+    // redirected by replacing the pathname during shutdown.
+    let warm_checkpoint_on_shutdown = config.global.warm_cache_checkpoint_on_shutdown;
+    let warm_bundle_path = config.warm_bundle_dir();
+    let warm_bundle_directory = if warm_checkpoint_on_shutdown {
+        match prepare_warm_bundle_directory(&warm_bundle_path) {
+            Ok(directory) => {
+                info!(
+                    path = %warm_bundle_path.display(),
+                    "prepared daemon-private warm checkpoint directory"
+                );
+                Some(Arc::new(directory))
+            }
+            Err(error) => {
+                warn!(
+                    path = %warm_bundle_path.display(),
+                    %error,
+                    "warm checkpoint publication unavailable; coordinated shutdown will retain marker-v1 GR fallback"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
         Ok(Some(marker)) => {
             let max_restart_time_secs = max_gr_restart_time_secs(&config);
@@ -2646,7 +2913,7 @@ async fn run<T>(
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
-    let grpc_rib_query_tx = rib_query_tx;
+    let grpc_rib_query_tx = rib_query_tx.clone();
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
     let evpn_duplicate_mac_clear = evpn_originator_handle.as_ref().map(|handle| {
         let control = handle.control();
@@ -3347,18 +3614,115 @@ async fn run<T>(
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
     daemon_gate.begin_shutdown();
     info!("initiating coordinated shutdown");
-    if let Some(restart_time_secs) = max_gr_restart_time_secs(&config) {
+    let mut restart_time_secs = max_gr_restart_time_secs(&config);
+    let mut checkpoint_generation = None;
+    let mut checkpoint_failure = None;
+    let mut _runtime_config_fence = None;
+    let mut evpn_apply_fence = None;
+
+    if warm_checkpoint_on_shutdown {
+        if let Some(directory) = warm_bundle_directory.clone() {
+            let deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
+            match tokio::time::timeout_at(deadline, runtime_config_lock.lock()).await {
+                Ok(guard) => _runtime_config_fence = Some(guard),
+                Err(_) => {
+                    checkpoint_failure = Some(
+                        "timed out acquiring the authoritative runtime-config fence".to_string(),
+                    );
+                }
+            }
+            if checkpoint_failure.is_none() {
+                match tokio::time::timeout_at(deadline, evpn_runtime_apply_lock.lock()).await {
+                    Ok(guard) => evpn_apply_fence = Some(guard),
+                    Err(_) => {
+                        checkpoint_failure =
+                            Some("timed out waiting for the EVPN runtime-apply fence".to_string());
+                    }
+                }
+            }
+            if checkpoint_failure.is_none() {
+                match tokio::time::timeout_at(deadline, query_warm_checkpoint_capture(&peer_mgr_tx))
+                    .await
+                {
+                    Ok(Ok(capture)) => {
+                        // Marker expiry and bundle identity come from this same
+                        // actor-consistent capture. Main's Config can lag
+                        // accepted runtime CRUD and is only the marker-v1
+                        // compatibility fallback when capture itself fails.
+                        restart_time_secs = capture.restart_time_secs;
+                        if restart_time_secs.is_some() {
+                            match tokio::time::timeout_at(
+                                deadline,
+                                publish_warm_checkpoint(capture, &rib_query_tx, directory),
+                            )
+                            .await
+                            {
+                                Ok(Ok(generation)) => {
+                                    checkpoint_generation = Some(generation);
+                                }
+                                Ok(Err(error)) => checkpoint_failure = Some(error),
+                                Err(_) => {
+                                    checkpoint_failure = Some(format!(
+                                        "warm checkpoint exceeded its {}s terminal deadline",
+                                        WARM_CHECKPOINT_DEADLINE.as_secs()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => checkpoint_failure = Some(error),
+                    Err(_) => {
+                        checkpoint_failure = Some(format!(
+                            "warm checkpoint capture exceeded its {}s terminal deadline",
+                            WARM_CHECKPOINT_DEADLINE.as_secs()
+                        ));
+                    }
+                }
+            }
+        } else {
+            checkpoint_failure = Some(format!(
+                "warm checkpoint directory {} was unavailable at startup",
+                warm_bundle_path.display()
+            ));
+        }
+    }
+
+    if let Some(error) = checkpoint_failure.as_deref() {
+        warn!(
+            %error,
+            "warm checkpoint publication failed; retaining marker-v1 GR fallback"
+        );
+    }
+
+    if let Some(restart_time_secs) = restart_time_secs {
         let expires_at = SystemTime::now() + Duration::from_secs(restart_time_secs);
-        if let Err(e) = write_gr_restart_marker(&gr_restart_marker_path, expires_at) {
+        let marker_result = write_selected_gr_restart_marker(
+            &gr_restart_marker_path,
+            expires_at,
+            checkpoint_generation.as_deref(),
+        );
+        if let Err(e) = marker_result {
             warn!(
                 marker = %gr_restart_marker_path.display(),
                 error = %e,
-                "failed to write GR restart marker — restarting-speaker mode will be unavailable on the next start (check runtime_state_dir permissions)"
+                "failed to write GR restart marker"
             );
+            if checkpoint_generation.is_some()
+                && let Err(fallback_error) =
+                    write_gr_restart_marker(&gr_restart_marker_path, expires_at)
+            {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    error = %fallback_error,
+                    "failed to publish marker-v1 after marker-v2 failure — restarting-speaker mode will be unavailable on the next start"
+                );
+            }
         } else {
             info!(
                 marker = %gr_restart_marker_path.display(),
                 restart_time_secs,
+                checkpoint_generation = checkpoint_generation.as_deref().unwrap_or("none"),
+                marker_version = if checkpoint_generation.is_some() { GR_RESTART_MARKER_V2 } else { GR_RESTART_MARKER_V1 },
                 "wrote GR restart marker for coordinated shutdown"
             );
         }
@@ -3376,15 +3740,20 @@ async fn run<T>(
     // and holding it for the rest of shutdown blocks a late apply from
     // re-originating routes after the withdraw-all sweep. Bounded so a
     // wedged converge cannot stall daemon exit.
-    let _evpn_apply_fence = tokio::time::timeout(
-        Duration::from_secs(10),
-        evpn_runtime_apply_lock.lock(),
-    )
-    .await
-    .inspect_err(|_| {
-        warn!("EVPN runtime apply still in flight after 10s; proceeding with shutdown teardown");
-    })
-    .ok();
+    if evpn_apply_fence.is_none() {
+        evpn_apply_fence = tokio::time::timeout(
+            Duration::from_secs(10),
+            evpn_runtime_apply_lock.lock(),
+        )
+        .await
+        .inspect_err(|_| {
+            warn!(
+                "EVPN runtime apply still in flight after 10s; proceeding with shutdown teardown"
+            );
+        })
+        .ok();
+    }
+    let _evpn_apply_fence_guard = evpn_apply_fence;
 
     // 1.9a-pre Stop the ADR-0085 link-drain coordinator before the
     // EVPN actors drain: a carrier edge arriving mid-teardown must
@@ -3878,25 +4247,118 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    fn gr_restart_marker_remaining_time_rejects_or_clamps_valid_far_future_marker() {
+    fn gr_restart_marker_remaining_time_rejects_or_clamps_valid_far_future_v2_marker() {
         let path = unique_temp_path("gr-restart-far-future");
         let far_future_secs = i64::MAX.unsigned_abs();
         std::fs::write(
             &path,
-            format!("version = 1\nexpires_at_unix = {far_future_secs}\n"),
+            format!(
+                "version = 2\nexpires_at_unix = {far_future_secs}\ncheckpoint_generation = \"far-future-generation\"\n"
+            ),
         )
         .unwrap();
-        let expires_at = read_gr_restart_marker(&path).unwrap().unwrap();
+        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        assert_eq!(
+            marker.checkpoint_generation.as_deref(),
+            Some("far-future-generation")
+        );
 
         assert_eq!(
-            gr_restart_marker_remaining_time(expires_at, UNIX_EPOCH, None),
+            gr_restart_marker_remaining_time(marker.expires_at, UNIX_EPOCH, None),
             None
         );
         assert_eq!(
-            gr_restart_marker_remaining_time(expires_at, UNIX_EPOCH, Some(120)).unwrap(),
+            gr_restart_marker_remaining_time(marker.expires_at, UNIX_EPOCH, Some(120)).unwrap(),
             Duration::from_mins(2)
         );
         remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn authoritative_capture_restart_window_controls_v2_expiry() {
+        let path = unique_temp_path("gr-restart-authoritative-window");
+        // Represents a live runtime-config capture that advanced from a stale
+        // startup value to 17 seconds. Production overwrites the fallback with
+        // `capture.restart_time_secs` before selecting marker v2.
+        let captured_restart_time_secs = 17;
+        let before = SystemTime::now();
+        write_selected_gr_restart_marker(
+            &path,
+            before + Duration::from_secs(captured_restart_time_secs),
+            Some("captured-generation"),
+        )
+        .unwrap();
+
+        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        assert_eq!(
+            marker.checkpoint_generation.as_deref(),
+            Some("captured-generation")
+        );
+        let retention = marker.expires_at.duration_since(before).unwrap();
+        assert!(retention >= Duration::from_secs(16));
+        assert!(retention <= Duration::from_secs(17));
+        remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn failed_or_timed_out_writer_selects_v1_without_generation_reference() {
+        let path = unique_temp_path("gr-restart-writer-fallback");
+        write_selected_gr_restart_marker(&path, SystemTime::now() + Duration::from_mins(2), None)
+            .unwrap();
+
+        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        assert_eq!(marker.checkpoint_generation, None);
+        remove_gr_restart_marker(&path).unwrap();
+    }
+
+    fn checkpoint_plan_session() -> WarmCheckpointSession {
+        WarmCheckpointSession {
+            peer: rustbgpd_api::peer_types::PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            session_id: 41,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            negotiated_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_gr_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            add_path_receive_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            canonical_import_policy: b"canonical-policy-v1".to_vec(),
+        }
+    }
+
+    #[test]
+    fn warm_checkpoint_plan_intersects_gr_with_negotiated_family() {
+        let plan = build_warm_checkpoint_plan(&[checkpoint_plan_session()]).unwrap();
+        assert_eq!(plan.views.len(), 1);
+        assert_eq!(plan.views[0].family, WarmBundleFamilyV1::Ipv4Unicast);
+        assert!(plan.views[0].add_path_receive);
+        assert_eq!(plan.rib_views[0].session_id, 41);
+        assert_eq!(plan.policy_inputs[0].view, plan.views[0]);
+        assert_eq!(
+            plan.policy_inputs[0].canonical_policy,
+            b"canonical-policy-v1"
+        );
+        assert_eq!(plan.add_path_receive.len(), 1);
+    }
+
+    #[test]
+    fn no_eligible_checkpoint_plan_retains_v1_fallback() {
+        let path = unique_temp_path("gr-restart-no-eligible-plan");
+        let mut session = checkpoint_plan_session();
+        session.peer_gr_families.clear();
+        assert!(build_warm_checkpoint_plan(&[session]).is_err());
+
+        write_selected_gr_restart_marker(&path, SystemTime::now() + Duration::from_mins(2), None)
+            .unwrap();
+        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        assert_eq!(marker.checkpoint_generation, None);
+        remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn effective_config_digest_rejects_runtime_config_mismatch() {
+        let before = effective_config_sha256("asn = 65001\n");
+        let after = effective_config_sha256("asn = 65001\nhonor_blackhole = true\n");
+        assert_eq!(before.len(), 64);
+        assert_ne!(before, after);
     }
 
     #[test]

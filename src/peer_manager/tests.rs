@@ -1290,6 +1290,26 @@ fn eligible_warm_checkpoint_state() -> WarmCheckpointSessionState {
 }
 
 #[tokio::test]
+async fn warm_checkpoint_capture_uses_live_actor_config_identity() {
+    let mut mgr = test_peer_manager();
+    let startup = mgr.current_config.effective_redacted_toml().unwrap();
+    mgr.current_config.global.honor_blackhole = true;
+    let addr: IpAddr = "10.0.0.2".parse().unwrap();
+    let mut neighbor = config_neighbor(addr, 65002);
+    neighbor.gr_restart_time = Some(17);
+    mgr.current_config.neighbors.push(neighbor);
+
+    let capture = mgr.query_warm_checkpoint_capture().await.unwrap();
+    assert_ne!(capture.effective_config_toml, startup);
+    assert!(
+        capture
+            .effective_config_toml
+            .contains("honor_blackhole = true")
+    );
+    assert_eq!(capture.restart_time_secs, Some(17));
+}
+
+#[tokio::test]
 async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
     let mut mgr = test_peer_manager();
     let addr: IpAddr = "10.0.0.2".parse().unwrap();
@@ -1299,8 +1319,17 @@ async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
         warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
         false,
     );
+    let mut neighbor = config_neighbor(addr, 65002);
+    neighbor.graceful_restart = Some(true);
+    neighbor.gr_restart_time = Some(120);
+    mgr.current_config.neighbors.push(neighbor);
 
-    let sessions = mgr.query_warm_checkpoint_sessions().await.unwrap();
+    let capture = mgr.query_warm_checkpoint_capture().await.unwrap();
+    assert_eq!(capture.local_asn, 65001);
+    assert_eq!(capture.local_router_id, Ipv4Addr::new(10, 0, 0, 1));
+    assert!(capture.effective_config_toml.contains("asn = 65001"));
+    assert_eq!(capture.restart_time_secs, Some(120));
+    let sessions = capture.sessions;
     assert_eq!(sessions.len(), 1);
     let session = &sessions[0];
     assert_eq!(session.peer, key(addr));
@@ -1334,7 +1363,7 @@ async fn warm_checkpoint_session_query_rejects_pending_collision() {
         2,
     );
 
-    let error = mgr.query_warm_checkpoint_sessions().await.unwrap_err();
+    let error = mgr.query_warm_checkpoint_capture().await.unwrap_err();
     assert!(error.contains("unresolved collision candidate"), "{error}");
 }
 
@@ -1344,7 +1373,7 @@ async fn warm_checkpoint_session_query_timeout_rejects_complete_snapshot() {
     let addr: IpAddr = "10.0.0.2".parse().unwrap();
     insert_test_managed_peer(&mut mgr, addr, warm_checkpoint_peer_handle(None), false);
 
-    let error = mgr.query_warm_checkpoint_sessions().await.unwrap_err();
+    let error = mgr.query_warm_checkpoint_capture().await.unwrap_err();
     assert!(error.contains("bounded checkpoint query"), "{error}");
 }
 
@@ -1371,9 +1400,10 @@ async fn warm_checkpoint_session_query_skips_unusable_gr_sessions() {
     );
 
     assert!(
-        mgr.query_warm_checkpoint_sessions()
+        mgr.query_warm_checkpoint_capture()
             .await
             .unwrap()
+            .sessions
             .is_empty()
     );
 }

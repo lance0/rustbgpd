@@ -565,6 +565,25 @@ pub struct WarmCheckpointSession {
     pub canonical_import_policy: Vec<u8>,
 }
 
+/// One peer-manager-actor-consistent checkpoint capture. The effective
+/// redacted config and resolved policies are sampled in the same blocked actor
+/// command, so a reload cannot pair routes with a different config identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmCheckpointCapture {
+    /// Authoritative local ASN from the live runtime config snapshot.
+    pub local_asn: u32,
+    /// Authoritative local router ID from the live runtime config snapshot.
+    pub local_router_id: std::net::Ipv4Addr,
+    /// Deterministic effective config with defaults materialized and secrets
+    /// redacted, captured from the live peer-manager config actor.
+    pub effective_config_toml: String,
+    /// Largest positive local GR restart retention among current resolved,
+    /// enabled static neighbors. `None` means no marker/cache is useful.
+    pub restart_time_secs: Option<u64>,
+    /// Current session generations plus their exact resolved import policies.
+    pub sessions: Vec<WarmCheckpointSession>,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -599,9 +618,9 @@ pub enum PeerManagerCommand {
     },
     /// Capture all checkpoint-eligible static sessions under the peer-manager
     /// actor. Any candidate query timeout rejects the entire reply.
-    QueryWarmCheckpointSessions {
-        /// Reply channel returning deterministic current-session identities.
-        reply: oneshot::Sender<Result<Vec<WarmCheckpointSession>, String>>,
+    QueryWarmCheckpointCapture {
+        /// Reply channel returning one actor-consistent config/session capture.
+        reply: oneshot::Sender<Result<WarmCheckpointCapture, String>>,
     },
     /// Subscribe to live session lifecycle events.
     SubscribeSessionEvents {

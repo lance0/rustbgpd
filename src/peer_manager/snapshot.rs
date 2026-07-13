@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_api::peer_types::{PeerInfo, PeerKey, WarmCheckpointSession};
+use rustbgpd_api::peer_types::{PeerInfo, PeerKey, WarmCheckpointCapture, WarmCheckpointSession};
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{PeerHandle, PeerSessionState};
@@ -134,9 +134,36 @@ impl PeerManager {
     /// than publishing a partial identity inventory. Sessions that are not
     /// currently Established with negotiated GR are simply ineligible: their
     /// routes are excluded by the following RIB-actor query.
-    pub(super) async fn query_warm_checkpoint_sessions(
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one blocked peer-manager turn binds live config, policy, and every bounded session query"
+    )]
+    pub(super) async fn query_warm_checkpoint_capture(
         &self,
-    ) -> Result<Vec<WarmCheckpointSession>, String> {
+    ) -> Result<WarmCheckpointCapture, String> {
+        // Capture config identity before awaiting session actors. The peer
+        // manager remains inside this one command while those queries run, so
+        // no reload/config transaction can advance `current_config` or the
+        // resolved policies paired with the returned session generations.
+        let effective_config_toml = self.current_config.effective_redacted_toml()?;
+        let local_asn = self.current_config.global.asn;
+        let local_router_id = self
+            .current_config
+            .global
+            .router_id
+            .parse::<Ipv4Addr>()
+            .map_err(|error| format!("invalid live router ID during warm checkpoint: {error}"))?;
+        let restart_time_secs = self
+            .current_config
+            .resolved_neighbors()
+            .map_err(|error| {
+                format!("failed to resolve current neighbors for warm checkpoint: {error}")
+            })?
+            .iter()
+            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
+            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            .filter(|seconds| *seconds > 0)
+            .max();
         let mut address_counts = HashMap::<IpAddr, usize>::new();
         for (peer, managed) in &self.peers {
             if !managed.is_dynamic {
@@ -217,7 +244,13 @@ impl PeerManager {
             });
         }
         sessions.sort_by(|left, right| left.peer.cmp(&right.peer));
-        Ok(sessions)
+        Ok(WarmCheckpointCapture {
+            local_asn,
+            local_router_id,
+            effective_config_toml,
+            restart_time_secs,
+            sessions,
+        })
     }
 
     pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {

@@ -3698,6 +3698,11 @@ impl RibManager {
     /// one RIB-actor turn. The supplied views came from the peer-manager actor;
     /// session generation/ASN/router-ID checks close replacement races between
     /// those two captures. Any mismatch rejects the complete checkpoint.
+    ///
+    /// This is an actor-ordered snapshot, not a global transport quiescence
+    /// barrier: UPDATEs the RIB actor processes before this query are included;
+    /// UPDATEs arriving later are not. On a later restore tranche, ordinary GR
+    /// stale-route reconciliation remains authoritative for that bounded edge.
     #[expect(
         clippy::too_many_lines,
         reason = "one actor turn validates the complete identity fence and captures every supported route view"

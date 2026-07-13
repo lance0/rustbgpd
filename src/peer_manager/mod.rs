@@ -657,9 +657,9 @@ impl PeerManager {
                             let infos = self.list_peers().await;
                             let _ = reply.send(infos);
                         }
-                        PeerManagerCommand::QueryWarmCheckpointSessions { reply } => {
-                            let sessions = self.query_warm_checkpoint_sessions().await;
-                            let _ = reply.send(sessions);
+                        PeerManagerCommand::QueryWarmCheckpointCapture { reply } => {
+                            let capture = self.query_warm_checkpoint_capture().await;
+                            let _ = reply.send(capture);
                         }
                         PeerManagerCommand::SubscribeSessionEvents { reply } => {
                             let _ = reply.send(self.session_events_tx.subscribe());
