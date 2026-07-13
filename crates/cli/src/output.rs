@@ -921,7 +921,7 @@ mod tests {
         };
         assert!(
             allowed.contains(&json_type(value)),
-            "required {contract_id} field {key:?} changed JSON type: expected {allowed:?}, got {}",
+            "{contract_id} field {key:?} changed JSON type: expected {allowed:?}, got {}",
             json_type(value)
         );
     }

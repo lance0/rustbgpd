@@ -8,8 +8,17 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+if sys.version_info < (3, 11):
+    print(
+        "v1 stable-surface check failed: Python 3.11 or newer is required "
+        "for the standard-library tomllib module",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -249,7 +258,10 @@ def check_method_sets(inventory: dict, services: dict, definitions: dict[str, st
 
 def check_grpc(inventory: dict) -> None:
     proto_path = ROOT / inventory["grpc"]["proto"]
-    proto = strip_proto_comments(proto_path.read_text())
+    try:
+        proto = strip_proto_comments(proto_path.read_text())
+    except OSError as error:
+        fail(f"cannot read {proto_path.relative_to(ROOT)}: {error}")
     services = parse_services(proto)
     definitions = parse_proto_definitions(proto)
     stable_paths = check_method_sets(inventory, services, definitions)
@@ -668,7 +680,11 @@ def check_policy(inventory: dict) -> None:
     required = {"stable", "scoped_rr_only", "alpha", "experimental"}
     if not required <= classifications:
         fail(f"role matrix must include classifications: {sorted(required)}")
-    public_contract = (ROOT / "docs/v1-stable-contract.md").read_text()
+    public_contract_path = ROOT / "docs/v1-stable-contract.md"
+    try:
+        public_contract = public_contract_path.read_text()
+    except OSError as error:
+        fail(f"cannot read {public_contract_path.relative_to(ROOT)}: {error}")
     for role_id in role_ids:
         if f"`{role_id}`" not in public_contract:
             fail(f"public role matrix is missing machine role id {role_id!r}")
