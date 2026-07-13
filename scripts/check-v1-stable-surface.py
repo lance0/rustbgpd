@@ -886,8 +886,12 @@ def expect_checker_failure(action, expected: str, label: str) -> None:
             failed = True
     if not failed:
         fail(f"checker self-test {label!r} unexpectedly passed")
-    if expected not in stderr.getvalue():
-        fail(f"checker self-test {label!r} failed for the wrong reason")
+    actual = stderr.getvalue()
+    if expected not in actual:
+        fail(
+            f"checker self-test {label!r} failed for the wrong reason; "
+            f"expected stderr containing {expected!r}, got {actual!r}"
+        )
 
 
 def check_cli_checker_selftests(inventory: dict) -> None:
