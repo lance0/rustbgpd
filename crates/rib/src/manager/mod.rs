@@ -51,6 +51,10 @@ struct PolicyTransitionStats {
     max_actor_slice: std::time::Duration,
     max_prefix_snapshot_poll: std::time::Duration,
     max_finalize_poll: std::time::Duration,
+    #[cfg(feature = "bench-internals")]
+    authoritative_peer_applies: usize,
+    #[cfg(feature = "bench-internals")]
+    max_authoritative_peer_apply: std::time::Duration,
 }
 
 #[cfg(test)]
