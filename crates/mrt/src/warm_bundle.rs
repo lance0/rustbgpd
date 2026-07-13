@@ -13,18 +13,22 @@
 //!
 //! Publication fsyncs and renames the content-addressed MRT artifact before it
 //! atomically replaces `manifest.json`, the commit point, then fsyncs the
-//! directory. Any reported failure rolls back destination entries to the exact
-//! state observed before publication; only a successful return exposes the new
-//! commit.
+//! directory. Any reported publication failure rolls back destination entries
+//! to the exact state observed before publication. After that commit succeeds,
+//! a best-effort descriptor-relative sweep removes superseded snapshots and
+//! recognizable crash-leaked temporary files. Cleanup failure is logged but
+//! never invalidates or rolls back the newly committed generation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{OFlag, RenameFlags, open, openat, renameat2};
 use nix::sys::stat::Mode;
@@ -32,6 +36,7 @@ use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
+use tracing::{debug, warn};
 
 use crate::codec::{WarmSnapshotBudget, WarmSnapshotBudgetError};
 use crate::{ReadError, SnapshotNlri, SnapshotReader};
@@ -579,7 +584,133 @@ fn write_warm_bundle_inner(
         }
         return Err(error);
     }
+    match cleanup_committed_bundle(directory, &manifest.snapshot.path, &encoded, fault, budget) {
+        Ok(removed) if removed > 0 => {
+            debug!(
+                removed,
+                current_snapshot = %manifest.snapshot.path,
+                "removed superseded warm-bundle entries after commit"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                error = %error,
+                current_snapshot = %manifest.snapshot.path,
+                "warm bundle remains committed but post-commit cleanup is incomplete"
+            );
+        }
+    }
     Ok(manifest)
+}
+
+/// Remove only names created by this module, after the manifest commit is
+/// durable. Unknown entries are deliberately left alone. The current
+/// manifest's exact content-addressed snapshot is never a cleanup candidate.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn cleanup_committed_bundle(
+    directory: &WarmBundleDirectory,
+    current_snapshot: &str,
+    committed_manifest: &[u8],
+    fault: FaultPoint,
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<u64, WarmBundleError> {
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::CleanupScan)
+        .map_err(|source| io_error(&directory.display_path, source))?;
+    verify_existing_entry(
+        directory,
+        WARM_BUNDLE_MANIFEST_FILE,
+        "manifest",
+        committed_manifest,
+        budget,
+    )?;
+
+    let cloned = directory
+        .file
+        .try_clone()
+        .map_err(|source| io_error(&directory.display_path, source))?;
+    let owned: OwnedFd = cloned.into();
+    let mut entries =
+        Dir::from_fd(owned).map_err(|source| nix_io(&directory.display_path, source))?;
+    let mut removed = 0_u64;
+    for entry in entries.iter() {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        let entry = entry.map_err(|source| nix_io(&directory.display_path, source))?;
+        let name = entry.file_name();
+        let bytes = name.to_bytes();
+        if bytes == current_snapshot.as_bytes()
+            || (!is_content_addressed_snapshot(bytes) && !is_atomic_temp_name(bytes))
+        {
+            continue;
+        }
+        let display = directory
+            .display_path
+            .join(String::from_utf8_lossy(bytes).into_owned());
+
+        #[cfg(test)]
+        fail_if(fault, FaultPoint::CleanupUnlink).map_err(|source| io_error(&display, source))?;
+        match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) => {
+                removed = removed.saturating_add(1);
+            }
+            Err(Errno::ENOENT) => {}
+            Err(source) => {
+                return Err(io_error(&display, errno_io(source)));
+            }
+        }
+    }
+    if removed > 0 {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        #[cfg(test)]
+        fail_if(fault, FaultPoint::CleanupDirSync)
+            .map_err(|source| io_error(&directory.display_path, source))?;
+        directory
+            .file
+            .sync_all()
+            .map_err(|source| io_error(&directory.display_path, source))?;
+    }
+    Ok(removed)
+}
+
+fn is_content_addressed_snapshot(name: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"snapshot-";
+    const SUFFIX: &[u8] = b".mrt";
+    name.len() == PREFIX.len() + 64 + SUFFIX.len()
+        && name.starts_with(PREFIX)
+        && name.ends_with(SUFFIX)
+        && name[PREFIX.len()..PREFIX.len() + 64]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn is_atomic_temp_name(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(b".") else {
+        return false;
+    };
+    let Some(marker) = rest.windows(5).position(|window| window == b".tmp.") else {
+        return false;
+    };
+    let base = &rest[..marker];
+    if base != WARM_BUNDLE_MANIFEST_FILE.as_bytes() && !is_content_addressed_snapshot(base) {
+        return false;
+    }
+    let mut identifiers = rest[marker + 5..].split(|byte| *byte == b'.');
+    let Some(pid) = identifiers.next() else {
+        return false;
+    };
+    let Some(sequence) = identifiers.next() else {
+        return false;
+    };
+    identifiers.next().is_none()
+        && !pid.is_empty()
+        && pid.iter().all(u8::is_ascii_digit)
+        && !sequence.is_empty()
+        && sequence.iter().all(u8::is_ascii_digit)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1261,8 +1392,11 @@ enum AtomicPublication {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     None,
+    #[cfg(test)]
     ArtifactWrite,
+    #[cfg(test)]
     ArtifactFileSync,
+    #[cfg(test)]
     ArtifactRename,
     #[cfg(test)]
     ArtifactCancelAfterFileSync,
@@ -1270,9 +1404,13 @@ enum FaultPoint {
     ArtifactCancelAfterRename,
     #[cfg(test)]
     ArtifactCancelAfterDirSync,
+    #[cfg(test)]
     ArtifactDirSync,
+    #[cfg(test)]
     ManifestWrite,
+    #[cfg(test)]
     ManifestFileSync,
+    #[cfg(test)]
     ManifestRename,
     #[cfg(test)]
     ManifestCancelAfterFileSync,
@@ -1280,9 +1418,17 @@ enum FaultPoint {
     ManifestCancelAfterRename,
     #[cfg(test)]
     ManifestCancelAfterDirSync,
+    #[cfg(test)]
     ManifestDirSync,
+    #[cfg(test)]
+    CleanupScan,
+    #[cfg(test)]
+    CleanupUnlink,
+    #[cfg(test)]
+    CleanupDirSync,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AtomicBoundary {
     FileSync,
@@ -1290,6 +1436,7 @@ enum AtomicBoundary {
     DirectorySync,
 }
 
+#[cfg(test)]
 fn stage(role: AtomicRole, ordinal: u8) -> FaultPoint {
     match (role, ordinal) {
         (AtomicRole::Artifact, 0) => FaultPoint::ArtifactWrite,
@@ -1303,6 +1450,7 @@ fn stage(role: AtomicRole, ordinal: u8) -> FaultPoint {
     }
 }
 
+#[cfg(test)]
 fn fail_if(selected: FaultPoint, current: FaultPoint) -> io::Result<()> {
     if selected == current {
         Err(io::Error::other(format!("injected failure at {current:?}")))
@@ -1351,23 +1499,11 @@ fn cancel_at_boundary_if(
     }
 }
 
-#[cfg(not(test))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "production and fault-injection builds share the transactional call site"
-)]
-fn cancel_at_boundary_if(
-    _selected: FaultPoint,
-    _role: AtomicRole,
-    _boundary: AtomicBoundary,
-) -> Result<(), WarmBundleError> {
-    Ok(())
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "atomic staging, publication, durability, and rollback form one transaction"
 )]
+#[cfg_attr(not(test), allow(unused_variables))]
 fn write_atomic_at(
     directory: &WarmBundleDirectory,
     name: &str,
@@ -1383,6 +1519,7 @@ fn write_atomic_at(
         if let Some(budget) = budget {
             budget.check()?;
         }
+        #[cfg(test)]
         fail_if(fault, stage(role, 0)).map_err(|source| io_error(&display, source))?;
         for chunk in bytes.chunks(STREAM_BUFFER_BYTES) {
             if let Some(budget) = budget {
@@ -1394,14 +1531,17 @@ fn write_atomic_at(
         if let Some(budget) = budget {
             budget.check()?;
         }
+        #[cfg(test)]
         fail_if(fault, stage(role, 1)).map_err(|source| io_error(&display, source))?;
         file.sync_all()
             .map_err(|source| io_error(&display, source))?;
+        #[cfg(test)]
         cancel_at_boundary_if(fault, role, AtomicBoundary::FileSync)?;
         if let Some(budget) = budget {
             budget.check()?;
         }
         drop(file);
+        #[cfg(test)]
         fail_if(fault, stage(role, 2)).map_err(|source| io_error(&display, source))?;
         let publication = match role {
             AtomicRole::Artifact => match renameat2(
@@ -1413,7 +1553,13 @@ fn write_atomic_at(
             ) {
                 Ok(()) => AtomicPublication::Created,
                 Err(Errno::EEXIST) => {
-                    verify_existing_entry(directory, name, bytes, budget)?;
+                    verify_existing_entry(
+                        directory,
+                        name,
+                        "content-addressed snapshot",
+                        bytes,
+                        budget,
+                    )?;
                     unlinkat(
                         &directory.file,
                         temp_name.as_str(),
@@ -1425,6 +1571,7 @@ fn write_atomic_at(
                         .file
                         .sync_all()
                         .map_err(|source| io_error(&display, source))?;
+                    #[cfg(test)]
                     cancel_at_boundary_if(fault, role, AtomicBoundary::DirectorySync)?;
                     return Ok(AtomicPublication::Reused);
                 }
@@ -1454,15 +1601,18 @@ fn write_atomic_at(
             },
         };
         committed = Some(publication);
+        #[cfg(test)]
         cancel_at_boundary_if(fault, role, AtomicBoundary::Rename)?;
         if let Some(budget) = budget {
             budget.check()?;
         }
+        #[cfg(test)]
         fail_if(fault, stage(role, 3)).map_err(|source| io_error(&display, source))?;
         directory
             .file
             .sync_all()
             .map_err(|source| io_error(&display, source))?;
+        #[cfg(test)]
         cancel_at_boundary_if(fault, role, AtomicBoundary::DirectorySync)?;
         if let Some(budget) = budget {
             budget.check()?;
@@ -1500,11 +1650,12 @@ fn write_atomic_at(
 fn verify_existing_entry(
     directory: &WarmBundleDirectory,
     name: &str,
+    role: &'static str,
     expected: &[u8],
     budget: Option<&WarmSnapshotBudget>,
 ) -> Result<(), WarmBundleError> {
     let display = directory.display_path.join(name);
-    let mut file = open_entry(directory, name, "snapshot", OFlag::O_RDONLY, Mode::empty())?;
+    let mut file = open_entry(directory, name, role, OFlag::O_RDONLY, Mode::empty())?;
     let metadata = file
         .metadata()
         .map_err(|source| io_error(&display, source))?;
@@ -1513,7 +1664,7 @@ fn verify_existing_entry(
             &display,
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "existing content-addressed artifact has the wrong length",
+                format!("existing {role} has the wrong length"),
             ),
         ));
     }
@@ -1531,7 +1682,7 @@ fn verify_existing_entry(
                 &display,
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "existing content-addressed artifact bytes differ",
+                    format!("existing {role} bytes differ"),
                 ),
             ));
         }
@@ -2459,6 +2610,145 @@ mod tests {
                 "first publication at {fault:?}"
             );
         }
+    }
+
+    #[test]
+    fn successful_commit_prunes_only_superseded_snapshots_and_crash_temps() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let old = identity();
+        let old_manifest = write_warm_bundle(&dir, old.clone(), &valid_snapshot(&old)).unwrap();
+        let leaked_manifest = ".manifest.json.tmp.123.7";
+        let leaked_snapshot = format!(".{}.tmp.123.8", old_manifest.snapshot.path);
+        fs::write(temp.path().join(leaked_manifest), b"torn manifest").unwrap();
+        fs::write(temp.path().join(&leaked_snapshot), b"torn snapshot").unwrap();
+        let unknown_snapshot = format!("{}.backup", old_manifest.snapshot.path);
+        fs::write(temp.path().join(&unknown_snapshot), b"operator-owned").unwrap();
+        let malformed_temp = ".manifest.json.tmp.not-a-pid.9";
+        fs::write(temp.path().join(malformed_temp), b"operator-owned").unwrap();
+
+        let mut next = old;
+        next.checkpoint_generation = "boot-42".to_string();
+        next.peer_index_table_view = "warm-generation-42".to_string();
+        next.snapshot_revision += 1;
+        next.created_at_utc_seconds += 1;
+        let next_snapshot = valid_snapshot(&next);
+        let current_temp = format!(".{}.tmp.123.9", snapshot_name(&sha256_hex(&next_snapshot)));
+        fs::write(temp.path().join(&current_temp), b"torn current snapshot").unwrap();
+        let current = write_warm_bundle(&dir, next.clone(), &next_snapshot).unwrap();
+
+        assert!(!temp.path().join(old_manifest.snapshot.path).exists());
+        assert!(!temp.path().join(leaked_manifest).exists());
+        assert!(!temp.path().join(leaked_snapshot).exists());
+        assert!(!temp.path().join(current_temp).exists());
+        assert!(temp.path().join(unknown_snapshot).is_file());
+        assert!(temp.path().join(malformed_temp).is_file());
+        assert!(temp.path().join(&current.snapshot.path).is_file());
+        assert!(temp.path().join(WARM_BUNDLE_MANIFEST_FILE).is_file());
+        assert!(load_warm_bundle(&dir, &expected(&next), freshness()).is_ok());
+    }
+
+    #[test]
+    fn cleanup_refuses_a_changed_manifest_before_unlinking_any_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let current = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        let stale = snapshot_name(SHA);
+        assert_ne!(stale, current.snapshot.path);
+        fs::write(temp.path().join(&stale), b"stale").unwrap();
+        let mut expected_manifest = fs::read(temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap();
+        expected_manifest[0] ^= 1;
+
+        assert!(
+            cleanup_committed_bundle(
+                &dir,
+                &current.snapshot.path,
+                &expected_manifest,
+                FaultPoint::None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(temp.path().join(&stale).is_file());
+        assert!(temp.path().join(&current.snapshot.path).is_file());
+        assert!(load_warm_bundle(&dir, &expected(&id), freshness()).is_ok());
+    }
+
+    #[test]
+    fn postcommit_cleanup_faults_never_roll_back_the_current_generation() {
+        for fault in [
+            FaultPoint::CleanupScan,
+            FaultPoint::CleanupUnlink,
+            FaultPoint::CleanupDirSync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = opened(&temp);
+            let old = identity();
+            publish(&dir, &old);
+            let mut next = old;
+            next.checkpoint_generation = "boot-42".to_string();
+            next.peer_index_table_view = "warm-generation-42".to_string();
+            next.snapshot_revision += 1;
+            next.created_at_utc_seconds += 1;
+
+            let manifest =
+                write_warm_bundle_inner(&dir, next.clone(), &valid_snapshot(&next), fault, None)
+                    .unwrap();
+
+            assert!(
+                temp.path().join(&manifest.snapshot.path).is_file(),
+                "{fault:?}"
+            );
+            assert!(
+                load_warm_bundle(&dir, &expected(&next), freshness()).is_ok(),
+                "{fault:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_cleanup_entry_cannot_invalidate_the_committed_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let old = identity();
+        publish(&dir, &old);
+        let obstructing_temp = temp.path().join(".manifest.json.tmp.321.9");
+        fs::create_dir(&obstructing_temp).unwrap();
+        let unknown = temp.path().join("snapshot-not-a-digest.mrt");
+        fs::write(&unknown, b"operator-owned").unwrap();
+
+        let mut next = old;
+        next.checkpoint_generation = "boot-42".to_string();
+        next.peer_index_table_view = "warm-generation-42".to_string();
+        next.snapshot_revision += 1;
+        next.created_at_utc_seconds += 1;
+        let manifest = write_warm_bundle(&dir, next.clone(), &valid_snapshot(&next)).unwrap();
+
+        assert!(obstructing_temp.is_dir());
+        assert!(unknown.is_file());
+        assert!(temp.path().join(&manifest.snapshot.path).is_file());
+        assert!(load_warm_bundle(&dir, &expected(&next), freshness()).is_ok());
+    }
+
+    #[test]
+    fn cleanup_name_matching_is_narrow_and_canonical() {
+        assert!(is_content_addressed_snapshot(
+            format!("snapshot-{SHA}.mrt").as_bytes()
+        ));
+        assert!(!is_content_addressed_snapshot(
+            format!("snapshot-{}.mrt", SHA.to_ascii_uppercase()).as_bytes()
+        ));
+        assert!(!is_content_addressed_snapshot(
+            format!("snapshot-{SHA}.mrt.backup").as_bytes()
+        ));
+        assert!(is_atomic_temp_name(b".manifest.json.tmp.12.34"));
+        assert!(is_atomic_temp_name(
+            format!(".snapshot-{SHA}.mrt.tmp.12.34").as_bytes()
+        ));
+        assert!(!is_atomic_temp_name(b".manifest.json.tmp.nope.34"));
+        assert!(!is_atomic_temp_name(b".manifest.json.tmp.12.34.extra"));
+        assert!(!is_atomic_temp_name(b".notes.tmp.12.34"));
     }
 
     #[test]

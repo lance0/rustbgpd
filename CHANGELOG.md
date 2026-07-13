@@ -131,6 +131,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backpressured peer population can no longer multiply the per-session deadline
   into a multi-minute daemon shutdown.
 
+- **Shutdown warm checkpoints retain one committed snapshot.** Only after the
+  new `manifest.json` rename and directory fsync establish the commit point,
+  publication removes superseded content-addressed snapshots and recognizable
+  crash-leaked temporary files through the pinned bundle directory. Cleanup
+  failure is warned but cannot roll back or delete the manifest's current
+  snapshot.
+
 - **The v1 stable-surface release gate now supports patch and major releases.**
   Upgrade exercises remain a contiguous, fail-closed chain of adjacent release
   lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
