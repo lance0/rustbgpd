@@ -139,6 +139,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot leave stale selected or advertised routes. A one-shot warning and
   `bgp_selection_deferral_ledger_overflows_total{afi_safi}` expose the fallback.
 
+- **The v1 CLI inventory now covers the complete `rbgp diff` command tree and
+  every shipped ribsnap producer.** The BIRD, FRR, GoBGP, MRT, and BMP
+  byte-exact producer tests are linked to five pinned goldens; every real
+  golden record is checked against the required type floor and every complete
+  artifact must still pass the fail-closed parser. The gate also rejects lost
+  command-path, golden, and producer-test linkage.
+
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
   encoder and negotiated message ceiling. The RIB probes the final one-route

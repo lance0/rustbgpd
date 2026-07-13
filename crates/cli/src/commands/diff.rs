@@ -1067,23 +1067,27 @@ mod tests {
         }
     }
 
-    fn assert_ribsnap_shape(value: &serde_json::Value, shape: &serde_json::Value) {
-        let object = value.as_object().expect("snapshot record is an object");
+    fn validate_ribsnap_shape(
+        value: &serde_json::Value,
+        shape: &serde_json::Value,
+    ) -> Result<(), String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "snapshot record is not an object".to_string())?;
         for (key, expected) in shape["required_json_types"].as_object().unwrap() {
             let field = object
                 .get(key)
-                .unwrap_or_else(|| panic!("required rbgp-ribsnap/1 field {key:?} is absent"));
+                .ok_or_else(|| format!("required rbgp-ribsnap/1 field {key:?} is absent"))?;
             let allowed: Vec<&str> = match expected {
                 serde_json::Value::String(value) => vec![value.as_str()],
                 serde_json::Value::Array(values) => {
                     values.iter().map(|value| value.as_str().unwrap()).collect()
                 }
-                _ => panic!("invalid rbgp-ribsnap/1 type floor for {key:?}"),
+                _ => return Err(format!("invalid rbgp-ribsnap/1 type floor for {key:?}")),
             };
-            assert!(
-                allowed.contains(&json_type(field)),
-                "rbgp-ribsnap/1 field {key:?} changed JSON type"
-            );
+            if !allowed.contains(&json_type(field)) {
+                return Err(format!("rbgp-ribsnap/1 field {key:?} changed JSON type"));
+            }
         }
         for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
             if let Some(field) = object.get(key) {
@@ -1092,11 +1096,14 @@ mod tests {
                     serde_json::Value::Array(values) => {
                         values.iter().map(|value| value.as_str().unwrap()).collect()
                     }
-                    _ => panic!("invalid rbgp-ribsnap/1 type floor for {key:?}"),
+                    _ => return Err(format!("invalid rbgp-ribsnap/1 type floor for {key:?}")),
                 };
-                assert!(allowed.contains(&json_type(field)));
+                if !allowed.contains(&json_type(field)) {
+                    return Err(format!("rbgp-ribsnap/1 field {key:?} changed JSON type"));
+                }
             }
         }
+        Ok(())
     }
 
     fn ribsnap_inventory_contract() -> serde_json::Value {
@@ -1139,49 +1146,98 @@ mod tests {
     }
 
     #[test]
-    fn ribsnap_json_contract_floor_matches_representative_records() {
-        let records = [
-            serde_json::json!({
-                "record": "header",
-                "schema": "rbgp-ribsnap/1",
-                "source": "contract-test",
-                "generation": 7,
-            }),
-            serde_json::json!({
-                "record": "route",
-                "peer": PEER,
-                "peer_asn": PEER_ASN,
-                "prefix": "203.0.113.0/24",
-                "path_id": 1,
-                "origin": 0,
-                "as_path": [64501],
-                "next_hop": "192.0.2.254",
-                "med": 10,
-                "local_pref": 100,
-                "communities": ["64501:100"],
-                "extended_communities": [281474976710756_u64],
-                "large_communities": ["64501:1:1"],
-                "unknown_attrs": [{"type_code": 99, "flags": 128, "value": "00"}],
-            }),
-            serde_json::json!({"record": "trailer", "routes": 1}),
-        ];
+    fn ribsnap_json_contract_floor_matches_producer_goldens() {
         let contract = ribsnap_inventory_contract();
         let shapes = contract["record_json_contracts"].as_object().unwrap();
-        for record in &records {
-            let kind = record["record"].as_str().unwrap();
-            assert_ribsnap_shape(record, &shapes[kind]);
-        }
+        let mut observed_record_kinds = BTreeSet::new();
+        for golden in contract["golden_files"].as_array().unwrap() {
+            let relative_path = golden["path"].as_str().unwrap();
+            let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative_path);
+            let bytes = std::fs::read(&golden_path).unwrap();
+            for (line_index, line) in std::str::from_utf8(&bytes).unwrap().lines().enumerate() {
+                let record: serde_json::Value =
+                    serde_json::from_str(line).unwrap_or_else(|error| {
+                        panic!(
+                            "{}:{} is not JSON: {error}",
+                            golden_path.display(),
+                            line_index + 1
+                        )
+                    });
+                let kind = record["record"].as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{}:{} has no string record kind",
+                        golden_path.display(),
+                        line_index + 1
+                    )
+                });
+                let shape = shapes.get(kind).unwrap_or_else(|| {
+                    panic!(
+                        "{}:{} has uninventoried record kind {kind:?}",
+                        golden_path.display(),
+                        line_index + 1
+                    )
+                });
+                validate_ribsnap_shape(&record, shape).unwrap_or_else(|error| {
+                    panic!("{}:{}: {error}", golden_path.display(), line_index + 1)
+                });
+                observed_record_kinds.insert(kind.to_string());
+            }
 
-        let mut bytes = records
-            .iter()
-            .map(serde_json::Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .into_bytes();
-        bytes.push(b'\n');
-        let opts = opts(std::path::Path::new("unused"));
-        parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[])
-            .expect("representative rbgp-ribsnap/1 records must pass the fail-closed parser");
+            let opts = opts(&golden_path);
+            parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[]).unwrap_or_else(|error| {
+                panic!(
+                    "pinned producer golden {} failed the rbgp-ribsnap/1 parser: {error}",
+                    golden_path.display()
+                )
+            });
+        }
+        assert_eq!(
+            observed_record_kinds,
+            ["header", "route", "trailer"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn ribsnap_contract_rejects_required_field_deletion_from_each_producer_golden() {
+        let contract = ribsnap_inventory_contract();
+        let route_shape = &contract["record_json_contracts"]["route"];
+        for golden in contract["golden_files"].as_array().unwrap() {
+            let relative_path = golden["path"].as_str().unwrap();
+            let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(relative_path);
+            let mut records: Vec<serde_json::Value> = std::fs::read_to_string(&golden_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let route = records
+                .iter_mut()
+                .find(|record| record["record"] == "route")
+                .unwrap_or_else(|| panic!("{} has no route record", golden_path.display()));
+            route.as_object_mut().unwrap().remove("peer_asn");
+            let error = validate_ribsnap_shape(route, route_shape).unwrap_err();
+            assert!(error.contains("peer_asn"), "unexpected error: {error}");
+
+            let mut bytes = records
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            bytes.push(b'\n');
+            let opts = opts(&golden_path);
+            assert!(
+                parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[]).is_err(),
+                "{} parsed after a required producer field was deleted",
+                golden_path.display()
+            );
+        }
     }
 
     fn header_line() -> String {

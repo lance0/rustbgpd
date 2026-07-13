@@ -130,11 +130,12 @@
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",
-    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown", "watch"],
+    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown", "watch"],
     "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
         "id": "rbgp-ribdiff/1",
+        "command_paths": ["diff", "diff advertised"],
         "source": "crates/cli/src/ribdiff.rs",
         "test": "json_schema_golden",
         "test_linkage": "assert_ribdiff_inventory_contract",
@@ -152,13 +153,26 @@
       },
       {
         "id": "rbgp-ribsnap/1",
+        "command_paths": ["diff", "diff advertised", "diff snapshot", "diff snapshot from-bmp", "diff snapshot from-mrt"],
         "source": "crates/cli/src/commands/diff.rs",
-        "test": "ribsnap_json_contract_floor_matches_representative_records",
+        "test": "ribsnap_json_contract_floor_matches_producer_goldens",
         "test_linkage": "ribsnap_inventory_contract",
-        "evidence_test": "bird_golden_matches_and_diffs_clean",
         "evolution": "closed_schema_version_bump_required",
         "executable_type_floor": true,
-        "golden_files": [{"path": "crates/cli/tests/fixtures/ribsnap/bird-m83.expected.ndjson", "sha256": "234aa36fb58679d12c98bc39ad374452236160b48bffb9b4f81ae430aa580174"}],
+        "golden_files": [
+          {"path": "crates/cli/tests/fixtures/ribsnap/bird-m83.expected.ndjson", "sha256": "234aa36fb58679d12c98bc39ad374452236160b48bffb9b4f81ae430aa580174"},
+          {"path": "crates/cli/tests/fixtures/ribsnap/from-bmp.expected.ndjson", "sha256": "d0e1952367a6ea7af95c9341585799adb3c51a23410a0ba7431ca1dc4a7223c9"},
+          {"path": "crates/cli/tests/fixtures/ribsnap/from-mrt.expected.ndjson", "sha256": "50c40435631db256f10a0263a4888ce103443fa55a7509df1bf11ceeab15a9cc"},
+          {"path": "crates/cli/tests/fixtures/ribsnap/frr-m83.expected.ndjson", "sha256": "12443e42345d555d13e350689e563b01633925c3439309e7260647416c44edb1"},
+          {"path": "crates/cli/tests/fixtures/ribsnap/gobgp-m83.expected.ndjson", "sha256": "11dfad0e9eb38dcb13ba072f5e848360a36fb03eb0c4bd877c86451a7c45f4ee"}
+        ],
+        "producer_tests": [
+          {"id": "bird-advertised-export-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "bird_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&BIRD)", "golden": "crates/cli/tests/fixtures/ribsnap/bird-m83.expected.ndjson", "golden_linkage": "golden: \"bird-m83.expected.ndjson\""},
+          {"id": "bmp-post-policy-adj-rib-out-adapter", "source": "crates/cli/src/commands/ribsnap_bmp.rs", "test": "emits_golden_snapshot", "test_linkage": "run_capture(&golden_capture())", "golden": "crates/cli/tests/fixtures/ribsnap/from-bmp.expected.ndjson", "golden_linkage": "/tests/fixtures/ribsnap/from-bmp.expected.ndjson"},
+          {"id": "frr-advertised-detail-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "frr_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&FRR)", "golden": "crates/cli/tests/fixtures/ribsnap/frr-m83.expected.ndjson", "golden_linkage": "golden: \"frr-m83.expected.ndjson\""},
+          {"id": "gobgp-adj-out-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "gobgp_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&GOBGP)", "golden": "crates/cli/tests/fixtures/ribsnap/gobgp-m83.expected.ndjson", "golden_linkage": "golden: \"gobgp-m83.expected.ndjson\""},
+          {"id": "mrt-adj-rib-out-adapter", "source": "crates/cli/src/commands/ribsnap.rs", "test": "emits_golden_snapshot_for_adj_rib_out_capture", "test_linkage": "run(&opts(", "golden": "crates/cli/tests/fixtures/ribsnap/from-mrt.expected.ndjson", "golden_linkage": "/tests/fixtures/ribsnap/from-mrt.expected.ndjson"}
+        ],
         "record_json_contracts": {
           "header": {"required_json_types": {"generation": "number", "record": "string", "schema": "string", "source": "string"}, "optional_json_types": {}},
           "route": {"required_json_types": {"peer": "string", "peer_asn": "number", "prefix": "string", "record": "string"}, "optional_json_types": {"as_path": "array", "communities": "array", "extended_communities": "array", "large_communities": "array", "local_pref": "number", "med": "number", "next_hop": "string", "origin": "number", "path_id": "number", "unknown_attrs": "array"}},
