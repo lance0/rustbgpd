@@ -226,7 +226,7 @@ new AFI/SAFI and EVPN dataplane expansion.
   unique-prefix 700-client × 400,400-route rerun under alternating A/B policy
   markers happened, but its exact raw output, daemon log, generated inputs,
   and provenance were not retained as one durable bundle. First rerun it through
-  the revision-pinned LAN-350 wrapper
+  the revision-pinned policy reload receipt wrapper
   and fail-closed validator. Then compute shared group-to-group migration work
   once, chunk member resync so queries and churn interleave, and gate repeated
   heterogeneous reloads on completion time, control-query latency, session

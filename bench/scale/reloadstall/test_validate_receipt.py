@@ -40,53 +40,105 @@ def fixture_git(repository: Path, *arguments: str, environment=None) -> bytes:
     return completed.stdout
 
 
-def source_evidence() -> tuple[str, str, bytes, bytes, bytes]:
-    """Create one real Git commit, archive, and self-contained bundle fixture."""
-    with tempfile.TemporaryDirectory(prefix="reloadstall-fixture-repo-") as raw:
-        repository = Path(raw) / "repository"
-        repository.mkdir()
-        fixture_git(repository, "init", "--quiet")
-        for relative, content in ARCHIVE_FILES.items():
-            path = repository / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-        fixture_git(repository, "add", "--all")
-        environment = validator.GIT_ENVIRONMENT.copy()
-        environment.update(
-            {
-                "GIT_AUTHOR_NAME": "Receipt Fixture",
-                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
-                "GIT_COMMITTER_NAME": "Receipt Fixture",
-                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
-            }
-        )
-        fixture_git(
-            repository,
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture commit",
-            environment=environment,
-        )
-        commit = fixture_git(repository, "rev-parse", "HEAD").decode().strip()
-        tree = fixture_git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
-        commit_payload = fixture_git(repository, "cat-file", "commit", "HEAD")
-        archive = Path(raw) / "source.tar"
-        bundle = Path(raw) / "source.bundle"
-        fixture_git(
-            repository,
-            "archive",
-            "--format=tar",
-            f"--output={archive}",
-            "HEAD",
-        )
-        fixture_git(repository, "bundle", "create", str(bundle), "HEAD")
-        return commit, tree, commit_payload, archive.read_bytes(), bundle.read_bytes()
+def source_evidence(
+    raw: str, *, candidate_message: str = "fixture candidate"
+) -> tuple[str, str, str, bytes, bytes, bytes, Path]:
+    """Create exact-SHA retained refs and evidence fetched from one Git repo."""
+    repository = Path(raw) / "repository"
+    repository.mkdir()
+    fixture_git(repository, "init", "--quiet", "--initial-branch=main")
+    for relative, content in ARCHIVE_FILES.items():
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    baseline_path = repository / "bench/scale/reloadstall/validate_receipt.py"
+    baseline_path.write_bytes(b"# baseline validator fixture\n")
+    fixture_git(repository, "add", "--all")
+    environment = validator.GIT_ENVIRONMENT.copy()
+    environment.update(
+        {
+            "GIT_AUTHOR_NAME": "Receipt Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_NAME": "Receipt Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+        }
+    )
+    fixture_git(
+        repository,
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture baseline",
+        environment=environment,
+    )
+    baseline = fixture_git(repository, "rev-parse", "HEAD").decode().strip()
+    fixture_git(
+        repository,
+        "switch",
+        "--quiet",
+        "-c",
+        validator.CANONICAL_CANDIDATE_CONTEXT_REF.removeprefix("refs/heads/"),
+    )
+    baseline_path.write_bytes(
+        ARCHIVE_FILES["bench/scale/reloadstall/validate_receipt.py"]
+    )
+    fixture_git(repository, "add", "--all")
+    candidate_environment = environment.copy()
+    candidate_environment["GIT_AUTHOR_DATE"] = "2000-01-02T00:00:00+00:00"
+    candidate_environment["GIT_COMMITTER_DATE"] = "2000-01-02T00:00:00+00:00"
+    fixture_git(
+        repository,
+        "commit",
+        "--quiet",
+        "-m",
+        candidate_message,
+        environment=candidate_environment,
+    )
+    commit = fixture_git(repository, "rev-parse", "HEAD").decode().strip()
+    tree = fixture_git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
+    commit_payload = fixture_git(repository, "cat-file", "commit", "HEAD")
+    fixture_git(repository, "update-ref", validator.RETAINED_BASELINE_REF, baseline)
+    fixture_git(repository, "update-ref", validator.RETAINED_SOURCE_REF, commit)
+    archive = Path(raw) / "source.tar"
+    bundle = Path(raw) / "source.bundle"
+    fixture_git(
+        repository,
+        "archive",
+        "--format=tar",
+        f"--output={archive}",
+        validator.RETAINED_SOURCE_REF,
+    )
+    fixture_git(
+        repository,
+        "bundle",
+        "create",
+        str(bundle),
+        validator.RETAINED_BASELINE_REF,
+        validator.RETAINED_SOURCE_REF,
+    )
+    return (
+        baseline,
+        commit,
+        tree,
+        commit_payload,
+        archive.read_bytes(),
+        bundle.read_bytes(),
+        repository,
+    )
 
 
-COMMIT, TREE, COMMIT_PAYLOAD, ARCHIVE_BYTES, BUNDLE_BYTES = source_evidence()
+SOURCE_REPOSITORY_TEMP = tempfile.TemporaryDirectory(prefix="reloadstall-fixture-repo-")
+(
+    BASELINE_COMMIT,
+    COMMIT,
+    TREE,
+    COMMIT_PAYLOAD,
+    ARCHIVE_BYTES,
+    BUNDLE_BYTES,
+    CANONICAL_FETCH_REPOSITORY,
+) = source_evidence(SOURCE_REPOSITORY_TEMP.name)
 
 
 def write(path: Path, text: str) -> None:
@@ -198,9 +250,7 @@ def resign(root: Path) -> None:
         (
             path
             for path in root.rglob("*")
-            if path.is_file()
-            and not path.is_symlink()
-            and path.name != "SHA256SUMS"
+            if path.is_file() and not path.is_symlink() and path.name != "SHA256SUMS"
         ),
         key=lambda path: path.relative_to(root).as_posix(),
     ):
@@ -235,6 +285,14 @@ def make_receipt(root: Path) -> None:
             f"source_archive_sha256={archive_sha256}\n"
             f"source_bundle_sha256={bundle_sha256}\n"
             "source_remote=https://github.com/lance0/rustbgpd.git\n"
+            "canonical_baseline_context_ref="
+            f"{validator.CANONICAL_BASELINE_CONTEXT_REF}\n"
+            f"canonical_baseline_commit={BASELINE_COMMIT}\n"
+            "canonical_candidate_context_ref="
+            f"{validator.CANONICAL_CANDIDATE_CONTEXT_REF}\n"
+            f"canonical_source_commit={COMMIT}\n"
+            f"canonical_source_tree={TREE}\n"
+            "canonical_membership_proof=exact-sha-live-fetch-and-retained-bundle\n"
             "build_source_root=<SOURCE_ROOT>\nbuild_target_dir=<BUILD_TARGET>\n"
             "host_lock=<HOST_LOCK>\nruntime_dir=<RUNTIME_DIR>\n"
             "output_dir=<OUTPUT_DIR>\n"
@@ -281,6 +339,28 @@ def make_receipt(root: Path) -> None:
         "scenario/member.initial.rpol": generation_a,
         "scenario/member.final.rpol": generation_a,
         "source-status.txt": "",
+        "sources/canonical-refs.txt": (
+            f"remote={validator.CANONICAL_REMOTE}\n"
+            f"baseline_commit={BASELINE_COMMIT}\n"
+            f"baseline_context_ref={validator.CANONICAL_BASELINE_CONTEXT_REF}\n"
+            f"source_commit={COMMIT}\n"
+            f"source_tree={TREE}\n"
+            f"candidate_context_ref={validator.CANONICAL_CANDIDATE_CONTEXT_REF}\n"
+            "proof=exact-sha-live-fetch-and-retained-bundle\n"
+        ),
+        "sources/canonical-fetch.txt": (
+            "command=env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin "
+            "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+            "GIT_TERMINAL_PROMPT=0 /usr/bin/git -C <CANONICAL_REPO> fetch "
+            f"--no-tags --force {validator.CANONICAL_REMOTE} "
+            f"+{BASELINE_COMMIT}:{validator.RETAINED_BASELINE_REF} "
+            f"+{COMMIT}:{validator.RETAINED_SOURCE_REF}\n"
+            "fetch=success\n"
+            "fsck=success\n"
+            f"baseline_commit={BASELINE_COMMIT}\n"
+            f"source_commit={COMMIT}\n"
+            f"source_tree={TREE}\n"
+        ),
         "sources/build_fence.py": ARCHIVE_FILES[
             "bench/scale/reloadstall/build_fence.py"
         ].decode(),
@@ -330,20 +410,43 @@ def make_receipt(root: Path) -> None:
         },
         "health_probe": {"timeout_seconds": 10, "interval_milliseconds": 50},
         "commands": {
+            "canonical_fetch": [
+                "/usr/bin/git",
+                "-C",
+                "<CANONICAL_REPO>",
+                "fetch",
+                "--no-tags",
+                "--force",
+                validator.CANONICAL_REMOTE,
+                f"+{BASELINE_COMMIT}:{validator.RETAINED_BASELINE_REF}",
+                f"+{COMMIT}:{validator.RETAINED_SOURCE_REF}",
+            ],
             "archive": [
-                "git",
+                "/usr/bin/git",
+                "-C",
+                "<CANONICAL_REPO>",
                 "archive",
                 "--format=tar",
                 f"--output={OUTPUT}/sources/source.tar",
-                COMMIT,
+                validator.RETAINED_SOURCE_REF,
             ],
-            "commit_object": ["git", "cat-file", "commit", COMMIT],
+            "commit_object": [
+                "/usr/bin/git",
+                "-C",
+                "<CANONICAL_REPO>",
+                "cat-file",
+                "commit",
+                validator.RETAINED_SOURCE_REF,
+            ],
             "bundle": [
-                "git",
+                "/usr/bin/git",
+                "-C",
+                "<CANONICAL_REPO>",
                 "bundle",
                 "create",
                 f"{OUTPUT}/sources/source.bundle",
-                "HEAD",
+                validator.RETAINED_BASELINE_REF,
+                validator.RETAINED_SOURCE_REF,
             ],
             "extract": [
                 "tar",
@@ -486,6 +589,13 @@ def make_receipt(root: Path) -> None:
             "archive_sha256": archive_sha256,
             "bundle_sha256": bundle_sha256,
             "remote": "https://github.com/lance0/rustbgpd.git",
+            "canonical": {
+                "baseline_commit": BASELINE_COMMIT,
+                "baseline_context_ref": validator.CANONICAL_BASELINE_CONTEXT_REF,
+                "candidate_context_ref": validator.CANONICAL_CANDIDATE_CONTEXT_REF,
+                "source_commit": COMMIT,
+                "proof": "exact-sha-live-fetch-and-retained-bundle",
+            },
             "clean": True,
         },
         "runtime_dir": RUNTIME,
@@ -551,7 +661,11 @@ class ReceiptValidatorTests(unittest.TestCase):
 
     def assert_invalid(self, fragment: str) -> None:
         with self.assertRaisesRegex(validator.ReceiptError, fragment):
-            validator.validate_receipt(self.root)
+            validator.validate_receipt(
+                self.root,
+                canonical_remote=str(CANONICAL_FETCH_REPOSITORY),
+                expected_baseline_commit=BASELINE_COMMIT,
+            )
 
     def mutate_text(self, relative: str, old: str, new: str) -> None:
         path = self.root / relative
@@ -568,7 +682,11 @@ class ReceiptValidatorTests(unittest.TestCase):
         resign(self.root)
 
     def test_valid_receipt_is_accepted(self) -> None:
-        result = validator.validate_receipt(self.root)
+        result = validator.validate_receipt(
+            self.root,
+            canonical_remote=str(CANONICAL_FETCH_REPOSITORY),
+            expected_baseline_commit=BASELINE_COMMIT,
+        )
         self.assertTrue(result["accepted"])
         self.assertEqual(result["shape"], "700x400400")
 
@@ -593,8 +711,14 @@ class ReceiptValidatorTests(unittest.TestCase):
     def test_symlinked_receipt_root_fails(self) -> None:
         linked_root = Path(self.tempdir.name) / "receipt-link"
         linked_root.symlink_to(self.root, target_is_directory=True)
-        with self.assertRaisesRegex(validator.ReceiptError, "root must not be a symlink"):
-            validator.validate_receipt(linked_root)
+        with self.assertRaisesRegex(
+            validator.ReceiptError, "root must not be a symlink"
+        ):
+            validator.validate_receipt(
+                linked_root,
+                canonical_remote=str(CANONICAL_FETCH_REPOSITORY),
+                expected_baseline_commit=BASELINE_COMMIT,
+            )
 
     def test_forged_validation_json_is_rejected(self) -> None:
         write(self.root / "validation.json", '{"accepted": false, "error": "forged"}\n')
@@ -622,31 +746,139 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.mutate_json(
             "manifest.json", lambda value: value["source"].update(tree="b" * 40)
         )
+        self.mutate_text(
+            "sources/canonical-refs.txt",
+            f"source_tree={TREE}",
+            f"source_tree={'b' * 40}",
+        )
+        self.mutate_text(
+            "sources/canonical-fetch.txt",
+            f"source_tree={TREE}",
+            f"source_tree={'b' * 40}",
+        )
         self.assert_invalid("source bundle tree")
 
     def test_retained_commit_object_tamper_fails_even_when_resigned(self) -> None:
         path = self.root / "sources/source.commit"
-        path.write_bytes(path.read_bytes().replace(b"fixture commit", b"forged commit"))
+        path.write_bytes(
+            path.read_bytes().replace(b"fixture candidate", b"forged candidate")
+        )
         resign(self.root)
         self.assert_invalid("source bundle commit object")
 
-    def test_self_consistent_synthetic_commit_absent_from_bundle_is_rejected(self) -> None:
-        synthetic_payload = COMMIT_PAYLOAD.replace(b"fixture commit", b"synthetic commit")
+    def test_self_consistent_synthetic_commit_absent_from_bundle_is_rejected(
+        self,
+    ) -> None:
+        synthetic_payload = COMMIT_PAYLOAD.replace(
+            b"fixture candidate", b"synthetic candidate"
+        )
         claimed = validator.git_object_id("commit", synthetic_payload).hex()
         (self.root / "sources/source.commit").write_bytes(synthetic_payload)
         self.mutate_json(
             "manifest.json",
-            lambda value: value["source"].update(commit=claimed, head=claimed),
+            lambda value: (
+                value["source"].update(commit=claimed, head=claimed),
+                value["source"]["canonical"].update(source_commit=claimed),
+            ),
         )
-        self.assert_invalid("source bundle advertised head")
+        self.mutate_text(
+            "sources/canonical-refs.txt",
+            f"source_commit={COMMIT}",
+            f"source_commit={claimed}",
+        )
+        self.assert_invalid("source bundle retained refs")
 
     def test_nonexistent_manifest_commit_is_rejected_by_bundle_head(self) -> None:
         claimed = "a" * 40
         self.mutate_json(
             "manifest.json",
-            lambda value: value["source"].update(commit=claimed, head=claimed),
+            lambda value: (
+                value["source"].update(commit=claimed, head=claimed),
+                value["source"]["canonical"].update(source_commit=claimed),
+            ),
         )
-        self.assert_invalid("source bundle advertised head")
+        self.assert_invalid("source bundle retained refs")
+
+    def test_unapproved_baseline_commit_is_rejected(self) -> None:
+        self.mutate_json(
+            "manifest.json",
+            lambda value: value["source"]["canonical"].update(baseline_commit="a" * 40),
+        )
+        self.assert_invalid("manifest.source.canonical.baseline_commit")
+
+    def test_self_consistent_synthetic_graph_absent_from_canonical_is_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="reloadstall-synthetic-") as temporary:
+            (
+                synthetic_baseline,
+                synthetic_commit,
+                synthetic_tree,
+                synthetic_payload,
+                synthetic_archive,
+                synthetic_bundle,
+                _,
+            ) = source_evidence(temporary, candidate_message="synthetic candidate")
+            self.assertEqual(synthetic_baseline, BASELINE_COMMIT)
+            self.assertEqual(synthetic_tree, TREE)
+            self.assertNotEqual(synthetic_commit, COMMIT)
+
+            archive_digest = hashlib.sha256(synthetic_archive).hexdigest()
+            bundle_digest = hashlib.sha256(synthetic_bundle).hexdigest()
+            (self.root / "sources/source.commit").write_bytes(synthetic_payload)
+            (self.root / "sources/source.tar").write_bytes(synthetic_archive)
+            (self.root / "sources/source.bundle").write_bytes(synthetic_bundle)
+            self.mutate_text(
+                "sources/canonical-refs.txt",
+                f"source_commit={COMMIT}",
+                f"source_commit={synthetic_commit}",
+            )
+            canonical_fetch = self.root / "sources/canonical-fetch.txt"
+            write(
+                canonical_fetch,
+                canonical_fetch.read_text(encoding="utf-8").replace(
+                    COMMIT, synthetic_commit
+                ),
+            )
+            provenance = self.root / "provenance.txt"
+            provenance_text = provenance.read_text(encoding="utf-8")
+            provenance_text = provenance_text.replace(COMMIT, synthetic_commit)
+            provenance_text = provenance_text.replace(
+                hashlib.sha256(ARCHIVE_BYTES).hexdigest(), archive_digest
+            )
+            provenance_text = provenance_text.replace(
+                hashlib.sha256(BUNDLE_BYTES).hexdigest(), bundle_digest
+            )
+            write(provenance, provenance_text)
+
+            def update_invocation(value) -> None:
+                value["source_commit"] = synthetic_commit
+                value["commands"]["canonical_fetch"][
+                    -1
+                ] = f"+{synthetic_commit}:{validator.RETAINED_SOURCE_REF}"
+
+            self.mutate_json("invocation.json", update_invocation)
+
+            def update_manifest(value) -> None:
+                source = value["source"]
+                source.update(
+                    commit=synthetic_commit,
+                    head=synthetic_commit,
+                    archive_sha256=archive_digest,
+                    bundle_sha256=bundle_digest,
+                )
+                source["canonical"]["source_commit"] = synthetic_commit
+
+            self.mutate_json("manifest.json", update_manifest)
+            self.assert_invalid("live canonical ref fetch")
+
+    def test_live_canonical_fetch_failure_is_rejected(self) -> None:
+        with self.assertRaisesRegex(validator.ReceiptError, "live canonical ref fetch"):
+            validator.validate_receipt(
+                self.root,
+                canonical_remote=str(self.root / "missing-canonical.git"),
+                expected_baseline_commit=BASELINE_COMMIT,
+            )
 
     def test_short_source_revision_fails_even_when_resigned(self) -> None:
         self.mutate_json(
@@ -696,9 +928,7 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.assert_invalid("violates the precommitted")
 
     def test_nonzero_defect_counter_fails(self) -> None:
-        self.mutate_text(
-            "harness.log", "base_withdrawals=0", "base_withdrawals=1"
-        )
+        self.mutate_text("harness.log", "base_withdrawals=0", "base_withdrawals=1")
         self.assert_invalid("zero-defect counters")
 
     def test_timeout_marker_fails_despite_success_manifest(self) -> None:
@@ -761,7 +991,9 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.assert_invalid("config keys")
 
     def test_config_extra_global_mapping_fails(self) -> None:
-        self.mutate_text("scenario/config.toml", "asn = 65500", "asn = 65500\nworkers = 4")
+        self.mutate_text(
+            "scenario/config.toml", "asn = 65500", "asn = 65500\nworkers = 4"
+        )
         self.assert_invalid("config.global keys")
 
     def test_config_extra_neighbor_mapping_fails(self) -> None:
@@ -826,9 +1058,7 @@ class ReceiptValidatorTests(unittest.TestCase):
     def test_build_toolchain_override_fails(self) -> None:
         self.mutate_json(
             "invocation.json",
-            lambda value: value["build_environment"].update(
-                RUSTUP_TOOLCHAIN="stable"
-            ),
+            lambda value: value["build_environment"].update(RUSTUP_TOOLCHAIN="stable"),
         )
         self.assert_invalid("invocation.build_environment")
 
@@ -966,6 +1196,7 @@ class ReceiptValidatorTests(unittest.TestCase):
         (self.root / "raw-logs.tar.gz").write_bytes(b"private archive")
         resign(self.root)
         self.assert_invalid("unexpected unvalidated artifacts")
+
 
 if __name__ == "__main__":
     unittest.main()

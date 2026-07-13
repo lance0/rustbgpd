@@ -311,10 +311,19 @@ bench/scale/reloadstall/run-receipt.sh \
   --output-dir target/reloadstall-receipt/<unique-run-id>
 ```
 
-The wrapper acquires the shared host lock, retains the requested commit object
-and a full Git archive, proves the commit's tree matches the reconstructed
-archive tree, and builds from an entirely non-writable extraction with both
-lockfiles. It rejects inherited compiler/linker/profile/target overrides and
+The wrapper acquires the shared host lock and fetches the declared baseline and
+requested source SHA directly from the hard-coded public GitHub remote into a
+fresh repository. It does not trust a mutable branch tip or the invoking object
+store. Network or exact-object fetch failure fails closed. It retains the exact
+fetch record, requested commit object, full Git archive, and a two-ref bundle,
+proves the commit's tree matches the reconstructed archive tree, and builds from
+an entirely non-writable extraction with both lockfiles. The validator repeats
+the live exact-SHA fetch to establish canonical membership; the retained bundle
+supports offline integrity and reconstruction but cannot by itself produce an
+acceptance result. The wrapper must be executed directly through its
+privileged-mode Bash shebang and rejects sourcing, unprivileged interpreter
+execution, inherited aliases/functions, and shell startup hooks. It also rejects
+inherited compiler/linker/profile/target overrides and
 every Cargo config except the archived regular `.cargo/config.toml`, fixes the
 build environment to fresh empty home and Cargo-home directories, exact Rust
 `1.95.0-x86_64-unknown-linux-gnu`, and the literal `/usr/bin:/bin` host-tool

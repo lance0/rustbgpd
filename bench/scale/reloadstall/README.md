@@ -24,7 +24,7 @@ Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Backs
 
-- `docs/perf/reload-stall-2026-07.md` (LAN-333/LAN-350). The full daemon-side
+- `docs/perf/reload-stall-2026-07.md`. The full daemon-side
   scenario (700 `[[neighbors]]` route-server-client blocks, `member-in` /
   `member-out` rpol chains, gRPC UDS, and the two policy generations) is pinned
   here. The corrected historical run remains non-acceptance evidence until the
@@ -44,11 +44,17 @@ bench/scale/reloadstall/run-receipt.sh \
 `run-receipt.sh` owns the shared host lock, exact-source release builds, short
 UDS-safe runtime directory, daemon and health-probe lifecycle, and a timestamped
 final load/process/all-governor snapshot immediately before daemon start. It
-retains the requested Git commit object, a `git archive`, and a self-contained
-Git bundle whose only advertised head is the requested commit. Before building,
-the runner verifies and imports that bundle into a fresh bare repository,
-requires the imported commit bytes and tree to match the retained evidence,
-and runs a strict Git object check. It then extracts the archive into a
+first fetches the declared baseline and requested source SHA directly from the
+hard-coded `https://github.com/lance0/rustbgpd.git` remote into a fresh bare
+repository. Mutable branch tips are recorded only as context, never used as
+source authority. A failed exact-SHA fetch, including a network failure, fails
+the run closed. From those canonical objects it retains the requested commit
+object, a `git archive`, the exact fetch command and object IDs, and a
+self-contained Git bundle advertising only `refs/receipt/baseline` and
+`refs/receipt/source`. Before building, the runner imports that bundle into a
+second fresh bare repository, requires the imported commit bytes and tree to
+match the retained evidence, and runs a strict Git object check. It then
+extracts the archive into a
 read-only source tree and sends every Cargo build, scenario
 generation, process-fence scan, and final validation through that exact tree;
 Cargo output lives in a separate scratch target directory. The validator
@@ -65,8 +71,9 @@ that tracks and bounds the harness, health probe, and daemon before escalating
 to KILL. The build fence rejects compiler/linker/profile/target overrides and
 external Cargo configuration, allowing only the archived regular
 `.cargo/config.toml`. The runner must be executed directly through its
-privileged-mode Bash shebang; inherited shell functions, shell startup hooks,
-ambient Rust selection variables, and a non-literal `PATH` fail closed. Rustup
+privileged-mode Bash shebang; sourced or unprivileged-interpreter invocation,
+inherited aliases or shell functions, shell startup hooks, ambient Rust
+selection variables, and a non-literal `PATH` fail closed. Rustup
 is the invoking account's regular, non-symlinked, owner-safe
 `~/.cargo/bin/rustup`; every selection query runs by absolute path under
 `env -i`, and Cargo/rustc/rustdoc must resolve to owner-safe absolute binaries
@@ -116,10 +123,15 @@ bundle, full source archive, selected source copy, log, preflight sample,
 invocation, manifest, and provenance file; only
 `SHA256SUMS` itself is excluded. There is deliberately no unsummed
 `validation.json`: acceptance is the exact validator's successful exit and JSON
-printed by the wrapper after the complete checksum inventory passes. A later
-audit should run `validate_receipt.py` from the named source commit against the
-receipt; that validator independently imports `sources/source.bundle` into a
-fresh repository before trusting the retained commit/archive relationship.
+printed by the wrapper after the complete checksum inventory passes. Validation
+always repeats the exact-SHA fetch from the hard-coded canonical remote in a
+fresh repository; it does not accept a retained bundle as proof of canonical
+membership. The retained bundle, commit, archive, and fetch record support
+offline integrity and source reconstruction, but an offline-only check is not
+an acceptance result. A later acceptance audit should run
+`validate_receipt.py` from the named source commit with canonical network access;
+the validator also independently imports `sources/source.bundle` into a fresh
+repository before trusting the retained commit/archive relationship.
 
 ## Build and run
 

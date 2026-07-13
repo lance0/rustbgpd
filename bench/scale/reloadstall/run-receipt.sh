@@ -1,35 +1,59 @@
 #!/bin/bash -p
 set -euo pipefail
 [[ $- == *p* ]] || {
-  printf '%s\n' 'error: run-receipt.sh must be executed directly in privileged shell mode' >&2
-  exit 2
+  \printf '%s\n' 'error: run-receipt.sh must be executed directly in privileged shell mode' >&2
+  \exit 2
 }
+((${#BASH_ALIASES[@]} == 0)) || {
+  \printf '%s\n' 'error: inherited shell aliases are forbidden' >&2
+  \printf '  %s\n' "${!BASH_ALIASES[@]}" >&2
+  \exit 2
+}
+[[ ${BASH_SOURCE[0]} == "$0" ]] || {
+  \printf '%s\n' 'error: run-receipt.sh must be executed directly, not sourced' >&2
+  \exit 2
+}
+\unalias -a
+shopt -u expand_aliases
 initial_functions=$(declare -F)
 [[ -z $initial_functions ]] || {
   printf '%s\n' 'error: inherited shell functions are forbidden' >&2
   printf '%s\n' "$initial_functions" >&2
   exit 2
 }
-inherited_function_variables=()
+ambiguous_shell_environment=()
 while IFS= read -r -d '' environment_entry; do
   environment_name=${environment_entry%%=*}
   case "$environment_name" in
-    BASH_FUNC_*|ZSH_FUNC_*) inherited_function_variables+=("$environment_name") ;;
+    BASH_FUNC_*|ZSH_FUNC_*|BASH_ENV|ENV)
+      ambiguous_shell_environment+=("$environment_name")
+      ;;
   esac
 done < <(/usr/bin/env -0)
-((${#inherited_function_variables[@]} == 0)) || {
-  printf '%s\n' 'error: exported shell functions are forbidden' >&2
-  printf '  %s\n' "${inherited_function_variables[@]}" >&2
+((${#ambiguous_shell_environment[@]} == 0)) || {
+  printf '%s\n' 'error: exported shell functions and shell startup hooks are forbidden' >&2
+  printf '  %s\n' "${ambiguous_shell_environment[@]}" >&2
   exit 2
 }
 export LC_ALL=C
 export TZ=UTC
 readonly runner_path=/usr/bin:/bin
 export PATH=$runner_path
+readonly git_command=/usr/bin/git
+readonly source_remote=https://github.com/lance0/rustbgpd.git
+readonly canonical_baseline_commit=b2ec55f21364978f26662b1ec35fd47ddcfce9a6
+readonly canonical_baseline_context_ref=refs/heads/main
+readonly canonical_candidate_context_ref=refs/heads/perf/policy-reload-durable-receipt
+readonly retained_baseline_ref=refs/receipt/baseline
+readonly retained_source_ref=refs/receipt/source
+git_environment=(
+  /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH="$runner_path"
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+)
 
 usage() {
   cat <<'EOF'
-Run the retained LAN-350 700-client x 400,400-route reload-stall receipt.
+Run the retained 700-client x 400,400-route policy reload-stall receipt.
 
 Usage:
   bench/scale/reloadstall/run-receipt.sh \
@@ -120,29 +144,28 @@ for command in \
   }
 done
 
-repo_root=$(git rev-parse --show-toplevel)
+repo_root=$("${git_environment[@]}" "$git_command" rev-parse --show-toplevel)
 cd "$repo_root"
-head_sha=$(git rev-parse --verify 'HEAD^{commit}')
+head_sha=$("${git_environment[@]}" "$git_command" rev-parse --verify 'HEAD^{commit}')
 [[ $head_sha == "$source_sha" ]] || {
   printf 'error: clean HEAD must equal --source-sha: HEAD=%s requested=%s\n' \
     "$head_sha" "$source_sha" >&2
   exit 2
 }
-source_tree=$(git rev-parse "${source_sha}^{tree}")
-source_remote_actual=$(git remote get-url origin)
+source_tree=$("${git_environment[@]}" "$git_command" rev-parse "${source_sha}^{tree}")
+source_remote_actual=$("${git_environment[@]}" "$git_command" remote get-url origin)
 if [[ ! $source_remote_actual =~ ^(git@github\.com:|https://github\.com/|ssh://git@github\.com/)lance0/rustbgpd(\.git)?$ ]]; then
   printf 'error: origin is not the canonical lance0/rustbgpd repository: %s\n' \
     "$source_remote_actual" >&2
   exit 2
 fi
-readonly source_remote=https://github.com/lance0/rustbgpd.git
-source_status=$(git status --porcelain=v1 --untracked-files=normal)
+source_status=$("${git_environment[@]}" "$git_command" status --porcelain=v1 --untracked-files=normal)
 [[ -z $source_status ]] || {
   printf '%s\n' 'error: retained receipt requires a clean invoking worktree' >&2
   printf '%s\n' "$source_status" >&2
   exit 2
 }
-git diff --check "$source_sha^" "$source_sha" >/dev/null
+"${git_environment[@]}" "$git_command" diff --check "$source_sha^" "$source_sha" >/dev/null
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
 
@@ -361,14 +384,69 @@ mkdir "$output_dir/scenario" "$output_dir/sources" "$source_root" "$build_target
   "$cargo_home" "$build_home"
 printf '%s' "$source_status" >"$output_dir/source-status.txt"
 
-# Materialize the exact Git object named by --source-sha before any build or
-# generation.  The retained archive is the canonical source input; the
-# extracted tree is read-only and every build output lives outside it.
+# Fetch the exact allowed baseline and source object IDs from the hard-coded
+# public canonical remote into a fresh bare repository. All retained source
+# evidence is then created from those objects, never from mutable branch tips or
+# the invoking object store.
 source_archive="$output_dir/sources/source.tar"
 source_commit_object="$output_dir/sources/source.commit"
 source_bundle="$output_dir/sources/source.bundle"
-git cat-file commit "$source_sha" >"$source_commit_object"
-retained_commit_sha=$(git hash-object -t commit "$source_commit_object")
+canonical_refs="$output_dir/sources/canonical-refs.txt"
+canonical_fetch_evidence="$output_dir/sources/canonical-fetch.txt"
+canonical_repo="$scratch/canonical.git"
+"${git_environment[@]}" "$git_command" init --bare --quiet "$canonical_repo"
+{
+  printf '+ %q ' "${git_environment[@]}" "$git_command" -C "$canonical_repo" fetch \
+    --no-tags --force "$source_remote" \
+    "+$canonical_baseline_commit:$retained_baseline_ref" \
+    "+$source_sha:$retained_source_ref"
+  printf '\n'
+  "${git_environment[@]}" "$git_command" -C "$canonical_repo" fetch \
+    --no-tags --force "$source_remote" \
+    "+$canonical_baseline_commit:$retained_baseline_ref" \
+    "+$source_sha:$retained_source_ref"
+} >"$scratch/canonical-fetch.log" 2>&1
+canonical_candidate_commit=$("${git_environment[@]}" "$git_command" -C \
+  "$canonical_repo" rev-parse "$retained_source_ref^{commit}")
+canonical_candidate_tree=$("${git_environment[@]}" "$git_command" -C \
+  "$canonical_repo" rev-parse "$retained_source_ref^{tree}")
+[[ $canonical_candidate_commit == "$source_sha" \
+    && $canonical_candidate_tree == "$source_tree" ]] || {
+  printf 'error: canonical candidate mismatch: commit=%s tree=%s requested=%s/%s\n' \
+    "$canonical_candidate_commit" "$canonical_candidate_tree" \
+    "$source_sha" "$source_tree" >&2
+  exit 1
+}
+"${git_environment[@]}" "$git_command" -C "$canonical_repo" \
+  fsck --full --strict >/dev/null
+{
+  printf 'remote=%s\n' "$source_remote"
+  printf 'baseline_commit=%s\n' "$canonical_baseline_commit"
+  printf 'baseline_context_ref=%s\n' "$canonical_baseline_context_ref"
+  printf 'source_commit=%s\n' "$canonical_candidate_commit"
+  printf 'source_tree=%s\n' "$canonical_candidate_tree"
+  printf 'candidate_context_ref=%s\n' "$canonical_candidate_context_ref"
+  printf 'proof=exact-sha-live-fetch-and-retained-bundle\n'
+} >"$canonical_refs"
+{
+  printf 'command=env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin '
+  printf 'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 '
+  printf '/usr/bin/git -C <CANONICAL_REPO> fetch --no-tags --force %s ' \
+    "$source_remote"
+  printf '+%s:%s +%s:%s\n' \
+    "$canonical_baseline_commit" "$retained_baseline_ref" \
+    "$source_sha" "$retained_source_ref"
+  printf 'fetch=success\n'
+  printf 'fsck=success\n'
+  printf 'baseline_commit=%s\n' "$canonical_baseline_commit"
+  printf 'source_commit=%s\n' "$canonical_candidate_commit"
+  printf 'source_tree=%s\n' "$canonical_candidate_tree"
+} >"$canonical_fetch_evidence"
+
+"${git_environment[@]}" "$git_command" -C "$canonical_repo" \
+  cat-file commit "$retained_source_ref" >"$source_commit_object"
+retained_commit_sha=$("${git_environment[@]}" "$git_command" hash-object \
+  -t commit "$source_commit_object")
 [[ $retained_commit_sha == "$source_sha" ]] || {
   printf 'error: retained commit object mismatch: actual=%s expected=%s\n' \
     "$retained_commit_sha" "$source_sha" >&2
@@ -380,37 +458,57 @@ retained_commit_tree=$(awk 'NR == 1 && $1 == "tree" { print $2 }' "$source_commi
     "$retained_commit_tree" "$source_tree" >&2
   exit 1
 }
-git archive --format=tar --output="$source_archive" "$source_sha"
-archive_commit=$(git get-tar-commit-id <"$source_archive")
+"${git_environment[@]}" "$git_command" -C "$canonical_repo" archive --format=tar \
+  --output="$source_archive" "$retained_source_ref"
+archive_commit=$("${git_environment[@]}" "$git_command" get-tar-commit-id \
+  <"$source_archive")
 [[ $archive_commit == "$source_sha" ]] || {
   printf 'error: source archive commit mismatch: archive=%s expected=%s\n' \
     "$archive_commit" "$source_sha" >&2
   exit 1
 }
-git bundle create "$source_bundle" HEAD
-bundle_heads=$(git bundle list-heads "$source_bundle")
-[[ $bundle_heads == "$source_sha HEAD" ]] || {
-  printf 'error: retained source bundle head mismatch: actual=%s expected=%s HEAD\n' \
-    "$bundle_heads" "$source_sha" >&2
+"${git_environment[@]}" "$git_command" -C "$canonical_repo" bundle create \
+  "$source_bundle" "$retained_baseline_ref" "$retained_source_ref"
+bundle_baseline=$("${git_environment[@]}" "$git_command" bundle list-heads \
+  "$source_bundle" "$retained_baseline_ref")
+bundle_candidate=$("${git_environment[@]}" "$git_command" bundle list-heads \
+  "$source_bundle" "$retained_source_ref")
+bundle_head_count=$("${git_environment[@]}" "$git_command" bundle list-heads \
+  "$source_bundle" | awk 'END { print NR }')
+[[ $bundle_baseline == "$canonical_baseline_commit $retained_baseline_ref" \
+    && $bundle_candidate == "$source_sha $retained_source_ref" \
+    && $bundle_head_count -eq 2 ]] || {
+  printf 'error: retained canonical bundle refs mismatch: baseline=%s candidate=%s count=%s\n' \
+    "$bundle_baseline" "$bundle_candidate" "$bundle_head_count" >&2
   exit 1
 }
 bundle_check="$scratch/bundle-check.git"
-git init --bare --quiet "$bundle_check"
-git -C "$bundle_check" bundle verify "$source_bundle" \
+"${git_environment[@]}" "$git_command" init --bare --quiet "$bundle_check"
+"${git_environment[@]}" "$git_command" -C "$bundle_check" \
+  bundle verify "$source_bundle" \
   >"$scratch/bundle-verify.txt" 2>&1
-git -C "$bundle_check" fetch --quiet "$source_bundle" \
-  HEAD:refs/receipt/source
-bundle_commit=$(git -C "$bundle_check" rev-parse refs/receipt/source)
-bundle_tree=$(git -C "$bundle_check" rev-parse 'refs/receipt/source^{tree}')
-git -C "$bundle_check" cat-file commit refs/receipt/source \
+"${git_environment[@]}" "$git_command" -C "$bundle_check" fetch --quiet \
+  "$source_bundle" \
+  "$retained_baseline_ref:refs/imported/baseline" \
+  "$retained_source_ref:refs/imported/source"
+bundle_baseline_commit=$("${git_environment[@]}" "$git_command" -C \
+  "$bundle_check" rev-parse refs/imported/baseline)
+bundle_commit=$("${git_environment[@]}" "$git_command" -C "$bundle_check" \
+  rev-parse refs/imported/source)
+bundle_tree=$("${git_environment[@]}" "$git_command" -C "$bundle_check" \
+  rev-parse 'refs/imported/source^{tree}')
+"${git_environment[@]}" "$git_command" -C "$bundle_check" \
+  cat-file commit refs/imported/source \
   >"$scratch/bundle-source.commit"
-[[ $bundle_commit == "$source_sha" && $bundle_tree == "$source_tree" ]] || {
-  printf 'error: fresh-repository bundle mismatch: commit=%s tree=%s\n' \
-    "$bundle_commit" "$bundle_tree" >&2
+[[ $bundle_baseline_commit == "$canonical_baseline_commit" \
+    && $bundle_commit == "$source_sha" && $bundle_tree == "$source_tree" ]] || {
+  printf 'error: fresh-repository bundle mismatch: baseline=%s commit=%s tree=%s\n' \
+    "$bundle_baseline_commit" "$bundle_commit" "$bundle_tree" >&2
   exit 1
 }
 cmp --silent "$source_commit_object" "$scratch/bundle-source.commit"
-git -C "$bundle_check" fsck --full --strict >/dev/null
+"${git_environment[@]}" "$git_command" -C "$bundle_check" \
+  fsck --full --strict >/dev/null
 rm -rf "$bundle_check"
 tar --extract --file="$source_archive" --directory="$source_root" \
   --no-same-owner --no-same-permissions
@@ -429,7 +527,8 @@ cp "$source_root/bench/scale/reloadstall/validate_receipt.py" \
 source_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
 source_bundle_sha256=$(sha256sum "$source_bundle" | awk '{print $1}')
 find "$source_root" -exec chmod a-w {} +
-chmod a-w "$source_archive" "$source_bundle" "$source_commit_object"
+chmod a-w "$canonical_fetch_evidence" "$canonical_refs" "$source_archive" \
+  "$source_bundle" "$source_commit_object"
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
     --source-root "$source_root" --cargo-home "$cargo_home" \
@@ -686,15 +785,25 @@ payload = {
         "health": {"LC_ALL": "C", "TZ": "UTC"},
     },
     "commands": {
+        "canonical_fetch": [
+            "/usr/bin/git", "-C", "<CANONICAL_REPO>", "fetch", "--no-tags",
+            "--force", "https://github.com/lance0/rustbgpd.git",
+            "+b2ec55f21364978f26662b1ec35fd47ddcfce9a6:refs/receipt/baseline",
+            f"+{os.environ['SOURCE_COMMIT']}:refs/receipt/source",
+        ],
         "archive": [
-            "git", "archive", "--format=tar",
-            f"--output={output}/sources/source.tar", os.environ["SOURCE_COMMIT"],
+            "/usr/bin/git", "-C", "<CANONICAL_REPO>", "archive", "--format=tar",
+            f"--output={output}/sources/source.tar",
+            "refs/receipt/source",
         ],
         "commit_object": [
-            "git", "cat-file", "commit", os.environ["SOURCE_COMMIT"],
+            "/usr/bin/git", "-C", "<CANONICAL_REPO>", "cat-file", "commit",
+            "refs/receipt/source",
         ],
         "bundle": [
-            "git", "bundle", "create", f"{output}/sources/source.bundle", "HEAD",
+            "/usr/bin/git", "-C", "<CANONICAL_REPO>", "bundle", "create",
+            f"{output}/sources/source.bundle", "refs/receipt/baseline",
+            "refs/receipt/source",
         ],
         "extract": [
             "tar", "--extract", f"--file={output}/sources/source.tar",
@@ -764,7 +873,8 @@ verify_exact_sources() {
       "$current_bundle_sha256" "$source_bundle_sha256" >&2
     return 1
   }
-  current_commit_sha=$(git hash-object -t commit "$source_commit_object")
+  current_commit_sha=$("${git_environment[@]}" "$git_command" hash-object \
+    -t commit "$source_commit_object")
   [[ $current_commit_sha == "$source_sha" ]] || {
     printf 'error: retained source commit changed: actual=%s expected=%s\n' \
       "$current_commit_sha" "$source_sha" >&2
@@ -947,6 +1057,12 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'source_archive_sha256=%s\n' "$source_archive_sha256"
   printf 'source_bundle_sha256=%s\n' "$source_bundle_sha256"
   printf 'source_remote=%s\n' "$source_remote"
+  printf 'canonical_baseline_context_ref=%s\n' "$canonical_baseline_context_ref"
+  printf 'canonical_baseline_commit=%s\n' "$canonical_baseline_commit"
+  printf 'canonical_candidate_context_ref=%s\n' "$canonical_candidate_context_ref"
+  printf 'canonical_source_commit=%s\n' "$canonical_candidate_commit"
+  printf 'canonical_source_tree=%s\n' "$canonical_candidate_tree"
+  printf 'canonical_membership_proof=exact-sha-live-fetch-and-retained-bundle\n'
   printf 'build_source_root=<SOURCE_ROOT>\n'
   printf 'build_target_dir=<BUILD_TARGET>\n'
   printf 'host_lock=<HOST_LOCK>\n'
@@ -972,7 +1088,7 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n'
   printf 'harness_environment=env -i LC_ALL=C TZ=UTC\n'
   printf 'health_environment=env -i LC_ALL=C TZ=UTC\n'
-  git show --no-patch \
+  "${git_environment[@]}" "$git_command" -C "$canonical_repo" show --no-patch \
     --format='source_parent=%P%nsource_author_date=%aI%nsource_commit_date=%cI%nsource_subject=%s' \
     "$source_sha"
   "${tool_query_environment[@]}" "$rustc_command" -Vv
@@ -1011,6 +1127,9 @@ sanitize_text "$scratch/provenance.raw.txt" "$output_dir/provenance.txt" "$daemo
 SOURCE_COMMIT=$source_sha SOURCE_TREE=$source_tree \
 SOURCE_ARCHIVE_SHA256=$source_archive_sha256 SOURCE_BUNDLE_SHA256=$source_bundle_sha256 \
 SOURCE_REMOTE=$source_remote \
+CANONICAL_BASELINE_CONTEXT_REF=$canonical_baseline_context_ref \
+CANONICAL_BASELINE_COMMIT=$canonical_baseline_commit \
+CANONICAL_CANDIDATE_CONTEXT_REF=$canonical_candidate_context_ref \
 LOAD_ONE=$load_one PREFLIGHT_STARTED_WALL_NS=$preflight_started_wall_ns \
 PREFLIGHT_COMPLETED_WALL_NS=$preflight_completed_wall_ns \
 PROCESS_WALL_NS=$process_wall_ns LOAD_WALL_NS=$load_wall_ns \
@@ -1032,6 +1151,13 @@ manifest = {
         "archive_sha256": os.environ["SOURCE_ARCHIVE_SHA256"],
         "bundle_sha256": os.environ["SOURCE_BUNDLE_SHA256"],
         "remote": os.environ["SOURCE_REMOTE"],
+        "canonical": {
+            "baseline_commit": os.environ["CANONICAL_BASELINE_COMMIT"],
+            "baseline_context_ref": os.environ["CANONICAL_BASELINE_CONTEXT_REF"],
+            "candidate_context_ref": os.environ["CANONICAL_CANDIDATE_CONTEXT_REF"],
+            "source_commit": os.environ["SOURCE_COMMIT"],
+            "proof": "exact-sha-live-fetch-and-retained-bundle",
+        },
         "clean": True,
     },
     "runtime_dir": "<RUNTIME_DIR>",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed validator for a LAN-350 reload-stall receipt bundle."""
+"""Fail-closed validator for a policy reload-stall receipt bundle."""
 
 from __future__ import annotations
 
@@ -37,8 +37,16 @@ BUILD_TARGET = "<BUILD_TARGET>"
 HOST_LOCK = "<HOST_LOCK>"
 DAEMON_PID = "<DAEMON_PID>"
 GIT = "/usr/bin/git"
+CANONICAL_REMOTE = "https://github.com/lance0/rustbgpd.git"
+CANONICAL_BASELINE_COMMIT = "b2ec55f21364978f26662b1ec35fd47ddcfce9a6"
+CANONICAL_BASELINE_CONTEXT_REF = "refs/heads/main"
+CANONICAL_CANDIDATE_CONTEXT_REF = "refs/heads/perf/policy-reload-durable-receipt"
+RETAINED_BASELINE_REF = "refs/receipt/baseline"
+RETAINED_SOURCE_REF = "refs/receipt/source"
 GIT_ENVIRONMENT = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
     "HOME": "/nonexistent",
     "LC_ALL": "C",
     "PATH": "/usr/bin:/bin",
@@ -68,6 +76,8 @@ REQUIRED_FILES = {
     "scenario/member.initial.rpol",
     "source-status.txt",
     "sources/build_fence.py",
+    "sources/canonical-fetch.txt",
+    "sources/canonical-refs.txt",
     "sources/gen-scenario.py",
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
@@ -80,6 +90,7 @@ REQUIRED_FILES = {
 UNSUMMED_FILES = {"SHA256SUMS"}
 SOURCE_FILES = {
     "sources/build_fence.py",
+    "sources/canonical-refs.txt",
     "sources/gen-scenario.py",
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
@@ -234,18 +245,69 @@ def run_git(arguments: list[str], *, label: str) -> bytes:
     return completed.stdout
 
 
+def bundle_heads(bundle_path: Path) -> dict[str, str]:
+    rendered = run_git(
+        ["bundle", "list-heads", str(bundle_path)], label="bundle head listing"
+    ).decode("ascii", errors="strict")
+    result: dict[str, str] = {}
+    for line in rendered.splitlines():
+        fields = line.split(" ", 1)
+        if len(fields) != 2 or not COMMIT_RE.fullmatch(fields[0]):
+            fail(f"malformed source bundle head: {line!r}")
+        commit, ref = fields
+        if ref in result:
+            fail(f"duplicate source bundle ref: {ref}")
+        result[ref] = commit
+    return result
+
+
 def validate_source_bundle(root: Path, manifest: dict[str, Any]) -> None:
     bundle_path = root / "sources/source.bundle"
     source = require_mapping(manifest["source"], "manifest.source")
+    canonical = require_mapping(source["canonical"], "manifest.source.canonical")
     require_exact(
         hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
         source["bundle_sha256"],
         "source bundle SHA-256",
     )
-    heads = run_git(
-        ["bundle", "list-heads", str(bundle_path)], label="bundle head listing"
-    ).decode("ascii", errors="strict")
-    require_exact(heads, f"{source['commit']} HEAD\n", "source bundle advertised head")
+    require_exact(
+        bundle_heads(bundle_path),
+        {
+            RETAINED_BASELINE_REF: canonical["baseline_commit"],
+            RETAINED_SOURCE_REF: source["commit"],
+        },
+        "source bundle retained refs",
+    )
+    require_exact(
+        read_text(root / "sources/canonical-refs.txt"),
+        (
+            f"remote={CANONICAL_REMOTE}\n"
+            f"baseline_commit={canonical['baseline_commit']}\n"
+            f"baseline_context_ref={CANONICAL_BASELINE_CONTEXT_REF}\n"
+            f"source_commit={source['commit']}\n"
+            f"source_tree={source['tree']}\n"
+            f"candidate_context_ref={CANONICAL_CANDIDATE_CONTEXT_REF}\n"
+            "proof=exact-sha-live-fetch-and-retained-bundle\n"
+        ),
+        "retained canonical refs",
+    )
+    require_exact(
+        read_text(root / "sources/canonical-fetch.txt"),
+        (
+            "command=env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin "
+            "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+            "GIT_TERMINAL_PROMPT=0 /usr/bin/git -C <CANONICAL_REPO> fetch "
+            f"--no-tags --force {CANONICAL_REMOTE} "
+            f"+{canonical['baseline_commit']}:{RETAINED_BASELINE_REF} "
+            f"+{source['commit']}:{RETAINED_SOURCE_REF}\n"
+            "fetch=success\n"
+            "fsck=success\n"
+            f"baseline_commit={canonical['baseline_commit']}\n"
+            f"source_commit={source['commit']}\n"
+            f"source_tree={source['tree']}\n"
+        ),
+        "retained canonical fetch evidence",
+    )
 
     with tempfile.TemporaryDirectory(prefix="reloadstall-bundle-") as temporary:
         repository = Path(temporary) / "fresh.git"
@@ -261,23 +323,45 @@ def validate_source_bundle(root: Path, manifest: dict[str, Any]) -> None:
                 "fetch",
                 "--quiet",
                 str(bundle_path),
-                "HEAD:refs/receipt/source",
+                f"{RETAINED_BASELINE_REF}:refs/imported/baseline",
+                f"{RETAINED_SOURCE_REF}:refs/imported/source",
             ],
             label="fresh-repository bundle import",
         )
-        imported_commit = run_git(
-            ["-C", str(repository), "rev-parse", "refs/receipt/source"],
-            label="imported commit lookup",
-        ).decode("ascii").strip()
-        imported_tree = run_git(
-            ["-C", str(repository), "rev-parse", "refs/receipt/source^{tree}"],
-            label="imported tree lookup",
-        ).decode("ascii").strip()
+        imported_commit = (
+            run_git(
+                ["-C", str(repository), "rev-parse", "refs/imported/source"],
+                label="imported commit lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        imported_baseline = (
+            run_git(
+                ["-C", str(repository), "rev-parse", "refs/imported/baseline"],
+                label="imported baseline lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        imported_tree = (
+            run_git(
+                ["-C", str(repository), "rev-parse", "refs/imported/source^{tree}"],
+                label="imported tree lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
         require_exact(imported_commit, source["commit"], "source bundle commit")
+        require_exact(
+            imported_baseline,
+            canonical["baseline_commit"],
+            "source bundle baseline commit",
+        )
         require_exact(imported_tree, source["tree"], "source bundle tree")
         require_exact(
             run_git(
-                ["-C", str(repository), "cat-file", "commit", "refs/receipt/source"],
+                ["-C", str(repository), "cat-file", "commit", "refs/imported/source"],
                 label="imported commit read",
             ),
             (root / "sources/source.commit").read_bytes(),
@@ -286,6 +370,79 @@ def validate_source_bundle(root: Path, manifest: dict[str, Any]) -> None:
         run_git(
             ["-C", str(repository), "fsck", "--full", "--strict"],
             label="fresh-repository object verification",
+        )
+
+
+def validate_live_canonical_membership(
+    manifest: dict[str, Any], *, fetch_remote: str = CANONICAL_REMOTE
+) -> None:
+    source = require_mapping(manifest["source"], "manifest.source")
+    canonical = require_mapping(source["canonical"], "manifest.source.canonical")
+    with tempfile.TemporaryDirectory(prefix="reloadstall-canonical-") as temporary:
+        repository = Path(temporary) / "canonical.git"
+        run_git(
+            ["init", "--bare", "--quiet", str(repository)],
+            label="canonical repository init",
+        )
+        run_git(
+            [
+                "-C",
+                str(repository),
+                "fetch",
+                "--no-tags",
+                "--force",
+                fetch_remote,
+                f"+{canonical['baseline_commit']}:{RETAINED_BASELINE_REF}",
+                f"+{source['commit']}:{RETAINED_SOURCE_REF}",
+            ],
+            label="live canonical ref fetch",
+        )
+        live_baseline = (
+            run_git(
+                [
+                    "-C",
+                    str(repository),
+                    "rev-parse",
+                    f"{RETAINED_BASELINE_REF}^{{commit}}",
+                ],
+                label="live canonical baseline lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        live_candidate = (
+            run_git(
+                [
+                    "-C",
+                    str(repository),
+                    "rev-parse",
+                    f"{RETAINED_SOURCE_REF}^{{commit}}",
+                ],
+                label="live canonical candidate lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        live_tree = (
+            run_git(
+                ["-C", str(repository), "rev-parse", f"{RETAINED_SOURCE_REF}^{{tree}}"],
+                label="live canonical candidate tree lookup",
+            )
+            .decode("ascii")
+            .strip()
+        )
+        require_exact(
+            live_baseline,
+            canonical["baseline_commit"],
+            "live canonical baseline commit",
+        )
+        require_exact(
+            live_candidate, source["commit"], "live canonical candidate commit"
+        )
+        require_exact(live_tree, source["tree"], "live canonical candidate tree")
+        run_git(
+            ["-C", str(repository), "fsck", "--full", "--strict"],
+            label="live canonical object verification",
         )
 
 
@@ -333,7 +490,11 @@ def validate_source_archive(root: Path, manifest: dict[str, Any]) -> None:
             )
             for member in archive.getmembers():
                 relative = PurePosixPath(member.name)
-                if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                if (
+                    relative.is_absolute()
+                    or not relative.parts
+                    or ".." in relative.parts
+                ):
                     fail(f"unsafe source archive path: {member.name!r}")
                 name = relative.as_posix().rstrip("/")
                 if member.isdir():
@@ -415,7 +576,9 @@ def validate_publication_safety(root: Path, files: set[str]) -> None:
                 fail(f"{relative} contains {label}")
 
 
-def validate_manifest(root: Path) -> dict[str, Any]:
+def validate_manifest(
+    root: Path, *, expected_baseline_commit: str = CANONICAL_BASELINE_COMMIT
+) -> dict[str, Any]:
     manifest = load_json(root / "manifest.json")
     require_exact(manifest.get("schema"), SCHEMA, "manifest.schema")
     require_exact(manifest.get("status"), "complete", "manifest.status")
@@ -437,8 +600,37 @@ def validate_manifest(root: Path) -> dict[str, Any]:
     require_exact(source.get("clean"), True, "manifest.source.clean")
     require_exact(
         source.get("remote"),
-        "https://github.com/lance0/rustbgpd.git",
+        CANONICAL_REMOTE,
         "manifest.source.remote",
+    )
+    canonical = require_mapping(source.get("canonical"), "manifest.source.canonical")
+    require_exact(
+        canonical.get("baseline_context_ref"),
+        CANONICAL_BASELINE_CONTEXT_REF,
+        "manifest.source.canonical.baseline_context_ref",
+    )
+    baseline_commit = canonical.get("baseline_commit")
+    if not isinstance(baseline_commit, str) or not COMMIT_RE.fullmatch(baseline_commit):
+        fail("manifest.source.canonical.baseline_commit must be a full lowercase SHA")
+    require_exact(
+        baseline_commit,
+        expected_baseline_commit,
+        "manifest.source.canonical.baseline_commit",
+    )
+    require_exact(
+        canonical.get("candidate_context_ref"),
+        CANONICAL_CANDIDATE_CONTEXT_REF,
+        "manifest.source.canonical.candidate_context_ref",
+    )
+    require_exact(
+        canonical.get("source_commit"),
+        commit,
+        "manifest.source.canonical.source_commit",
+    )
+    require_exact(
+        canonical.get("proof"),
+        "exact-sha-live-fetch-and-retained-bundle",
+        "manifest.source.canonical.proof",
     )
     if read_text(root / "source-status.txt") != "":
         fail("source-status.txt must be empty for a retained receipt")
@@ -646,6 +838,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     for name in (
         "archive",
         "bundle",
+        "canonical_fetch",
         "commit_object",
         "build_daemon_cli",
         "build_fence",
@@ -731,29 +924,56 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "invocation.commands.build_fence",
     )
     require_exact(
+        commands["canonical_fetch"],
+        [
+            "/usr/bin/git",
+            "-C",
+            "<CANONICAL_REPO>",
+            "fetch",
+            "--no-tags",
+            "--force",
+            CANONICAL_REMOTE,
+            f"+{manifest['source']['canonical']['baseline_commit']}:{RETAINED_BASELINE_REF}",
+            f"+{manifest['source']['commit']}:{RETAINED_SOURCE_REF}",
+        ],
+        "invocation.commands.canonical_fetch",
+    )
+    require_exact(
         commands["archive"],
         [
-            "git",
+            "/usr/bin/git",
+            "-C",
+            "<CANONICAL_REPO>",
             "archive",
             "--format=tar",
             f"--output={OUTPUT_DIR}/sources/source.tar",
-            manifest["source"]["commit"],
+            RETAINED_SOURCE_REF,
         ],
         "invocation.commands.archive",
     )
     require_exact(
         commands["commit_object"],
-        ["git", "cat-file", "commit", manifest["source"]["commit"]],
+        [
+            "/usr/bin/git",
+            "-C",
+            "<CANONICAL_REPO>",
+            "cat-file",
+            "commit",
+            RETAINED_SOURCE_REF,
+        ],
         "invocation.commands.commit_object",
     )
     require_exact(
         commands["bundle"],
         [
-            "git",
+            "/usr/bin/git",
+            "-C",
+            "<CANONICAL_REPO>",
             "bundle",
             "create",
             f"{OUTPUT_DIR}/sources/source.bundle",
-            "HEAD",
+            RETAINED_BASELINE_REF,
+            RETAINED_SOURCE_REF,
         ],
         "invocation.commands.bundle",
     )
@@ -876,7 +1096,13 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         f"source_commit_object_sha={manifest['source']['commit']}",
         f"source_archive_sha256={manifest['source']['archive_sha256']}",
         f"source_bundle_sha256={manifest['source']['bundle_sha256']}",
-        "source_remote=https://github.com/lance0/rustbgpd.git",
+        f"source_remote={CANONICAL_REMOTE}",
+        f"canonical_baseline_context_ref={CANONICAL_BASELINE_CONTEXT_REF}",
+        f"canonical_baseline_commit={manifest['source']['canonical']['baseline_commit']}",
+        f"canonical_candidate_context_ref={CANONICAL_CANDIDATE_CONTEXT_REF}",
+        f"canonical_source_commit={manifest['source']['commit']}",
+        f"canonical_source_tree={manifest['source']['tree']}",
+        "canonical_membership_proof=exact-sha-live-fetch-and-retained-bundle",
         "build_source_root=<SOURCE_ROOT>",
         "build_target_dir=<BUILD_TARGET>",
         "host_lock=<HOST_LOCK>",
@@ -984,9 +1210,7 @@ def validate_scenario(root: Path, manifest: dict[str, Any]) -> None:
         "config.global keys",
     )
     require_exact(global_config.get("asn"), 65_500, "config.global.asn")
-    require_exact(
-        global_config.get("router_id"), "10.0.0.1", "config.global.router_id"
-    )
+    require_exact(global_config.get("router_id"), "10.0.0.1", "config.global.router_id")
     require_exact(global_config.get("listen_port"), PORT, "config.global.listen_port")
     runtime_dir = manifest["runtime_dir"]
     require_exact(
@@ -997,9 +1221,7 @@ def validate_scenario(root: Path, manifest: dict[str, Any]) -> None:
     telemetry = require_mapping(
         global_config.get("telemetry"), "config.global.telemetry"
     )
-    require_exact(
-        set(telemetry), {"grpc_uds", "log_format"}, "config telemetry keys"
-    )
+    require_exact(set(telemetry), {"grpc_uds", "log_format"}, "config telemetry keys")
     require_exact(telemetry.get("log_format"), "json", "config telemetry log_format")
     uds = require_mapping(telemetry.get("grpc_uds"), "config grpc_uds")
     require_exact(set(uds), {"path"}, "config grpc_uds keys")
@@ -1247,7 +1469,12 @@ def validate_health(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(result["health_failures"], failures, "manifest health failure count")
 
 
-def validate_receipt(path: str | Path) -> dict[str, Any]:
+def validate_receipt(
+    path: str | Path,
+    *,
+    canonical_remote: str = CANONICAL_REMOTE,
+    expected_baseline_commit: str = CANONICAL_BASELINE_COMMIT,
+) -> dict[str, Any]:
     requested_root = Path(path)
     if requested_root.is_symlink():
         fail("receipt root must not be a symlink")
@@ -1258,9 +1485,12 @@ def validate_receipt(path: str | Path) -> dict[str, Any]:
     files = validate_file_inventory(root)
     validate_checksums(root, files)
     validate_publication_safety(root, files)
-    manifest = validate_manifest(root)
+    manifest = validate_manifest(
+        root, expected_baseline_commit=expected_baseline_commit
+    )
     validate_source_bundle(root, manifest)
     validate_source_archive(root, manifest)
+    validate_live_canonical_membership(manifest, fetch_remote=canonical_remote)
     validate_preflight(root, manifest)
     validate_invocation(root, manifest)
     validate_scenario(root, manifest)

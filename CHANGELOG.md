@@ -261,7 +261,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   build, runtime, liveness, parsing, and scenario defects, including incomplete
   ordinary live `/proc` records. It emits a validator-checked durable bundle
   for the pending acceptance rerun. The daemon-side scenario generator
-  is committed at `bench/scale/reloadstall/gen-scenario.py`. (LAN-350)
+  is committed at `bench/scale/reloadstall/gen-scenario.py`.
 
 ## [0.51.0] — 2026-07-11
 

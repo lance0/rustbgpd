@@ -61,7 +61,10 @@ struct Event {
 }
 
 struct Obs {
-    events: Mutex<Vec<Event>>,
+    /// Generation state and the UPDATE timeline are one authority surface. A
+    /// completion timestamp must never become observable before the UPDATE at
+    /// that timestamp is present in `events`.
+    receiver: Mutex<ReceiverState>,
     /// cumulative base-space announced NLRI
     base_ann_total: AtomicU64,
     established: AtomicBool,
@@ -69,10 +72,22 @@ struct Obs {
     last_comms: Mutex<Vec<u32>>,
     /// Community marker required for the active reload generation.
     expected_community: AtomicU32,
-    /// Unique base prefixes observed with `expected_community`.
-    generation: Mutex<GenerationProgress>,
     /// One outstanding ROUTE-REFRESH reply at a time (see the reader).
     refresh_pending: AtomicBool,
+}
+
+struct ReceiverState {
+    events: Vec<Event>,
+    /// Unique base prefixes observed with the active expected community.
+    generation: GenerationProgress,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReloadSnapshot {
+    active: u64,
+    completed_at_us: Option<u64>,
+    max_gap_ms: Option<f64>,
+    first_update_ms: Option<f64>,
 }
 
 #[derive(Default)]
@@ -588,6 +603,11 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         other += u32::try_from(parsed.announced.len()).unwrap_or(0) - base;
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
+                        // Publish the generation transition and its UPDATE
+                        // event under one lock. A post-quiesce snapshot can
+                        // never observe completion without the event that
+                        // establishes that completion.
+                        let mut receiver = ob.receiver.lock().unwrap();
                         if base > 0 {
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
@@ -607,10 +627,11 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                             }
                             if expected != 0 {
                                 let state = marker_state(expected, communities);
-                                let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
                                     for &index in &base_indices {
-                                        if let Err(error) = generation.replace(index, state, t_us) {
+                                        if let Err(error) =
+                                            receiver.generation.replace(index, state, t_us)
+                                        {
                                             eprintln!(
                                                 "stub {i} invalid generation replacement: {error}"
                                             );
@@ -623,7 +644,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         }
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
-                        ob.events.lock().unwrap().push(Event {
+                        receiver.events.push(Event {
                             t_us,
                             base_ann: base,
                             other,
@@ -683,8 +704,8 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 /// Includes the leading gap from s_us to the first event; includes the
 /// trailing gap to e_us only when `trailing` is set (control windows).
 fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 {
-    let ev = ctx.obs[i].events.lock().unwrap();
-    max_gap_ms_for_events(&ev, s_us, e_us, trailing)
+    let receiver = ctx.obs[i].receiver.lock().unwrap();
+    max_gap_ms_for_events(&receiver.events, s_us, e_us, trailing)
 }
 
 fn max_gap_ms_for_events(ev: &[Event], s_us: u64, e_us: u64, trailing: bool) -> f64 {
@@ -709,7 +730,34 @@ fn max_gap_ms_for_events(ev: &[Event], s_us: u64, e_us: u64, trailing: bool) -> 
 /// First event time at which every expected unique base prefix was observed
 /// with the active policy-generation community marker.
 fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
-    ctx.obs[i].generation.lock().unwrap().completed_at_us
+    ctx.obs[i]
+        .receiver
+        .lock()
+        .unwrap()
+        .generation
+        .completed_at_us
+}
+
+fn reload_snapshot(observer: &Obs, t_hup: u64) -> ReloadSnapshot {
+    let receiver = observer.receiver.lock().unwrap();
+    reload_snapshot_for_receiver(&receiver, t_hup)
+}
+
+fn reload_snapshot_for_receiver(receiver: &ReceiverState, t_hup: u64) -> ReloadSnapshot {
+    let completed_at_us = receiver.generation.completed_at_us;
+    ReloadSnapshot {
+        active: receiver.generation.active,
+        completed_at_us,
+        max_gap_ms: completed_at_us
+            .map(|completed| max_gap_ms_for_events(&receiver.events, t_hup, completed, false)),
+        first_update_ms: completed_at_us.and_then(|completed| {
+            receiver
+                .events
+                .iter()
+                .find(|event| event.t_us >= t_hup && event.t_us <= completed)
+                .map(|event| (event.t_us - t_hup) as f64 / 1000.0)
+        }),
+    }
 }
 
 fn rss_mib(pid: i32) -> u64 {
@@ -774,12 +822,14 @@ fn main() {
             daemon: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), port),
             obs: (0..n_peers)
                 .map(|_| Obs {
-                    events: Mutex::new(Vec::with_capacity(1 << 14)),
+                    receiver: Mutex::new(ReceiverState {
+                        events: Vec::with_capacity(1 << 14),
+                        generation: GenerationProgress::default(),
+                    }),
                     base_ann_total: AtomicU64::new(0),
                     established: AtomicBool::new(false),
                     last_comms: Mutex::new(Vec::new()),
                     expected_community: AtomicU32::new(0),
-                    generation: Mutex::new(GenerationProgress::default()),
                     refresh_pending: AtomicBool::new(false),
                 })
                 .collect(),
@@ -924,7 +974,7 @@ fn main() {
             let rss_before = rss_mib(pid);
             for (i, observer) in ctx.obs.iter().enumerate() {
                 observer.expected_community.store(0, Ordering::Release);
-                observer.generation.lock().unwrap().reset(
+                observer.receiver.lock().unwrap().generation.reset(
                     total,
                     expected,
                     u32::try_from(i).unwrap() * per_peer,
@@ -986,22 +1036,19 @@ fn main() {
                 &format!("reload {r} quiesce"),
             )
             .await;
-            let generation_snapshots: Vec<(u64, Option<u64>)> = ctx
+            let generation_snapshots: Vec<ReloadSnapshot> = ctx
                 .obs
                 .iter()
-                .map(|observer| {
-                    let generation = observer.generation.lock().unwrap();
-                    (generation.active, generation.completed_at_us)
-                })
+                .map(|observer| reload_snapshot(observer, t_hup))
                 .collect();
             let (verified_min, verified_max, verified_observers) =
                 generation_snapshots.iter().fold(
                     (u64::MAX, 0, 0usize),
-                    |(minimum, maximum, complete), (active, completed_at_us)| {
+                    |(minimum, maximum, complete), snapshot| {
                         (
-                            minimum.min(*active),
-                            maximum.max(*active),
-                            complete + usize::from(completed_at_us.is_some()),
+                            minimum.min(snapshot.active),
+                            maximum.max(snapshot.active),
+                            complete + usize::from(snapshot.completed_at_us.is_some()),
                         )
                     },
                 );
@@ -1028,14 +1075,14 @@ fn main() {
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
-            for (i, (_, completed_at_us)) in generation_snapshots.iter().enumerate() {
-                if let Some(tc) = *completed_at_us {
+            for snapshot in &generation_snapshots {
+                if let Some(tc) = snapshot.completed_at_us {
                     comp_s.push((tc - t_hup) as f64 / 1e6);
-                    gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
-                    // Leading stall: SIGHUP -> first UPDATE of any kind.
-                    let ev = ctx.obs[i].events.lock().unwrap();
-                    if let Some(e) = ev.iter().find(|e| e.t_us >= t_hup) {
-                        firsts.push((e.t_us - t_hup) as f64 / 1000.0);
+                    if let Some(gap) = snapshot.max_gap_ms {
+                        gaps.push(gap);
+                    }
+                    if let Some(first) = snapshot.first_update_ms {
+                        firsts.push(first);
                     }
                 }
             }
@@ -1159,6 +1206,77 @@ mod tests {
             max_gap_ms_for_events(&events, 0, authoritative_completion, false),
             2_000.0
         );
+    }
+
+    #[test]
+    fn completion_and_event_publication_are_atomic_under_reassertion_race() {
+        use std::sync::{mpsc as std_mpsc, Arc, TryLockError};
+
+        let receiver = Arc::new(Mutex::new(ReceiverState {
+            events: vec![
+                Event {
+                    t_us: 10,
+                    base_ann: 1,
+                    other: 0,
+                },
+                Event {
+                    t_us: 20,
+                    base_ann: 1,
+                    other: 0,
+                },
+                Event {
+                    t_us: 30,
+                    base_ann: 1,
+                    other: 0,
+                },
+            ],
+            generation: GenerationProgress::default(),
+        }));
+        {
+            let mut state = receiver.lock().unwrap();
+            state.generation.reset(2, 2, 2, 0);
+            state
+                .generation
+                .replace(0, MarkerState::Active, 10)
+                .unwrap();
+            state
+                .generation
+                .replace(1, MarkerState::Active, 20)
+                .unwrap();
+            state
+                .generation
+                .replace(1, MarkerState::Inactive, 30)
+                .unwrap();
+        }
+
+        let (completion_published_tx, completion_published_rx) = std_mpsc::channel();
+        let (append_allowed_tx, append_allowed_rx) = std_mpsc::channel();
+        let writer_state = Arc::clone(&receiver);
+        let writer = std::thread::spawn(move || {
+            let mut state = writer_state.lock().unwrap();
+            let completion = 2_000_030;
+            state
+                .generation
+                .replace(1, MarkerState::Active, completion)
+                .unwrap();
+            completion_published_tx.send(()).unwrap();
+            append_allowed_rx.recv().unwrap();
+            state.events.push(Event {
+                t_us: completion,
+                base_ann: 1,
+                other: 0,
+            });
+        });
+
+        completion_published_rx.recv().unwrap();
+        assert!(matches!(receiver.try_lock(), Err(TryLockError::WouldBlock)));
+        append_allowed_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        let state = receiver.lock().unwrap();
+        let snapshot = reload_snapshot_for_receiver(&state, 0);
+        assert_eq!(snapshot.completed_at_us, Some(2_000_030));
+        assert_eq!(snapshot.max_gap_ms, Some(2_000.0));
     }
 
     #[test]
