@@ -16,7 +16,7 @@ build).
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation and memory attribution correction: 2026-06-02;
 structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
-distribution fanout A/B: 2026-07-12.
+distribution fanout A/B and update-group recovery: 2026-07-12.
 
 | Field | Value |
 |-------|-------|
@@ -447,15 +447,44 @@ batch probing with the live prepared-attribute memo key:
 | 256 | 7.795 → 5.283 ms | -31.3% | 7.778 → 6.407 ms | -18.3% |
 
 All Criterion mean-change 95% confidence intervals are entirely below zero.
-The full environment, commands, commit IDs, confidence intervals, correctness
-fence, and checked-in CSV are in the
+
+That memo still left the exact probe scaling per peer. A second pinned campaign
+compares current `main`'s permissive benchmark, the pre-cache real-probe head,
+and successful-length reuse across provably wire-equivalent members of the one
+update group exercised by this benchmark:
+
+| Peers | No policy: `main` / pre-cache / optimized | Optimized vs pre-cache | Policy: `main` / pre-cache / optimized | Optimized vs pre-cache |
+|-------|--------------------------------------------|------------------------|-----------------------------------------|------------------------|
+| 1 | 21.148 / 36.395 / 35.908 µs | -1.84% | 24.494 / 40.012 / 39.993 µs | -0.98% |
+| 8 | 56.415 / 180.416 / 94.704 µs | -47.33% | 62.745 / 183.181 / 102.689 µs | -43.99% |
+| 64 | 318.064 µs / 1.382 ms / 543.301 µs | -60.98% | 356.086 µs / 1.369 ms / 584.361 µs | -57.50% |
+| 256 | 1.251 / 5.886 / 2.068 ms | -64.28% | 1.372 / 5.341 / 2.234 ms | -58.31% |
+
+At 256 peers this reduces the overhead relative to the permissive control from
+4.706x to 1.653x without policy (82.37% of the excess recovered), and from
+3.893x to 1.629x with policy (78.28% recovered). This is one update group's
+64-route IPv4 first-advertise burst, not a resync or full-table measurement.
+
+The reuse cache lives for one distribution pass, requires the same group and
+pointer-identical shared unicast payload slices, and retains at most eight
+wire-equivalence cohorts per group. Transport proves equivalence by full
+normalized session-profile equality excluding only owner, generation, and the
+message ceiling; the target re-applies its own ceiling and generation. Only
+cardinality-correct all-success batches are retained. Default-refusing
+snapshots, non-shared/resync/exception payloads, and mixed-family envelopes
+remain on the ordinary exact-probe path.
+
+The full environments, commands, commit IDs, confidence intervals, correctness
+fences, and checked-in CSV for both campaigns are in the
 [`exact-export fanout receipt`](perf/exact-export-fanout-2026-07.md).
 
 The previous 2026-06 numbers used a permissive benchmark stub and did not time
 the exact export probe; they are superseded rather than a valid A/B baseline.
-The optimized path still builds one exact `UpdateMessage` per candidate. It
-only shares prepared attributes, so the benchmark continues to measure the
-full correctness gate while trapping the observed 18%..32% improvement.
+The first optimization still built one exact `UpdateMessage` per candidate and
+only shared prepared attributes. The cohort optimization builds one exact
+message per shared route and compatible cohort, then rechecks the encoded
+length against each target's ceiling. It preserves the exact correctness gate,
+but must not be described as performing a full exact encode per peer.
 
 ### Bulk Initial Load
 

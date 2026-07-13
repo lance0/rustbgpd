@@ -13,6 +13,11 @@
 //! per-peer export-policy share. Each measured pass is a *first* advertise
 //! (Adj-RIB-Out starts empty, so the Adj-RIB-Out equality suppression never
 //! short-circuits) — the conservative upper bound on per-peer cost.
+//! All peers occupy one update group and ordinary members share the same
+//! unicast route/next-hop payload Arcs. The exact-export path may therefore
+//! encode each route once per compatible wire-profile cohort and reapply each
+//! target's negotiated ceiling; it does not perform a full exact encode per
+//! peer. This is not a resync or full-table convergence benchmark.
 //!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
