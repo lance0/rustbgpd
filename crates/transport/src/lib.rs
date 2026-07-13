@@ -40,6 +40,7 @@ pub use handle::{
     ImportPolicyTermHits, PeerCommand, PeerCommandError, PeerHandle, PeerSessionState,
     PeerShutdownError, SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionRole, StateQueryOutcome,
+    WarmCheckpointSessionState,
 };
 pub use listener::{
     AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerGeneration,

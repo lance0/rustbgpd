@@ -30,7 +30,7 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
     MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, route_query_key,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotView, route_query_key,
 };
 
 use helpers::{
@@ -1665,6 +1665,9 @@ impl RibManager {
             }
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
+            RibUpdate::QueryWarmMrtSnapshot { views, reply } => {
+                self.handle_query_warm_mrt_snapshot(&views, reply);
+            }
             RibUpdate::QueryBmpLocRibDump { cursor, reply } => {
                 self.handle_query_bmp_loc_rib_dump(cursor, reply);
             }
@@ -3678,6 +3681,137 @@ impl RibManager {
         if reply.send(snapshot).is_err() {
             warn!("MRT snapshot query caller dropped before receiving response");
         }
+    }
+
+    fn handle_query_warm_mrt_snapshot(
+        &mut self,
+        views: &[WarmMrtSnapshotView],
+        reply: tokio::sync::oneshot::Sender<Result<MrtSnapshotData, String>>,
+    ) {
+        let result = self.build_warm_mrt_snapshot(views);
+        if reply.send(result).is_err() {
+            warn!("warm MRT snapshot query caller dropped before receiving response");
+        }
+    }
+
+    /// Build a route snapshot and verify the exact active session inventory in
+    /// one RIB-actor turn. The supplied views came from the peer-manager actor;
+    /// session generation/ASN/router-ID checks close replacement races between
+    /// those two captures. Any mismatch rejects the complete checkpoint.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one actor turn validates the complete identity fence and captures every supported route view"
+    )]
+    fn build_warm_mrt_snapshot(
+        &self,
+        views: &[WarmMrtSnapshotView],
+    ) -> Result<MrtSnapshotData, String> {
+        if views.is_empty() {
+            return Err("warm checkpoint has no eligible peer/family views".to_string());
+        }
+        if views
+            .windows(2)
+            .any(|pair| pair[0].sort_key() >= pair[1].sort_key())
+        {
+            return Err(
+                "warm checkpoint views must be strictly sorted and duplicate-free".to_string(),
+            );
+        }
+
+        let mut peer_identity = HashMap::<IpAddr, (u64, u32, Ipv4Addr)>::new();
+        let mut families = HashMap::<IpAddr, HashSet<(Afi, Safi)>>::new();
+        for view in views {
+            if !matches!(
+                (view.afi, view.safi),
+                (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) | (Afi::L2Vpn, Safi::Evpn)
+            ) {
+                return Err(format!(
+                    "warm checkpoint view for {} uses unsupported family {:?}/{:?}",
+                    view.peer, view.afi, view.safi
+                ));
+            }
+            let identity = (view.session_id, view.peer_asn, view.peer_router_id);
+            if peer_identity
+                .insert(view.peer, identity)
+                .is_some_and(|prior| prior != identity)
+            {
+                return Err(format!(
+                    "warm checkpoint views disagree on identity for peer {}",
+                    view.peer
+                ));
+            }
+            if !families
+                .entry(view.peer)
+                .or_default()
+                .insert((view.afi, view.safi))
+            {
+                return Err(format!(
+                    "warm checkpoint repeats family {:?}/{:?} for peer {}",
+                    view.afi, view.safi, view.peer
+                ));
+            }
+        }
+
+        for (&peer, &(session_id, peer_asn, peer_router_id)) in &peer_identity {
+            if self.outbound_session_ids.get(&peer).copied() != Some(session_id) {
+                return Err(format!(
+                    "peer {peer} changed active session during warm checkpoint"
+                ));
+            }
+            if self.peer_asn.get(&peer).copied() != Some(peer_asn) {
+                return Err(format!(
+                    "peer {peer} changed negotiated ASN during warm checkpoint"
+                ));
+            }
+            if self.peer_bgp_id.get(&peer).copied() != Some(peer_router_id) {
+                return Err(format!(
+                    "peer {peer} changed BGP identifier during warm checkpoint"
+                ));
+            }
+        }
+
+        let mut peers: Vec<_> = peer_identity
+            .iter()
+            .map(|(&peer_addr, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
+                peer_addr,
+                peer_bgp_id,
+                peer_asn,
+            })
+            .collect();
+        peers.sort_by_key(|peer| peer.peer_addr);
+
+        let routes = self
+            .ribs
+            .values()
+            .flat_map(crate::adj_rib_in::AdjRibIn::iter)
+            .filter(|route| {
+                let family = match route.prefix {
+                    Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                    Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+                };
+                families
+                    .get(&route.peer)
+                    .is_some_and(|allowed| allowed.contains(&family))
+            })
+            .cloned()
+            .collect();
+        let evpn_routes = self
+            .ribs
+            .values()
+            .flat_map(crate::adj_rib_in::AdjRibIn::iter_evpn)
+            .filter(|route| {
+                families
+                    .get(&route.peer)
+                    .is_some_and(|allowed| allowed.contains(&(Afi::L2Vpn, Safi::Evpn)))
+            })
+            .cloned()
+            .collect();
+
+        Ok(MrtSnapshotData {
+            peers,
+            routes,
+            evpn_routes,
+        })
     }
 
     /// Run the RIB manager event loop until the channel is closed.

@@ -542,6 +542,29 @@ pub struct RuntimeConfigSnapshotReply {
     pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
 }
 
+/// Current static-session negotiation identity captured for one coordinated
+/// warm checkpoint. This is daemon-internal plumbing, not a public API view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmCheckpointSession {
+    /// Unambiguous configured peer identity (V1 admits numbered peers only).
+    pub peer: PeerKey,
+    /// Peer-manager generation of the exact active transport session.
+    pub session_id: u64,
+    /// Remote ASN negotiated in the current OPEN exchange.
+    pub peer_asn: u32,
+    /// Remote BGP identifier negotiated in the current OPEN exchange.
+    pub peer_router_id: std::net::Ipv4Addr,
+    /// Address families negotiated on this exact session.
+    pub negotiated_families: Vec<(Afi, Safi)>,
+    /// GR families advertised by this exact session's peer OPEN.
+    pub peer_gr_families: Vec<(Afi, Safi)>,
+    /// Families for which Add-Path receive/both was negotiated.
+    pub add_path_receive_families: Vec<(Afi, Safi)>,
+    /// Canonical, redacted identity of the effective import policy captured
+    /// from the same peer-manager actor state as the session generation.
+    pub canonical_import_policy: Vec<u8>,
+}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -573,6 +596,12 @@ pub enum PeerManagerCommand {
     ListPeers {
         /// Reply channel returning all peer snapshots.
         reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+    /// Capture all checkpoint-eligible static sessions under the peer-manager
+    /// actor. Any candidate query timeout rejects the entire reply.
+    QueryWarmCheckpointSessions {
+        /// Reply channel returning deterministic current-session identities.
+        reply: oneshot::Sender<Result<Vec<WarmCheckpointSession>, String>>,
     },
     /// Subscribe to live session lifecycle events.
     SubscribeSessionEvents {

@@ -297,6 +297,61 @@ async fn query_state_sorts_both_paths_limit_vectors_by_numeric_family() {
     );
 }
 
+#[tokio::test]
+async fn warm_checkpoint_query_uses_current_gr_and_add_path_receive_direction() {
+    let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::L2Vpn, Safi::Evpn),
+    ];
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_restart_time = 120;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: true,
+    }];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Receive);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Send);
+    negotiated
+        .add_path_families
+        .insert((Afi::L2Vpn, Safi::Evpn), AddPathMode::Both);
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryWarmCheckpointState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    let state = state.await.unwrap();
+
+    assert_eq!(state.peer_asn, Some(65002));
+    assert_eq!(state.peer_router_id, Some(Ipv4Addr::new(10, 0, 0, 2)));
+    assert!(state.peer_gr_capable);
+    assert_eq!(state.peer_gr_restart_time, 120);
+    assert_eq!(
+        state.negotiated_families,
+        vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::L2Vpn, Safi::Evpn),
+        ]
+    );
+    assert_eq!(state.peer_gr_families, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert_eq!(
+        state.add_path_receive_families,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn),]
+    );
+}
+
 fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
     let nlri = decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, payload_tag])
         .expect("fixture BGP-LS NLRI decodes")

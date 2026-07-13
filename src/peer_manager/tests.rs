@@ -5,7 +5,7 @@ use rustbgpd_api::peer_types::{
     SessionLifecycleEventType,
 };
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::{PeerSessionState, TcpAoRotationStatus};
+use rustbgpd_transport::{PeerSessionState, TcpAoRotationStatus, WarmCheckpointSessionState};
 use rustbgpd_wire::{
     Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
 };
@@ -1250,6 +1250,132 @@ fn fake_peer_handle_with_route_refresh_reply(
         Ok(())
     });
     PeerHandle::from_parts(session_tx, task)
+}
+
+fn warm_checkpoint_peer_handle(response: Option<WarmCheckpointSessionState>) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut held_replies = Vec::new();
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryWarmCheckpointState { reply } => {
+                    if let Some(state) = response.clone() {
+                        let _ = reply.send(state);
+                    } else {
+                        held_replies.push(reply);
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+fn eligible_warm_checkpoint_state() -> WarmCheckpointSessionState {
+    WarmCheckpointSessionState {
+        fsm_state: SessionState::Established,
+        peer_asn: Some(65002),
+        peer_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+        negotiated_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        peer_gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_gr_capable: true,
+        peer_gr_restart_time: 120,
+        add_path_receive_families: vec![(Afi::Ipv4, Safi::Unicast)],
+    }
+}
+
+#[tokio::test]
+async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.2".parse().unwrap();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
+        false,
+    );
+
+    let sessions = mgr.query_warm_checkpoint_sessions().await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.peer, key(addr));
+    assert_eq!(session.session_id, 1);
+    assert_eq!(session.peer_asn, 65002);
+    assert_eq!(session.peer_router_id, Ipv4Addr::new(10, 0, 0, 2));
+    assert_eq!(
+        session.add_path_receive_families,
+        vec![(Afi::Ipv4, Safi::Unicast)]
+    );
+    assert_eq!(
+        session.canonical_import_policy,
+        b"rustbgpd/policy-chain/warm-checkpoint/v1/implicit-permit\n"
+    );
+}
+
+#[tokio::test]
+async fn warm_checkpoint_session_query_rejects_pending_collision() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.2".parse().unwrap();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
+        2,
+    );
+
+    let error = mgr.query_warm_checkpoint_sessions().await.unwrap_err();
+    assert!(error.contains("unresolved collision candidate"), "{error}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn warm_checkpoint_session_query_timeout_rejects_complete_snapshot() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.2".parse().unwrap();
+    insert_test_managed_peer(&mut mgr, addr, warm_checkpoint_peer_handle(None), false);
+
+    let error = mgr.query_warm_checkpoint_sessions().await.unwrap_err();
+    assert!(error.contains("bounded checkpoint query"), "{error}");
+}
+
+#[tokio::test]
+async fn warm_checkpoint_session_query_skips_unusable_gr_sessions() {
+    let mut mgr = test_peer_manager();
+    let no_family_addr: IpAddr = "10.0.0.2".parse().unwrap();
+    let zero_restart_addr: IpAddr = "10.0.0.3".parse().unwrap();
+    let mut no_family = eligible_warm_checkpoint_state();
+    no_family.peer_gr_families.clear();
+    let mut zero_restart = eligible_warm_checkpoint_state();
+    zero_restart.peer_gr_restart_time = 0;
+    insert_test_managed_peer(
+        &mut mgr,
+        no_family_addr,
+        warm_checkpoint_peer_handle(Some(no_family)),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        zero_restart_addr,
+        warm_checkpoint_peer_handle(Some(zero_restart)),
+        false,
+    );
+
+    assert!(
+        mgr.query_warm_checkpoint_sessions()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

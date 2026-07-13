@@ -1683,6 +1683,15 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
+    /// Query one actor-consistent, session-fenced Adj-RIB-In snapshot for a
+    /// shutdown warm checkpoint. The caller supplies the exact PM/session
+    /// inventory; any mismatch rejects the complete snapshot.
+    QueryWarmMrtSnapshot {
+        /// Strictly sorted, duplicate-free eligible view inventory.
+        views: Vec<WarmMrtSnapshotView>,
+        /// Response channel. `Err` is a fail-closed checkpoint result.
+        reply: oneshot::Sender<Result<MrtSnapshotData, String>>,
+    },
     /// One bounded chunk of an RFC 9069 Loc-RIB table dump for a
     /// (re)connected BMP collector: synthesize at most one chunk of
     /// UPDATE PDUs (unicast + VPN bests, resumed from `cursor`) with
@@ -1729,4 +1738,39 @@ pub struct MrtSnapshotData {
     /// `RIB_GENERIC` records (AFI 25 / SAFI 70). Empty for non-EVPN
     /// deployments.
     pub evpn_routes: Vec<crate::route::EvpnRibRoute>,
+}
+
+/// One exact peer/family/session view requested for a warm MRT snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmMrtSnapshotView {
+    /// Configured numbered peer address.
+    pub peer: IpAddr,
+    /// Peer-manager generation of the active session.
+    pub session_id: u64,
+    /// Remote ASN negotiated by that session.
+    pub peer_asn: u32,
+    /// Remote BGP identifier negotiated by that session.
+    pub peer_router_id: Ipv4Addr,
+    /// Exact supported family.
+    pub afi: Afi,
+    /// Exact supported SAFI.
+    pub safi: Safi,
+    /// Whether Add-Path receive/both was negotiated for this view.
+    pub add_path_receive: bool,
+}
+
+impl WarmMrtSnapshotView {
+    /// Stable ordering key independent of enum declaration order.
+    #[must_use]
+    pub fn sort_key(&self) -> (IpAddr, u16, u8, u64, u32, Ipv4Addr, bool) {
+        (
+            self.peer,
+            self.afi as u16,
+            self.safi as u8,
+            self.session_id,
+            self.peer_asn,
+            self.peer_router_id,
+            self.add_path_receive,
+        )
+    }
 }

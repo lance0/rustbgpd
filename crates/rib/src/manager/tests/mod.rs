@@ -388,6 +388,20 @@ async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtS
     reply_rx.await.unwrap()
 }
 
+async fn query_warm_mrt_snapshot(
+    tx: &mpsc::Sender<RibUpdate>,
+    views: Vec<crate::update::WarmMrtSnapshotView>,
+) -> Result<crate::update::MrtSnapshotData, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryWarmMrtSnapshot {
+        views,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 async fn query_flowspec_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<FlowSpecRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryFlowSpecRoutes { reply: reply_tx })

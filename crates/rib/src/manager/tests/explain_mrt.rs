@@ -1,6 +1,124 @@
 use super::*;
 
 #[tokio::test]
+async fn warm_mrt_snapshot_rejects_session_generation_change_at_rib_fence() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 42,
+        peer,
+        peer_asn: 65002,
+        peer_router_id,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let error = query_warm_mrt_snapshot(
+        &tx,
+        vec![crate::update::WarmMrtSnapshotView {
+            peer,
+            session_id: 41,
+            peer_asn: 65002,
+            peer_router_id,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            add_path_receive: false,
+        }],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("changed active session"), "{error}");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 42,
+        peer,
+        peer_asn: 65002,
+        peer_router_id,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut v6 = make_v6_route(
+        Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
+        "2001:db8::1".parse().unwrap(),
+    );
+    v6.peer = peer;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 42,
+        peer,
+        announced: vec![make_route(v4, Ipv4Addr::new(10, 0, 0, 1)), v6],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let snapshot = query_warm_mrt_snapshot(
+        &tx,
+        vec![crate::update::WarmMrtSnapshotView {
+            peer,
+            session_id: 42,
+            peer_asn: 65002,
+            peer_router_id,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            add_path_receive: false,
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.routes.len(), 1);
+    assert_eq!(snapshot.routes[0].prefix, Prefix::V4(v4));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
