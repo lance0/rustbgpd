@@ -260,16 +260,23 @@ The IXP follow-up adds a complementary eBGP route-server fixture without
 changing the homogeneous RR workload above. Before the fix, a clean transition
 treated each remote ASN as a distinct exact-export profile even though encoding
 consumed it only as eBGP/iBGP classification. At 4,096 routes and 700 distinct-ASN clients,
-that produced 2,867,200 full probes, 3,599 actor polls, and a 508.389 ms median.
+that produced 2,867,200 full probes, 3,599 actor polls, and a 516.344 ms median.
 
 The exact-export profile now stores the derived eBGP/iBGP class while retaining
 full equality for every actual wire input. The same distinct-ASN workload uses
-4,096 full probes and 803 polls and completes in 7.744 ms, a -98.47% Criterion
-mean change (-98.52%..-98.42%). The 64-client cell drops from 262,144 to 4,096
-full probes and from 48.639 ms to 3.438 ms. Optimized homogeneous and
+4,096 full probes and 803 polls and completes in 7.544 ms, a -98.53% Criterion
+mean change (-98.57%..-98.49%). The 64-client cell drops from 262,144 to 4,096
+full probes and from 49.026 ms to 3.384 ms. Optimized homogeneous and
 distinct-ASN receipts have identical plan/probe/shell/poll counts. Byte-level
 tests prove cross-ASN eBGP equality and preserve the eBGP/iBGP incompatibility
 boundary; per-member ceiling and generation checks remain mandatory.
+
+The homogeneous 700-client cell showed no detected change. The homogeneous
+64-client cell measured a +4.14% mean shift (+2.63%..+5.56%), retained here
+because the benchmark matrix is evidence rather than a selective headline.
+The dynamic-neighbor capture canary additionally proves that configured
+`remote_asn = 0` defers classification to the negotiated ASN for both eBGP and
+same-AS iBGP sessions.
 
 Raw medians, confidence bounds, deterministic counters, environment, and
 reproduction commands are retained in

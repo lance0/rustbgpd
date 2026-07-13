@@ -2,15 +2,14 @@
 
 This directory retains the raw, normalized Criterion medians and deterministic
 production-state-machine counters for the IXP exact-export cohort campaign.
-All durations are nanoseconds. The measured fixture-only baseline is commit
-`5ba459833190b72cc1f1c348155557ed0d090ff1`; its tree-equivalent rebased commit
-is `3e6416894e93668393b28f0d21e52a1d1a30ee03`. The measured wire-equivalence
-optimization is `e76e6fa55c39ebdd00ec9122a163c3b704d3bedc`.
+All durations are nanoseconds. The measured fixture-only baseline is the
+reachable commit `3e64168919f1f5a7f2631663c8b02f536950cc86`. The measured
+wire-equivalence optimization is
+`e76e6fa55c39ebdd00ec9122a163c3b704d3bedc`.
 
 Environment: Linux 6.17.0-35-generic x86_64, AMD Ryzen Threadripper 7970X,
 `rustc 1.97.0 (2d8144b78 2026-07-07)`, Criterion 0.8, workspace release
-profile, CPU 7 pinned with the `performance` governor. The initial one-minute
-load average was 2.21 on a 64-logical-CPU host.
+profile, CPU 7 pinned with the `performance` governor.
 
 The first-advertise matrix used 64 IPv4 unicast routes and 8, 64, or 256
 eBGP route-server clients. The transition matrix used 4,096 routes and 64 or
