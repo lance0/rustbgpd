@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -705,7 +708,71 @@ def named_rust_test_region(source: str, name: str) -> str | None:
     return source[match.start() : cursor]
 
 
-def check_json_contract(contract: dict, label: str, *, require_id_literal: bool) -> None:
+def check_contract_command_paths(
+    contract: dict, label: str, stable_command_paths: set[str]
+) -> None:
+    command_paths = contract.get("command_paths")
+    if not isinstance(command_paths, list) or not command_paths:
+        fail(f"{label}.command_paths must link at least one stable CLI command path")
+    canonical = [" ".join(path.split()) for path in command_paths]
+    require_sorted_unique(canonical, f"{label}.command_paths")
+    if command_paths != canonical:
+        fail(f"{label}.command_paths must use canonical single-space separators")
+    missing = sorted(set(command_paths) - stable_command_paths)
+    if missing:
+        fail(f"{label}.command_paths reference unpinned CLI paths: {missing}")
+
+
+def check_contract_producer_tests(contract: dict, label: str) -> None:
+    golden_paths = {golden["path"] for golden in contract.get("golden_files", [])}
+    producer_tests = contract.get("producer_tests", [])
+    if not golden_paths and producer_tests:
+        fail(f"{label}.producer_tests cannot exist without pinned golden files")
+    if golden_paths and not producer_tests:
+        fail(f"{label} pins golden files without producer-test linkage")
+
+    producer_ids = [producer["id"] for producer in producer_tests]
+    require_sorted_unique(producer_ids, f"{label}.producer_tests")
+    linked_goldens: list[str] = []
+    for producer in producer_tests:
+        producer_label = f"{label}.producer_tests.{producer['id']}"
+        golden = producer.get("golden")
+        if golden not in golden_paths:
+            fail(f"{producer_label} references an unpinned golden file")
+        linked_goldens.append(golden)
+
+        source_path = ROOT / safe_relative_path(
+            producer["source"], "JSON contract producer-test source"
+        )
+        try:
+            source = source_path.read_text()
+        except OSError as error:
+            fail(f"cannot read producer-test source {producer['source']}: {error}")
+        test = producer.get("test")
+        test_region = named_rust_test_region(source, test) if test else None
+        if not test_region:
+            fail(f"{producer_label} has no live named producer test")
+        test_linkage = producer.get("test_linkage")
+        if not test_linkage or test_linkage not in test_region:
+            fail(f"{producer_label} test is not linked to its producer")
+        golden_linkage = producer.get("golden_linkage")
+        if not golden_linkage or golden_linkage not in strip_rust_comments(source):
+            fail(f"{producer_label} source is not linked to its pinned golden")
+
+    if len(linked_goldens) != len(set(linked_goldens)):
+        fail(f"{label}.producer_tests link a golden file more than once")
+    missing_producers = sorted(golden_paths - set(linked_goldens))
+    if missing_producers:
+        fail(f"{label}.golden_files have no producer test: {missing_producers}")
+
+
+def check_json_contract(
+    contract: dict,
+    label: str,
+    *,
+    require_id_literal: bool,
+    stable_command_paths: set[str] | None = None,
+) -> None:
     if contract.get("evolution") not in {
         "additive_fields_only",
         "additive_fields_only_except_explicitly_experimental_fields",
@@ -742,6 +809,9 @@ def check_json_contract(contract: dict, label: str, *, require_id_literal: bool)
             fail(f"JSON contract golden {golden['path']} must be a regular file")
         if file_sha256(golden_path) != golden["sha256"]:
             fail(f"JSON contract golden {golden['path']} changed without an inventory update")
+    check_contract_producer_tests(contract, label)
+    if stable_command_paths is not None:
+        check_contract_command_paths(contract, label, stable_command_paths)
     if "required_json_types" in contract:
         check_json_shape(contract, label)
     elif "record_json_contracts" in contract:
@@ -793,6 +863,7 @@ def check_cli(inventory: dict) -> None:
             contract,
             f"cli.versioned_json_contracts.{contract['id']}",
             require_id_literal=True,
+            stable_command_paths=set(stable_canonical),
         )
     pinned = inventory["cli"]["test_pinned_json_contracts"]
     pinned_ids = [contract["id"] for contract in pinned]
@@ -803,6 +874,61 @@ def check_cli(inventory: dict) -> None:
             f"cli.test_pinned_json_contracts.{contract['id']}",
             require_id_literal=False,
         )
+
+
+def expect_checker_failure(action, expected: str, label: str) -> None:
+    stderr = io.StringIO()
+    failed = False
+    with contextlib.redirect_stderr(stderr):
+        try:
+            action()
+        except SystemExit:
+            failed = True
+    if not failed:
+        fail(f"checker self-test {label!r} unexpectedly passed")
+    actual = stderr.getvalue()
+    if expected not in actual:
+        fail(
+            f"checker self-test {label!r} failed for the wrong reason; "
+            f"expected stderr containing {expected!r}, got {actual!r}"
+        )
+
+
+def check_cli_checker_selftests(inventory: dict) -> None:
+    versioned = {
+        contract["id"]: contract for contract in inventory["cli"]["versioned_json_contracts"]
+    }
+    ribsnap = versioned["rbgp-ribsnap/1"]
+
+    expect_checker_failure(
+        lambda: check_contract_command_paths(
+            versioned["rbgp-ribdiff/1"],
+            "selftest.ribdiff",
+            set(inventory["cli"]["stable_command_paths"]) - {"diff advertised"},
+        ),
+        "reference unpinned CLI paths",
+        "missing command path classification",
+    )
+
+    missing_golden = copy.deepcopy(ribsnap)
+    missing_golden["golden_files"] = missing_golden["golden_files"][1:]
+    expect_checker_failure(
+        lambda: check_contract_producer_tests(missing_golden, "selftest.ribsnap"),
+        "references an unpinned golden file",
+        "missing golden linkage",
+    )
+
+    missing_producer_linkage = copy.deepcopy(ribsnap)
+    missing_producer_linkage["producer_tests"][0]["test_linkage"] = (
+        "producer_linkage_that_does_not_exist"
+    )
+    expect_checker_failure(
+        lambda: check_contract_producer_tests(
+            missing_producer_linkage, "selftest.ribsnap"
+        ),
+        "test is not linked to its producer",
+        "missing producer linkage",
+    )
 
 
 def check_policy(inventory: dict) -> None:
@@ -840,6 +966,7 @@ def main() -> None:
     check_policy(inventory)
     check_config(inventory, load_json(SCHEMA_PATH))
     check_grpc(inventory)
+    check_cli_checker_selftests(inventory)
     check_cli(inventory)
     check_upgrade_exercises(inventory)
     print("v1 stable-surface inventory: OK")

@@ -58,9 +58,13 @@ currently include `rbgp-ribdiff/1` and `rbgp-ribsnap/1`. The ribdiff report may
 gain additive fields, but removing or reinterpreting existing fields is not
 compatible. The ribsnap parser is intentionally closed and rejects unknown
 fields; changing its record schema requires a new format version rather than an
-in-place additive change. The neighbor-detail JSON and support-bundle manifest
-v2 pin required and optional key/type floors, including promised nested object
-shapes, in their serializer contract tests while allowing additive fields.
+in-place additive change. Each format inventory names the CLI paths that expose
+it. Every pinned ribsnap golden is also linked to the exact BIRD, FRR, GoBGP,
+MRT, or BMP producer test that creates it; the executable floor checks every
+record in those real goldens and then passes each complete artifact through the
+fail-closed parser. The neighbor-detail JSON and support-bundle manifest v2 pin
+required and optional key/type floors, including promised nested object shapes,
+in their serializer contract tests while allowing additive fields.
 
 Prometheus metrics and structured event payloads used by the stable roles are
 covered by semantic rules rather than a promise that no new metric, event kind,
