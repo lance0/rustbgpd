@@ -2015,10 +2015,11 @@ impl RibManager {
             RouteQueryScope::Advertised { peer } => {
                 // A grouped member holds no per-peer unicast Adj-RIB-Out;
                 // its advertised set is synthesized (group table − own-
-                // sourced) — materialized by that synthesis, then paged
-                // so the reply stays bounded either way.
-                match self.grouped_advertised_routes(peer) {
-                    Some(routes) => page_routes(routes.iter(), filter, after, page_size),
+                // sourced − exact-export rejections). Page that borrowed
+                // view directly: materializing it first would clone the
+                // complete group table for every bounded page.
+                match self.grouped_advertised_routes_iter(peer) {
+                    Some(routes) => page_routes(routes, filter, after, page_size),
                     None => page_routes(
                         self.adj_ribs_out
                             .get(&peer)

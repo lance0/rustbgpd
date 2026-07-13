@@ -46,9 +46,102 @@ with both runs pinned to one CPU core through `taskset`. It writes a Markdown
 summary, command logs, environment metadata, and raw Criterion artifacts under
 `target/bench-compare/`.
 
-Requirements: `bash`, `git`, `cargo`, `python3`, and `taskset` from
-util-linux. Use `--no-taskset` only for a quick mechanics check; results from
-an unpinned run should be treated as directional.
+`route_paging` is a manager-level custom harness for the long-running LAN-391
+complete-traversal shape. One harness process runs exactly one scope/route/page
+cell and reports one CSV row plus per-page synchronous handler-boundary
+p50/p99/max. Those page timings include oneshot setup/retrieval around the
+direct handler call: they are a conservative proxy for manager-task occupancy,
+not an observation of actor scheduling or end-to-end gRPC latency. Unlike
+Criterion, the harness does not multiply the 400k route/page-size 100
+repeated-scan baseline by a minimum sample count.
+
+Use the paired driver for retained comparisons:
+
+```bash
+bench/compare-route-paging.sh \
+  --base 50399dac696507a827480be4a9dcfef49e1682b3 \
+  --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
+  --routes 100000,400000 \
+  --page-sizes 100,1000 \
+  --repetitions 4 \
+  --core 5
+```
+
+The driver requires the exact full commit IDs shown above, creates detached
+worktrees for them, and overlays the invoking checkout's benchmark plus
+bench-support source byte-for-byte into both. It records and verifies their
+combined SHA-256, runs every traversal in a fresh process, and alternates
+baseline-first/optimized-first order for paired repetitions. The harness
+validates row totals, strict cursor order, page bounds, complete traversal, and
+a deterministic ordered-route-key checksum. The
+grouped fixture is intentionally distinct from the best control: two RR-client
+members share a group while every sixteenth route is sourced by the queried
+member and removed by member-specific split horizon. The driver rejects any
+baseline/optimized row, page-count, or checksum disagreement and any grouped
+fixture that collapses back to the best control. Both refs are required, must
+resolve to the pinned distinct commits, and executable-line plus iterator-body
+guards require the materialized call only at the baseline and the borrowed
+grouped view only at the optimized ref. The normalized production diff must
+match its pinned SHA-256, so extra edits inside an otherwise allowed
+implementation file are rejected. After the shared overlays, all tracked Cargo
+manifests and lockfiles, build scripts, Cargo config, and optional Rust
+toolchain selector files must be byte-identical; dirty production files are
+never measured. Retained comparisons also require a clean invoking checkout
+and an exclusive, nonblocking lock on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}`; lock contention
+exits 75 before either pinned tree is built. The driver prebuilds both trees
+with `cargo bench --locked --no-run` into separate target directories and
+retains one build log per side. Prebuilds use one Cargo job so the driver's own
+compile phase does not manufacture a high one-minute load immediately before
+the first sample. Each cell launches its side's resolved prebuilt executable
+directly, so Cargo cannot rebuild between the idle preflight and the sample;
+metadata retains both executable hashes.
+
+Immediately before every fresh-process cell, the driver polls for at most 30
+seconds and requires all of the following at the same point-in-time check: the
+one-minute load average is below 2.0, no other `cargo`, `rustc`, `rrharness`, or
+`route_paging` process is running, and the selected CPU reports the
+`performance` governor. Every polling attempt, including a timeout, is retained
+with UTC, load, governor, and matching process snapshot in
+`cell-preflight.tsv`. The lock excludes only cooperating rustbgpd bench/soak
+runners, and the process/load checks are a noise fence rather than a claim that
+the whole host is isolated.
+Retained metadata records the lock's default/override policy and a path digest,
+not the host username or absolute home directory.
+
+Each per-process CSV is retained under the comparison artifact's `raw/`
+directory. The exact overlaid harness, bench-support module, comparison driver,
+baseline/optimized production paging sources, and common Cargo/build inputs are
+retained under `measurement-sources/` with verified manifests, and an
+explicitly selected output directory must be empty.
+On successful validation, a top-level `SHA256SUMS` covers the combined/raw
+CSVs, logs, preflight evidence, metadata, and nested measurement-source
+manifest.
+
+`--no-taskset` marks the output `mechanics-only` and is never retained as
+comparison evidence. A dirty checkout is rejected by default; the explicit
+`--allow-dirty-mechanics --no-taskset` combination exists only to exercise the
+driver while editing it. Metadata records the invoking HEAD, dirty flag and
+status hash, evidence class, lock policy/digest, preflight thresholds, and exact driver,
+harness, bench-support, compile-input-manifest, and measurement-source-manifest
+hashes.
+
+For a quick single-process mechanics check, invoke the bench target directly
+with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publish
+that output as comparison evidence.
+
+Requirements: `bash`, `git`, `cargo`, `python3`, `flock`, and `taskset` from
+util-linux, plus Linux `/proc/loadavg` and per-CPU cpufreq governor reporting.
+Use `--no-taskset` only for a quick mechanics check; its output is not
+performance evidence.
+
+The no-build driver guard test covers dirty-source rejection, the
+mechanics-only override, host-lock contention/exit 75, and lock/prebuild/
+preflight ordering:
+
+```bash
+bench/tests/test-route-paging-driver.sh
+```
 
 Example:
 
