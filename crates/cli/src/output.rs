@@ -281,6 +281,23 @@ pub struct JsonNeighborDetail {
     /// Update-group membership: `group:N` or the ungrouped reason.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub update_group: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub selection_deferral: Vec<JsonSelectionDeferralFamily>,
+}
+
+#[derive(Serialize)]
+pub struct JsonSelectionDeferralFamily {
+    pub afi: u32,
+    pub safi: u32,
+    pub active: bool,
+    pub waiter_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiter_session_id: Option<u64>,
+    pub blocking_waiters: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub remaining_millis: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub release_reason: String,
 }
 
 #[derive(Serialize)]
@@ -1115,6 +1132,16 @@ mod tests {
             add_path_send_max: 4,
             paths_limits: Vec::new(),
             update_group: "group:0".to_string(),
+            selection_deferral: vec![JsonSelectionDeferralFamily {
+                afi: 1,
+                safi: 1,
+                active: true,
+                waiter_state: "awaiting_eor".to_string(),
+                waiter_session_id: Some(42),
+                blocking_waiters: 2,
+                remaining_millis: 1_500,
+                release_reason: String::new(),
+            }],
         };
 
         let value: Value =
@@ -1142,6 +1169,13 @@ mod tests {
         assert_eq!(value["messages_received"], 20);
         assert_eq!(value["messages_sent"], 21);
         assert_eq!(value["route_reflector_client"], false);
+        assert_eq!(value["selection_deferral"][0]["afi"], 1);
+        assert_eq!(
+            value["selection_deferral"][0]["waiter_state"],
+            "awaiting_eor"
+        );
+        assert_eq!(value["selection_deferral"][0]["waiter_session_id"], 42);
+        assert_eq!(value["selection_deferral"][0]["blocking_waiters"], 2);
     }
 
     fn table_fixture() -> Vec<proto::NeighborState> {

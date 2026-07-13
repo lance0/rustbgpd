@@ -5,6 +5,7 @@ mod graceful_restart;
 mod helpers;
 mod peer_lifecycle;
 mod route_refresh;
+mod selection_deferral;
 mod update_groups;
 
 #[cfg(test)]
@@ -35,6 +36,7 @@ use crate::update::{
 use helpers::{
     DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family, unicast_route_family,
 };
+pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
 #[cfg(test)]
 struct PermissiveTestExactExport;
@@ -175,6 +177,9 @@ pub struct RibManager {
     /// avoids making every non-transport `PeerUp` producer construct a fake
     /// wire encoder while still fencing collision losers by session id.
     pending_peer_export_encoders: HashMap<(IpAddr, u64), Arc<dyn ExactExportEncoder>>,
+    /// Session-stamped peer GR capability context staged immediately before
+    /// `PeerUp`, used only by the process-start RFC 4724 selection gate.
+    pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
     /// Exact encoder owned by the active outbound registration. Every
     /// precommit pass captures one immutable snapshot from this handle and
     /// attaches that same snapshot to the outbound envelope.
@@ -315,6 +320,15 @@ pub struct RibManager {
     /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
     /// would otherwise never see `EoR` at all.
     gr_deferred_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
+    selection_deferral: Option<selection_deferral::SelectionDeferral>,
+    /// Route identities touched while their family's Loc-RIB was frozen.
+    /// Includes withdrawals so restored rows absent from Adj-RIB-In are
+    /// still removed when the gate releases.
+    deferred_selection_keys: selection_deferral::DeferredSelectionKeys,
+    /// Route-refresh responses received while family selection is frozen.
+    /// Replayed after the released initial table and `EoR` are queued.
+    selection_deferred_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for path verification. `None` = no ASPA data.
@@ -459,7 +473,14 @@ pub(super) struct LiveSessionRecord {
     add_path_send_max: u32,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
+    gr_context: Option<PeerSelectionDeferralContext>,
     exact_export_encoder: Option<Arc<dyn ExactExportEncoder>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PeerSelectionDeferralContext {
+    peer_restart_state: bool,
+    peer_gr_families: Vec<(Afi, Safi)>,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -875,6 +896,7 @@ impl RibManager {
             live_sessions: HashMap::new(),
             pending_peer_export_context: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
+            pending_peer_gr_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
             peer_unexportable: HashMap::new(),
             export_policy,
@@ -916,6 +938,9 @@ impl RibManager {
             peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
+            selection_deferral: None,
+            deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
+            selection_deferred_refresh: HashMap::new(),
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
@@ -990,6 +1015,21 @@ impl RibManager {
     pub fn with_bmp_tx(mut self, bmp_tx: mpsc::Sender<rustbgpd_bmp::BmpEvent>) -> Self {
         self.bmp_tx = Some(bmp_tx);
         self
+    }
+
+    /// Install the startup-frozen RFC 4724 restarting-speaker waiter roster.
+    /// Called before the actor starts; cold starts leave the gate absent.
+    #[must_use]
+    pub fn with_selection_deferral(mut self, config: SelectionDeferralConfig) -> Self {
+        self.selection_deferral = selection_deferral::SelectionDeferral::new(config, &self.metrics);
+        self
+    }
+
+    #[must_use]
+    pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
+        self.selection_deferral
+            .as_ref()
+            .is_some_and(|state| state.is_gated(family))
     }
 
     /// Emit an RFC 9069 Loc-RIB Route Monitoring event. `pdu = None`
@@ -1087,9 +1127,18 @@ impl RibManager {
 
     fn drain_ready_updates(&mut self) -> bool {
         let mut drained = false;
+        // Route batches are actor-deferred for fairness. During a timer race,
+        // however, preserve channel order: an EoR or timeout must not release
+        // selection before route payloads accepted ahead of it are applied.
+        while self.process_next_route_chunk() {
+            drained = true;
+        }
         while let Ok(update) = self.rx.try_recv() {
             drained = true;
             self.handle_update(update);
+            while self.process_next_route_chunk() {
+                drained = true;
+            }
         }
         drained
     }
@@ -1313,6 +1362,20 @@ impl RibManager {
                 self.pending_peer_export_encoders
                     .insert((peer, session_id), encoder);
             }
+            RibUpdate::SetPeerGracefulRestartContext {
+                peer,
+                session_id,
+                peer_restart_state,
+                peer_gr_families,
+            } => {
+                self.pending_peer_gr_context.insert(
+                    (peer, session_id),
+                    PeerSelectionDeferralContext {
+                        peer_restart_state,
+                        peer_gr_families,
+                    },
+                );
+            }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {
                 prefix,
@@ -1454,7 +1517,16 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "EndOfRib", "eor") {
+                    let selection_released =
+                        self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
+                    if selection_released {
+                        self.finalize_selection_deferral_all_eor((afi, safi));
+                        self.release_selection_families(
+                            &[(afi, safi)],
+                            "all current-session End-of-RIB markers received",
+                        );
+                    }
                 }
             }
             RibUpdate::RouteRefreshRequest {
@@ -3242,7 +3314,9 @@ impl RibManager {
             }
             self.sync_attr_intern_gauge();
         }
-        self.rebuild_rtc_membership_and_restage_vpn(peer);
+        if !self.selection_deferred(family) {
+            self.rebuild_rtc_membership_and_restage_vpn(peer);
+        }
     }
 
     /// Rebuild `peer`'s RT-Constrain membership from its Adj-RIB-In (all
@@ -3429,7 +3503,8 @@ impl RibManager {
         let topology = crate::orr::OrrTopology::build(
             self.ribs
                 .values()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls),
+                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
+                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
         );
         let input_diagnostics = topology.input_diagnostics();
         log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
@@ -3610,6 +3685,11 @@ impl RibManager {
         let refresh_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(refresh_sleep);
 
+        // RFC 4724 restarting-speaker selection-deferral timer. The roster
+        // and deadline are frozen before this actor starts.
+        let selection_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(selection_sleep);
+
         loop {
             // Sample ingest-channel depth once per iteration — a gauge
             // pegged at the channel capacity on scrape means producers
@@ -3648,8 +3728,19 @@ impl RibManager {
                 false
             };
 
-            let needs_timers =
-                resync_armed || has_gr_timers || has_llgr_timers || has_refresh_timers;
+            let has_selection_timer =
+                if let Some(deadline) = self.next_selection_deferral_deadline() {
+                    selection_sleep.as_mut().reset(deadline);
+                    true
+                } else {
+                    false
+                };
+
+            let needs_timers = resync_armed
+                || has_gr_timers
+                || has_llgr_timers
+                || has_refresh_timers
+                || has_selection_timer;
 
             if query_rx_open && self.query_rx.is_closed() {
                 query_rx_open = false;
@@ -3700,6 +3791,15 @@ impl RibManager {
                     continue;
                 }
                 self.expire_refresh_windows();
+                continue;
+            }
+            if has_selection_timer && selection_sleep.deadline() <= now {
+                // A queued current-session EoR wins the all-EoR release race
+                // over a simultaneously ready timer.
+                if self.drain_ready_updates() {
+                    continue;
+                }
+                self.expire_selection_deferral();
                 continue;
             }
 
@@ -3769,6 +3869,12 @@ impl RibManager {
                             continue;
                         }
                         self.expire_refresh_windows();
+                    }
+                    () = selection_sleep.as_mut(), if has_selection_timer => {
+                        if self.drain_ready_updates() {
+                            continue;
+                        }
+                        self.expire_selection_deferral();
                     }
                 }
             } else {

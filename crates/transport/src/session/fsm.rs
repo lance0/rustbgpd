@@ -428,6 +428,12 @@ impl PeerSession {
                         .map(|(family, limit)| (*family, *limit))
                         .collect();
 
+                    let peer_restart_state = neg.peer_restart_state;
+                    let peer_gr_families = neg
+                        .peer_gr_families
+                        .iter()
+                        .map(|family| (family.afi, family.safi))
+                        .collect();
                     self.negotiated = Some(*neg);
                     self.publish_export_profile();
                     self.established_at = Some(Instant::now());
@@ -462,6 +468,20 @@ impl PeerSession {
                             peer: self.peer_ip,
                             session_id: self.session_identity.id,
                             encoder: self.export_encoder.clone(),
+                        })
+                        .await;
+
+                    // Stage immutable RFC 4724 OPEN context before `PeerUp`.
+                    // The restarting-speaker selection gate consumes only the
+                    // matching session, so a collision loser cannot satisfy or
+                    // reclassify the winner's frozen EoR waiter.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerGracefulRestartContext {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            peer_restart_state,
+                            peer_gr_families,
                         })
                         .await;
 

@@ -791,6 +791,50 @@ impl RibManager {
         group_prior: HashSet<crate::update::ExactExportKey>,
         mut shared_unicast_probe_cache: Option<(usize, &mut SharedUnicastProbeCache)>,
     ) -> bool {
+        let gated = announce
+            .iter()
+            .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
+            || withdraw
+                .iter()
+                .any(|(prefix, _)| self.selection_deferred(prefix_family(prefix)))
+            || end_of_rib
+                .iter()
+                .any(|family| self.selection_deferred(*family))
+            || refresh_markers
+                .iter()
+                .any(|(afi, safi, _)| self.selection_deferred((*afi, *safi)))
+            || flowspec_announce
+                .iter()
+                .any(|route| self.selection_deferred((route.afi, Safi::FlowSpec)))
+            || flowspec_withdraw
+                .iter()
+                .any(|key| self.selection_deferred((key.afi, Safi::FlowSpec)))
+            || ((!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
+                && self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
+            || bgpls_announce
+                .iter()
+                .any(|route| self.selection_deferred(route.family.to_afi_safi()))
+            || bgpls_withdraw
+                .iter()
+                .any(|key| self.selection_deferred(key.family.to_afi_safi()))
+            || vpn_announce
+                .iter()
+                .any(|route| self.selection_deferred(route.afi_safi()))
+            || vpn_withdraw
+                .iter()
+                .any(|key| self.selection_deferred(key.afi_safi()))
+            || labeled_announce
+                .iter()
+                .any(|route| self.selection_deferred(route.afi_safi()))
+            || labeled_withdraw
+                .iter()
+                .any(|key| self.selection_deferred(key.afi_safi()))
+            || ((!rtc_announce.is_empty() || !rtc_withdraw.is_empty())
+                && self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()));
+        if gated {
+            warn!(%peer, "outbound transaction intersected an active RFC 4724 selection gate; failing closed");
+            return false;
+        }
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
         };
@@ -1672,12 +1716,16 @@ impl RibManager {
     ) -> HashSet<Prefix> {
         use std::cmp::Ordering;
 
+        self.record_deferred_unicast(affected);
         // Some(true): install the challenger directly (case 5).
         // Some(false): provably unchanged, skip (case 4).
         // None: full rescan (cases 1-3, 6).
         let mut changed = HashSet::new();
         let mut needs_full = HashSet::new();
         for prefix in affected {
+            if self.selection_deferred(prefix_family(prefix)) {
+                continue;
+            }
             let verdict = 'fast: {
                 let Some(best) = self.loc_rib.get(prefix) else {
                     break 'fast None; // case 1
@@ -1744,8 +1792,10 @@ impl RibManager {
         &mut self,
         affected: &HashSet<Prefix>,
     ) -> HashSet<Prefix> {
+        self.record_deferred_unicast(affected);
         let needs_full: HashSet<Prefix> = affected
             .iter()
+            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
             .filter(|prefix| {
                 let Some(best) = self.loc_rib.get(prefix) else {
                     return true; // no best: rescan (cheap; re-checks invariant)
@@ -1764,8 +1814,12 @@ impl RibManager {
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
     pub(super) fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
+        self.record_deferred_unicast(affected);
         let mut changed = HashSet::new();
         for prefix in affected {
+            if self.selection_deferred(prefix_family(prefix)) {
+                continue;
+            }
             let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
             // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
             // dropped before the `&mut self` event publication below.
@@ -1925,6 +1979,18 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
+        self.record_deferred_unicast(best_changed);
+        self.record_deferred_unicast(all_affected);
+        let best_changed: HashSet<_> = best_changed
+            .iter()
+            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
+            .copied()
+            .collect();
+        let all_affected: HashSet<_> = all_affected
+            .iter()
+            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
+            .copied()
+            .collect();
         if best_changed.is_empty()
             && all_affected.is_empty()
             && self.dirty_peers.is_empty()
@@ -1944,7 +2010,7 @@ impl RibManager {
         // loop below emits the deltas per member via the source-flip
         // matrix; disqualified peers take the per-peer staging path
         // exactly as before.
-        let group_stage = self.stage_update_groups(best_changed, &mut export_memo);
+        let group_stage = self.stage_update_groups(&best_changed, &mut export_memo);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         for peer in peers {
             let member_of = self.grouped_member_of(peer);
@@ -2002,12 +2068,13 @@ impl RibManager {
                 if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
                     all.extend(extras.unicast.iter().map(|(prefix, _)| *prefix));
                 }
+                all.retain(|prefix| !self.selection_deferred(prefix_family(prefix)));
                 Cow::Owned(all)
             } else if member_of.is_some() {
                 // Grouped peers have no ORR / Add-Path extras (both are
                 // grouping disqualifiers): the group deltas cover
                 // exactly the best-changed set.
-                Cow::Borrowed(best_changed)
+                Cow::Borrowed(&best_changed)
             } else {
                 // An RFC 9107 ORR peer selects from the per-target
                 // candidate set, not the Loc-RIB best — a candidate
@@ -2038,7 +2105,7 @@ impl RibManager {
                 // per-peer clone of it — this loop runs once per
                 // outbound peer per distribution pass.
                 if extras.is_empty() {
-                    Cow::Borrowed(best_changed)
+                    Cow::Borrowed(&best_changed)
                 } else {
                     let mut prefixes = best_changed.clone();
                     prefixes.extend(extras);
@@ -2058,6 +2125,7 @@ impl RibManager {
                             .map(crate::route::FlowSpecRoute::selection_key),
                     );
                 }
+                all.retain(|key| !self.selection_deferred((key.afi, Safi::FlowSpec)));
                 all
             } else {
                 HashSet::new()
@@ -2071,6 +2139,9 @@ impl RibManager {
                     .collect();
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter_evpn().map(crate::route::EvpnRibRoute::key));
+                }
+                if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                    all.clear();
                 }
                 all
             } else {
@@ -2086,6 +2157,7 @@ impl RibManager {
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter_bgpls().map(crate::route::BgpLsRibRoute::key));
                 }
+                all.retain(|key| !self.selection_deferred(key.family.to_afi_safi()));
                 all
             } else {
                 HashSet::new()
@@ -2128,6 +2200,13 @@ impl RibManager {
                 if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
                     all.extend(extras.vpn.iter().copied());
                 }
+                all.retain(|key| {
+                    let family = match key.prefix.family() {
+                        rustbgpd_wire::VpnAddressFamily::V4 => (Afi::Ipv4, Safi::MplsVpn),
+                        rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
+                    };
+                    !self.selection_deferred(family)
+                });
                 all
             } else {
                 HashSet::new()
@@ -2149,6 +2228,13 @@ impl RibManager {
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter_labeled().map(|route| route.nlri.key()));
                 }
+                all.retain(|prefix| {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    !self.selection_deferred((afi, Safi::LabeledUnicast))
+                });
                 all
             } else {
                 HashSet::new()
@@ -2162,6 +2248,9 @@ impl RibManager {
                     .collect();
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter_rtc().map(crate::route::RtcRibRoute::key));
+                }
+                if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+                    all.clear();
                 }
                 all
             } else {

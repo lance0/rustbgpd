@@ -410,10 +410,11 @@ may reject them, but this is not v1 scope.
 
 ## RFC 4724 — Graceful Restart Mechanism for BGP
 
-rustbgpd implements the **receiving speaker** role only. When a peer that
-previously advertised the Graceful Restart capability goes down, rustbgpd
-preserves that peer's routes as stale rather than immediately withdrawing
-them.
+rustbgpd implements the **receiving speaker** role and a planned-restart
+**restarting speaker** role. As a receiver, when a peer that previously
+advertised the Graceful Restart capability goes down, rustbgpd preserves that
+peer's routes as stale rather than immediately withdrawing them. The bounded
+restarting-speaker behavior is described in §4.1 and ADR-0040.
 
 ### §3 — Graceful Restart Capability
 
@@ -432,11 +433,16 @@ them.
 
 ### §4.1 — Procedures for the Restarting Speaker
 
-Minimal restarting-speaker mode implemented (ADR-0040). After a coordinated
+Restarting-speaker mode is implemented (ADR-0040). After a coordinated
 shutdown, a marker file is written to `runtime_state_dir`. On startup, if the
 marker is present and not expired, static peers from config are offered R=1 in
 OPEN. `forwarding_preserved` remains false because rustbgpd does not own or
-verify the FIB. Dynamic gRPC-added peers always get R=0.
+verify the FIB. Dynamic gRPC-added peers always get R=0. Before sessions start,
+the RIB freezes the resolved static GR peer/family roster. Per-family Loc-RIB
+selection and outbound initial table/EoR are held until current-session EoRs
+arrive from every eligible waiter or the marker-bounded selection timer
+expires. Peer Restart State and absent GR families exclude that peer/family;
+superseded-session EoRs are rejected.
 
 ### §4.2 — Procedures for the Receiving Speaker
 

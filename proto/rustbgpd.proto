@@ -472,6 +472,20 @@ message NeighborState {
   // Effective live unicast distribution mode reported by the RIB. This is
   // UNKNOWN while the peer has no active outbound registration.
   EffectiveDistributionMode effective_distribution_mode = 30;
+  // Process-start RFC 4724 selection-deferral state. Empty on cold starts.
+  repeated SelectionDeferralFamilyState selection_deferral = 31;
+}
+
+message SelectionDeferralFamilyState {
+  uint32 afi = 1;
+  uint32 safi = 2;
+  bool active = 3;
+  string waiter_state = 4;
+  optional uint64 waiter_session_id = 5;
+  uint64 blocking_waiters = 6;
+  uint64 remaining_millis = 7;
+  // Empty while active; "all_eor" or "timer" after release.
+  string release_reason = 8;
 }
 
 enum EffectiveDistributionMode {

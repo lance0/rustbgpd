@@ -944,6 +944,7 @@ mod policy;
 mod refresh;
 mod rpki;
 mod rtc;
+mod selection_deferral;
 mod unicast;
 mod update_groups;
 mod update_groups_fault_corpus;

@@ -306,15 +306,29 @@ impl RibManager {
 
     /// Recompute `FlowSpec` Loc-RIB best routes for affected rules and
     /// distribute changes to all outbound peers.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "FlowSpec recompute stages policy-aware changes for every outbound peer"
+    )]
     pub(in crate::manager) fn recompute_and_distribute_flowspec(
         &mut self,
         affected: &HashSet<FlowSpecKey>,
     ) {
         use crate::route::FlowSpecRoute;
 
+        self.record_deferred_flowspec(affected);
+        let affected: HashSet<_> = affected
+            .iter()
+            .filter(|key| !self.selection_deferred((key.afi, Safi::FlowSpec)))
+            .cloned()
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+
         let mut changed_keys: HashSet<FlowSpecKey> = HashSet::new();
 
-        for key in affected {
+        for key in &affected {
             let candidates: Vec<&FlowSpecRoute> = self
                 .ribs
                 .values()

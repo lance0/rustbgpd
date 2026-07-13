@@ -17,7 +17,8 @@ use rustbgpd_wire::{
 /// and RT-Constrain (SAFI 132). A family absent here is excluded from the
 /// GR/LLGR capability sets and therefore withdrawn (not retained stale) on
 /// session drop.
-pub(crate) fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> bool {
+#[must_use]
+pub fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> bool {
     matches!(
         (afi, safi),
         (

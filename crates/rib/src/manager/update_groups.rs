@@ -2424,6 +2424,10 @@ impl RibManager {
         let _ = reply.send(PeerOutboundState {
             update_group,
             effective_distribution_mode,
+            selection_deferral: self
+                .selection_deferral
+                .as_ref()
+                .map_or_else(Vec::new, |selection| selection.peer_snapshot(peer)),
         });
     }
 }

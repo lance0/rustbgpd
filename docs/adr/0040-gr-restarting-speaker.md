@@ -21,7 +21,7 @@ misleading today.
 
 ## Decision
 
-Implement a **minimal, honest restarting-speaker mode**:
+Implement an honest restarting-speaker mode:
 
 1. On coordinated daemon shutdown, rustbgpd writes a small restart marker
    file under `global.runtime_state_dir`.
@@ -34,6 +34,19 @@ Implement a **minimal, honest restarting-speaker mode**:
 4. Dynamic peers added later via gRPC do **not** participate in that window.
 5. Once the window expires, subsequent reconnects revert to normal
    `restart_state = false`.
+6. On a marker-backed startup, freeze the complete GR-enabled static-peer
+   roster before any session starts. Route selection is deferred separately
+   for every locally supported family until all roster peers are either:
+   - bound to a current session that sends that family's End-of-RIB;
+   - excluded because its OPEN omitted GR/the family or carried Restart State;
+   - or the marker-bounded `Selection_Deferral_Timer` expires.
+7. Adj-RIB-In continues ingesting while a family is gated, but Loc-RIB
+   selection, initial outbound table data, route-refresh responses, and EoR
+   remain withheld. On release, deferred route identities (withdrawals
+   included) are selected and advertised before EoR.
+8. Waiters are transport-generation stamped. A replacement or failed-over
+   session re-arms its frozen roster entry, and an EoR from a predecessor or
+   collision loser cannot release the gate.
 
 This mode helps peers retain our routes briefly during a planned restart,
 but makes **no claim** that rustbgpd preserved dataplane continuity.
@@ -50,3 +63,12 @@ but makes **no claim** that rustbgpd preserved dataplane continuity.
   daemon-owned runtime state.
 - This does **not** replace the helper-mode state machine in ADR-0024; it
   complements it.
+- The current `Selection_Deferral_Timer` upper bound is the remaining
+  coordinated-restart marker lifetime, derived from the maximum effective
+  `gr_restart_time` across resolved static peers. This reuses the existing
+  configurable planned-restart window rather than introducing a second
+  startup-only duration knob.
+- `rbgp neighbor <peer>` and its JSON output expose per-family active/released
+  state, the queried peer's stamped waiter state, blocking waiter count,
+  remaining time, and release reason. Prometheus exposes the same family gate
+  and waiter gauges plus bounded release-reason and timeout counters.

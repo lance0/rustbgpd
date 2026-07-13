@@ -1006,6 +1006,21 @@ pub struct PeerOutboundState {
     pub update_group: String,
     /// Effective live distribution mode.
     pub effective_distribution_mode: EffectiveDistributionMode,
+    /// Process-start RFC 4724 selection-deferral state, one row per family.
+    pub selection_deferral: Vec<SelectionDeferralPeerFamilyState>,
+}
+
+/// Neighbor-facing RFC 4724 selection-deferral state for one family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionDeferralPeerFamilyState {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub active: bool,
+    pub waiter_state: String,
+    pub waiter_session_id: Option<u64>,
+    pub blocking_waiters: u64,
+    pub remaining_millis: u64,
+    pub release_reason: String,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -1220,6 +1235,19 @@ pub enum RibUpdate {
         session_id: u64,
         /// Session-owned replaceable encoder.
         encoder: Arc<dyn ExactExportEncoder>,
+    },
+    /// Stage the peer's negotiated GR context before `PeerUp` builds any
+    /// outbound state. The startup selection-deferral roster uses this to
+    /// exclude Restart-State/non-GR peers and stamp the remaining `EoR` waiter.
+    SetPeerGracefulRestartContext {
+        /// Peer whose OPEN was negotiated.
+        peer: IpAddr,
+        /// Transport generation that owns this immutable OPEN context.
+        session_id: u64,
+        /// Peer's RFC 4724 Restart State bit.
+        peer_restart_state: bool,
+        /// Negotiated families present in the peer's GR capability.
+        peer_gr_families: Vec<(Afi, Safi)>,
     },
     /// Inject a locally-originated route.
     InjectRoute {

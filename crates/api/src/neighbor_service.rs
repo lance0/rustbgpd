@@ -576,6 +576,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         }),
         tcp_ao_health: tcp_ao_health.into(),
         effective_distribution_mode: proto::EffectiveDistributionMode::Unknown.into(),
+        selection_deferral: Vec::new(),
     }
 }
 
@@ -589,6 +590,23 @@ fn effective_distribution_mode_to_proto(
         EffectiveDistributionMode::Orr => proto::EffectiveDistributionMode::Orr,
         EffectiveDistributionMode::PerClientBest => proto::EffectiveDistributionMode::PerClientBest,
     }
+}
+
+fn selection_deferral_to_proto(
+    rows: Vec<rustbgpd_rib::SelectionDeferralPeerFamilyState>,
+) -> Vec<proto::SelectionDeferralFamilyState> {
+    rows.into_iter()
+        .map(|row| proto::SelectionDeferralFamilyState {
+            afi: row.afi as u32,
+            safi: row.safi as u32,
+            active: row.active,
+            waiter_state: row.waiter_state,
+            waiter_session_id: row.waiter_session_id,
+            blocking_waiters: row.blocking_waiters,
+            remaining_millis: row.remaining_millis,
+            release_reason: row.release_reason,
+        })
+        .collect()
 }
 
 fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
@@ -903,6 +921,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             state.update_group = outbound.update_group;
             state.effective_distribution_mode =
                 effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
+            state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
             neighbors.push(state);
         }
 
@@ -939,6 +958,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         state.update_group = outbound.update_group;
         state.effective_distribution_mode =
             effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
+        state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
         Ok(Response::new(state))
     }
 
@@ -1275,6 +1295,8 @@ mod tests {
         assert!(source.contains("repeated TcpAoKeyState keys = 10;"));
         assert!(source.contains("message TcpAoKeyState {"));
         assert!(source.contains("EffectiveDistributionMode effective_distribution_mode = 30;"));
+        assert!(source.contains("repeated SelectionDeferralFamilyState selection_deferral = 31;"));
+        assert!(source.contains("message SelectionDeferralFamilyState {"));
         assert!(source.contains("optional uint32 effective_send_limit = 6;"));
     }
 
@@ -1975,6 +1997,18 @@ mod tests {
                         let _ = reply.send(PeerOutboundState {
                             update_group: "group:0".to_string(),
                             effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                            selection_deferral: vec![
+                                rustbgpd_rib::SelectionDeferralPeerFamilyState {
+                                    afi: Afi::Ipv4,
+                                    safi: Safi::Unicast,
+                                    active: true,
+                                    waiter_state: "awaiting_eor".to_string(),
+                                    waiter_session_id: Some(42),
+                                    blocking_waiters: 2,
+                                    remaining_millis: 1_500,
+                                    release_reason: String::new(),
+                                },
+                            ],
                         });
                     }
                     _ => {}
@@ -1999,6 +2033,14 @@ mod tests {
             resp.effective_distribution_mode,
             proto::EffectiveDistributionMode::AddPath as i32
         );
+        assert_eq!(resp.selection_deferral.len(), 1);
+        assert_eq!(resp.selection_deferral[0].afi, Afi::Ipv4 as u32);
+        assert_eq!(resp.selection_deferral[0].safi, Safi::Unicast as u32);
+        assert!(resp.selection_deferral[0].active);
+        assert_eq!(resp.selection_deferral[0].waiter_state, "awaiting_eor");
+        assert_eq!(resp.selection_deferral[0].waiter_session_id, Some(42));
+        assert_eq!(resp.selection_deferral[0].blocking_waiters, 2);
+        assert_eq!(resp.selection_deferral[0].remaining_millis, 1_500);
     }
 
     #[test]

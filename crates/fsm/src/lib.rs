@@ -38,7 +38,9 @@ pub mod session;
 pub mod state;
 
 pub use action::{Action, NegotiatedSession, TimerType};
-pub use config::{DEFAULT_HOLD_TIME, PeerConfig, default_send_hold_time};
+pub use config::{
+    DEFAULT_HOLD_TIME, PeerConfig, default_send_hold_time, graceful_restart_preserves_family,
+};
 pub use event::Event;
 pub use session::Session;
 pub use state::SessionState;

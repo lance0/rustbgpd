@@ -371,6 +371,11 @@ impl RibManager {
     ) {
         use crate::route::EvpnRibRoute;
 
+        self.record_deferred_evpn(affected);
+        if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+            return;
+        }
+
         let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         for key in affected {
             let candidates: Vec<&EvpnRibRoute> = self

@@ -968,10 +968,22 @@ remote_asn = 65003
 graceful_restart = false
 ```
 
-**Implementation note:** restarting-speaker mode is deliberately minimal and
-honest. The daemon may advertise `R=1` after a planned restart, but it does
-not claim forwarding-state preservation (`forwarding_preserved = false`) and
-does not persist route state across restarts.
+**Implementation note:** restarting-speaker mode is deliberately honest. The
+daemon may advertise `R=1` after a planned restart, but it does not claim
+forwarding-state preservation (`forwarding_preserved = false`) and does not
+yet persist route state across restarts. During that marker-backed startup it
+freezes the effective static GR peer/family roster and defers each family's
+route selection plus initial table/EoR until all eligible current sessions
+send EoR or the remaining marker window expires. `gr_restart_time` therefore
+bounds both the advertised restart window and, via the maximum effective value
+across static peers, the process-start selection deferral.
+
+`rbgp neighbor <address>` shows `Selection Deferral` rows while active and
+retains their `all_eor` or `timer` release reason afterward. Metrics are
+`bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
+`bgp_selection_deferral_releases_total`, and
+`bgp_selection_deferral_timeouts_total` (all bounded by configured family and
+release-reason labels).
 See [ADR-0024](adr/0024-graceful-restart.md).
 
 ### Long-Lived Graceful Restart (RFC 9494)
