@@ -268,6 +268,43 @@ impl WarmBundleDirectory {
             display_path: path.to_path_buf(),
         })
     }
+
+    /// Open a single child directory relative to an already pinned parent.
+    ///
+    /// This is used by the daemon to keep the restart marker and bundle below
+    /// the same owner-verified runtime-state directory authority. `name` must
+    /// be exactly one ordinary path component; the child itself is opened with
+    /// `O_NOFOLLOW` and receives the same owner/mode validation as [`Self::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation or descriptor-relative I/O error.
+    pub fn open_at(
+        parent: &File,
+        parent_display_path: &Path,
+        name: &str,
+    ) -> Result<Self, WarmBundleError> {
+        let component = Path::new(name);
+        if component.components().count() != 1
+            || component.file_name().and_then(|value| value.to_str()) != Some(name)
+            || matches!(name, "" | "." | "..")
+        {
+            return Err(WarmBundleError::InvalidSnapshotPath {
+                path: name.to_string(),
+            });
+        }
+        let display_path = parent_display_path.join(name);
+        let fd = openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|source| nix_io(&display_path, source))?;
+        let file = File::from(fd);
+        validate_owner_mode(&file, &display_path, "directory", true)?;
+        Ok(Self { file, display_path })
+    }
 }
 
 /// Warm-bundle storage or validation failure.

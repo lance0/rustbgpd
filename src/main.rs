@@ -48,19 +48,23 @@ mod reload;
 mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::DirBuilderExt as _;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt as _;
+use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_mrt::{
-    WarmBundleDirectory, WarmBundleFamilyV1, WarmBundleIdentityV1, WarmBundlePolicyInputV1,
-    WarmBundleViewKindV1, WarmBundleViewV1, resolved_import_policy_digest_v1, write_warm_bundle,
+    MAX_WARM_BUNDLE_SNAPSHOT_BYTES, WarmBundleDirectory, WarmBundleFamilyV1, WarmBundleIdentityV1,
+    WarmBundlePolicyInputV1, WarmBundleViewKindV1, WarmBundleViewV1,
+    resolved_import_policy_digest_v1, write_warm_bundle,
 };
-use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotView};
+use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotBudget, WarmMrtSnapshotView};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
     BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
@@ -93,6 +97,9 @@ use rustbgpd_wire::{Afi, Safi};
 
 const GR_RESTART_MARKER_V1: u8 = 1;
 const GR_RESTART_MARKER_V2: u8 = 2;
+const GR_RESTART_MARKER_FILE: &str = "gr-restart.toml";
+const WARM_BUNDLE_DIRECTORY: &str = "warm-bundle-v1";
+const MAX_GR_RESTART_MARKER_BYTES: u64 = 4096;
 const MAX_CHECKPOINT_GENERATION_BYTES: usize = 128;
 const WARM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(30);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -155,6 +162,9 @@ struct ValidGrRestartMarker {
     /// Present only for durable marker v2. Tranche 2 records this binding but
     /// deliberately has no boot-side cache load or route-serving behavior.
     checkpoint_generation: Option<String>,
+    /// SHA-256 of the exact bounded bytes read from the pinned marker entry.
+    /// `None` only for values validated directly in unit tests before storage.
+    storage_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -163,6 +173,310 @@ struct WarmCheckpointPlan {
     rib_views: Vec<WarmMrtSnapshotView>,
     policy_inputs: Vec<WarmBundlePolicyInputV1>,
     add_path_receive: Vec<rustbgpd_mrt::codec::MrtAddPathReceiveProfile>,
+}
+
+/// Owner-verified runtime-state directory pinned for the daemon lifetime.
+/// Marker and bundle publication are both descriptor-relative beneath this
+/// authority, so replacing a pathname or planting a final symlink cannot
+/// redirect shutdown state.
+#[derive(Debug)]
+struct PinnedRuntimeStateDirectory {
+    file: File,
+    display_path: PathBuf,
+}
+
+impl PinnedRuntimeStateDirectory {
+    fn prepare(path: &Path) -> Result<Self, String> {
+        use nix::fcntl::{OFlag, open};
+        use nix::sys::stat::Mode;
+        use nix::unistd::geteuid;
+
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut builder = std::fs::DirBuilder::new();
+                builder.recursive(true).mode(0o700);
+                builder.create(path).map_err(|error| {
+                    format!(
+                        "failed to create runtime-state directory {}: {error}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect runtime-state directory {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+        let fd = open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            format!(
+                "failed to pin runtime-state directory {}: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(error as i32)
+            )
+        })?;
+        let file = File::from(fd);
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "failed to validate runtime-state directory {}: {error}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_dir()
+            || metadata.uid() != geteuid().as_raw()
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(format!(
+                "runtime-state directory {} has unsafe type, owner, or mode (is_dir={}, uid={}, expected_uid={}, mode={:o})",
+                path.display(),
+                metadata.is_dir(),
+                metadata.uid(),
+                geteuid().as_raw(),
+                metadata.mode() & 0o7777
+            ));
+        }
+        Ok(Self {
+            file,
+            display_path: path.to_path_buf(),
+        })
+    }
+
+    fn prepare_warm_bundle(&self) -> Result<WarmBundleDirectory, String> {
+        use nix::errno::Errno;
+        use nix::sys::stat::{Mode, mkdirat};
+
+        match mkdirat(
+            &self.file,
+            WARM_BUNDLE_DIRECTORY,
+            Mode::from_bits_truncate(0o700),
+        ) {
+            Ok(()) | Err(Errno::EEXIST) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to create warm checkpoint directory {}: {}",
+                    self.display_path.join(WARM_BUNDLE_DIRECTORY).display(),
+                    std::io::Error::from_raw_os_error(error as i32)
+                ));
+            }
+        }
+        WarmBundleDirectory::open_at(&self.file, &self.display_path, WARM_BUNDLE_DIRECTORY)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Serialized descriptor-relative restart marker I/O. The shared lock closes
+/// the boot-expiry versus coordinated-shutdown publication race inside this
+/// process; exact identity comparison prevents an inherited timer from
+/// deleting a replacement marker.
+#[derive(Debug, Clone)]
+struct GrRestartMarkerStore {
+    directory: Arc<PinnedRuntimeStateDirectory>,
+    io_lock: Arc<Mutex<()>>,
+}
+
+impl GrRestartMarkerStore {
+    fn new(directory: Arc<PinnedRuntimeStateDirectory>) -> Self {
+        Self {
+            directory,
+            io_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn display_path(&self) -> PathBuf {
+        self.directory.display_path.join(GR_RESTART_MARKER_FILE)
+    }
+
+    fn read(&self) -> Result<Option<ValidGrRestartMarker>, String> {
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| "restart-marker I/O lock was poisoned".to_string())?;
+        self.read_locked()
+    }
+
+    fn read_locked(&self) -> Result<Option<ValidGrRestartMarker>, String> {
+        use nix::errno::Errno;
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::Mode;
+        use nix::unistd::geteuid;
+
+        let fd = match openat(
+            &self.directory.file,
+            GR_RESTART_MARKER_FILE,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::ENOENT) => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        let file = File::from(fd);
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file()
+            || metadata.uid() != geteuid().as_raw()
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err("restart marker has unsafe type, owner, or mode".to_string());
+        }
+        if metadata.len() > MAX_GR_RESTART_MARKER_BYTES {
+            return Err(format!(
+                "restart marker exceeds the {MAX_GR_RESTART_MARKER_BYTES}-byte cap"
+            ));
+        }
+        let mut content = String::new();
+        file.take(MAX_GR_RESTART_MARKER_BYTES.saturating_add(1))
+            .read_to_string(&mut content)
+            .map_err(|error| error.to_string())?;
+        if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_GR_RESTART_MARKER_BYTES {
+            return Err(format!(
+                "restart marker exceeds the {MAX_GR_RESTART_MARKER_BYTES}-byte cap"
+            ));
+        }
+        let marker: GrRestartMarker = toml::from_str(&content).map_err(|e| e.to_string())?;
+        let mut validated = validate_gr_restart_marker(marker)?;
+        validated.storage_sha256 = Some(Sha256::digest(content.as_bytes()).into());
+        Ok(Some(validated))
+    }
+
+    fn write_selected(
+        &self,
+        expires_at: SystemTime,
+        checkpoint_generation: Option<&str>,
+    ) -> std::io::Result<()> {
+        self.write_inner(expires_at, checkpoint_generation, MarkerFaultPoint::None)
+    }
+
+    fn write_inner(
+        &self,
+        expires_at: SystemTime,
+        checkpoint_generation: Option<&str>,
+        fault: MarkerFaultPoint,
+    ) -> std::io::Result<()> {
+        use nix::fcntl::{OFlag, openat, renameat};
+        use nix::sys::stat::Mode;
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+
+        if checkpoint_generation.is_some_and(|generation| {
+            generation.is_empty()
+                || generation.len() > MAX_CHECKPOINT_GENERATION_BYTES
+                || generation.chars().any(char::is_control)
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid checkpoint generation",
+            ));
+        }
+        let expires_at_unix = expires_at
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .as_secs();
+        let marker = GrRestartMarker {
+            version: if checkpoint_generation.is_some() {
+                GR_RESTART_MARKER_V2
+            } else {
+                GR_RESTART_MARKER_V1
+            },
+            expires_at_unix,
+            checkpoint_generation: checkpoint_generation.map(str::to_string),
+        };
+        let encoded =
+            toml::to_string(&marker).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let sequence = MARKER_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(
+            ".{GR_RESTART_MARKER_FILE}.tmp.{}.{}",
+            std::process::id(),
+            sequence
+        );
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("restart-marker I/O lock was poisoned"))?;
+        let result = (|| -> std::io::Result<()> {
+            marker_fail_if(fault, MarkerFaultPoint::Write)?;
+            let fd = openat(
+                &self.directory.file,
+                temp_name.as_str(),
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            let mut temp = File::from(fd);
+            temp.write_all(encoded.as_bytes())?;
+            marker_fail_if(fault, MarkerFaultPoint::FileSync)?;
+            temp.sync_all()?;
+            drop(temp);
+            marker_fail_if(fault, MarkerFaultPoint::Rename)?;
+            renameat(
+                &self.directory.file,
+                temp_name.as_str(),
+                &self.directory.file,
+                GR_RESTART_MARKER_FILE,
+            )
+            .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            marker_fail_if(fault, MarkerFaultPoint::DirectorySync)?;
+            self.directory.file.sync_all()
+        })();
+        if result.is_err() {
+            let _ = unlinkat(
+                &self.directory.file,
+                temp_name.as_str(),
+                UnlinkatFlags::NoRemoveDir,
+            );
+        }
+        result
+    }
+
+    fn remove(&self) -> std::io::Result<()> {
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("restart-marker I/O lock was poisoned"))?;
+        self.remove_locked()
+    }
+
+    fn remove_if_matches(&self, expected: &ValidGrRestartMarker) -> std::io::Result<bool> {
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("restart-marker I/O lock was poisoned"))?;
+        let current = self.read_locked().map_err(std::io::Error::other)?;
+        // Compare the exact file-byte identity, not just parsed semantics. A
+        // replacement marker can deliberately carry the same expiry and
+        // generation with different bytes; it belongs to a newer publisher
+        // and must survive this inherited timer.
+        if expected.storage_sha256.is_none()
+            || current.as_ref().and_then(|marker| marker.storage_sha256) != expected.storage_sha256
+        {
+            return Ok(false);
+        }
+        self.remove_locked()?;
+        Ok(true)
+    }
+
+    fn remove_locked(&self) -> std::io::Result<()> {
+        use nix::errno::Errno;
+        use nix::unistd::{UnlinkatFlags, unlinkat};
+
+        match unlinkat(
+            &self.directory.file,
+            GR_RESTART_MARKER_FILE,
+            UnlinkatFlags::NoRemoveDir,
+        ) {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()),
+            Err(error) => Err(std::io::Error::from_raw_os_error(error as i32)),
+        }
+    }
 }
 
 struct BmpRuntime {
@@ -555,56 +869,8 @@ fn validate_gr_restart_marker(marker: GrRestartMarker) -> Result<ValidGrRestartM
     Ok(ValidGrRestartMarker {
         expires_at,
         checkpoint_generation: marker.checkpoint_generation,
+        storage_sha256: None,
     })
-}
-
-fn read_gr_restart_marker(path: &Path) -> Result<Option<ValidGrRestartMarker>, String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
-    let marker: GrRestartMarker = toml::from_str(&content).map_err(|e| e.to_string())?;
-    validate_gr_restart_marker(marker).map(Some)
-}
-
-fn write_gr_restart_marker(path: &Path, expires_at: SystemTime) -> std::io::Result<()> {
-    write_gr_restart_marker_inner(path, expires_at, None, MarkerFaultPoint::None)
-}
-
-/// Publish marker v2 only after the exact referenced warm bundle generation
-/// has committed. No boot-side restore consumes this reference in tranche 2.
-fn write_gr_restart_marker_v2(
-    path: &Path,
-    expires_at: SystemTime,
-    checkpoint_generation: &str,
-) -> std::io::Result<()> {
-    if checkpoint_generation.is_empty()
-        || checkpoint_generation.len() > MAX_CHECKPOINT_GENERATION_BYTES
-        || checkpoint_generation.chars().any(char::is_control)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid checkpoint generation",
-        ));
-    }
-    write_gr_restart_marker_inner(
-        path,
-        expires_at,
-        Some(checkpoint_generation),
-        MarkerFaultPoint::None,
-    )
-}
-
-fn write_selected_gr_restart_marker(
-    path: &Path,
-    expires_at: SystemTime,
-    checkpoint_generation: Option<&str>,
-) -> std::io::Result<()> {
-    checkpoint_generation.map_or_else(
-        || write_gr_restart_marker(path, expires_at),
-        |generation| write_gr_restart_marker_v2(path, expires_at, generation),
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,73 +880,6 @@ enum MarkerFaultPoint {
     FileSync,
     Rename,
     DirectorySync,
-}
-
-fn write_gr_restart_marker_inner(
-    path: &Path,
-    expires_at: SystemTime,
-    checkpoint_generation: Option<&str>,
-    fault: MarkerFaultPoint,
-) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let expires_at_unix = expires_at
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .as_secs();
-    let marker = GrRestartMarker {
-        version: if checkpoint_generation.is_some() {
-            GR_RESTART_MARKER_V2
-        } else {
-            GR_RESTART_MARKER_V1
-        },
-        expires_at_unix,
-        checkpoint_generation: checkpoint_generation.map(str::to_string),
-    };
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "restart marker path has no parent directory",
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-    let encoded = toml::to_string(&marker).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "restart marker path has no UTF-8 file name",
-            )
-        })?;
-    let sequence = MARKER_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp_path = parent.join(format!(
-        ".{file_name}.tmp.{}.{}",
-        std::process::id(),
-        sequence
-    ));
-    let result = (|| -> std::io::Result<()> {
-        marker_fail_if(fault, MarkerFaultPoint::Write)?;
-        let mut temp = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp_path)?;
-        temp.write_all(encoded.as_bytes())?;
-        marker_fail_if(fault, MarkerFaultPoint::FileSync)?;
-        temp.sync_all()?;
-        drop(temp);
-        marker_fail_if(fault, MarkerFaultPoint::Rename)?;
-        std::fs::rename(&temp_path, path)?;
-        marker_fail_if(fault, MarkerFaultPoint::DirectorySync)?;
-        std::fs::File::open(parent)?.sync_all()
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
 }
 
 fn marker_fail_if(selected: MarkerFaultPoint, current: MarkerFaultPoint) -> std::io::Result<()> {
@@ -761,37 +960,6 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
             }),
         })
         .collect()
-}
-
-fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn prepare_warm_bundle_directory(path: &Path) -> Result<WarmBundleDirectory, String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true).mode(0o700);
-            builder.create(path).map_err(|error| {
-                format!(
-                    "failed to create warm checkpoint directory {}: {error}",
-                    path.display()
-                )
-            })?;
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect warm checkpoint directory {}: {error}",
-                path.display()
-            ));
-        }
-    }
-    WarmBundleDirectory::open(path).map_err(|error| error.to_string())
 }
 
 const fn warm_bundle_family_v1(afi: Afi, safi: Safi) -> Option<WarmBundleFamilyV1> {
@@ -894,13 +1062,25 @@ async fn publish_warm_checkpoint(
     capture: WarmCheckpointCapture,
     rib_query_tx: &mpsc::Sender<RibUpdate>,
     directory: Arc<WarmBundleDirectory>,
+    deadline: StdInstant,
 ) -> Result<String, String> {
     let plan = build_warm_checkpoint_plan(&capture.sessions)?;
 
     let (rib_reply, rib_rx) = oneshot::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut cancel_on_drop = CancelWarmSnapshotOnDrop {
+        cancelled: Arc::clone(&cancelled),
+        armed: true,
+    };
     rib_query_tx
         .send(RibUpdate::QueryWarmMrtSnapshot {
             views: plan.rib_views,
+            budget: WarmMrtSnapshotBudget {
+                deadline,
+                cancelled,
+                max_materialized_bytes: usize::try_from(MAX_WARM_BUNDLE_SNAPSHOT_BYTES)
+                    .unwrap_or(usize::MAX),
+            },
             reply: rib_reply,
         })
         .await
@@ -908,6 +1088,7 @@ async fn publish_warm_checkpoint(
     let snapshot = rib_rx
         .await
         .map_err(|_| "RIB actor dropped warm checkpoint query".to_string())??;
+    cancel_on_drop.armed = false;
 
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -971,6 +1152,19 @@ async fn publish_warm_checkpoint(
         .await
         .map_err(|_| "warm checkpoint writer exited without a result".to_string())??;
     Ok(checkpoint_generation)
+}
+
+struct CancelWarmSnapshotOnDrop {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for CancelWarmSnapshotOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
 }
 
 async fn query_warm_checkpoint_capture(
@@ -1775,13 +1969,33 @@ async fn run<T>(
 
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
-    // This knob and path are restart-required. Pin the verified directory at
-    // startup; later publication is descriptor-relative and cannot be
-    // redirected by replacing the pathname during shutdown.
+    let runtime_state_path = config.runtime_state_dir();
+    // Pin the shared authority before either marker or bundle access. Unsafe
+    // owner/mode or a final symlink disables both paths fail closed.
+    let runtime_state_directory = match PinnedRuntimeStateDirectory::prepare(&runtime_state_path) {
+        Ok(directory) => Some(Arc::new(directory)),
+        Err(error) => {
+            warn!(
+                path = %runtime_state_path.display(),
+                %error,
+                "runtime-state marker/checkpoint storage unavailable"
+            );
+            None
+        }
+    };
+    let gr_restart_marker_store = runtime_state_directory
+        .as_ref()
+        .map(|directory| GrRestartMarkerStore::new(Arc::clone(directory)));
+    // This knob and child name are restart-required. Open the bundle relative
+    // to the same verified descriptor as the marker.
     let warm_checkpoint_on_shutdown = config.global.warm_cache_checkpoint_on_shutdown;
     let warm_bundle_path = config.warm_bundle_dir();
     let warm_bundle_directory = if warm_checkpoint_on_shutdown {
-        match prepare_warm_bundle_directory(&warm_bundle_path) {
+        match runtime_state_directory
+            .as_ref()
+            .ok_or_else(|| "runtime-state directory is unavailable".to_string())
+            .and_then(|directory| directory.prepare_warm_bundle())
+        {
             Ok(directory) => {
                 info!(
                     path = %warm_bundle_path.display(),
@@ -1801,7 +2015,11 @@ async fn run<T>(
     } else {
         None
     };
-    let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
+    let mut inherited_gr_restart_marker = None;
+    let local_gr_restart_until = match gr_restart_marker_store
+        .as_ref()
+        .map_or(Ok(None), GrRestartMarkerStore::read)
+    {
         Ok(Some(marker)) => {
             let max_restart_time_secs = max_gr_restart_time_secs(&config);
             if let Some(remaining) = gr_restart_marker_remaining_time(
@@ -1816,13 +2034,16 @@ async fn run<T>(
                     checkpoint_generation = marker.checkpoint_generation.as_deref().unwrap_or("none"),
                     "detected GR restart marker — static peers will advertise R=1 until the restart window expires"
                 );
+                inherited_gr_restart_marker = Some(marker);
                 Some(deadline)
             } else {
                 info!(
                     marker = %gr_restart_marker_path.display(),
                     "ignoring expired or unusable GR restart marker"
                 );
-                if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
+                if let Some(store) = gr_restart_marker_store.as_ref()
+                    && let Err(e) = store.remove()
+                {
                     warn!(
                         marker = %gr_restart_marker_path.display(),
                         error = %e,
@@ -1839,7 +2060,9 @@ async fn run<T>(
                 error = %e,
                 "ignoring invalid GR restart marker — starting without restarting-speaker mode"
             );
-            if let Err(remove_err) = remove_gr_restart_marker(&gr_restart_marker_path) {
+            if let Some(store) = gr_restart_marker_store.as_ref()
+                && let Err(remove_err) = store.remove()
+            {
                 warn!(
                     marker = %gr_restart_marker_path.display(),
                     error = %remove_err,
@@ -1850,17 +2073,30 @@ async fn run<T>(
         }
     };
 
-    if let Some(deadline) = local_gr_restart_until {
-        let marker_path = gr_restart_marker_path.clone();
+    if let (Some(deadline), Some(expected_marker)) =
+        (local_gr_restart_until, inherited_gr_restart_marker)
+    {
+        let marker_store = gr_restart_marker_store
+            .as_ref()
+            .expect("a read marker always has a pinned store")
+            .clone();
+        let marker_path = marker_store.display_path();
         let sleep_for = deadline.saturating_duration_since(StdInstant::now());
         tokio::spawn(async move {
             tokio::time::sleep(sleep_for).await;
-            if let Err(e) = remove_gr_restart_marker(&marker_path) {
-                warn!(
+            match marker_store.remove_if_matches(&expected_marker) {
+                Ok(true) => {}
+                Ok(false) => info!(
                     marker = %marker_path.display(),
-                    error = %e,
-                    "failed to remove expired GR restart marker"
-                );
+                    "retained replacement GR restart marker after inherited expiry"
+                ),
+                Err(e) => {
+                    warn!(
+                        marker = %marker_path.display(),
+                        error = %e,
+                        "failed to remove expired GR restart marker"
+                    );
+                }
             }
         });
     }
@@ -3653,7 +3889,12 @@ async fn run<T>(
                         if restart_time_secs.is_some() {
                             match tokio::time::timeout_at(
                                 deadline,
-                                publish_warm_checkpoint(capture, &rib_query_tx, directory),
+                                publish_warm_checkpoint(
+                                    capture,
+                                    &rib_query_tx,
+                                    directory,
+                                    deadline.into_std(),
+                                ),
                             )
                             .await
                             {
@@ -3696,10 +3937,13 @@ async fn run<T>(
 
     if let Some(restart_time_secs) = restart_time_secs {
         let expires_at = SystemTime::now() + Duration::from_secs(restart_time_secs);
-        let marker_result = write_selected_gr_restart_marker(
-            &gr_restart_marker_path,
-            expires_at,
-            checkpoint_generation.as_deref(),
+        let marker_result = gr_restart_marker_store.as_ref().map_or_else(
+            || {
+                Err(std::io::Error::other(
+                    "pinned runtime-state marker storage is unavailable",
+                ))
+            },
+            |store| store.write_selected(expires_at, checkpoint_generation.as_deref()),
         );
         if let Err(e) = marker_result {
             warn!(
@@ -3708,8 +3952,8 @@ async fn run<T>(
                 "failed to write GR restart marker"
             );
             if checkpoint_generation.is_some()
-                && let Err(fallback_error) =
-                    write_gr_restart_marker(&gr_restart_marker_path, expires_at)
+                && let Some(store) = gr_restart_marker_store.as_ref()
+                && let Err(fallback_error) = store.write_selected(expires_at, None)
             {
                 warn!(
                     marker = %gr_restart_marker_path.display(),
@@ -3726,7 +3970,9 @@ async fn run<T>(
                 "wrote GR restart marker for coordinated shutdown"
             );
         }
-    } else if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
+    } else if let Some(store) = gr_restart_marker_store.as_ref()
+        && let Err(e) = store.remove()
+    {
         warn!(
             marker = %gr_restart_marker_path.display(),
             error = %e,
@@ -3923,6 +4169,15 @@ mod tests {
         std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
     }
 
+    fn marker_store() -> (tempfile::TempDir, GrRestartMarkerStore) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = PinnedRuntimeStateDirectory::prepare(dir.path()).unwrap();
+        (dir, GrRestartMarkerStore::new(Arc::new(pinned)))
+    }
+
     fn load_config_from_toml(name: &str, toml: &str) -> Config {
         let path = unique_temp_path(name);
         std::fs::write(&path, toml).unwrap();
@@ -4106,26 +4361,28 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
 
     #[test]
     fn gr_restart_marker_round_trip() {
-        let path = unique_temp_path("gr-restart-marker");
+        let (_dir, store) = marker_store();
         let expires_at = SystemTime::now() + Duration::from_mins(2);
-        write_gr_restart_marker(&path, expires_at).unwrap();
-        let read_back = read_gr_restart_marker(&path).unwrap().unwrap();
+        store.write_selected(expires_at, None).unwrap();
+        let read_back = store.read().unwrap().unwrap();
         let diff = read_back
             .expires_at
             .duration_since(expires_at)
             .unwrap_or_else(|e| e.duration());
         assert!(diff < Duration::from_secs(1));
         assert_eq!(read_back.checkpoint_generation, None);
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
     fn gr_restart_marker_v2_round_trip_binds_exact_generation() {
-        let path = unique_temp_path("gr-restart-marker-v2");
+        let (_dir, store) = marker_store();
         let expires_at = SystemTime::now() + Duration::from_mins(2);
-        write_gr_restart_marker_v2(&path, expires_at, "checkpoint-0007").unwrap();
+        store
+            .write_selected(expires_at, Some("checkpoint-0007"))
+            .unwrap();
 
-        let read_back = read_gr_restart_marker(&path).unwrap().unwrap();
+        let read_back = store.read().unwrap().unwrap();
         assert_eq!(
             read_back.checkpoint_generation.as_deref(),
             Some("checkpoint-0007")
@@ -4135,68 +4392,181 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             .duration_since(expires_at)
             .unwrap_or_else(|e| e.duration());
         assert!(diff < Duration::from_secs(1));
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
     fn gr_restart_marker_invalid_shapes_are_rejected() {
-        let path = unique_temp_path("gr-restart-bad-version");
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, store) = marker_store();
+        let path = store.display_path();
         std::fs::write(&path, "version = 3\nexpires_at_unix = 1\n").unwrap();
-        let err = read_gr_restart_marker(&path).unwrap_err();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let err = store.read().unwrap_err();
         assert!(err.contains("unsupported marker version"));
         std::fs::write(&path, "version = 2\nexpires_at_unix = 1\n").unwrap();
-        let err = read_gr_restart_marker(&path).unwrap_err();
+        let err = store.read().unwrap_err();
         assert!(err.contains("missing checkpoint_generation"));
         std::fs::write(
             &path,
             "version = 1\nexpires_at_unix = 1\ncheckpoint_generation = \"unexpected\"\n",
         )
         .unwrap();
-        let err = read_gr_restart_marker(&path).unwrap_err();
+        let err = store.read().unwrap_err();
         assert!(err.contains("v1 must not reference"));
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
     fn gr_restart_marker_precommit_failures_preserve_previous_generation() {
-        let path = unique_temp_path("gr-restart-marker-atomicity");
+        let (_dir, store) = marker_store();
         let expires_at = SystemTime::now() + Duration::from_mins(2);
-        write_gr_restart_marker_v2(&path, expires_at, "committed").unwrap();
+        store.write_selected(expires_at, Some("committed")).unwrap();
 
         for fault in [
             MarkerFaultPoint::Write,
             MarkerFaultPoint::FileSync,
             MarkerFaultPoint::Rename,
         ] {
-            let result =
-                write_gr_restart_marker_inner(&path, expires_at, Some("uncommitted"), fault);
+            let result = store.write_inner(expires_at, Some("uncommitted"), fault);
             assert!(result.is_err(), "fault {fault:?} must fail");
-            let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+            let marker = store.read().unwrap().unwrap();
             assert_eq!(
                 marker.checkpoint_generation.as_deref(),
                 Some("committed"),
                 "fault {fault:?} must preserve the prior committed marker"
             );
         }
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
     fn gr_restart_marker_postrename_failure_exposes_only_complete_v2() {
-        let path = unique_temp_path("gr-restart-marker-postrename");
+        let (_dir, store) = marker_store();
         let expires_at = SystemTime::now() + Duration::from_mins(2);
-        write_gr_restart_marker_v2(&path, expires_at, "old").unwrap();
+        store.write_selected(expires_at, Some("old")).unwrap();
 
-        let result = write_gr_restart_marker_inner(
-            &path,
-            expires_at,
-            Some("new"),
-            MarkerFaultPoint::DirectorySync,
-        );
+        let result = store.write_inner(expires_at, Some("new"), MarkerFaultPoint::DirectorySync);
         assert!(result.is_err());
-        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation.as_deref(), Some("new"));
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
+    }
+
+    #[test]
+    fn inherited_marker_expiry_cannot_remove_replacement_generation() {
+        let (_dir, store) = marker_store();
+        let expires_at = SystemTime::now() + Duration::from_mins(2);
+        store.write_selected(expires_at, Some("old")).unwrap();
+        let inherited = store.read().unwrap().unwrap();
+
+        store.write_selected(expires_at, Some("new")).unwrap();
+        assert!(!store.remove_if_matches(&inherited).unwrap());
+        assert_eq!(
+            store
+                .read()
+                .unwrap()
+                .unwrap()
+                .checkpoint_generation
+                .as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn inherited_marker_expiry_compares_exact_bytes_not_parsed_semantics() {
+        let (_dir, store) = marker_store();
+        let expires_at = UNIX_EPOCH + Duration::from_hours(500_000);
+        store.write_selected(expires_at, Some("same")).unwrap();
+        let inherited = store.read().unwrap().unwrap();
+
+        // Same parsed marker, different exact stored bytes and therefore a
+        // distinct publisher identity.
+        std::fs::write(
+            store.display_path(),
+            "# replacement\ncheckpoint_generation = \"same\"\nexpires_at_unix = 1800000000\nversion = 2\n",
+        )
+        .unwrap();
+        assert!(!store.remove_if_matches(&inherited).unwrap());
+        assert!(store.display_path().exists());
+        assert_eq!(
+            store
+                .read()
+                .unwrap()
+                .unwrap()
+                .checkpoint_generation
+                .as_deref(),
+            Some("same")
+        );
+    }
+
+    #[test]
+    fn pinned_marker_and_bundle_ignore_runtime_path_replacement() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let parent = tempfile::tempdir().unwrap();
+        let runtime = parent.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = Arc::new(PinnedRuntimeStateDirectory::prepare(&runtime).unwrap());
+        let store = GrRestartMarkerStore::new(Arc::clone(&pinned));
+
+        let original = parent.path().join("original");
+        std::fs::rename(&runtime, &original).unwrap();
+        let attacker = parent.path().join("attacker");
+        std::fs::create_dir(&attacker).unwrap();
+        symlink(&attacker, &runtime).unwrap();
+
+        store
+            .write_selected(SystemTime::now() + Duration::from_mins(2), Some("pinned"))
+            .unwrap();
+        pinned.prepare_warm_bundle().unwrap();
+        assert!(original.join(GR_RESTART_MARKER_FILE).is_file());
+        assert!(original.join(WARM_BUNDLE_DIRECTORY).is_dir());
+        assert!(!attacker.join(GR_RESTART_MARKER_FILE).exists());
+        assert!(!attacker.join(WARM_BUNDLE_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn marker_storage_rejects_symlinks_and_unsafe_modes() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "version = 1\nexpires_at_unix = 1\n").unwrap();
+        symlink(&target, dir.path().join(GR_RESTART_MARKER_FILE)).unwrap();
+        let store = GrRestartMarkerStore::new(Arc::new(
+            PinnedRuntimeStateDirectory::prepare(dir.path()).unwrap(),
+        ));
+        assert!(
+            store.read().is_err(),
+            "final marker symlink must be rejected"
+        );
+
+        std::fs::remove_file(dir.path().join(GR_RESTART_MARKER_FILE)).unwrap();
+        std::fs::write(
+            dir.path().join(GR_RESTART_MARKER_FILE),
+            "version = 1\nexpires_at_unix = 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            dir.path().join(GR_RESTART_MARKER_FILE),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        assert!(
+            store
+                .read()
+                .unwrap_err()
+                .contains("unsafe type, owner, or mode")
+        );
+
+        let unsafe_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(unsafe_dir.path(), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        assert!(PinnedRuntimeStateDirectory::prepare(unsafe_dir.path()).is_err());
     }
 
     #[test]
@@ -4276,20 +4646,20 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
 
     #[test]
     fn authoritative_capture_restart_window_controls_v2_expiry() {
-        let path = unique_temp_path("gr-restart-authoritative-window");
+        let (_dir, store) = marker_store();
         // Represents a live runtime-config capture that advanced from a stale
         // startup value to 17 seconds. Production overwrites the fallback with
         // `capture.restart_time_secs` before selecting marker v2.
         let captured_restart_time_secs = 17;
         let before = SystemTime::now();
-        write_selected_gr_restart_marker(
-            &path,
-            before + Duration::from_secs(captured_restart_time_secs),
-            Some("captured-generation"),
-        )
-        .unwrap();
+        store
+            .write_selected(
+                before + Duration::from_secs(captured_restart_time_secs),
+                Some("captured-generation"),
+            )
+            .unwrap();
 
-        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        let marker = store.read().unwrap().unwrap();
         assert_eq!(
             marker.checkpoint_generation.as_deref(),
             Some("captured-generation")
@@ -4297,18 +4667,19 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         let retention = marker.expires_at.duration_since(before).unwrap();
         assert!(retention >= Duration::from_secs(16));
         assert!(retention <= Duration::from_secs(17));
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
     fn failed_or_timed_out_writer_selects_v1_without_generation_reference() {
-        let path = unique_temp_path("gr-restart-writer-fallback");
-        write_selected_gr_restart_marker(&path, SystemTime::now() + Duration::from_mins(2), None)
+        let (_dir, store) = marker_store();
+        store
+            .write_selected(SystemTime::now() + Duration::from_mins(2), None)
             .unwrap();
 
-        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     fn checkpoint_plan_session() -> WarmCheckpointSession {
@@ -4341,16 +4712,17 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
 
     #[test]
     fn no_eligible_checkpoint_plan_retains_v1_fallback() {
-        let path = unique_temp_path("gr-restart-no-eligible-plan");
+        let (_dir, store) = marker_store();
         let mut session = checkpoint_plan_session();
         session.peer_gr_families.clear();
         assert!(build_warm_checkpoint_plan(&[session]).is_err());
 
-        write_selected_gr_restart_marker(&path, SystemTime::now() + Duration::from_mins(2), None)
+        store
+            .write_selected(SystemTime::now() + Duration::from_mins(2), None)
             .unwrap();
-        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]

@@ -119,6 +119,105 @@ async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
 }
 
 #[tokio::test]
+async fn cancelled_warm_mrt_snapshot_fails_fast_without_wedging_actor() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    let error = query_warm_mrt_snapshot_with_budget(
+        &tx,
+        Vec::new(),
+        crate::update::WarmMrtSnapshotBudget {
+            deadline: std::time::Instant::now() + Duration::from_secs(30),
+            cancelled,
+            max_materialized_bytes: 512 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("cancelled"), "{error}");
+
+    // A following actor query must still complete; cancellation is scoped to
+    // the abandoned checkpoint and cannot wedge the single-threaded actor.
+    let snapshot = query_mrt_snapshot(&tx).await;
+    assert!(snapshot.routes.is_empty());
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn warm_mrt_snapshot_rejects_materialization_before_route_clone() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 42,
+        peer,
+        peer_asn: 65002,
+        peer_router_id,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 42,
+        peer,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let error = query_warm_mrt_snapshot_with_budget(
+        &tx,
+        vec![crate::update::WarmMrtSnapshotView {
+            peer,
+            session_id: 42,
+            peer_asn: 65002,
+            peer_router_id,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            add_path_receive: false,
+        }],
+        crate::update::WarmMrtSnapshotBudget {
+            deadline: std::time::Instant::now() + Duration::from_secs(30),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            max_materialized_bytes: 0,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("materialized bytes"), "{error}");
+
+    let snapshot = query_mrt_snapshot(&tx).await;
+    assert_eq!(snapshot.routes.len(), 1, "actor remained responsive");
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());

@@ -145,14 +145,27 @@ impl PeerManager {
         // manager remains inside this one command while those queries run, so
         // no reload/config transaction can advance `current_config` or the
         // resolved policies paired with the returned session generations.
-        let effective_config_toml = self.current_config.effective_redacted_toml()?;
-        let local_asn = self.current_config.global.asn;
-        let local_router_id = self
+        let desired_local_asn = self.current_config.global.asn;
+        let desired_local_router_id = self
             .current_config
             .global
             .router_id
             .parse::<Ipv4Addr>()
             .map_err(|error| format!("invalid live router ID during warm checkpoint: {error}"))?;
+        // ASN/router-ID changes are restart-required: `current_config` can
+        // legitimately contain the accepted desired values while the running
+        // listener and every live session still use these immutable fields.
+        // A checkpoint digest must never claim the desired identity describes
+        // the captured live routes. Fail closed until the restart applies it.
+        if desired_local_asn != self.local_asn || desired_local_router_id != self.router_id {
+            return Err(format!(
+                "restart-required local identity differs from the live daemon during warm checkpoint (desired ASN/router-ID {desired_local_asn}/{desired_local_router_id}, live {}/{})",
+                self.local_asn, self.router_id
+            ));
+        }
+        let effective_config_toml = self.current_config.effective_redacted_toml()?;
+        let local_asn = self.local_asn;
+        let local_router_id = self.router_id;
         let restart_time_secs = self
             .current_config
             .resolved_neighbors()

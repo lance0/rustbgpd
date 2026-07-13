@@ -30,7 +30,8 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
     MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotView, route_query_key,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
+    route_query_key,
 };
 
 use helpers::{
@@ -1665,8 +1666,12 @@ impl RibManager {
             }
             RibUpdate::QueryOrrStatus { reply } => self.handle_query_orr_status(reply),
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
-            RibUpdate::QueryWarmMrtSnapshot { views, reply } => {
-                self.handle_query_warm_mrt_snapshot(&views, reply);
+            RibUpdate::QueryWarmMrtSnapshot {
+                views,
+                budget,
+                reply,
+            } => {
+                self.handle_query_warm_mrt_snapshot(&views, &budget, reply);
             }
             RibUpdate::QueryBmpLocRibDump { cursor, reply } => {
                 self.handle_query_bmp_loc_rib_dump(cursor, reply);
@@ -3686,9 +3691,10 @@ impl RibManager {
     fn handle_query_warm_mrt_snapshot(
         &mut self,
         views: &[WarmMrtSnapshotView],
+        budget: &WarmMrtSnapshotBudget,
         reply: tokio::sync::oneshot::Sender<Result<MrtSnapshotData, String>>,
     ) {
-        let result = self.build_warm_mrt_snapshot(views);
+        let result = self.build_warm_mrt_snapshot(views, budget);
         if reply.send(result).is_err() {
             warn!("warm MRT snapshot query caller dropped before receiving response");
         }
@@ -3710,7 +3716,9 @@ impl RibManager {
     fn build_warm_mrt_snapshot(
         &self,
         views: &[WarmMrtSnapshotView],
+        budget: &WarmMrtSnapshotBudget,
     ) -> Result<MrtSnapshotData, String> {
+        budget.check()?;
         if views.is_empty() {
             return Err("warm checkpoint has no eligible peer/family views".to_string());
         }
@@ -3726,6 +3734,7 @@ impl RibManager {
         let mut peer_identity = HashMap::<IpAddr, (u64, u32, Ipv4Addr)>::new();
         let mut families = HashMap::<IpAddr, HashSet<(Afi, Safi)>>::new();
         for view in views {
+            budget.check()?;
             if !matches!(
                 (view.afi, view.safi),
                 (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) | (Afi::L2Vpn, Safi::Evpn)
@@ -3758,6 +3767,7 @@ impl RibManager {
         }
 
         for (&peer, &(session_id, peer_asn, peer_router_id)) in &peer_identity {
+            budget.check()?;
             if self.outbound_session_ids.get(&peer).copied() != Some(session_id) {
                 return Err(format!(
                     "peer {peer} changed active session during warm checkpoint"
@@ -3785,32 +3795,97 @@ impl RibManager {
             .collect();
         peers.sort_by_key(|peer| peer.peer_addr);
 
-        let routes = self
-            .ribs
-            .values()
-            .flat_map(crate::adj_rib_in::AdjRibIn::iter)
-            .filter(|route| {
-                let family = match route.prefix {
-                    Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
-                    Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
-                };
-                families
-                    .get(&route.peer)
-                    .is_some_and(|allowed| allowed.contains(&family))
+        let route_is_allowed = |route: &crate::route::Route| {
+            let family = match route.prefix {
+                Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+            };
+            families
+                .get(&route.peer)
+                .is_some_and(|allowed| allowed.contains(&family))
+        };
+        let evpn_is_allowed = |route: &crate::route::EvpnRibRoute| {
+            families
+                .get(&route.peer)
+                .is_some_and(|allowed| allowed.contains(&(Afi::L2Vpn, Safi::Evpn)))
+        };
+
+        // Count and bound every owned allocation before cloning even one
+        // route. Route attributes and interface names are Arc-backed; the
+        // only clone-side allocation outside the Vec buffers is the optional
+        // boxed next-hop scope, accounted explicitly below.
+        let mut route_count = 0usize;
+        let mut boxed_scope_count = 0usize;
+        let mut evpn_count = 0usize;
+        for rib in self.ribs.values() {
+            for route in rib.iter() {
+                budget.check()?;
+                if route_is_allowed(route) {
+                    route_count = route_count
+                        .checked_add(1)
+                        .ok_or_else(|| "warm checkpoint route count overflow".to_string())?;
+                    boxed_scope_count = boxed_scope_count
+                        .checked_add(usize::from(route.next_hop_scope.is_some()))
+                        .ok_or_else(|| "warm checkpoint route scope count overflow".to_string())?;
+                }
+            }
+            for route in rib.iter_evpn() {
+                budget.check()?;
+                if evpn_is_allowed(route) {
+                    evpn_count = evpn_count
+                        .checked_add(1)
+                        .ok_or_else(|| "warm checkpoint EVPN route count overflow".to_string())?;
+                }
+            }
+        }
+        let materialized_bytes = peers
+            .len()
+            .checked_mul(std::mem::size_of::<MrtPeerEntry>())
+            .and_then(|bytes| {
+                route_count
+                    .checked_mul(std::mem::size_of::<crate::route::Route>())
+                    .and_then(|routes| bytes.checked_add(routes))
             })
-            .cloned()
-            .collect();
-        let evpn_routes = self
-            .ribs
-            .values()
-            .flat_map(crate::adj_rib_in::AdjRibIn::iter_evpn)
-            .filter(|route| {
-                families
-                    .get(&route.peer)
-                    .is_some_and(|allowed| allowed.contains(&(Afi::L2Vpn, Safi::Evpn)))
+            .and_then(|bytes| {
+                boxed_scope_count
+                    .checked_mul(std::mem::size_of::<crate::route::NextHopScope>())
+                    .and_then(|scopes| bytes.checked_add(scopes))
             })
-            .cloned()
-            .collect();
+            .and_then(|bytes| {
+                evpn_count
+                    .checked_mul(std::mem::size_of::<crate::route::EvpnRibRoute>())
+                    .and_then(|routes| bytes.checked_add(routes))
+            })
+            .ok_or_else(|| "warm checkpoint materialized size overflow".to_string())?;
+        if materialized_bytes > budget.max_materialized_bytes {
+            return Err(format!(
+                "warm checkpoint needs {materialized_bytes} materialized bytes, exceeding the {}-byte cap",
+                budget.max_materialized_bytes
+            ));
+        }
+
+        let mut routes = Vec::new();
+        routes.try_reserve_exact(route_count).map_err(|_| {
+            format!("failed to reserve {route_count} warm checkpoint unicast routes")
+        })?;
+        let mut evpn_routes = Vec::new();
+        evpn_routes
+            .try_reserve_exact(evpn_count)
+            .map_err(|_| format!("failed to reserve {evpn_count} warm checkpoint EVPN routes"))?;
+        for rib in self.ribs.values() {
+            for route in rib.iter() {
+                budget.check()?;
+                if route_is_allowed(route) {
+                    routes.push(route.clone());
+                }
+            }
+            for route in rib.iter_evpn() {
+                budget.check()?;
+                if evpn_is_allowed(route) {
+                    evpn_routes.push(route.clone());
+                }
+            }
+        }
 
         Ok(MrtSnapshotData {
             peers,

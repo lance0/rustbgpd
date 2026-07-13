@@ -1310,6 +1310,26 @@ async fn warm_checkpoint_capture_uses_live_actor_config_identity() {
 }
 
 #[tokio::test]
+async fn warm_checkpoint_rejects_sighup_desired_live_global_identity_drift() {
+    let mut mgr = test_peer_manager();
+
+    // SIGHUP accepts restart-required global fields into the desired runtime
+    // snapshot, but the listener/session actors retain their boot identity.
+    mgr.current_config.global.asn = 65123;
+    let error = mgr.query_warm_checkpoint_capture().await.unwrap_err();
+    assert!(error.contains("restart-required local identity"), "{error}");
+    assert!(error.contains("65123/10.0.0.1"), "{error}");
+    assert!(error.contains("65001/10.0.0.1"), "{error}");
+
+    mgr.current_config.global.asn = 65001;
+    mgr.current_config.global.router_id = "192.0.2.99".to_string();
+    let error = mgr.query_warm_checkpoint_capture().await.unwrap_err();
+    assert!(error.contains("restart-required local identity"), "{error}");
+    assert!(error.contains("65001/192.0.2.99"), "{error}");
+    assert!(error.contains("65001/10.0.0.1"), "{error}");
+}
+
+#[tokio::test]
 async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
     let mut mgr = test_peer_manager();
     let addr: IpAddr = "10.0.0.2".parse().unwrap();

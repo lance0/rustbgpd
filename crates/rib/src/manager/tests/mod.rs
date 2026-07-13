@@ -392,9 +392,27 @@ async fn query_warm_mrt_snapshot(
     tx: &mpsc::Sender<RibUpdate>,
     views: Vec<crate::update::WarmMrtSnapshotView>,
 ) -> Result<crate::update::MrtSnapshotData, String> {
+    query_warm_mrt_snapshot_with_budget(
+        tx,
+        views,
+        crate::update::WarmMrtSnapshotBudget {
+            deadline: std::time::Instant::now() + Duration::from_secs(30),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            max_materialized_bytes: 512 * 1024 * 1024,
+        },
+    )
+    .await
+}
+
+async fn query_warm_mrt_snapshot_with_budget(
+    tx: &mpsc::Sender<RibUpdate>,
+    views: Vec<crate::update::WarmMrtSnapshotView>,
+    budget: crate::update::WarmMrtSnapshotBudget,
+) -> Result<crate::update::MrtSnapshotData, String> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryWarmMrtSnapshot {
         views,
+        budget,
         reply: reply_tx,
     })
     .await
