@@ -1860,17 +1860,36 @@ impl SessionExportEncoder {
 #[doc(hidden)]
 #[must_use]
 pub fn fanout_bench_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    fanout_bench_encoder(64_512, false, Some(Ipv4Addr::new(10, 255, 255, 255)))
+}
+
+/// Build the authoritative exact-export encoder for one synthetic eBGP route-
+/// server client. The remote ASN is deliberately retained in the snapshot so
+/// the benchmark can distinguish homogeneous and IXP-style client populations.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_route_server_export_encoder(remote_asn: u32) -> Arc<dyn ExactExportEncoder> {
+    fanout_bench_encoder(remote_asn, true, None)
+}
+
+#[cfg(feature = "bench-internals")]
+fn fanout_bench_encoder(
+    peer_asn: u32,
+    route_server_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+) -> Arc<dyn ExactExportEncoder> {
     Arc::new(SessionExportEncoder::new(SessionExportProfile {
         owner_id: 0,
         generation: 0,
         local_asn: 64_512,
         local_router_id: Ipv4Addr::new(10, 255, 255, 255),
         local_role: None,
-        route_server_client: false,
+        route_server_client,
         remove_private_as: RemovePrivateAs::Disabled,
-        cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
+        cluster_id,
         configured_local_ipv6_nexthop: None,
-        peer_asn: Some(64_512),
+        peer_asn: Some(peer_asn),
         four_octet_as: true,
         extended_messages: false,
         extended_nexthop_ipv4: false,

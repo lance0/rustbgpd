@@ -88,6 +88,61 @@ impl RibManager {
     where
         F: FnMut() -> Arc<dyn ExactExportEncoder>,
     {
+        self.bench_register_peers_with_profile(
+            n_peers,
+            export_policy,
+            channel_capacity,
+            |_| 64_512,
+            false,
+            is_rr_client,
+            |_| make_exact_export_encoder(),
+        )
+    }
+
+    /// Register synthetic eBGP route-server clients with the supplied remote
+    /// ASNs. All other manager-side grouping inputs remain homogeneous, so the
+    /// benchmark isolates exact-export snapshot compatibility at realistic IXP
+    /// fanout sizes without changing the established RR fixture above.
+    #[must_use]
+    pub fn bench_register_route_server_peers<F>(
+        &mut self,
+        remote_asns: &[u32],
+        export_policy: Option<&PolicyChain>,
+        channel_capacity: usize,
+        make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        F: FnMut(u32) -> Arc<dyn ExactExportEncoder>,
+    {
+        self.bench_register_peers_with_profile(
+            remote_asns.len(),
+            export_policy,
+            channel_capacity,
+            |index| remote_asns[index],
+            true,
+            false,
+            make_exact_export_encoder,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the bench seam keeps each production PeerUp grouping dimension explicit"
+    )]
+    fn bench_register_peers_with_profile<P, F>(
+        &mut self,
+        n_peers: usize,
+        export_policy: Option<&PolicyChain>,
+        channel_capacity: usize,
+        mut peer_asn: P,
+        is_ebgp: bool,
+        is_rr_client: bool,
+        mut make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        P: FnMut(usize) -> u32,
+        F: FnMut(u32) -> Arc<dyn ExactExportEncoder>,
+    {
         let mut receivers = Vec::with_capacity(n_peers);
         for i in 0..n_peers {
             // Unique peer address `10.b1.b2.b3` from the index; the high byte is
@@ -95,18 +150,19 @@ impl RibManager {
             let idx = u32::try_from(i).expect("bench peer count fits in u32");
             let peer = Self::bench_peer_address(i);
             let session_id = u64::from(idx) + 1;
+            let peer_asn = peer_asn(i);
             let (tx, mut rx) = mpsc::channel(channel_capacity);
             self.pending_peer_export_encoders
-                .insert((peer, session_id), make_exact_export_encoder());
+                .insert((peer, session_id), make_exact_export_encoder(peer_asn));
             self.handle_peer_up(
                 peer,
                 session_id,
-                64_512,                      // iBGP — all peers share the local ASN
+                peer_asn,
                 Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
                 tx,
                 export_policy.cloned(),
                 vec![(Afi::Ipv4, Safi::Unicast)],
-                false, // is_ebgp = false (iBGP / route-reflector scenario)
+                is_ebgp,
                 is_rr_client,
                 None,       // no ORR vantage
                 false,      // no per-client best (RS mode)

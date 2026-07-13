@@ -36,7 +36,7 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::fanout_bench_export_encoder;
+use rustbgpd_transport::{fanout_bench_export_encoder, fanout_bench_route_server_export_encoder};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
 };
@@ -46,6 +46,8 @@ use tokio::sync::mpsc;
 const CHANGED: usize = 64;
 /// Peer fanout factors (the independent variable).
 const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
+/// IXP route-server fanout factors retained in the LAN-409 receipt.
+const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).
 const CHANNEL_CAP: usize = CHANGED + 8;
@@ -197,6 +199,35 @@ fn build(n_peers: usize, export_policy: Option<PolicyChain>) -> FanoutState {
     (mgr, receivers, changed)
 }
 
+fn route_server_remote_asns(n_peers: usize, distinct: bool) -> Vec<u32> {
+    (0..n_peers)
+        .map(|index| {
+            if distinct {
+                65_001 + u32::try_from(index).expect("benchmark peer count fits u32")
+            } else {
+                65_001
+            }
+        })
+        .collect()
+}
+
+fn build_ixp(n_peers: usize, distinct_remote_asns: bool) -> FanoutState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
+    let prefixes = changed_prefixes();
+    let remote_asns = route_server_remote_asns(n_peers, distinct_remote_asns);
+    let receivers = manager.bench_register_route_server_peers(
+        &remote_asns,
+        None,
+        CHANNEL_CAP,
+        fanout_bench_route_server_export_encoder,
+    );
+    manager.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
+    let changed = prefixes.into_iter().collect();
+    (manager, receivers, changed)
+}
+
 fn bench_fanout(c: &mut Criterion) {
     let mut group = c.benchmark_group("distribute_fanout");
     for &n in &PEER_COUNTS {
@@ -211,6 +242,31 @@ fn bench_fanout(c: &mut Criterion) {
             b.iter_batched_ref(
                 || build(n, Some(representative_export_chain())),
                 |(mgr, _recv, changed)| mgr.bench_distribute(changed),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_ixp_exact_export_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ixp_exact_export_fanout");
+    for &n in &IXP_PEER_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new("homogeneous_remote_asn", n),
+            &n,
+            |b, &n| {
+                b.iter_batched_ref(
+                    || build_ixp(n, false),
+                    |(manager, _receivers, changed)| manager.bench_distribute(changed),
+                    BatchSize::PerIteration,
+                );
+            },
+        );
+        group.bench_with_input(BenchmarkId::new("distinct_remote_asns", n), &n, |b, &n| {
+            b.iter_batched_ref(
+                || build_ixp(n, true),
+                |(manager, _receivers, changed)| manager.bench_distribute(changed),
                 BatchSize::PerIteration,
             );
         });
@@ -253,6 +309,67 @@ fn build_policy_regroup(routes: usize, peers: usize) -> PolicyRegroupState {
         while receiver.try_recv().is_ok() {}
     }
     (manager, receivers, community_export_chain(0xFDE8_0002))
+}
+
+fn build_ixp_policy_regroup(
+    routes: usize,
+    peers: usize,
+    distinct_remote_asns: bool,
+) -> PolicyRegroupState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
+    let old_policy = community_export_chain(0xFDE8_0001);
+    let remote_asns = route_server_remote_asns(peers, distinct_remote_asns);
+    let mut receivers = manager.bench_register_route_server_peers(
+        &remote_asns,
+        Some(&old_policy),
+        4,
+        fanout_bench_route_server_export_encoder,
+    );
+    let seeded = policy_regroup_routes(routes);
+    let changed = seeded
+        .iter()
+        .map(|route| route.prefix)
+        .collect::<HashSet<_>>();
+    manager.bench_seed_loc_rib(seeded);
+    manager.bench_distribute(&changed);
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    (manager, receivers, community_export_chain(0xFDE8_0002))
+}
+
+fn bench_ixp_policy_regroup_resync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ixp_policy_regroup_resync");
+    group.sample_size(10);
+    let mut peer_counts = vec![64usize];
+    if std::env::var_os("RUSTBGPD_IXP_LARGE_RECEIPT").is_some() {
+        peer_counts.push(700);
+    }
+    for peers in peer_counts {
+        for (shape, distinct) in [
+            ("homogeneous_remote_asn", false),
+            ("distinct_remote_asns", true),
+        ] {
+            let parameter = format!("{shape}/4096/{peers}");
+            group.bench_with_input(
+                BenchmarkId::new("shared_plan", &parameter),
+                &(peers, distinct),
+                |bench, &(peers, distinct)| {
+                    bench.iter_batched_ref(
+                        || build_ixp_policy_regroup(4_096, peers, distinct),
+                        |(manager, _receivers, next)| {
+                            let fast = manager.bench_replace_export_policy_cohort(peers, next);
+                            std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+        }
+    }
+    group.finish();
 }
 
 fn bench_policy_regroup_resync(c: &mut Criterion) {
@@ -307,5 +424,11 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_fanout, bench_policy_regroup_resync);
+criterion_group!(
+    benches,
+    bench_fanout,
+    bench_ixp_exact_export_fanout,
+    bench_policy_regroup_resync,
+    bench_ixp_policy_regroup_resync
+);
 criterion_main!(benches);
