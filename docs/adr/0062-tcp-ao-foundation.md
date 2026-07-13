@@ -105,7 +105,7 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   configured keyring, including transient key-byte equality, matches the
   kernel inventory. Dropped-ICMP counters degrade health but do not by
   themselves reject an accepted authenticated socket.
-- Protected M43 interop against BIRD 3.2.1 runs in the self-hosted
+- Protected M43 interop against BIRD 3.2.1 runs in the GitHub-hosted
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
   feature skip M43 with a warning instead of failing unrelated dataplane gates.

@@ -37,7 +37,8 @@ session's mutation surface (`PeerCommand`, `crates/transport/src/handle.rs`):
   capabilities), `add_path` (capability), `role` / `strict_role` (RFC 9234
   capability), `prefix_orf_receive` (ORF capability), `md5_password` (TCP
   MD5 option), `ttl_security` (socket-level GTSM). `bfd` is restart-required
-  for everyone; `tcp_ao` is static-neighbor-only and restart-required.
+  for everyone; `tcp_ao` is configured directly on static neighbors or dynamic
+  ranges, is never inherited from a peer group, and is restart-required.
 - **(c) In between** (no wire renegotiation, but trapped in the immutable
   per-session snapshot): `max_prefixes`, `remove_private_as`,
   `local_ipv6_nexthop`, `gr_stale_routes_time`, `route_reflector_client` /

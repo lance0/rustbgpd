@@ -922,10 +922,11 @@ disconnected, connecting, or socket inspection may have failed).
 Persistent disagreement between `TCP_AO_INFO` and `TCP_AO_GET_KEYS` is also
 `unavailable`: rustbgpd clears the whole snapshot instead of publishing an
 inconsistent degraded value. `healthy` means the published live snapshot has
-valid current/RNext keys, a consistent configured kernel MKT inventory, and no
-authentication error counters;
-`degraded` means a key-validity flag is missing, an active key is deprecated,
-or at least one cumulative socket-lifetime error counter is non-zero. When socket inspection succeeds, connected sessions
+valid current/RNext keys mapped to a nonempty, internally consistent live MKT
+inventory, neither active key is deprecated, and there are no authentication
+error counters; `degraded` means a key-validity flag is missing, an active key
+is deprecated, or at least one cumulative socket-lifetime error counter is
+non-zero. When socket inspection succeeds, connected sessions
 also show current/RNext KeyIDs,
 packet verification counters, and redacted per-key peer/prefix, directional
 IDs, algorithm, selection flags, rollover metadata, and counters. Key bytes,

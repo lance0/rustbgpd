@@ -271,12 +271,12 @@ so any non-zero error counter keeps the socket `DEGRADED` until reconnect.
 `NeighborState.tcp_ao_health` is `NOT_APPLICABLE` for plaintext and MD5 peers,
 `UNAVAILABLE` when TCP-AO protects the session but there is no socket snapshot
 (including disconnect, inspection failure, or persistent INFO/inventory
-inconsistency), `HEALTHY` when the published snapshot has
-both current/RNext key-validity flags, a matching nondeprecated key inventory,
-and no error counters, and `DEGRADED` when either key-validity flag is absent,
-an active key is deprecated, or any bad, key-not-found, unsigned-required, or
-dropped-ICMP counter is non-zero. An inconsistent INFO/inventory pair is never
-published as degraded state.
+inconsistency), `HEALTHY` when the published snapshot has both current/RNext
+key-validity flags mapped to a nonempty, internally consistent live inventory,
+neither active key is deprecated, and no error counters, and `DEGRADED` when
+either key-validity flag is absent, an active key is deprecated, or any bad,
+key-not-found, unsigned-required, or dropped-ICMP counter is non-zero. An
+inconsistent INFO/inventory pair is never published as degraded state.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is

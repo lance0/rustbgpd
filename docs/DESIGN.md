@@ -559,13 +559,14 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 **TCP MD5 (RFC 2385):** Supported in v1. This is table stakes for any BGP daemon deployed in production — most peers will require it. Implemented via `setsockopt(TCP_MD5SIG)` on the listener and per-peer outbound sockets. Linux only.
 
-**TCP-AO (RFC 5925):** Staged via ADR-0062. Static-neighbor `tcp_ao` TOML is
-validated and installed on Linux startup sockets: active-open sessions install
-the key before `connect()`, and the passive BGP listener installs configured
-static-peer and direct dynamic-prefix MKTs before `listen()`. Accepted protected
-sockets are validated fail-closed, live KeyIDs/counters are queryable through
-the neighbor API/CLI, and M43 covers BIRD interop. Runtime key rotation and
-multi-key rollover remain follow-up work.
+**TCP-AO (RFC 5925):** Staged via ADR-0062. Static-neighbor and direct
+dynamic-prefix `tcp_ao` TOML accepts ordered startup keyrings on Linux:
+active-open sessions install the selected key and remaining MKTs before
+`connect()`, and the passive BGP listener installs configured keyrings before
+`listen()`. Accepted protected sockets are validated fail-closed, live
+KeyIDs/counters are queryable through the neighbor API/CLI, and M43 covers BIRD
+interop. Changing keys on live sockets without a daemon restart remains
+follow-up work.
 
 **GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and checks inbound TTL >= 254. Simple, effective, and prevents most remote session hijacking.
 

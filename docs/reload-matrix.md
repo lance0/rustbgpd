@@ -127,7 +127,7 @@ Peer-group fields mirror `[[neighbors]]` minus the identity triple
 (`address`, `interface`, `remote_asn`) and TCP-AO. Inheritance is resolved at
 each reconcile. Neighbor-level policy fields override inherited peer-group
 policy fields. TCP-AO is never inherited: static neighbors and dynamic ranges
-configure their startup key directly.
+configure their startup keyring directly.
 
 | Field | Class | Notes |
 |---|---|---|

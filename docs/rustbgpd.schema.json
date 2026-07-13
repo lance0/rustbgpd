@@ -2426,7 +2426,7 @@
           "type": "string"
         },
         "deprecated": {
-          "description": "Mark this key as deprecated for future rollover behavior. Startup socket\ninstallation carries the flag through; runtime rollover remains deferred.",
+          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. Live rotation remains deferred.",
           "type": "boolean",
           "default": false
         },

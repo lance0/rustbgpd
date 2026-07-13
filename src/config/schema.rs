@@ -791,8 +791,10 @@ pub struct TcpAoConfig {
     /// installation. Runtime key rotation remains deferred.
     #[serde(default)]
     pub preferred: bool,
-    /// Mark this key as deprecated for future rollover behavior. Startup socket
-    /// installation carries the flag through; runtime rollover remains deferred.
+    /// Mark this key as deprecated for local startup selection and health
+    /// metadata. Deprecated keys are still installed and may remain usable
+    /// when peer-selected, but rustbgpd never selects one as its startup
+    /// fallback. Live rotation remains deferred.
     #[serde(default)]
     pub deprecated: bool,
 }
