@@ -60,7 +60,7 @@ impl TcpAoAlgorithm {
     }
 }
 
-/// Static-neighbor TCP-AO configuration for one peer.
+/// TCP-AO configuration for one MKT in a peer or listener-selector keyring.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TcpAoConfig {
     /// TCP-AO Master Key Tuple secret.
@@ -71,9 +71,10 @@ pub struct TcpAoConfig {
     pub recv_id: u8,
     /// TCP-AO MAC/KDF algorithm.
     pub algorithm: TcpAoAlgorithm,
-    /// Rollover metadata reserved for future multi-key support.
+    /// Local metadata that prefers this key for startup transmission.
     pub preferred: bool,
-    /// Rollover metadata reserved for future multi-key support.
+    /// Local metadata that excludes this key from automatic startup selection.
+    /// The MKT is still installed and may remain usable when peer-selected.
     pub deprecated: bool,
 }
 

@@ -5,6 +5,7 @@ use super::{
 };
 use crate::config::TransportConfig;
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
@@ -631,11 +632,21 @@ pub(super) async fn poll_connect(
     task.await
 }
 
-fn install_active_tcp_ao(
+fn install_active_tcp_ao_with<F>(
     socket: &socket2::Socket,
     config: &TransportConfig,
     peer_label: &str,
-) -> std::io::Result<Option<crate::socket_opts::TcpAoMktReceipt>> {
+    mut install_key: F,
+) -> std::io::Result<Option<crate::socket_opts::TcpAoMktReceipt>>
+where
+    F: FnMut(
+        &socket2::Socket,
+        IpAddr,
+        u8,
+        &crate::TcpAoConfig,
+        crate::socket_opts::TcpAoSocketRole,
+    ) -> std::io::Result<()>,
+{
     let Some(tcp_ao) = config.tcp_ao.as_ref() else {
         return Ok(None);
     };
@@ -656,7 +667,7 @@ fn install_active_tcp_ao(
         } else {
             crate::socket_opts::TcpAoSocketRole::Listener
         };
-        crate::socket_opts::set_tcp_ao_config(
+        install_key(
             socket,
             config.remote_addr.ip(),
             prefix_len,
@@ -706,11 +717,71 @@ fn install_active_tcp_ao(
     Ok(Some(receipt))
 }
 
+fn prepare_active_socket_with<I, C>(
+    socket: socket2::Socket,
+    config: &TransportConfig,
+    peer_label: &str,
+    install_key: I,
+    connect_socket: C,
+) -> std::io::Result<(socket2::Socket, Option<crate::socket_opts::TcpAoMktReceipt>)>
+where
+    I: FnMut(
+        &socket2::Socket,
+        IpAddr,
+        u8,
+        &crate::TcpAoConfig,
+        crate::socket_opts::TcpAoSocketRole,
+    ) -> std::io::Result<()>,
+    C: FnOnce(&socket2::Socket, &socket2::SockAddr) -> std::io::Result<()>,
+{
+    if let Some(ref password) = config.md5_password {
+        crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password)?;
+        debug!(peer = %peer_label, "TCP MD5 authentication configured");
+    }
+
+    // Install the selected exact MKT as Current/RNext, then every remaining
+    // key in declaration order before connect. This helper owns the fresh
+    // socket, so any partial installation failure closes it before returning
+    // and cannot reach the connect operation or fall back to plaintext.
+    let tcp_ao_receipt = install_active_tcp_ao_with(&socket, config, peer_label, install_key)?;
+
+    if config.ttl_security {
+        crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
+        debug!(peer = %peer_label, "GTSM / TTL security configured");
+    }
+
+    socket.set_nonblocking(true)?;
+    let addr = socket2::SockAddr::from(config.remote_addr);
+    connect_socket(&socket, &addr)?;
+    Ok((socket, tcp_ao_receipt))
+}
+
+#[cfg(test)]
+pub(super) fn prepare_active_socket_for_test<I, C>(
+    socket: socket2::Socket,
+    config: &TransportConfig,
+    peer_label: &str,
+    install_key: I,
+    connect_socket: C,
+) -> std::io::Result<(socket2::Socket, Option<crate::socket_opts::TcpAoMktReceipt>)>
+where
+    I: FnMut(
+        &socket2::Socket,
+        IpAddr,
+        u8,
+        &crate::TcpAoConfig,
+        crate::socket_opts::TcpAoSocketRole,
+    ) -> std::io::Result<()>,
+    C: FnOnce(&socket2::Socket, &socket2::SockAddr) -> std::io::Result<()>,
+{
+    prepare_active_socket_with(socket, config, peer_label, install_key, connect_socket)
+}
+
 async fn create_and_connect(
     config: TransportConfig,
     peer_label: String,
 ) -> std::io::Result<(TcpStream, Option<crate::TcpAoInfoSnapshot>)> {
-    use socket2::{Domain, Protocol, SockAddr, Type};
+    use socket2::{Domain, Protocol, Type};
 
     let domain = if config.remote_addr.is_ipv4() {
         Domain::IPV4
@@ -719,30 +790,17 @@ async fn create_and_connect(
     };
 
     let socket = socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-
-    if let Some(ref password) = config.md5_password {
-        crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password)?;
-        debug!(peer = %peer_label, "TCP MD5 authentication configured");
-    }
-
-    // Install the selected exact MKT as Current/RNext, then every remaining
-    // key in declaration order before connect. Any failure abandons this fresh
-    // socket, so protected peers never fall back to plaintext.
-    let tcp_ao_receipt = install_active_tcp_ao(&socket, &config, &peer_label)?;
-
-    if config.ttl_security {
-        crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
-        debug!(peer = %peer_label, "GTSM / TTL security configured");
-    }
-
-    socket.set_nonblocking(true)?;
-
-    let addr = SockAddr::from(config.remote_addr);
-    match socket.connect(&addr) {
-        Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
-        Err(e) => return Err(e),
-    }
+    let (socket, tcp_ao_receipt) = prepare_active_socket_with(
+        socket,
+        &config,
+        &peer_label,
+        crate::socket_opts::set_tcp_ao_config,
+        |socket, addr| match socket.connect(addr) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => Ok(()),
+            Err(e) => Err(e),
+        },
+    )?;
 
     let std_stream: std::net::TcpStream = socket.into();
     let stream = TcpStream::from_std(std_stream)?;

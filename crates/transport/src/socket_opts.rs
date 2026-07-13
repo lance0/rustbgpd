@@ -368,23 +368,54 @@ const TCP_AO_GET_KEYS: libc::c_int = 41;
 #[cfg(target_os = "linux")]
 const TCP_AO_MAXKEYLEN: usize = 80;
 #[cfg(target_os = "linux")]
-const TCP_AO_ADD_SET_CURRENT: u32 = 1 << 0;
+const TCP_AO_TARGET_BIG_ENDIAN: bool = cfg!(target_endian = "big");
+
+/// Return the numeric mask for a bit in a Linux UAPI `u32` C bitfield word.
+///
+/// Linux big-endian C ABIs allocate the first declared bitfield from the most
+/// significant bit; little-endian ABIs allocate it from the least significant
+/// bit. The surrounding `repr(C)` records stay identical on both targets.
 #[cfg(target_os = "linux")]
-const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
+const fn tcp_ao_u32_bitfield_mask(index: u32, big_endian: bool) -> u32 {
+    let shift = if big_endian {
+        u32::BITS - 1 - index
+    } else {
+        index
+    };
+    1u32 << shift
+}
+
+/// Return the numeric mask for a bit in a Linux UAPI `u16` C bitfield word.
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_SET_CURRENT: u32 = 1 << 0;
+const fn tcp_ao_u16_bitfield_mask(index: u32, big_endian: bool) -> u16 {
+    let shift = if big_endian {
+        u16::BITS - 1 - index
+    } else {
+        index
+    };
+    1u16 << shift
+}
+
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_SET_RNEXT: u32 = 1 << 1;
+const TCP_AO_ADD_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_AO_REQUIRED: u32 = 1 << 2;
+const TCP_AO_ADD_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_ACCEPT_ICMPS: u32 = 1 << 4;
+const TCP_AO_INFO_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_IS_CURRENT: u16 = 1 << 0;
+const TCP_AO_INFO_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_IS_RNEXT: u16 = 1 << 1;
+const TCP_AO_INFO_AO_REQUIRED: u32 = tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_ALL: u16 = 1 << 2;
+const TCP_AO_INFO_ACCEPT_ICMPS: u32 = tcp_ao_u32_bitfield_mask(4, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_CURRENT: u16 = tcp_ao_u16_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_RNEXT: u16 = tcp_ao_u16_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_ALL: u16 = tcp_ao_u16_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
+// `keyflags` is an ordinary one-byte flag field, not a C bitfield word, so its
+// numeric masks are endian-independent.
 #[cfg(target_os = "linux")]
 const TCP_AO_KEYF_IFINDEX: u8 = 1 << 0;
 #[cfg(target_os = "linux")]
@@ -1498,12 +1529,61 @@ mod tests {
         assert_eq!(TCP_AO_INFO, 40);
         assert_eq!(TCP_AO_GET_KEYS, 41);
         assert_eq!(TCP_AO_MAXKEYLEN, 80);
-        assert_eq!(TCP_AO_ADD_SET_CURRENT, 1);
-        assert_eq!(TCP_AO_ADD_SET_RNEXT, 2);
-        assert_eq!(TCP_AO_INFO_SET_CURRENT, 1);
-        assert_eq!(TCP_AO_INFO_SET_RNEXT, 2);
-        assert_eq!(TCP_AO_INFO_AO_REQUIRED, 4);
-        assert_eq!(TCP_AO_INFO_ACCEPT_ICMPS, 16);
+        assert_eq!(
+            TCP_AO_ADD_SET_CURRENT,
+            tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_ADD_SET_RNEXT,
+            tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_SET_CURRENT,
+            tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_SET_RNEXT,
+            tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_AO_REQUIRED,
+            tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_ACCEPT_ICMPS,
+            tcp_ao_u32_bitfield_mask(4, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_IS_CURRENT,
+            tcp_ao_u16_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_IS_RNEXT,
+            tcp_ao_u16_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_ALL,
+            tcp_ao_u16_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(TCP_AO_KEYF_IFINDEX, 1);
+        assert_eq!(TCP_AO_KEYF_EXCLUDE_OPT, 2);
+    }
+
+    #[test]
+    fn tcp_ao_c_bitfield_masks_cover_little_and_big_endian_abis() {
+        assert_eq!(tcp_ao_u32_bitfield_mask(0, false), 1);
+        assert_eq!(tcp_ao_u32_bitfield_mask(1, false), 2);
+        assert_eq!(tcp_ao_u32_bitfield_mask(4, false), 16);
+        assert_eq!(tcp_ao_u32_bitfield_mask(0, true), 1 << 31);
+        assert_eq!(tcp_ao_u32_bitfield_mask(1, true), 1 << 30);
+        assert_eq!(tcp_ao_u32_bitfield_mask(4, true), 1 << 27);
+
+        assert_eq!(tcp_ao_u16_bitfield_mask(0, false), 1);
+        assert_eq!(tcp_ao_u16_bitfield_mask(1, false), 2);
+        assert_eq!(tcp_ao_u16_bitfield_mask(2, false), 4);
+        assert_eq!(tcp_ao_u16_bitfield_mask(0, true), 1 << 15);
+        assert_eq!(tcp_ao_u16_bitfield_mask(1, true), 1 << 14);
+        assert_eq!(tcp_ao_u16_bitfield_mask(2, true), 1 << 13);
     }
 
     #[test]

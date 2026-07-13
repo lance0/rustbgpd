@@ -35,14 +35,26 @@ impl PeerSession {
                 if self.tcp_ao_key_metadata.is_empty() {
                     self.tcp_ao_key_metadata = super::tcp_ao_key_metadata(&self.config, None);
                 }
+                let connected_peer = self.config.remote_addr.ip();
+                let connected_prefix_len = if connected_peer.is_ipv4() { 32 } else { 128 };
                 for key in &mut snapshot.keys {
                     if let Some(metadata) = self.tcp_ao_key_metadata.iter().find(|metadata| {
-                        metadata.peer == key.peer
-                            && metadata.prefix_len == key.prefix_len
+                        let selector_matches = (metadata.peer == key.peer
+                            && metadata.prefix_len == key.prefix_len)
+                            || (key.peer == connected_peer
+                                && key.prefix_len == connected_prefix_len);
+                        selector_matches
                             && metadata.send_id == key.send_id
                             && metadata.recv_id == key.recv_id
                             && metadata.algorithm == key.algorithm
                     }) {
+                        // Linux may normalize every listener selector inherited
+                        // by an accepted child to the connected host prefix.
+                        // IDs are disjoint across covering owners, so restore
+                        // the validated owner selector as well as the redacted
+                        // declaration flags on every live refresh.
+                        key.peer = metadata.peer;
+                        key.prefix_len = metadata.prefix_len;
                         key.preferred = metadata.preferred;
                         key.deprecated = metadata.deprecated;
                     }
