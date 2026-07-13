@@ -2269,6 +2269,25 @@ impl RibManager {
                 }
             }
         }
+        self.install_group_member(gid, peer);
+    }
+
+    /// Install one peer into an already-created group and make the peer's
+    /// operator-visible policy handle share the group's actual counter
+    /// instance. Every grouped membership path uses this seam: ordinary
+    /// recompute/fallback, rollback to a prior group, and the optimized clean
+    /// transition commit. Ungrouped peers never pass through it and retain
+    /// their independently installed chain.
+    fn install_group_member(&mut self, gid: usize, peer: IpAddr) {
+        let export_chain = self
+            .group_ribs
+            .get(&gid)
+            .expect("group must exist before installing a member")
+            .export_chain
+            .as_ref()
+            .map(PolicyChain::share);
+        self.peer_export_policies.insert(peer, export_chain);
+
         // The joining member's advertised-count seed (RTC groups only):
         // the O(table) walk rides the join replay's existing cost.
         let filter = self.member_rt_filter(peer);
@@ -2471,18 +2490,12 @@ impl RibManager {
         peer: IpAddr,
         source: usize,
         destination: usize,
-        export_policy: Option<PolicyChain>,
     ) {
-        self.peer_export_policies.insert(peer, export_policy);
         self.leave_group_without_gauge_refresh(source, peer);
         self.update_groups
             .members
             .insert(peer, GroupMembership::Grouped(destination));
-        let filter = self.member_rt_filter(peer);
-        if let Some(group) = self.group_ribs.get_mut(&destination) {
-            group.members.insert(peer);
-            group.recompute_vpn_member_counts(peer, filter.as_ref());
-        }
+        self.install_group_member(destination, peer);
         self.metrics.record_update_group_regroup();
     }
 

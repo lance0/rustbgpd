@@ -439,16 +439,9 @@ impl PeerManager {
         &mut self,
         reply_rx: oneshot::Receiver<Result<(), String>>,
     ) -> Result<(), String> {
-        match self
-            .await_with_readiness(tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx))
-            .await
-        {
-            Err(_) => Err(format!(
-                "RIB manager did not reply within {:?} while updating export policy cohort",
-                super::RIB_REPLY_TIMEOUT
-            )),
-            Ok(Err(_)) => Err("RIB manager dropped cohort reply".to_string()),
-            Ok(Ok(result)) => result,
+        match self.await_with_readiness(reply_rx).await {
+            Err(_) => Err("RIB manager dropped cohort reply".to_string()),
+            Ok(result) => result,
         }
     }
 

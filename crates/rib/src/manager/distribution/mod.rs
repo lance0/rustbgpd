@@ -1307,14 +1307,7 @@ impl RibManager {
                         };
                         Some(permit)
                     };
-                    let export_policy = if cursor == 0 {
-                        self.group_ribs
-                            .get(&destination)
-                            .and_then(|group| group.export_chain.as_ref())
-                            .map(rustbgpd_policy::PolicyChain::share)
-                    } else {
-                        replacement.export_policy.clone()
-                    };
+                    let export_policy = replacement.export_policy.clone();
                     if inventory.announce.is_empty() {
                         prepared.push(PreparedCleanPolicyTransitionPeer {
                             peer,
@@ -1427,12 +1420,7 @@ impl RibManager {
 
                 let materialized_routes = inventory.announce.len();
                 for member in prepared {
-                    self.commit_clean_policy_transition_member(
-                        member.peer,
-                        source,
-                        destination,
-                        member.export_policy,
-                    );
+                    self.commit_clean_policy_transition_member(member.peer, source, destination);
                     self.clear_policy_filtered_routes_for_peer(member.peer);
                     self.apply_clean_policy_transition_counters(member.peer, &inventory);
                     if let Some(permit) = member.permit {

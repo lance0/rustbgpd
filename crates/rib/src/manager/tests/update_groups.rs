@@ -294,6 +294,24 @@ async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Strin
     reply_rx.await.unwrap()
 }
 
+async fn query_first_export_term_hits(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryExportPolicyTermHits {
+        peer: Some(peer),
+        reply,
+    })
+    .await
+    .unwrap();
+    let hits = response.await.unwrap();
+    assert_eq!(hits.len(), 1, "peer must report its installed chain");
+    assert_eq!(
+        hits[0].terms.len(),
+        1,
+        "fixture policy must expose one term"
+    );
+    (hits[0].evals, hits[0].terms[0].hits)
+}
+
 async fn query_peer_outbound_state(
     tx: &mpsc::Sender<RibUpdate>,
     peer: IpAddr,
@@ -833,24 +851,6 @@ async fn content_identical_policy_replace_is_key_stable() {
     reason = "the scaling regression keeps every cohort counter assertion in one fixture"
 )]
 async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
-    async fn query_first_term_hits(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
-        let (reply, response) = oneshot::channel();
-        tx.send(RibUpdate::QueryExportPolicyTermHits {
-            peer: Some(peer),
-            reply,
-        })
-        .await
-        .unwrap();
-        let hits = response.await.unwrap();
-        assert_eq!(hits.len(), 1, "peer must report its installed chain");
-        assert_eq!(
-            hits[0].terms.len(),
-            1,
-            "fixture policy must expose one term"
-        );
-        (hits[0].evals, hits[0].terms[0].hits)
-    }
-
     const MEMBER_COUNT: usize = 8;
     const ROUTE_COUNT: usize = 32;
 
@@ -931,13 +931,14 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     assert_eq!(response.await.unwrap(), Ok(()));
-    let first_peer = peers[0];
-    let transition_hits = query_first_term_hits(&tx, first_peer).await;
-    assert_eq!(
-        transition_hits,
-        (ROUTE_COUNT as u64, ROUTE_COUNT as u64),
-        "the first installed member must expose the destination group's staged evaluations"
-    );
+    let transition_hits = (ROUTE_COUNT as u64, ROUTE_COUNT as u64);
+    for &peer in &peers {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            transition_hits,
+            "every installed member must expose the destination group's staged evaluations"
+        );
+    }
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
@@ -977,7 +978,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         actor_polls >= ROUTE_COUNT,
         "the test-only one-route budget must require multiple real actor polls"
     );
-    for peer in peers {
+    for &peer in &peers {
         assert_eq!(query_update_group(&tx, peer).await, "group:1");
     }
 
@@ -999,11 +1000,147 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, Prefix::V4(later_prefix));
     }
-    assert_eq!(
-        query_first_term_hits(&tx, first_peer).await,
-        (transition_hits.0 + 1, transition_hits.1 + 1),
-        "later group evaluations must keep advancing the installed member's counters"
-    );
+    for peer in peers {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (transition_hits.0 + 1, transition_hits.1 + 1),
+            "later group evaluations must advance every installed member's shared counters"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the existing-destination regression checks every grouped counter handle before and after later staging"
+)]
+async fn clean_policy_transition_existing_destination_shares_every_members_counters() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let moving = [
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 2)),
+    ];
+    let destination_member = IpAddr::V4(Ipv4Addr::new(10, 27, 0, 3));
+    let mut moving_receivers = Vec::new();
+    for (index, peer) in moving.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        moving_receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 31,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let mut destination_spec = PeerUpSpec::ibgp(destination_member);
+    destination_spec.route_reflector_client = true;
+    destination_spec.export_policy = Some(next_policy.clone());
+    let mut destination_receiver = peer_up_with_cohort_encoder(
+        &tx,
+        destination_spec,
+        Arc::new(CohortExactEncoder {
+            owner: 3,
+            profile: 31,
+            max_len: 4_096,
+            generation: AtomicUsize::new(0),
+            advance_generation: false,
+            probes: Arc::clone(&probes),
+            reuses: Arc::clone(&reuses),
+        }),
+    )
+    .await;
+
+    let source = Ipv4Addr::new(192, 0, 2, 17);
+    let first_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 53, 0, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(first_prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut moving_receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert_eq!(destination_receiver.recv().await.unwrap().announce.len(), 1);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: moving
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    for receiver in &mut moving_receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert!(destination_receiver.try_recv().is_err());
+
+    for peer in moving.into_iter().chain([destination_member]) {
+        assert_eq!(query_update_group(&tx, peer).await, "group:1");
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (1, 1),
+            "every member must expose the maintained destination group's counter instance"
+        );
+    }
+
+    let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 53, 1, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(later_prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut moving_receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert_eq!(destination_receiver.recv().await.unwrap().announce.len(), 1);
+    for peer in moving.into_iter().chain([destination_member]) {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (2, 2),
+            "later staging must advance every member's shared counter view"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();
@@ -1265,6 +1402,10 @@ async fn clean_policy_transition_matches_force_ungrouped_member_views() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fallback regression covers canonical counters through later staging and a complete prior-policy rollback"
+)]
 async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejection() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -1352,6 +1493,103 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         reuses.load(Ordering::Relaxed) >= 1,
         "the rejecting target must reapply its own ceiling to a proven wire-cohort length"
     );
+
+    for &peer in &peers {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (1, 1),
+            "authoritative fallback must install the destination group's actual counter instance for every grouped member"
+        );
+    }
+
+    let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 1, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        announced: vec![crate::test_support::make_route(
+            later_prefix,
+            Ipv4Addr::new(192, 0, 2, 10),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    assert_eq!(receivers[0].recv().await.unwrap().announce.len(), 1);
+    for &peer in &peers {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (2, 2),
+            "later evaluations must remain visible through every fallback member"
+        );
+    }
+
+    // Model the peer-manager rollback after a failed outer transaction by
+    // reinstalling the captured prior chain as one cohort. The prior group was
+    // removed when its last member left, so this also proves a freshly rebuilt
+    // rollback destination canonicalizes every member, not just its creator.
+    let (rollback_reply, rollback_response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(old_policy.clone()),
+            })
+            .collect(),
+        reply: rollback_reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(rollback_response.await.unwrap(), Ok(()));
+    for receiver in &mut receivers {
+        let mut rollback_updates = 0;
+        while receiver.try_recv().is_ok() {
+            rollback_updates += 1;
+        }
+        assert!(
+            rollback_updates > 0,
+            "rollback must reconcile every member's prior wire view"
+        );
+    }
+    for &peer in &peers {
+        assert_eq!(query_update_group(&tx, peer).await, "group:0");
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (2, 2),
+            "rollback must expose the rebuilt prior group's counter instance for every member"
+        );
+    }
+
+    let post_rollback_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 2, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        announced: vec![crate::test_support::make_route(
+            post_rollback_prefix,
+            Ipv4Addr::new(192, 0, 2, 10),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    for peer in peers {
+        assert_eq!(
+            query_first_export_term_hits(&tx, peer).await,
+            (3, 3),
+            "post-rollback evaluations must keep every prior member's counters live"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();

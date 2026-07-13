@@ -7159,6 +7159,48 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
         "readiness must not fabricate cohort completion"
     );
 
+    // The successfully enqueued RIB transaction owns its reply. Advancing
+    // beyond the ordinary per-peer five-second deadline must not start a
+    // competing rollback while the forward RIB commit can still complete.
+    tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_secs(1)).await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        peers.len(),
+        "no session rollback may race an owned forward RIB transaction"
+    );
+    assert!(
+        matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "the prior timeout would enqueue a per-peer rollback while the forward reply remained owned"
+    );
+    assert!(matches!(
+        mutation_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        apply_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    let (late_readiness_reply, late_readiness_response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers {
+            reply: late_readiness_reply,
+        })
+        .await
+        .unwrap();
+    let late_infos = tokio::time::timeout(
+        rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+        late_readiness_response,
+    )
+    .await
+    .expect("readiness must remain live beyond the former five-second cohort timeout")
+    .unwrap();
+    assert_eq!(late_infos.len(), peers.len());
+    assert_eq!(attempts.load(Ordering::SeqCst), peers.len());
+
     rib_reply.send(Ok(())).unwrap();
     apply_response.await.unwrap().unwrap();
     mutation_response.await.unwrap();
@@ -7386,7 +7428,7 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
                         let _ = batch_seen.send(());
                     }
                     task_release.notified().await;
-                    let _ = reply.send(Err("injected cohort commit failure".to_string()));
+                    drop(reply);
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
                     restore_order.push(peer);
@@ -7446,8 +7488,9 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
     assert!(
         result
             .as_ref()
-            .is_err_and(|error| error.contains("already-applied peers restored")),
-        "RIB cohort failure must restore every session and RIB policy: {result:?}"
+            .is_err_and(|error| error.contains("RIB manager dropped cohort reply")
+                && error.contains("already-applied peers restored")),
+        "a dropped owned RIB reply must restore every session and RIB policy: {result:?}"
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
     for peer in [first, second] {
