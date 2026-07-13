@@ -1183,13 +1183,20 @@ fn established_export_policy_test_session(
 
 fn stalled_export_policy_test_session(
     addr: IpAddr,
-) -> (PeerHandle, oneshot::Receiver<()>, Arc<tokio::sync::Notify>) {
+) -> (
+    PeerHandle,
+    oneshot::Receiver<()>,
+    Arc<tokio::sync::Notify>,
+    Arc<AtomicUsize>,
+) {
     use rustbgpd_transport::PeerCommand;
 
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
     let (entered_tx, entered_rx) = oneshot::channel();
     let release = Arc::new(tokio::sync::Notify::new());
     let task_release = Arc::clone(&release);
+    let state_queries = Arc::new(AtomicUsize::new(0));
+    let task_state_queries = Arc::clone(&state_queries);
     let task = tokio::spawn(async move {
         let mut entered_tx = Some(entered_tx);
         while let Some(command) = session_rx.recv().await {
@@ -1202,6 +1209,7 @@ fn stalled_export_policy_test_session(
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::QueryState { reply } => {
+                    task_state_queries.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: addr,
@@ -1241,7 +1249,19 @@ fn stalled_export_policy_test_session(
         PeerHandle::from_parts(session_tx, task),
         entered_rx,
         release,
+        state_queries,
     )
+}
+
+async fn assert_session_state_query_count(counter: &AtomicUsize, expected: usize) {
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        expected,
+        "expired readiness requests must not query every session"
+    );
 }
 
 fn insert_test_scoped_managed_peer(
@@ -7209,6 +7229,10 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
 }
 
 #[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the readiness regression keeps cancellation and live probing in one held transaction"
+)]
 async fn export_only_snapshot_services_readiness_during_stalled_session_apply() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
@@ -7229,7 +7253,8 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         None,
     )
     .with_readiness_queries(readiness_rx);
-    let (stalled_handle, entered, release) = stalled_export_policy_test_session(stalled);
+    let (stalled_handle, entered, release, state_queries) =
+        stalled_export_policy_test_session(stalled);
     insert_test_managed_peer(&mut manager, stalled, stalled_handle, false);
     insert_test_managed_peer(
         &mut manager,
@@ -7256,6 +7281,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         .await
         .unwrap();
     entered.await.unwrap();
+    state_queries.store(0, Ordering::SeqCst);
     tokio::time::advance(std::time::Duration::from_millis(250)).await;
     tokio::task::yield_now().await;
     assert!(matches!(
@@ -7264,6 +7290,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
     ));
 
     let (cancelled_reply, cancelled_response) = oneshot::channel();
+    drop(cancelled_response);
     readiness_tx
         .send(PeerManagerReadinessQuery::ListPeers {
             reply: cancelled_reply,
@@ -7271,7 +7298,6 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         .await
         .unwrap();
     tokio::task::yield_now().await;
-    drop(cancelled_response);
     tokio::time::advance(std::time::Duration::from_millis(100)).await;
     tokio::task::yield_now().await;
 
@@ -7313,6 +7339,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
     };
     rib_reply.send(Ok(())).unwrap();
     apply_response.await.unwrap().unwrap();
+    assert_session_state_query_count(&state_queries, 1).await;
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();
 }

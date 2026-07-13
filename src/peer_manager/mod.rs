@@ -447,6 +447,9 @@ impl PeerManager {
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::ListPeers { reply } => {
+                if reply.is_closed() {
+                    return;
+                }
                 let infos = self.list_peers().await;
                 let _ = reply.send(infos);
             }
