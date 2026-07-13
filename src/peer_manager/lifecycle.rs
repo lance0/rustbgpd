@@ -24,6 +24,14 @@ impl PeerManager {
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
+        Self::shutdown_handle_bounded_owned(address, context, handle).await
+    }
+
+    pub(super) async fn shutdown_handle_bounded_owned(
+        address: std::net::IpAddr,
+        context: &'static str,
+        handle: PeerHandle,
+    ) -> PeerShutdownOutcome {
         match handle
             .shutdown_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await

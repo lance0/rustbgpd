@@ -125,6 +125,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Coordinated shutdown stays bounded at high peer counts.** Peer sessions now
+  drain with fixed cross-peer concurrency while preserving pending-before-primary
+  ordering and each session's existing timeout, abort, and reap guarantees. A
+  backpressured peer population can no longer multiply the per-session deadline
+  into a multi-minute daemon shutdown.
+
 - **The v1 stable-surface release gate now supports patch and major releases.**
   Upgrade exercises remain a contiguous, fail-closed chain of adjacent release
   lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
