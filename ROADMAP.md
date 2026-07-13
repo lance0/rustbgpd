@@ -1218,9 +1218,12 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 - **TCP-AO rotation polish.** Static TCP-AO + BIRD interop (M43), direct
   dynamic-prefix listener MKTs, fail-closed accepted-socket validation, and
-  live neighbor API/CLI inspection are shipped. Runtime key rotation,
-  multi-key rollover, and per-socket metrics remain demand-shaped rather than
-  core-feature blockers.
+  live neighbor API/CLI inspection are shipped. Ordered startup keyrings allow
+  a restart-coordinated rollover: every key is installed, with a preferred or
+  declaration-order-selected non-deprecated key used for startup transmission.
+  Live key rotation without a daemon restart (LAN-16 / #159), runtime
+  protected-range CRUD, and per-socket metrics remain demand-shaped rather
+  than core-feature blockers.
 - **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
   `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager
   + RIB responsiveness within a 200 ms deadline — and deliberately excludes the

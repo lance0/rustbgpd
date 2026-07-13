@@ -82,16 +82,17 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
 
 - `[[neighbors]].tcp_ao` is parsed and validated, mutually exclusive with TCP
   MD5, and redacted in config diffs.
-- Outbound active-open sockets install the configured TCP-AO key before
-  `connect()` and fail that connect attempt if the key cannot be installed.
+- Outbound active-open sockets install the configured TCP-AO keyring before
+  `connect()` and fail that connect attempt if any key cannot be installed or
+  the resulting kernel inventory cannot be reconciled.
 - The passive BGP listener is created through `socket2`, installs configured
-  static-neighbor TCP-AO keys before `listen()`, and fails closed if a key
-  cannot be installed.
-- SIGHUP additions, removals, or rotations of `tcp_ao` are restart-required and
-  pinned to the live startup snapshot along with validation-affecting startup
-  dependencies.
+  static-neighbor and direct dynamic-prefix TCP-AO keyrings before `listen()`,
+  and fails closed if any key cannot be installed.
+- SIGHUP additions, removals, edits, or reordering of `tcp_ao` keyrings are
+  restart-required and pinned to the live startup snapshot along with
+  validation-affecting startup dependencies.
 - Runtime deletion of a configured TCP-AO neighbor is rejected until listener
-  MKT deletion / key rotation support exists.
+  MKT deletion / live rotation support exists.
 - Protected active-open and accepted passive sockets are inspected with
   `getsockopt(TCP_AO_INFO)` plus a bounded `TCP_AO_GET_KEYS` dump after
   connection setup. Raw GET_KEYS records are non-formatting, non-cloning
@@ -100,21 +101,28 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   transport boundary. The Linux AO ifindex selector is a VRF identity rather
   than an IPv6 link-local scope; current rustbgpd AO MKTs are VRF-unbound and
   may match any L3 master because `TCP_AO_KEYF_IFINDEX` is clear. Active-open
-  inspection is best effort. Accepted static and dynamic-prefix sockets fail
-  closed unless the full singleton inventory, including transient key-byte
-  equality, matches configuration. Dropped-ICMP counters degrade health but do
-  not by themselves reject an accepted authenticated socket.
+  and accepted static or dynamic-prefix sockets fail closed unless the complete
+  configured keyring, including transient key-byte equality, matches the
+  kernel inventory. Dropped-ICMP counters degrade health but do not by
+  themselves reject an accepted authenticated socket.
 - Protected M43 interop against BIRD 3.2.1 runs in the self-hosted
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
   feature skip M43 with a warning instead of failing unrelated dataplane gates.
-- Direct `[[dynamic_neighbors]].tcp_ao` installs a prefix MKT before listen,
+- Direct `[[dynamic_neighbors]].tcp_ao` installs a prefix keyring before listen,
   rejects overlapping authentication boundaries, fails closed when accepted
   socket inspection is missing or inconsistent, and pins protected edits until
   restart. Runtime range CRUD cannot mutate or overlap a protected range.
 
-Still deferred: runtime key rotation / deletion on an already-listening socket,
-multi-key rollover, and peer-group inheritance. API/CLI neighbor state exposes
+Ordered startup keyrings are now supported. A singleton retains the legacy
+table shape; multi-key rings are ordered arrays. The preferred key, or the
+first declared non-deprecated key, is selected for startup transmission, while
+every MKT is installed and reconciled. At most one key may be preferred, each
+direction's KeyIDs must be unique within the ring, and at least one key must be
+non-deprecated.
+
+Still deferred: live key rotation / deletion on an already-listening socket
+(LAN-16 / #159) and peer-group inheritance. API/CLI neighbor state exposes
 redacted live inspection results (KeyIDs, validity flags, per-key inventory,
 and counters) for
 static and direct dynamic-prefix protected sessions; runtime protected-range

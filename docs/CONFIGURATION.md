@@ -527,7 +527,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6 |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `tcp_ao`               | table    | no       | --      | TCP-AO key for static neighbors (RFC 5925; Linux startup sockets, restart-required edits) |
+| `tcp_ao`               | table or array | no | -- | Ordered TCP-AO startup keyring for static neighbors (RFC 5925; Linux, restart-required edits) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
@@ -567,36 +567,47 @@ families = ["ipv4_unicast"]
 ```
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted directly on static `[[neighbors]]` and
-on `[[dynamic_neighbors]]` ranges. On
-Linux, rustbgpd installs the configured key on outbound active-open sockets
-before `connect()` and on the passive BGP listener before `listen()` when the
-peer address family matches the configured listener socket. If a configured
-TCP-AO listener key cannot be installed, startup fails closed instead of
-running a partially protected listener. Active-open key installation failures
-fail that session connect attempt and retry later; they do not fall back to an
-unauthenticated session. `rbgp global` / `GlobalService.GetGlobal` expose
-the host capability probe so operators can verify kernel support before
-enabling the field.
+on `[[dynamic_neighbors]]` ranges. It is an ordered startup keyring containing
+one to 256 Master Key Tuples (MKTs). The legacy singleton table remains valid
+and is also the canonical serialized shape for a one-key ring. Configure two or
+more keys as an ordered array of inline tables.
 
-Active-open sockets install the key as both Linux `current_key` and `rnext_key`
-so the initial SYN is signed. Listener sockets install the per-peer MKT without
-`current_key` / `rnext_key`; Linux rejects those flags on listening sockets.
-rustbgpd does not set the socket-wide `ao_required` bit because a shared BGP
-listener may also serve non-TCP-AO neighbors.
+On Linux, rustbgpd installs every configured key on outbound active-open
+sockets before `connect()` and on the passive BGP listener before `listen()`
+when the peer address family matches the configured listener socket. If any
+listener key cannot be installed, startup fails closed instead of running a
+partially protected listener. Any active-open installation or kernel-inventory
+reconciliation failure fails that session connect attempt and retries later;
+it never falls back to an unauthenticated session. `rbgp global` /
+`GlobalService.GetGlobal` expose the host capability probe so operators can
+verify kernel support before enabling the field.
 
-Linux TCP-AO Master Key Tuples are socket state, so `tcp_ao` additions,
-removals, and key changes are restart-required. On SIGHUP, rustbgpd pins the
-live neighbor back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
+Exactly one non-deprecated key is selected for startup transmission: the key
+marked `preferred`, or the first declared non-deprecated key if none is marked.
+Active-open sockets install that selected key first as Linux `current_key` and
+`rnext_key` so the initial SYN is signed, then install the remaining MKTs in
+declaration order. Listener sockets install every MKT in declaration order
+without `current_key` / `rnext_key`; Linux rejects those flags on listening
+sockets. After accept, rustbgpd preserves the peer-selected current key, sets
+the receive-next key to the locally selected key's `recv_id`, and reconciles
+the complete configured keyring. rustbgpd does not set the socket-wide
+`ao_required` bit because a shared BGP listener may also serve non-TCP-AO
+neighbors.
+
+Linux TCP-AO MKTs are socket state, so adding, removing, editing, or reordering
+keyring entries is restart-required. On SIGHUP, rustbgpd pins the live neighbor
+back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
 restart-required in `--diff` / config-diff JSON, pins peer-group and policy
 dependencies referenced by the pinned TCP-AO neighbors and restart-required
 global fields that affect neighbor validation to the live snapshot for that
-reload, and leaves the edited TOML as the desired config for the next daemon
-restart. Runtime deletion of a configured TCP-AO neighbor is also rejected
-until listener MKT deletion / key rotation support lands.
+reload, and leaves the edited TOML, including its requested key order, as the
+desired config for the next daemon restart. Runtime deletion of a configured
+TCP-AO neighbor is also rejected until listener MKT deletion and live rotation
+land in LAN-16 / #159.
 
 `tcp_ao` is mutually exclusive with `md5_password`, including an inherited
 peer-group MD5 password. It is not available in `[peer_groups.*]`; dynamic
-ranges configure their prefix MKT directly. Example:
+ranges configure their prefix keyring directly. The legacy singleton form is:
 
 ```toml
 [[neighbors]]
@@ -612,15 +623,33 @@ tcp_ao = {
 }
 ```
 
+A restart-coordinated two-key rollover can be staged as an ordered array:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = [
+  { key = "old-secret", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "next-secret", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true },
+]
+```
+
 Allowed `algorithm` values are `"hmac(sha1)"`, `"hmac(sha256)"`, and
 `"cmac(aes128)"`. `key` must be 1--80 bytes. `send_id` and `recv_id` are
 TCP-AO KeyIDs (`0..=255`). They are directional: this neighbor's `send_id`
 must equal the peer's `recv_id`, and this neighbor's `recv_id` must equal the
-peer's `send_id`. `preferred` and `deprecated` are parsed as
-rollover metadata for future multi-key support; with the current single-key
-runtime, active-open sockets install the configured key as the initial current
-/ receive-next key, while listener MKTs are installed without current /
-receive-next flags. `preferred` and `deprecated` cannot both be true.
+peer's `send_id`. For the example above, the peer must therefore configure
+RecvIDs 1 and 2, and SendIDs 11 and 12, for the corresponding secrets.
+
+Within one keyring, every `send_id` must be unique and every `recv_id` must be
+unique. At most one entry may be `preferred`; a preferred key cannot also be
+`deprecated`; and at least one entry must be non-deprecated. If there is no
+preferred entry, declaration order is significant because the first
+non-deprecated key is selected. Reordering is therefore a restart-required
+configuration change. These startup keyrings support coordinated rollover
+across a restart; changing selection or installing/removing an MKT on live
+sockets remains deferred to LAN-16 / #159.
 
 ### BFD (RFC 5880 / 5881 / 5882)
 
@@ -855,7 +884,7 @@ Dynamic peers:
 | `peer_group`  | string | yes      | --      | Peer group whose settings dynamic peers inherit |
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
-| `tcp_ao`      | table  | no       | --      | Direct TCP-AO prefix MKT; Linux startup-only and restart-required |
+| `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux startup-only and restart-required |
 
 When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the
@@ -898,8 +927,10 @@ Validation rules:
 - two ranges covering the **identical** effective prefix (same masked network
   and length) are rejected; overlapping ranges of *different* lengths are
   allowed and resolve by longest-prefix-match at accept time
-- a TCP-AO-protected range must be disjoint from every other dynamic range and
-  static neighbor, and its peer group must not configure MD5
+- a TCP-AO-protected range must satisfy the TCP-AO keyring validation above;
+  authentication-boundary overlap and ownership rules are validated across
+  dynamic ranges and static neighbors, and its peer group must not configure
+  MD5
 
 ### Runtime management (gRPC / `rbgp`)
 
