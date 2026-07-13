@@ -1,0 +1,14 @@
+{
+  "Id": "sha256:7da0b34b0327dbc153061bf3785313478f13ef88520e56ecc197cddd6a3b4002",
+  "RepoDigests": [
+    "bgperf/rustbgpd@sha256:7da0b34b0327dbc153061bf3785313478f13ef88520e56ecc197cddd6a3b4002"
+  ],
+  "Labels": {
+    "org.opencontainers.image.base.digest": "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    "org.opencontainers.image.base.name": "debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    "org.opencontainers.image.revision": "4800061b178a84a7b62c74bf0b6a71c4e413b8f2",
+    "org.rustbgpd.bgperf2.builder-base.digest": "sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+    "org.rustbgpd.bgperf2.revision": "fe4fdab9f7efb56e2e98ad6e6bcffeda047761a9",
+    "org.rustbgpd.bgperf2.rust-toolchain": "1.95"
+  }
+}

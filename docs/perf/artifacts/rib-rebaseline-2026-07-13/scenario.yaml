@@ -1,0 +1,44 @@
+<%
+    import netaddr
+    from itertools import islice
+
+    it = netaddr.iter_iprange('100.0.0.0','160.0.0.0')
+
+    def gen_paths(num):
+        return list('{0}/32'.format(ip) for ip in islice(it, num))
+%>
+local_prefix: 10.10.0.0/16
+monitor:
+  as: 1001
+  check-points:
+  - 200000
+  local-address: 10.10.0.2
+  router-id: 10.10.0.2
+policy: {}
+target:
+  as: 1000
+  local-address: 10.10.255.254
+  router-id: 10.10.255.254
+  single-table: false
+testers:
+- name: tester
+  neighbors:
+    10.10.0.3:
+      as: 1003
+      check-points: 100000
+      count: 100000
+      filter:
+        in: []
+      local-address: 10.10.0.3
+      paths: ${gen_paths(100000)}
+      router-id: 10.10.0.3
+    10.10.0.4:
+      as: 1004
+      check-points: 100000
+      count: 100000
+      filter:
+        in: []
+      local-address: 10.10.0.4
+      paths: ${gen_paths(100000)}
+      router-id: 10.10.0.4
+  type: bird

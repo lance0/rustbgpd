@@ -1,0 +1,83 @@
+{
+  "receipt_version": 1,
+  "source_sha": "4800061b178a84a7b62c74bf0b6a71c4e413b8f2",
+  "parent_main_sha": "a7ab255211d9055706736cb07e9131f2986ba101",
+  "tree_clean_before_measurement": true,
+  "host": {
+    "cpu": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "physical_cores": 32,
+    "logical_cpus": 64,
+    "memory_bytes": 134532804608,
+    "kernel": "Linux 6.17.0-35-generic #35~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 19:30:42 UTC 2 x86_64",
+    "cpu_governor": "performance",
+    "host_lock": "${HOME}/.local/state/rustbgpd-host.lock"
+  },
+  "build": {
+    "rrharness_profile": "release",
+    "rrharness_rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rrharness_cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rrharness_sha256": "00f1d891abe1b41cafe02bf880c223ae6c926ebc73f83e9d529a78ecbce9d2b6",
+    "rrharness_lock_sha256": "61691aec8838f088179c3d1eabadd71c0ec4151451df685a736c93dbd5a4b5ec",
+    "root_lock_sha256": "f5bb290eb8e52f77303806563112e0c2b6ed15b738d3c2ea3047d4aa65c96f66",
+    "rrharness_argv": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "--manifest-path",
+      "bench/scale/rrharness/Cargo.toml"
+    ],
+    "image_build_argv": [
+      "${BGPERF2_VENV}/bin/python",
+      "-c",
+      "from rustbgpd import RustBGPd; RustBGPd.build_image(force=True, tag=\"bgperf/rustbgpd:lan351-dhat\", checkout=\"4800061b178a84a7b62c74bf0b6a71c4e413b8f2\", nocache=True, profile=\"dhat\")"
+    ],
+    "image_digest": "sha256:7da0b34b0327dbc153061bf3785313478f13ef88520e56ecc197cddd6a3b4002",
+    "image_profile": "release-prof+dhat-heap",
+    "image_rust_toolchain": "1.95",
+    "image_builder_base": "rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+    "image_runtime_base": "debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
+  },
+  "bgperf2": {
+    "revision": "fe4fdab9f7efb56e2e98ad6e6bcffeda047761a9",
+    "event_history": "disabled"
+  },
+  "cpu_runs": [
+    {"artifact": "flood-256-a", "started_utc": "2026-07-13T05:55:48Z", "load_1m": 0.19, "argv": ["bench/scale/rrharness/target/release/rrharness", "flood", "256", "100000", "20", "receipts/flood-256-a"]},
+    {"artifact": "flood-256-b", "started_utc": "2026-07-13T05:56:11Z", "load_1m": 0.47, "argv": ["bench/scale/rrharness/target/release/rrharness", "flood", "256", "100000", "20", "receipts/flood-256-b"]},
+    {"artifact": "flood-1000-a", "started_utc": "2026-07-13T05:56:35Z", "load_1m": 0.70, "argv": ["bench/scale/rrharness/target/release/rrharness", "flood", "1000", "100000", "20", "receipts/flood-1000-a"]},
+    {"artifact": "flood-1000-b", "started_utc": "2026-07-13T05:57:07Z", "load_1m": 1.04, "argv": ["bench/scale/rrharness/target/release/rrharness", "flood", "1000", "100000", "20", "receipts/flood-1000-b"]},
+    {"artifact": "churn-256-a", "started_utc": "2026-07-13T05:57:39Z", "load_1m": 1.25, "argv": ["bench/scale/rrharness/target/release/rrharness", "churn", "256", "256", "3000", "20", "receipts/churn-256-a"]},
+    {"artifact": "churn-256-b", "started_utc": "2026-07-13T05:58:00Z", "load_1m": 1.18, "argv": ["bench/scale/rrharness/target/release/rrharness", "churn", "256", "256", "3000", "20", "receipts/churn-256-b"]},
+    {"artifact": "churn-1000-a", "started_utc": "2026-07-13T05:58:21Z", "load_1m": 1.18, "argv": ["bench/scale/rrharness/target/release/rrharness", "churn", "1000", "1000", "3000", "20", "receipts/churn-1000-a"]},
+    {"artifact": "churn-1000-b", "started_utc": "2026-07-13T05:58:45Z", "load_1m": 1.19, "argv": ["bench/scale/rrharness/target/release/rrharness", "churn", "1000", "1000", "3000", "20", "receipts/churn-1000-b"]}
+  ],
+  "memory_run": {
+    "id": "rib-memory-20260713T060914Z",
+    "started_utc": "2026-07-13T06:09:14Z",
+    "load_1m": 0.36,
+    "bgperf_launch_argv": ["python3", "bgperf2.py", "bench", "-t", "rustbgpd", "-i", "bgperf/rustbgpd:lan351-dhat", "-n", "2", "-p", "100000"],
+    "sigterm_argv": ["docker", "exec", "bgperf_rustbgpd_target", "sh", "-c", "kill -TERM $(pidof rustbgpd)"],
+    "copy_argv": ["docker", "cp", "bgperf_rustbgpd_target:/root/config/dhat-heap.json", "receipts/dhat-heap.json"],
+    "classify_argv": ["python3", "bench/scale/rebaseline/classify_dhat.py", "receipts/dhat-heap.json", "--output", "receipts/2p-100k.memory.tsv", "--derivative", "receipts/2p-100k.dhat-derivative.tsv"],
+    "csv_sanitize_argv": ["python3", "bench/scale/rebaseline/sanitize_bgperf_csv.py", "/tmp/lan351-final-2p-100k.raw.csv", "--output", "receipts/2p-100k.csv"],
+    "required_routes": 200000,
+    "received_routes": 200000,
+    "tester_errors": 0,
+    "tester_error_evidence": "The two retained pre-SIGTERM BIRD logs have zero RMT lines after excluding NEXT_HOP, matching the pinned adapter rule.",
+    "tester_timeouts_reported": 0,
+    "tester_timeout_evidence": "Unsupported: the pinned BIRD adapter inherits a constant-zero timeout counter. No independent timeout count is claimed."
+  },
+  "classifiers": {
+    "classify_cpu.py": "eee305c347fb6549f4814fbd13616c3fdc7ca17987b7c9643d652a80909259c1",
+    "classify_dhat.py": "09b87e50867679f16c51d1f6440ada06c776e14f34b4a085cf665227cdb04381",
+    "sanitize_bgperf_csv.py": "969dbc4b8d33f13e1282223d5cda18a4fa7b1e1397b1bde9124378990c60fc22"
+  },
+  "retained_raw_cpu": {
+    "archive": "cpu-folded-profiles.tar.gz",
+    "archive_sha256": "d31e2c2444a0b1d47085a87e405e1514590465a8faa2cd3057c75a98be2daf25",
+    "member_checksums": "folded-SHA256SUMS"
+  },
+  "raw_dhat_committed": false,
+  "raw_bgperf_csv_committed": false
+}

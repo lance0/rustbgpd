@@ -175,7 +175,10 @@ python3 bench/scale/rebaseline/sanitize_bgperf_csv.py \
 
 Use a dedicated directory and stable names:
 
-- eight `*.folded` CPU profiles and eight `*.cpu.tsv` classified tables;
+- eight `*.folded` CPU profiles and eight `*.cpu.tsv` classified tables. The
+  folded inputs may be retained in one deterministic compressed tar archive
+  when the receipt also carries the archive hash and a checksum for every
+  extracted member;
 - `2p-100k.memory.tsv` and `2p-100k.dhat-derivative.tsv`;
 - the sanitized same-run `2p-100k.csv`;
 - `manifest.json` and `SHA256SUMS`.

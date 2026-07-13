@@ -16,7 +16,8 @@ build).
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation and memory attribution correction: 2026-06-02;
 structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
-distribution fanout A/B and update-group recovery: 2026-07-12.
+distribution fanout A/B and update-group recovery: 2026-07-12; revision-pinned
+production-exact manager CPU and full-daemon DHAT rebaseline: 2026-07-13.
 
 | Field | Value |
 |-------|-------|
@@ -643,10 +644,14 @@ treated as allocator/map-capacity noise unless the PR is memory-targeted.
 > target for any future memory work, not the runtime or operational surfaces.
 >
 > **Superseded (2026-07):** this profile predates the update-groups arc. The
-> re-baseline in [`docs/perf/rebaseline-2026-07.md`](perf/rebaseline-2026-07.md)
-> shows per-peer Adj-RIB-Out is now ~0.1% (grouped peers share one group
-> table); map/index bucket storage still dominates (~79%), redistributed
-> across the group table, Loc-RIB, and Adj-RIB-In.
+> revision-pinned rebaseline in
+> [`docs/perf/rib-rebaseline-2026-07-13.md`](perf/rib-rebaseline-2026-07-13.md)
+> shows per-peer Adj-RIB-Out is now 0.05% (grouped peers share one group
+> table). At the 210,338,877-byte live-heap peak, the group table is 22.06%,
+> Loc-RIB 21.06%, Adj-RIB-In route storage 15.95%, the two prefix tries 16.37%,
+> and the announcing-peers index 7.10%. The retained derivative, exact image
+> identity, same-process bgperf row, and checksums make those the authoritative
+> attribution values.
 
 > **Prefix-index migration (trie-backed indexes).** The first measured fix
 > targeting the bucket-array overhead above: the two prefix-keyed *indexes* —

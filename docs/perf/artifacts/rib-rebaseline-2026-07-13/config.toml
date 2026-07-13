@@ -1,0 +1,29 @@
+[global]
+asn = 1000
+router_id = "10.10.255.254"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[security.grpc]
+enforcement = "legacy"
+
+[event_history]
+enabled = false
+
+[[neighbors]]
+address = "10.10.0.3"
+remote_asn = 1003
+
+[[neighbors]]
+address = "10.10.0.4"
+remote_asn = 1004
+
+[[neighbors]]
+address = "10.10.0.2"
+remote_asn = 1001

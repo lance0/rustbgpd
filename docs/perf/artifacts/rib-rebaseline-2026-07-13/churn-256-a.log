@@ -1,0 +1,10 @@
+# churn clients=256 candidates=256 prefixes=3000 secs=20
+rss_established_mib 8
+prime_s 0.663
+rss_primed_mib 758
+waves 189
+waves_per_s 9.43
+window_s 20.041
+mgr_cpu_s 19.420
+mgr_busy_frac 0.969
+rss_end_mib 861

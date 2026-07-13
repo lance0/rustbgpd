@@ -1,0 +1,12 @@
+phase	samples	share_percent
+ingest + Adj-RIB-In insert	219	0.938585
+recompute	229	0.981443
+group-table commit	0	0.000000
+member-emit	0	0.000000
+distribute residual	22536	96.584237
+event-publish	84	0.360005
+staging walk	188	0.805726
+staging eval	55	0.235718
+shared-emit build	21	0.090001
+other	1	0.004286
+TOTAL	23333	100.000000
