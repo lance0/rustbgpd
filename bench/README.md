@@ -63,7 +63,7 @@ bench/compare-route-paging.sh \
   --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
-  --repetitions 2 \
+  --repetitions 4 \
   --core 5
 ```
 

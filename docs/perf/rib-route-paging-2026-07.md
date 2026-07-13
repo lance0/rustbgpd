@@ -6,9 +6,14 @@ cloned the complete member view before that scan. This first tranche measures
 both costs and removes only the grouped full-view clone. It deliberately does
 not add an always-on ordered index or change the opaque cursor contract.
 
-No raw traversal artifact is retained yet. This document records the corrected
-methodology and landing gates; the paired CSV will be added only after the
-pinned matrix completes on an otherwise idle host.
+The complete retained matrix is checked in under
+[`artifacts/rib-route-paging-2026-07/`](artifacts/rib-route-paging-2026-07/).
+The combined CSV, metadata, and cell-by-cell host preflights are unpacked for
+review. The compressed exact driver output carries its original top-level
+`SHA256SUMS` over all 64 raw one-process rows, build and execution logs,
+metadata, and the nested exact-source manifest. The separate route-churn
+control summary is retained beside it as
+[`rib-route-paging-2026-07-route-churn-control.md`](artifacts/rib-route-paging-2026-07-route-churn-control.md).
 
 ## Pinned comparison
 
@@ -82,7 +87,7 @@ or memory-bandwidth counters. The borrowed view adds no persistent index or
 per-route memory and removes that temporary full-view materialization while
 leaving the repeated table scan for a measured continuation tranche.
 
-## Planned host and command
+## Measured host and command
 
 | Field | Value |
 |---|---|
@@ -92,7 +97,7 @@ leaving the repeated table scan for a measured continuation tranche.
 | Pinned core | `5` |
 | Governor | `performance` (`amd-pstate-epp`) |
 | Rust | `rustc 1.97.0 (2d8144b78 2026-07-07)`, LLVM 22.1.6 |
-| Repetitions | two paired complete traversals per matrix cell, counterbalanced by execution order; each traversal contributes 100–4,000 handler-boundary samples before split-horizon row reduction |
+| Repetitions | four paired complete traversals per matrix cell, counterbalanced by execution order; each traversal contributes 100–4,000 handler-boundary samples before split-horizon row reduction |
 
 ```bash
 bench/compare-route-paging.sh \
@@ -100,7 +105,7 @@ bench/compare-route-paging.sh \
   --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
-  --repetitions 2 \
+  --repetitions 4 \
   --core 5
 ```
 
@@ -124,19 +129,29 @@ manifest.
 
 | Scope | Routes | Page | Baseline complete | Borrowed complete | Speedup | Baseline p99 | Borrowed p99 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Best control | 100,000 | 100 | TBD | TBD | TBD | TBD | TBD |
-| Best control | 100,000 | 1,000 | TBD | TBD | TBD | TBD | TBD |
-| Best control | 400,000 | 100 | TBD | TBD | TBD | TBD | TBD |
-| Best control | 400,000 | 1,000 | TBD | TBD | TBD | TBD | TBD |
-| Grouped advertised | 100,000 | 100 | TBD | TBD | TBD | TBD | TBD |
-| Grouped advertised | 100,000 | 1,000 | TBD | TBD | TBD | TBD | TBD |
-| Grouped advertised | 400,000 | 100 | TBD | TBD | TBD | TBD | TBD |
-| Grouped advertised | 400,000 | 1,000 | TBD | TBD | TBD | TBD | TBD |
+| Best control | 100,000 | 100 | 707.516 ms | 718.700 ms | 0.984x | 0.811 ms | 0.864 ms |
+| Best control | 100,000 | 1,000 | 105.553 ms | 106.261 ms | 0.993x | 1.574 ms | 1.600 ms |
+| Best control | 400,000 | 100 | 10,914.062 ms | 10,990.322 ms | 0.993x | 3.281 ms | 3.203 ms |
+| Best control | 400,000 | 1,000 | 1,330.935 ms | 1,360.392 ms | 0.978x | 3.785 ms | 3.893 ms |
+| Grouped advertised | 100,000 | 100 | 2,072.276 ms | 678.350 ms | 3.055x | 2.529 ms | 0.919 ms |
+| Grouped advertised | 100,000 | 1,000 | 224.267 ms | 97.561 ms | 2.299x | 3.252 ms | 1.224 ms |
+| Grouped advertised | 400,000 | 100 | 98,644.701 ms | 10,558.903 ms | 9.342x | 29.410 ms | 3.518 ms |
+| Grouped advertised | 400,000 | 1,000 | 10,021.423 ms | 1,239.376 ms | 8.086x | 29.980 ms | 3.994 ms |
 
 The tranche landing gate is at least 1.25x faster grouped 400k complete
 traversal at both page sizes, no grouped p99 regression, and no more than 3%
 regression in the best control or existing route-churn benchmark. Below 1.10x
 at either 400k grouped shape is a stop condition.
+
+All complete-traversal values and page p99 values above are medians of the
+four counterbalanced repetitions. The grouped landing gates pass with
+9.342x/8.086x complete-traversal speedups and 88.04%/86.68% lower p99 at 400k.
+Best-control complete traversal moved by +0.67% to +2.21%, within the 3% gate.
+The 100k/page-100 best-control p99 median moved from 0.811 ms to 0.864 ms; that
+unchanged code path's four paired deltas were noisy rather than one-directional
+and its complete traversal remained +1.58%. The independent four-attempt
+`route_churn/10k_base_1k_churn` control measured -1.17% mean with a
+`noise` verdict (-3.48%..+0.02%).
 
 ## Correctness fence
 
@@ -153,8 +168,14 @@ at either 400k grouped shape is a stop condition.
 
 ## Decision
 
-TBD after the pinned matrix. This tranche cannot close LAN-391 unless the full
-10x complete-traversal and at-most-5ms handler-boundary p99 proxy gates
-unexpectedly pass. The remaining repeated full-table scan is measured here so
-a later continuation can weigh its memory and ingest cost against an ordered
-index or equivalent resumable continuation.
+Land the borrowed grouped-view tranche. It removes the dominant temporary
+full-view clone without changing the cursor contract or adding persistent
+memory, clears every tranche gate, and leaves the best-scope control within the
+declared complete-traversal envelope.
+
+Do not close LAN-391. The 400k grouped p99 proxy is now below 5 ms, but the
+complete-traversal speedups are 9.342x and 8.086x rather than the issue's full
+10x gate. The residual cost is the measured repeated full-table scan shared by
+grouped and best scopes. A continuation should evaluate an ordered index or
+equivalent resumable continuation against its ingest and memory cost; it must
+retain the opaque cursor and mutation semantics fenced above.
