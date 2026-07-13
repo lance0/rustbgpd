@@ -44,7 +44,15 @@ are otherwise unchanged.
 `compare-criterion.sh` runs the same Criterion bench target at two git refs,
 with both runs pinned to one CPU core through `taskset`. It writes a Markdown
 summary, command logs, environment metadata, and raw Criterion artifacts under
-`target/bench-compare/`.
+`target/bench-compare/`. Use `--features LIST` when the selected benchmark is
+feature-gated; the same Cargo feature set is applied to both refs.
+
+LAN-395 retained comparisons additionally use `--lan395-gate-out PATH`. That
+mode rejects any missing or unexpected fanout row, requires the exact pinned
+two-attempt transport matrix on a performance-governor CPU, applies every
+acceptance threshold, and writes only a checksummed sanitized receipt. Generic
+metadata, logs, absolute paths, and Criterion reports are local diagnostics and
+must not be published.
 
 `route_paging` is a manager-level custom harness for the long-running LAN-391
 complete-traversal shape. One harness process runs exactly one scope/route/page
@@ -144,6 +152,22 @@ bench/tests/test-route-paging-driver.sh
 ```
 
 Example:
+
+```bash
+bench/compare-criterion.sh \
+  --base origin/main \
+  --head HEAD^^ \
+  --core 5 \
+  --features bench-internals \
+  --package rustbgpd-transport \
+  --bench fanout \
+  --filter distribute_fanout \
+  --attempts 2 \
+  --require-performance \
+  --lan395-gate-out target/lan395-criterion-receipt
+```
+
+For the default RIB benchmark surface:
 
 ```bash
 bench/compare-criterion.sh \

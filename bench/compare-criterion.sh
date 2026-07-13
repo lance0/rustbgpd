@@ -13,6 +13,7 @@ Options:
   --head REF              Head ref to compare against baseline (default: HEAD)
   --package NAME          Cargo package to benchmark (default: rustbgpd-rib)
   --bench NAME            Criterion bench target (default: rib_ops)
+  --features LIST         Cargo feature list forwarded to both refs
   --filter TEXT           Criterion benchmark filter, for example adj_rib_in_insert
   --core CPU              CPU core passed to taskset -c (default: 0)
   --attempts N            Number of A/B attempts with alternating order to
@@ -20,6 +21,11 @@ Options:
                           Odd attempts run base first, even attempts run head
                           first. Even N fully cancels first-vs-second bias.
   --out-dir PATH          Output directory (default: target/bench-compare)
+  --lan395-gate-out PATH  After the run, require the exact pinned LAN-395
+                          matrix and write a sanitized fail-closed receipt to
+                          this new path. This mode requires transport/fanout,
+                          bench-internals, two attempts on CPU 5, taskset, and
+                          the performance governor.
   --allow-dirty           Allow a dirty worktree; refs still resolve to commits
   --no-taskset            Run without taskset pinning
   --require-performance   Fail if the selected CPU is not using performance governor
@@ -67,9 +73,11 @@ head_ref="HEAD"
 package="rustbgpd-rib"
 bench_name="rib_ops"
 filter=""
+features=""
 core="0"
 attempts=1
 out_root="target/bench-compare"
+lan395_gate_out=""
 allow_dirty=0
 use_taskset=1
 require_performance=0
@@ -101,6 +109,10 @@ while [[ $# -gt 0 ]]; do
       filter="${2:?missing value for --filter}"
       shift 2
       ;;
+    --features)
+      features="${2:?missing value for --features}"
+      shift 2
+      ;;
     --core)
       core="${2:?missing value for --core}"
       shift 2
@@ -111,6 +123,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --out-dir)
       out_root="${2:?missing value for --out-dir}"
+      shift 2
+      ;;
+    --lan395-gate-out)
+      lan395_gate_out="${2:?missing value for --lan395-gate-out}"
       shift 2
       ;;
     --allow-dirty)
@@ -171,6 +187,30 @@ base_sha="$(git rev-parse --verify "${base_ref}^{commit}")"
 head_sha="$(git rev-parse --verify "${head_ref}^{commit}")"
 base_short="$(git rev-parse --short=12 "$base_sha")"
 head_short="$(git rev-parse --short=12 "$head_sha")"
+
+if [[ -n $lan395_gate_out ]]; then
+  [[ $package == rustbgpd-transport \
+    && $bench_name == fanout \
+    && $filter == distribute_fanout \
+    && $features == bench-internals \
+    && $core == 5 \
+    && $attempts == 2 \
+    && $use_taskset == 1 \
+    && $require_performance == 1 \
+    && $fail_on_regression == 0 \
+    && $regression_threshold_pct == 3 \
+    && $regression_max_stddev_pct == 10 \
+    && $verdict_min_attempts == 3 ]] || {
+    echo "error: --lan395-gate-out requires rustbgpd-transport/fanout, filter distribute_fanout, feature bench-internals, two attempts on CPU 5, taskset, --require-performance, and the default generic verdict settings" >&2
+    exit 2
+  }
+  [[ ! -e $lan395_gate_out && ! -L $lan395_gate_out ]] || {
+    echo "error: LAN-395 receipt path already exists: ${lan395_gate_out}" >&2
+    exit 2
+  }
+  "$repo/bench/scale/compare-rrharness.sh" \
+    --validate-only --base "$base_sha" --head "$head_sha"
+fi
 
 if [[ "$use_taskset" -eq 1 ]] && ! command -v taskset >/dev/null 2>&1; then
   echo "error: taskset not found; install util-linux or pass --no-taskset" >&2
@@ -304,6 +344,7 @@ write_metadata() {
     echo "package=${package}"
     echo "bench=${bench_name}"
     echo "filter=${filter}"
+    echo "features=${features}"
     echo "core=${core}"
     echo "attempts=${attempts}"
     echo "fail_on_regression=${fail_on_regression}"
@@ -369,6 +410,11 @@ build_args() {
   fi
 }
 
+cargo_feature_args=()
+if [[ -n $features ]]; then
+  cargo_feature_args=(--features "$features")
+fi
+
 for attempt in $(seq 1 "$attempts"); do
   if (( attempt % 2 == 1 )); then
     order="base-first"
@@ -387,17 +433,21 @@ for attempt in $(seq 1 "$attempts"); do
   if [[ "$order" == "base-first" ]]; then
     echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
     run_bench "$base_dir" "$base_target_dir" "${log_dir}/attempt-${attempt}-base.log" \
-      cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
+      cargo bench -p "$package" "${cargo_feature_args[@]}" \
+        --bench "$bench_name" -- "${base_args[@]}"
     echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
     run_bench "$head_dir" "$head_target_dir" "${log_dir}/attempt-${attempt}-head.log" \
-      cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
+      cargo bench -p "$package" "${cargo_feature_args[@]}" \
+        --bench "$bench_name" -- "${head_args[@]}"
   else
     echo "[attempt ${attempt}] Running head ${head_ref} (${head_short})"
     run_bench "$head_dir" "$head_target_dir" "${log_dir}/attempt-${attempt}-head.log" \
-      cargo bench -p "$package" --bench "$bench_name" -- "${head_args[@]}"
+      cargo bench -p "$package" "${cargo_feature_args[@]}" \
+        --bench "$bench_name" -- "${head_args[@]}"
     echo "[attempt ${attempt}] Running base ${base_ref} (${base_short})"
     run_bench "$base_dir" "$base_target_dir" "${log_dir}/attempt-${attempt}-base.log" \
-      cargo bench -p "$package" --bench "$bench_name" -- "${base_args[@]}"
+      cargo bench -p "$package" "${cargo_feature_args[@]}" \
+        --bench "$bench_name" -- "${base_args[@]}"
   fi
 done
 
@@ -660,6 +710,14 @@ print(summary_file.read_text())
 if fail_on_regression and regression_rows:
     sys.exit(1)
 PY
+
+if [[ -n $lan395_gate_out ]]; then
+  python3 "$repo/bench/scale/rebaseline/validate_lan395_criterion.py" \
+    --run-dir "$run_dir" \
+    --pin "$repo/bench/scale/rebaseline/lan395-run-pin.env" \
+    --output-dir "$lan395_gate_out"
+  echo "LAN-395 sanitized receipt written to ${lan395_gate_out}"
+fi
 
 echo "Summary written to ${summary_file}"
 echo "Logs written to ${log_dir}"

@@ -51,7 +51,12 @@ jobs:
           cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
           cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
           cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+          bash -n bench/compare-criterion.sh
+          bash -n bench/scale/compare-rrharness.sh
+          bash bench/tests/test-rrharness-driver.sh
           python3 bench/scale/rebaseline/test_classifiers.py
+          python3 bench/scale/rebaseline/test_parse_rrharness.py
+          python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:
