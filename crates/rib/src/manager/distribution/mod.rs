@@ -355,11 +355,19 @@ impl PendingCleanPolicyTransition {
     /// Release prepared send permits and remove any destination created for a
     /// transition that did not commit. This terminal work completes before
     /// fallback timing is recorded or the caller receives its handoff.
-    pub(super) fn discard_uncommitted_transition(&mut self, manager: &mut RibManager) {
+    pub(super) fn discard_uncommitted_transition(
+        &mut self,
+        manager: &mut RibManager,
+    ) -> Result<(), String> {
         self.phase = None;
-        if let Some(destination) = self.created_destination.take() {
-            manager.discard_uncommitted_policy_transition_group(destination);
+        if let Some(destination) = self.created_destination.take()
+            && !manager.discard_uncommitted_policy_transition_group(destination)
+        {
+            return Err(format!(
+                "uncommitted policy-transition destination {destination} unexpectedly gained members"
+            ));
         }
+        Ok(())
     }
 }
 
@@ -1489,7 +1497,9 @@ impl RibManager {
                     return true;
                 }
                 CleanPolicyTransitionAdvance::Fallback(mut failed) => {
-                    failed.discard_uncommitted_transition(self);
+                    failed
+                        .discard_uncommitted_transition(self)
+                        .expect("benchmark fallback destination remains unowned");
                     self.record_policy_transition_poll(kind, started.elapsed());
                     return false;
                 }

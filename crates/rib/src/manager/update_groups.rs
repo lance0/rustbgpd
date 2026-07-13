@@ -2471,14 +2471,18 @@ impl RibManager {
 
     /// Remove a partially or fully staged, still-unowned destination before
     /// the caller hands the transition back to the authoritative per-peer path.
-    pub(in crate::manager) fn discard_uncommitted_policy_transition_group(&mut self, gid: usize) {
-        if self
+    pub(in crate::manager) fn discard_uncommitted_policy_transition_group(
+        &mut self,
+        gid: usize,
+    ) -> bool {
+        let removable = self
             .group_ribs
             .get(&gid)
-            .is_some_and(|group| group.members.is_empty())
-        {
+            .is_none_or(|group| group.members.is_empty());
+        if removable {
             self.group_ribs.remove(&gid);
         }
+        removable
     }
 
     /// Commit a preflighted clean transition after every writer slot and exact
@@ -2797,6 +2801,28 @@ mod tests {
             classify_effective_distribution_mode(true, false, false, false),
             EffectiveDistributionMode::SingleBest
         );
+    }
+
+    #[test]
+    fn uncommitted_policy_transition_cleanup_refuses_owned_groups() {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        manager.group_ribs.insert(7, empty_group());
+        assert!(manager.discard_uncommitted_policy_transition_group(7));
+        assert!(!manager.group_ribs.contains_key(&7));
+
+        let mut owned = empty_group();
+        owned.members.insert(MEMBER);
+        manager.group_ribs.insert(8, owned);
+        assert!(!manager.discard_uncommitted_policy_transition_group(8));
+        assert!(manager.group_ribs.contains_key(&8));
     }
 
     const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1));

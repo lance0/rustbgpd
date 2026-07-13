@@ -4124,12 +4124,13 @@ impl RibManager {
                         drop(done);
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
-                        failed.discard_uncommitted_transition(&mut self);
+                        let cleanup = failed.discard_uncommitted_transition(&mut self);
                         self.record_policy_transition_poll(kind, started.elapsed());
                         if let Some(reply) = failed.take_reply() {
-                            let _ = reply.send(Ok(
-                                crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
-                            ));
+                            let outcome = cleanup.map(|()| {
+                                crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+                            });
+                            let _ = reply.send(outcome);
                         }
                     }
                 }
