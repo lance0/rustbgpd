@@ -95,6 +95,38 @@ impl<V> FamilyPrefixMap<V> {
         self.v4.clear();
         self.v6.clear();
     }
+
+    /// Iterate from `prefix` (inclusive) in [`Prefix`]'s derived order.
+    ///
+    /// Inclusive prefix traversal is intentional: a route-page cursor also
+    /// contains source peer and path ID, so callers must still inspect the
+    /// cursor prefix for identities ordered after those secondary fields.
+    pub(crate) fn iter_from(&self, prefix: Option<Prefix>) -> impl Iterator<Item = (Prefix, &V)> {
+        let v4 = match prefix {
+            None => self.v4.iter(),
+            Some(Prefix::V4(prefix)) => self.v4.iter_from(&v4_net(prefix), true),
+            Some(Prefix::V6(_)) => self.v4.iter_from(
+                &Ipv4Net::new_assert(std::net::Ipv4Addr::BROADCAST, 32),
+                false,
+            ),
+        };
+        let v6 = match prefix {
+            None | Some(Prefix::V4(_)) => self.v6.iter(),
+            Some(Prefix::V6(prefix)) => self.v6.iter_from(&v6_net(prefix), true),
+        };
+        v4.map(|(prefix, value)| {
+            (
+                Prefix::V4(Ipv4Prefix::new(prefix.addr(), prefix.prefix_len())),
+                value,
+            )
+        })
+        .chain(v6.map(|(prefix, value)| {
+            (
+                Prefix::V6(Ipv6Prefix::new(prefix.addr(), prefix.prefix_len())),
+                value,
+            )
+        }))
+    }
 }
 
 impl<V: Default> FamilyPrefixMap<V> {
@@ -104,6 +136,49 @@ impl<V: Default> FamilyPrefixMap<V> {
         match prefix {
             Prefix::V4(p) => self.v4.entry(v4_net(p)).or_default(),
             Prefix::V6(p) => self.v6.entry(v6_net(p)).or_default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_continuation_matches_prefix_derived_order() {
+        let mut map = FamilyPrefixMap::<()>::default();
+        let prefixes = [
+            Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48)),
+            Prefix::V4(Ipv4Prefix::new("10.2.0.0".parse().unwrap(), 16)),
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 8)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+            Prefix::V4(Ipv4Prefix::new("10.1.0.0".parse().unwrap(), 16)),
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 16)),
+        ];
+        for prefix in prefixes {
+            map.entry_or_default(prefix);
+        }
+
+        let mut expected = prefixes.to_vec();
+        expected.sort_unstable();
+        let all: Vec<_> = map.iter_from(None).map(|(prefix, ())| prefix).collect();
+        assert_eq!(all, expected);
+
+        for cursor in [
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 16)),
+            Prefix::V4(Ipv4Prefix::new("10.1.128.0".parse().unwrap(), 17)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+        ] {
+            let actual: Vec<_> = map
+                .iter_from(Some(cursor))
+                .map(|(prefix, ())| prefix)
+                .collect();
+            let authoritative: Vec<_> = expected
+                .iter()
+                .copied()
+                .filter(|prefix| *prefix >= cursor)
+                .collect();
+            assert_eq!(actual, authoritative, "cursor {cursor}");
         }
     }
 }

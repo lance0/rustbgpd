@@ -17,6 +17,7 @@ mod tests;
 use crate::ERR_REFRESH_TIMEOUT;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -35,8 +36,8 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
     MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibReadinessError,
-    RibReadinessQuery, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
-    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
+    RibReadinessQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
+    RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
 };
 
 use helpers::{
@@ -438,6 +439,12 @@ pub struct RibManager {
     /// not sent the deferred batch yet.
     pending_distribute_changed: HashSet<Prefix>,
     pending_distribute_affected: HashSet<Prefix>,
+    /// Process-local mutation versions bound into opaque route-page tokens.
+    /// A successful continuation must match the requested scope's current
+    /// version; no server-side snapshots are retained.
+    route_page_received_version: Option<RoutePageVersion>,
+    route_page_best_version: Option<RoutePageVersion>,
+    route_page_advertised_version: Option<RoutePageVersion>,
     /// Test-only ingest stall (ADR-0078 fault injection). When set via
     /// [`TEST_INGEST_STALL_ENV`], the run loop sleeps this long before
     /// handling each `RoutesReceived` batch popped from the primary
@@ -643,6 +650,80 @@ fn page_routes<'a>(
         routes,
         total,
         has_more,
+        version: RoutePageVersion::default(),
+    }
+}
+
+/// One bounded page over rows yielded in order strictly after the cursor.
+/// At most `page_size + 1` yielded rows are cloned: the extra row proves
+/// `has_more` without restarting the ordered iterator. Callers whose iterator
+/// applies member-local filters may inspect additional underlying index rows
+/// before yielding those rows.
+fn page_ordered_routes<'a>(
+    routes: impl Iterator<Item = &'a crate::route::Route>,
+    total: usize,
+    page_size: usize,
+) -> RoutePage {
+    let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+    let mut routes: Vec<_> = routes.take(n + 1).cloned().collect();
+    let has_more = routes.len() > n;
+    routes.truncate(n);
+    RoutePage {
+        routes,
+        total: u64::try_from(total).unwrap_or(u64::MAX),
+        has_more,
+        version: RoutePageVersion::default(),
+    }
+}
+
+/// Merge multiple individually ordered Adj-RIB-In iterators into one route
+/// page. The heap retains one key per peer and the output retains at most one
+/// page, so a Received(all) request is bounded by O(peers + page) rather than
+/// the route-table size.
+fn page_merged_ordered_routes<'a, I>(
+    mut iterators: Vec<I>,
+    total: usize,
+    page_size: usize,
+) -> RoutePage
+where
+    I: Iterator<Item = &'a crate::route::Route>,
+{
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+    let mut current = Vec::with_capacity(iterators.len());
+    let mut heap = BinaryHeap::with_capacity(iterators.len());
+    for (index, iterator) in iterators.iter_mut().enumerate() {
+        let route = iterator.next();
+        if let Some(route) = route {
+            heap.push(Reverse((route_query_key(route), index)));
+        }
+        current.push(route);
+    }
+
+    let mut routes = Vec::with_capacity(n + 1);
+    while routes.len() <= n {
+        let Some(Reverse((_, index))) = heap.pop() else {
+            break;
+        };
+        let route = current[index]
+            .take()
+            .expect("heap entry always owns one current route");
+        routes.push(route.clone());
+        let next = iterators[index].next();
+        if let Some(route) = next {
+            heap.push(Reverse((route_query_key(route), index)));
+        }
+        current[index] = next;
+    }
+    let has_more = routes.len() > n;
+    routes.truncate(n);
+    RoutePage {
+        routes,
+        total: u64::try_from(total).unwrap_or(u64::MAX),
+        has_more,
+        version: RoutePageVersion::default(),
     }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
@@ -681,6 +762,22 @@ const RESYNC_PEERS_PER_TICK: usize = 8;
 const DIRTY_RESYNC_BACKLOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
+
+fn initial_route_page_version() -> RoutePageVersion {
+    let state = std::collections::hash_map::RandomState::new();
+    let mut hasher = state.build_hasher();
+    hasher.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+            }),
+    );
+    RoutePageVersion {
+        epoch: hasher.finish(),
+        generation: 0,
+    }
+}
 
 /// Test-only fault injection for the ADR-0078 inbound backpressure
 /// contract: milliseconds the RIB manager sleeps before handling each
@@ -1069,6 +1166,9 @@ impl RibManager {
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
+            route_page_received_version: Some(initial_route_page_version()),
+            route_page_best_version: Some(initial_route_page_version()),
+            route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
         }
     }
@@ -1233,6 +1333,76 @@ impl RibManager {
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
         self.refresh_deadlines
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
+    }
+
+    /// Advance one scope version without ever reusing a process-local value.
+    /// Generation rollover increments the epoch; exhausting both words leaves
+    /// the scope disabled so continuation fails closed.
+    fn advance_route_page_version(version: &mut Option<RoutePageVersion>) {
+        let Some(current) = version.as_mut() else {
+            return;
+        };
+        if let Some(next) = current.generation.checked_add(1) {
+            current.generation = next;
+        } else if let Some(next_epoch) = current.epoch.checked_add(1) {
+            current.epoch = next_epoch;
+            current.generation = 0;
+        } else {
+            *version = None;
+        }
+    }
+
+    fn advance_received_pages(&mut self) {
+        Self::advance_route_page_version(&mut self.route_page_received_version);
+    }
+
+    fn advance_best_pages(&mut self) {
+        Self::advance_route_page_version(&mut self.route_page_best_version);
+    }
+
+    pub(super) fn advance_advertised_pages(&mut self) {
+        Self::advance_route_page_version(&mut self.route_page_advertised_version);
+    }
+
+    fn advance_all_route_pages(&mut self) {
+        self.advance_received_pages();
+        self.advance_best_pages();
+        self.advance_advertised_pages();
+    }
+
+    fn route_page_version(
+        &self,
+        scope: RouteQueryScope,
+    ) -> Result<RoutePageVersion, RoutePageError> {
+        let version = match scope {
+            RouteQueryScope::Received { .. } => self.route_page_received_version,
+            RouteQueryScope::Best => self.route_page_best_version,
+            RouteQueryScope::Advertised { .. } => self.route_page_advertised_version,
+        };
+        version.ok_or(RoutePageError::GenerationExhausted)
+    }
+
+    fn advance_route_pages_for_update(&mut self, update: &RibUpdate) {
+        match update {
+            RibUpdate::PeerAddPathLimits { .. }
+            | RibUpdate::PeerOrfUpdate { .. }
+            | RibUpdate::SetPeerPolicyContext { .. }
+            | RibUpdate::ReplacePeerExportPolicy { .. }
+            | RibUpdate::RefreshPeerOutbound { .. }
+            | RibUpdate::RouteRefreshRequest { .. } => self.advance_advertised_pages(),
+            RibUpdate::PeerUp { .. }
+            | RibUpdate::PeerDown { .. }
+            | RibUpdate::PeerDeleted { .. }
+            | RibUpdate::InjectRoute { .. }
+            | RibUpdate::WithdrawInjected { .. }
+            | RibUpdate::EndOfRib { .. }
+            | RibUpdate::PeerGracefulRestart { .. }
+            | RibUpdate::BeginRouteRefresh { .. }
+            | RibUpdate::EndRouteRefresh { .. }
+            | RibUpdate::RpkiCacheUpdate { .. }
+            | RibUpdate::AspaTableUpdate { .. } => self.advance_all_route_pages(),
+            _ => {}
+        }
     }
 
     /// Drain a bounded number of pending queries from the priority channel.
@@ -1424,6 +1594,7 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn handle_update(&mut self, update: RibUpdate) {
+        self.advance_route_pages_for_update(&update);
         match update {
             RibUpdate::RoutesReceived {
                 peer,
@@ -1702,10 +1873,18 @@ impl RibManager {
                 scope,
                 filter,
                 after,
+                expected_version,
                 page_size,
                 reply,
             } => {
-                self.handle_query_routes_page(scope, filter.as_ref(), after, page_size, reply);
+                self.handle_query_routes_page_versioned(
+                    scope,
+                    filter.as_ref(),
+                    after,
+                    expected_version,
+                    page_size,
+                    reply,
+                );
             }
             RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
             RibUpdate::QueryFibInstallCandidates {
@@ -2322,9 +2501,131 @@ impl RibManager {
     /// receiver — e.g. a canceled gRPC request whose page query was
     /// already enqueued) skips the scan entirely, so abandoned
     /// pagination stops costing the RIB task anything.
-    // ponytail: each page re-scans the scope (O(table) per page, like
-    // the BMP Loc-RIB dump) — allocation is bounded per page; swap in a
-    // sorted index if paging CPU at DFZ scale ever bites.
+    fn handle_query_routes_page_versioned(
+        &mut self,
+        scope: RouteQueryScope,
+        filter: Option<&RouteQueryFilter>,
+        after: Option<RouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<Result<RoutePage, RoutePageError>>,
+    ) {
+        if reply.is_closed() {
+            debug!("route page query canceled before scan; skipping");
+            return;
+        }
+        let version = match self.route_page_version(scope) {
+            Ok(version) => version,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        if after.is_some() != expected_version.is_some() {
+            let _ = reply.send(Err(RoutePageError::Invalidated));
+            return;
+        }
+        if expected_version.is_some_and(|expected| expected != version) {
+            let _ = reply.send(Err(RoutePageError::Invalidated));
+            return;
+        }
+        // Arbitrary API route predicates still need the full scope to preserve
+        // the cursor-independent filtered total. Unfiltered listings resume
+        // through persistent ordered indices and clone only one page plus a
+        // lookahead row. A grouped advertised view may inspect extra index rows
+        // while applying member-local split horizon and exact-rejection filters.
+        let page = if filter.is_some() {
+            match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_routes(
+                    self.ribs.get(&peer).into_iter().flat_map(AdjRibIn::iter),
+                    filter,
+                    after,
+                    page_size,
+                ),
+                RouteQueryScope::Received { peer: None } => page_routes(
+                    self.ribs.values().flat_map(AdjRibIn::iter),
+                    filter,
+                    after,
+                    page_size,
+                ),
+                RouteQueryScope::Best => page_routes(self.loc_rib.iter(), filter, after, page_size),
+                RouteQueryScope::Advertised { peer } => {
+                    match self.grouped_advertised_routes_iter(peer) {
+                        Some(routes) => page_routes(routes, filter, after, page_size),
+                        None => page_routes(
+                            self.adj_ribs_out
+                                .get(&peer)
+                                .into_iter()
+                                .flat_map(AdjRibOut::iter),
+                            filter,
+                            after,
+                            page_size,
+                        ),
+                    }
+                }
+            }
+        } else {
+            match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => {
+                    self.ribs.get(&peer).map_or_else(RoutePage::default, |rib| {
+                        page_ordered_routes(rib.iter_ordered_from(after), rib.len(), page_size)
+                    })
+                }
+                RouteQueryScope::Received { peer: None } => {
+                    let total = self.ribs.values().map(AdjRibIn::len).sum();
+                    let iterators = self
+                        .ribs
+                        .values()
+                        .map(|rib| rib.iter_ordered_from(after))
+                        .collect();
+                    page_merged_ordered_routes(iterators, total, page_size)
+                }
+                RouteQueryScope::Best => page_ordered_routes(
+                    self.loc_rib.iter_ordered_from(after),
+                    self.loc_rib.len(),
+                    page_size,
+                ),
+                RouteQueryScope::Advertised { peer } => {
+                    // A grouped member holds no per-peer unicast Adj-RIB-Out;
+                    // its view is group table − own-sourced − exact-export
+                    // rejections. Both branches resume through their table's
+                    // compact prefix index without materializing the scope.
+                    let grouped_total = self.grouped_advertised_count(peer);
+                    match self.grouped_advertised_routes_ordered_iter(peer, after) {
+                        Some(routes) => page_ordered_routes(
+                            routes,
+                            grouped_total.unwrap_or_default(),
+                            page_size,
+                        ),
+                        None => {
+                            self.adj_ribs_out
+                                .get(&peer)
+                                .map_or_else(RoutePage::default, |rib| {
+                                    page_ordered_routes(
+                                        rib.iter_ordered_from(after),
+                                        rib.len(),
+                                        page_size,
+                                    )
+                                })
+                        }
+                    }
+                }
+            }
+        };
+        let page = RoutePage { version, ..page };
+        if reply.send(Ok(page)).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// Compatibility boundary for the retained ordered route-paging benchmark.
+    ///
+    /// The canonical bench-support source is overlaid byte-for-byte onto the
+    /// pre-continuation baseline, whose handler had this signature. A stable
+    /// wrapper keeps that measurement honest while production callers use the
+    /// versioned handler above. The wrapper supplies the current version for a
+    /// continuation because the benchmark performs no concurrent mutation.
+    #[cfg(feature = "bench-internals")]
     fn handle_query_routes_page(
         &mut self,
         scope: RouteQueryScope,
@@ -2333,47 +2634,21 @@ impl RibManager {
         page_size: usize,
         reply: tokio::sync::oneshot::Sender<RoutePage>,
     ) {
-        if reply.is_closed() {
-            debug!("route page query canceled before scan; skipping");
-            return;
-        }
-        let page = match scope {
-            RouteQueryScope::Received { peer: Some(peer) } => page_routes(
-                self.ribs.get(&peer).into_iter().flat_map(AdjRibIn::iter),
-                filter,
-                after,
-                page_size,
-            ),
-            RouteQueryScope::Received { peer: None } => page_routes(
-                self.ribs.values().flat_map(AdjRibIn::iter),
-                filter,
-                after,
-                page_size,
-            ),
-            RouteQueryScope::Best => page_routes(self.loc_rib.iter(), filter, after, page_size),
-            RouteQueryScope::Advertised { peer } => {
-                // A grouped member holds no per-peer unicast Adj-RIB-Out;
-                // its advertised set is synthesized (group table − own-
-                // sourced − exact-export rejections). Page that borrowed
-                // view directly: materializing it first would clone the
-                // complete group table for every bounded page.
-                match self.grouped_advertised_routes_iter(peer) {
-                    Some(routes) => page_routes(routes, filter, after, page_size),
-                    None => page_routes(
-                        self.adj_ribs_out
-                            .get(&peer)
-                            .into_iter()
-                            .flat_map(AdjRibOut::iter),
-                        filter,
-                        after,
-                        page_size,
-                    ),
-                }
-            }
-        };
-        if reply.send(page).is_err() {
-            warn!("query caller dropped before receiving response");
-        }
+        let expected_version = after.and_then(|_| self.route_page_version(scope).ok());
+        let (versioned_reply, mut versioned_response) = tokio::sync::oneshot::channel();
+        self.handle_query_routes_page_versioned(
+            scope,
+            filter,
+            after,
+            expected_version,
+            page_size,
+            versioned_reply,
+        );
+        let page = versioned_response
+            .try_recv()
+            .expect("route page handler replies synchronously")
+            .expect("benchmark route-page generation remains available");
+        let _ = reply.send(page);
     }
 
     fn handle_query_best_routes(

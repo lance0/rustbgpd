@@ -2554,6 +2554,17 @@ impl RibManager {
             return false;
         };
 
+        if matches!(
+            &chunk,
+            PendingRouteChunk::Withdrawn(_) | PendingRouteChunk::Announced(_)
+        ) {
+            // The same manager-owned versions cover Received(all), every
+            // peer-scoped received view, Loc-RIB best, and their advertised
+            // consequences. Bump before applying the chunk so an interleaved
+            // priority query can never continue across partial ingest.
+            self.advance_all_route_pages();
+        }
+
         match chunk {
             PendingRouteChunk::Withdrawn(withdrawn) => {
                 self.pending_exact_export_withdrawals.extend(
@@ -2977,6 +2988,11 @@ impl RibManager {
         {
             return;
         }
+
+        // Group-table commits and member-local exact-export overlay changes
+        // happen below. Invalidate every advertised continuation up front;
+        // conservative invalidation is safe even if a later send fails.
+        self.advance_advertised_pages();
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         // Pass-scoped export memo: shares post-modification attribute

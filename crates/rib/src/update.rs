@@ -1034,6 +1034,30 @@ pub fn route_query_key(route: &Route) -> RouteQueryKey {
 /// Row filter evaluated inside the RIB task during a paged route query.
 pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
 
+/// Process-local scope-class mutation version bound into an opaque route-page
+/// token. The manager owns one conservative version each for Received, Best,
+/// and Advertised views, so a peer-specific walk may also be invalidated by an
+/// unrelated mutation in the same class. `epoch` advances when the generation
+/// counter rolls over; exhausting both words disables continuation rather than
+/// silently reusing a version.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoutePageVersion {
+    pub epoch: u64,
+    pub generation: u64,
+}
+
+/// A route-page continuation could not be served safely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutePageError {
+    /// The requested scope class changed after the preceding page. Callers
+    /// must restart from an empty token rather than risk skipped or duplicate
+    /// rows.
+    Invalidated,
+    /// The process-local version space was exhausted. This fail-closed state
+    /// is reachable only through fault injection in practice.
+    GenerationExhausted,
+}
+
 /// One page of a resumable route query.
 #[derive(Debug, Clone, Default)]
 pub struct RoutePage {
@@ -1043,6 +1067,8 @@ pub struct RoutePage {
     pub total: u64,
     /// Whether matching routes remain beyond this page.
     pub has_more: bool,
+    /// Mutation version that must accompany the next continuation request.
+    pub version: RoutePageVersion,
 }
 
 /// Effective live unicast distribution mode for a registered peer.
@@ -1339,9 +1365,11 @@ pub enum RibUpdate {
     },
     /// Query: one bounded page of a resumable route listing. Filtering
     /// and pagination run inside the RIB task with per-page bounded
-    /// allocation (same mutation-robust cursor step as the BMP Loc-RIB
-    /// dump), and the reply channel doubles as the cancellation token:
-    /// an abandoned caller (dropped receiver) skips the scan entirely.
+    /// allocation. Continuations are mutation-fenced: a change in the
+    /// manager's conservative Received, Best, or Advertised scope class
+    /// returns [`RoutePageError::Invalidated`] instead of serving a torn walk.
+    /// The reply channel doubles as the cancellation token: an
+    /// abandoned caller (dropped receiver) skips the scan entirely.
     QueryRoutesPage {
         /// Which table to read.
         scope: RouteQueryScope,
@@ -1351,10 +1379,13 @@ pub enum RibUpdate {
         /// Resume strictly after this key; `None` starts from the
         /// beginning.
         after: Option<RouteQueryKey>,
+        /// Mutation version decoded from the continuation token. `None`
+        /// starts a new walk at the scope's current version.
+        expected_version: Option<RoutePageVersion>,
         /// Maximum routes on the page (clamped to a server-side cap).
         page_size: usize,
         /// Response channel; a dropped receiver cancels the query.
-        reply: oneshot::Sender<RoutePage>,
+        reply: oneshot::Sender<Result<RoutePage, RoutePageError>>,
     },
     /// Query: return best routes from the Loc-RIB.
     QueryBestRoutes {

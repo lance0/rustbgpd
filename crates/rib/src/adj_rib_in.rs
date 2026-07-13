@@ -32,6 +32,7 @@ use crate::route::{
     VpnRibRoute, VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
+use crate::update::{RouteQueryKey, route_query_key};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -266,6 +267,28 @@ impl AdjRibIn {
     /// Iterate over all stored routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
         self.routes.iter()
+    }
+
+    /// Iterate unicast routes in route-query identity order, beginning at
+    /// the cursor prefix and excluding identities at or before `after`.
+    ///
+    /// The existing compact prefix trie supplies the ordered continuation;
+    /// path handles are copied into a `SmallVec` and sorted per prefix so
+    /// Add-Path insertion order cannot leak into API ordering. The normal
+    /// single-path case stays inline and allocation-free.
+    pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+        let routes = &self.routes;
+        self.prefix_index
+            .iter_from(after.map(|cursor| cursor.0))
+            .flat_map(move |(_, ids)| {
+                let mut ordered = ids.clone();
+                ordered
+                    .sort_unstable_by_key(|(_, handle)| routes.get(*handle).map(route_query_key));
+                ordered
+                    .into_iter()
+                    .filter_map(move |(_, handle)| routes.get(handle))
+            })
+            .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
     /// Iterate mutably over all stored routes.

@@ -42,8 +42,8 @@ use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::{
-    ExactExportKey, UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupPeerSnapshot,
-    UpdateGroupSnapshot, classify_update_group,
+    ExactExportKey, RouteQueryKey, UpdateGroupClassification, UpdateGroupClassifierInput,
+    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
 };
 use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
 
@@ -1925,6 +1925,26 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         Some(group.table.iter().filter(move |route| {
+            route.peer != peer
+                && !rejected.is_some_and(|keys| {
+                    keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                })
+        }))
+    }
+
+    /// Ordered sibling used by resumable route listings. The group table's
+    /// persistent prefix index resumes at the cursor; member-local split
+    /// horizon and exact-export rejection remain streaming filters. A page
+    /// clones only yielded rows, but a high-exclusion member may inspect more
+    /// underlying group rows before filling that page.
+    pub(in crate::manager) fn grouped_advertised_routes_ordered_iter(
+        &self,
+        peer: IpAddr,
+        after: Option<RouteQueryKey>,
+    ) -> Option<impl Iterator<Item = &Route>> {
+        let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        let rejected = self.peer_unexportable.get(&peer);
+        Some(group.table.iter_ordered_from(after).filter(move |route| {
             route.peer != peer
                 && !rejected.is_some_and(|keys| {
                     keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))

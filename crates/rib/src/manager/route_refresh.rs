@@ -1301,6 +1301,10 @@ impl RibManager {
             debug!(%peer, ?afi, ?safi, "End-of-RIB-Refresh without active refresh state, ignoring");
             return;
         }
+        // Timeout completion reaches this method directly from the timer arm;
+        // ordinary End-of-RIB-Refresh is already fenced by `handle_update`.
+        // Advancing here covers both without relying on a later distribution.
+        self.advance_all_route_pages();
         if timed_out {
             warn!(
                 %peer,
