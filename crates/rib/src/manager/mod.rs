@@ -13,6 +13,9 @@ mod update_groups;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use crate::ERR_REFRESH_TIMEOUT;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -120,7 +123,7 @@ fn permissive_test_exact_export_encoder() -> Arc<dyn ExactExportEncoder> {
 type UnicastPrefixPeers = rustc_hash::FxHashMap<Prefix, smallvec::SmallVec<[IpAddr; 1]>>;
 
 #[cfg(test)]
-use helpers::{ERR_REFRESH_TIMEOUT, LOCAL_PEER, validate_route_rpki};
+use helpers::{LOCAL_PEER, validate_route_rpki};
 
 /// A peer's RT-Constrain membership (RFC 4684): the Route Targets the peer
 /// declared interest in via SAFI-132 NLRI. Rebuilt whole from the peer's OWN

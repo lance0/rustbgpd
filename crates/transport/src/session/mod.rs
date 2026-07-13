@@ -5,6 +5,7 @@ pub mod import_decision_cache;
 pub(crate) mod inbound;
 mod io;
 mod outbound;
+mod refresh_accounting;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
@@ -137,6 +138,10 @@ pub(crate) struct PeerSession {
     /// `SessionEstablished` and reused by inbound UPDATE decode instead of
     /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
     add_path_receive_families: Vec<(Afi, Safi)>,
+    /// Families whose End-of-RIB marker has been received on this session.
+    /// RFC 7313 requires a GR-capable peer's `BoRR` to be ignored until the
+    /// corresponding initial GR replay has completed.
+    received_eor_families: HashSet<(Afi, Safi)>,
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
     stop_requested: bool,
@@ -252,6 +257,12 @@ pub(crate) struct PeerSession {
     /// Accepted RT-Constrain routes from this peer (RFC 4684 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_rtc: HashSet<RtcRibRouteKey>,
+    /// Ephemeral RFC 7313 stale-identity snapshots used to keep transport-owned
+    /// max-prefix accounting aligned with the RIB's refresh sweep.
+    refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting,
+    /// Earliest active refresh-accounting deadline. Kept separate from the
+    /// snapshot owner so the run loop can borrow it independently in `select!`.
+    refresh_accounting_timer: Option<Pin<Box<Sleep>>>,
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
@@ -444,8 +455,9 @@ impl PeerSession {
 
     /// Total accepted route count across all negotiated families: unicast
     /// (unique prefixes, ignoring Add-Path multiplicity), `FlowSpec` rules,
-    /// EVPN keys, and BGP-LS objects. Used by max-prefix enforcement so a peer can't slip
-    /// past the cap by flooding non-unicast NLRI.
+    /// EVPN keys, BGP-LS objects, VPN routes, labeled-unicast routes, and
+    /// RT-Constrain membership. Used by max-prefix enforcement so a peer cannot
+    /// slip past the cap by flooding non-unicast NLRI.
     pub(super) fn known_prefix_count(&self) -> usize {
         self.known_prefix_refcounts.len()
             + self.known_flowspec.len()
@@ -499,6 +511,8 @@ impl PeerSession {
         self.known_vpn.clear();
         self.known_labeled.clear();
         self.known_rtc.clear();
+        self.received_eor_families.clear();
+        self.clear_refresh_accounting();
     }
 
     fn link_local_next_hop_scope_from_config(config: &TransportConfig) -> Option<NextHopScope> {
@@ -636,6 +650,7 @@ impl PeerSession {
             negotiated: None,
             negotiated_families: Vec::new(),
             add_path_receive_families: Vec::new(),
+            received_eor_families: HashSet::new(),
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
@@ -665,6 +680,8 @@ impl PeerSession {
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),
             known_rtc: HashSet::new(),
+            refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting::default(),
+            refresh_accounting_timer: None,
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -694,6 +711,7 @@ impl PeerSession {
 
     #[expect(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "inbound constructor carries the same dependency boundary plus accepted stream"
     )]
     pub(crate) fn new_inbound_with_identity_and_lifecycle(
@@ -763,6 +781,7 @@ impl PeerSession {
             negotiated: None,
             negotiated_families: Vec::new(),
             add_path_receive_families: Vec::new(),
+            received_eor_families: HashSet::new(),
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
@@ -792,6 +811,8 @@ impl PeerSession {
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),
             known_rtc: HashSet::new(),
+            refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting::default(),
+            refresh_accounting_timer: None,
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -1187,6 +1208,7 @@ impl PeerSession {
                 outbound_rx,
                 writer_join,
                 bmp_repair_timer,
+                refresh_accounting_timer,
                 ..
             } = self;
 
@@ -1252,6 +1274,15 @@ impl PeerSession {
                 () = poll_timer(bmp_repair_timer) => {
                     self.bmp_repair_timer = None;
                     self.retry_bmp_stream_repair();
+                }
+
+                // RFC 7313 refresh-accounting timeout. The RIB owns its own
+                // matching stale-route timer; this session-local arm keeps the
+                // transport's max-prefix mirror exact even when the peer goes
+                // quiet after omitting routes from a refresh replay.
+                () = poll_timer(refresh_accounting_timer) => {
+                    self.refresh_accounting_timer = None;
+                    let _ = self.expire_refresh_accounting_windows().await;
                 }
 
                 // In-flight outbound TCP connect completion

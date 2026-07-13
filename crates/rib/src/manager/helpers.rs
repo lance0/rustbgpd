@@ -16,10 +16,6 @@ pub(super) const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 /// How long to wait before retrying distribution to dirty peers.
 pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How long to wait for an inbound enhanced route refresh window to complete
-/// before sweeping unreplaced state.
-pub(super) const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
-
 /// Per-peer LLGR configuration stored when `PeerGracefulRestart` is received.
 ///
 /// The entry stays alive through the LLGR stale phase — `handle_peer_up`

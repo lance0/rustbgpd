@@ -125,6 +125,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Enhanced-refresh omissions no longer poison max-prefix accounting.**
+  Inbound RFC 7313 windows now mirror exact typed route identities across every
+  counted family, retire replayed or withdrawn identities only after ordered
+  RIB acceptance, and reconcile omitted routes at `EoRR` or the shared timeout.
+  Timeout closure is ordered ahead of later buffered UPDATEs, remains safe under
+  RIB backpressure or shutdown, and runs for quiet peers; Graceful Restart peers
+  cannot open a family refresh window before that family's initial End-of-RIB.
+
 - **Coordinated shutdown stays bounded at high peer counts.** Peer sessions now
   drain with fixed cross-peer concurrency while preserving pending-before-primary
   ordering and each session's existing timeout, abort, and reap guarantees. A
