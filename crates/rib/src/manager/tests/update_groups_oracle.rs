@@ -750,6 +750,22 @@ impl Oracle {
         reply_rx.await.unwrap().iter().map(|row| row.evals).sum()
     }
 
+    /// Export-policy evaluations visible through one installed peer handle.
+    /// Grouped peers intentionally alias the same group counter instance, so
+    /// summing every per-peer row would multiply one real evaluation by the
+    /// number of members and cannot measure a zero-evaluation delta.
+    async fn export_policy_evals_for(&mut self, peer: Ipv4Addr) -> u64 {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::QueryExportPolicyTermHits {
+                peer: Some(IpAddr::V4(peer)),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().iter().map(|row| row.evals).sum()
+    }
+
     /// Drain every receiver into the collected streams (no await — only
     /// messages already sent).
     fn drain_collected(&mut self) {
@@ -2543,7 +2559,10 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     o.quiesce().await;
     o.drain_collected();
     let msgs_before = o.collected.get(&IpAddr::V4(C)).map_or(0, Vec::len);
-    let evals_before = o.export_policy_evals().await;
+    // B and C share one group counter instance. Observe one representative
+    // member: summing both operator-visible aliases would double-count the
+    // same real group evaluation after each RTC reflection.
+    let evals_before = o.export_policy_evals_for(C).await;
     assert!(evals_before > 0, "the flood must have evaluated the chain");
 
     let per_rt = |n: u64| (0..N).filter(|k| u64::from(*k) % RT_POOL == n).count();
@@ -2567,7 +2586,7 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     // (one RTC staging eval) — identical on the per-peer path, and not
     // a VPN restage.
     assert_eq!(
-        o.export_policy_evals().await,
+        o.export_policy_evals_for(C).await,
         evals_before + 1,
         "membership widen must add only the SAFI-132 reflection eval, zero VPN evals"
     );
@@ -2584,7 +2603,7 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     // A SAFI-132 withdraw stages no eval (withdraw-if-present precedes
     // the policy check), so the narrow is exactly zero evals.
     assert_eq!(
-        o.export_policy_evals().await,
+        o.export_policy_evals_for(C).await,
         evals_before + 1,
         "membership narrow must run ZERO export-policy evaluations"
     );
