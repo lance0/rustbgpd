@@ -109,3 +109,88 @@ lane between slices; it must not generalize chunking to every
 These results are microbenchmark evidence only. They do not accept or replace
 the loaded reload campaign, which remains blocked on that responsiveness work
 and the PeerManager readiness-query lane.
+
+## Bounded responsiveness follow-up
+
+The follow-up source `106df0cd` is a true stack on the shared-plan head
+`2c5ad2bd`. It keeps the strict PR-1 eligibility and fallback rules, but bounds
+only the expensive shared-plan preflight: destination staging, immutable diff
+construction, and exact probing process at most 1,024 route identities before
+servicing up to eight requests from the existing RIB priority-query lane.
+Successful exact-probe reuse now checks only the cohort's largest encoded
+message for each compatible member. The snapshot contract still proves wire
+equivalence, and admitting the maximum proves every shorter message fits;
+incompatible wire profiles still perform their own chunked full probe.
+
+The final membership move and reserved-permit sends remain one synchronous,
+infallible section. Priority queries cannot observe half-applied membership.
+Every writer permit and exact snapshot is acquired before that section, then
+owner, generation, and active-session identity are revalidated. A preflight
+failure discards the local inventory and takes the authoritative whole-cohort
+fallback before emission. Dropping the caller does not cancel an applied
+prefix of the transaction: PeerManager continues to a complete RIB commit or
+the existing newest-first rollback before returning to its normal mutation
+lane.
+
+PeerManager also has a dedicated, type-narrow `ListPeers` readiness channel.
+The production `/readyz` path uses that channel plus the RIB priority-query
+channel while retaining the same absolute 200 ms deadline. Session-policy and
+RIB-reply waits select the transaction result first, then service one live
+readiness snapshot at a time. Ordinary add/delete/reconfigure/config/policy
+commands remain on the normal receiver and cannot bypass a transaction.
+
+### Deterministic readiness gate
+
+The paused-clock regression holds a uniform 16-peer export-only cohort at its
+in-flight RIB commit, queues an ordinary runtime mutation, and issues eight
+live `ListPeers` snapshots through the dedicated channel. All eight complete
+inside the unchanged 200 ms timeout (zero timeouts), each returns all 16 live
+peers, the mutation remains unanswered, and the transaction reply remains
+unanswered until the held RIB commit is released:
+
+```console
+cargo test -p rustbgpd --bin rustbgpd \
+  export_only_snapshot_services_readiness_without_admitting_mutations -- --nocapture
+```
+
+The exact-cohort regression additionally varies synthetic encoded lengths and
+asserts that every compatible target rechecks one value (the cohort maximum),
+not one value per route:
+
+```console
+cargo test -p rustbgpd-rib \
+  clean_policy_transition_builds_and_probes_once_per_wire_cohort -- --nocapture
+```
+
+### Actor-slice receipt
+
+- Toolchain: `rustc 1.97.0 (2d8144b78 2026-07-07)`.
+- CPU: AMD Ryzen Threadripper 7970X 32-Cores.
+- Profile: Criterion release benchmark, 1 second warm-up, 3 second target
+  measurement, 10 samples, no plot.
+- Workload: the same 65,536-route, 64-peer, real-encoder shared policy-regroup
+  case described above.
+
+```console
+RUSTBGPD_POLICY_TRANSITION_RECEIPT=1 \
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout -- \
+  'policy_regroup_resync/shared_plan/65536/64' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+The recorded result was 79.289 ms (77.908-80.799 ms) total transition time,
+with this counter receipt:
+
+```text
+fast=true
+plans=1
+full_exact_probes=65536
+route_shell_materializations=65536
+max_actor_slice_ns=1675871
+```
+
+The 1.676 ms maximum recorded slice is below the 50 ms engineering budget and
+replaces the PR-1 samples of 83.2-93.2 ms. Total time remains microbenchmark
+evidence, not a loaded-reload acceptance claim. The exclusive 700-peer campaign
+must run from a fresh integrated SHA before the rejected campaign can be
+superseded.

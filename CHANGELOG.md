@@ -288,6 +288,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp policy stats` exposes the staged evaluations and continues to advance
   as later routes arrive.
 
+- **Large uniform export-policy transitions stay observable while they
+  converge.** Clean grouped-to-grouped unicast cohorts reuse one immutable
+  transition inventory and exact-probe plan, process expensive preflight work
+  in bounded slices, and service live readiness through dedicated read-only
+  PeerManager and RIB query lanes. Ordinary mutations remain ordered behind
+  the transaction, while membership and reserved writer sends still commit as
+  one synchronous section. A pinned 65,536-route/64-peer receipt records a
+  1.676 ms maximum actor slice, down from 83.2-93.2 ms, and the paused-clock
+  regression completes eight in-flight readiness probes with zero 200 ms
+  timeouts.
+
 - **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
   Ordinary grouped members whose exact probes all succeed no longer rebuild
   candidate keys or walk and allocate the group's prior advertised set; that
