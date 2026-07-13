@@ -31,7 +31,8 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
-    ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, RibCommandError,
+    ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, PeerExportPolicyReplacement,
+    RibCommandError,
 };
 
 mod bgpls;
@@ -199,6 +200,14 @@ struct ExactExportOverlayDecision {
         crate::update::ExactExportKey,
         crate::update::ExactExportError,
     )>,
+}
+
+struct PreparedCleanPolicyTransitionPeer {
+    peer: IpAddr,
+    session_id: u64,
+    export_policy: Option<PolicyChain>,
+    snapshot: Option<Arc<dyn crate::update::ExactExportSnapshot>>,
+    permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
 }
 
 #[inline(never)]
@@ -835,6 +844,273 @@ fn adj_rib_out_contains_exact_key(
 }
 
 impl RibManager {
+    fn clean_policy_transition_peer_ready(&self, peer: IpAddr) -> bool {
+        let sendable = self.peer_sendable_families.get(&peer);
+        let only_unicast = sendable.is_some_and(|families| {
+            !families.is_empty() && families.iter().all(|(_, safi)| *safi == Safi::Unicast)
+        });
+        let no_private_family_state = self.adj_ribs_out.get(&peer).is_none_or(|rib| {
+            rib.flowspec_len() == 0
+                && rib.evpn_len() == 0
+                && rib.bgpls_len() == 0
+                && rib.vpn_len() == 0
+                && rib.labeled_len() == 0
+                && rib.rtc_len() == 0
+        });
+        let no_selection_gate = sendable.is_some_and(|families| {
+            families
+                .iter()
+                .all(|family| !self.selection_deferred(*family))
+        });
+        let current_session = self.outbound_session_ids.get(&peer).copied();
+        only_unicast
+            && no_private_family_state
+            && no_selection_gate
+            && self.outbound_peers.contains_key(&peer)
+            && self.peer_export_encoders.contains_key(&peer)
+            && current_session.is_some()
+            && self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|session| Some(session.session_id) == current_session)
+            && !self.dirty_peers.contains(&peer)
+            && !self.force_outbound_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+            && !self.pending_extra_withdraws.contains_key(&peer)
+            && !self.pending_eor.contains_key(&peer)
+            && !self.pending_refresh.contains_key(&peer)
+            && !self.pending_otc_blocked.contains_key(&peer)
+            && !self.peer_unexportable.contains_key(&peer)
+            && !self.peer_orf_pending.contains_key(&peer)
+            && !self.peer_orf_filters.contains_key(&peer)
+    }
+
+    fn prepare_clean_policy_transition_members(
+        &self,
+        destination: usize,
+        replacements: &[PeerExportPolicyReplacement],
+        inventory: &super::update_groups::CleanPolicyTransitionInventory,
+    ) -> Option<(Vec<PreparedCleanPolicyTransitionPeer>, usize)> {
+        let candidates = inventory
+            .announce
+            .iter()
+            .zip(inventory.next_hop_override.iter())
+            .map(
+                |(route, next_hop_override)| crate::update::ExactExportCandidate::Unicast {
+                    route,
+                    next_hop_override: next_hop_override.as_ref(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut probe_cache = SharedUnicastProbeCache::default();
+        let mut prepared = Vec::with_capacity(replacements.len());
+        let mut full_probe_count = 0usize;
+        let destination_export_policy = self.group_ribs.get(&destination)?.export_chain.as_ref();
+
+        for (index, replacement) in replacements.iter().enumerate() {
+            let peer = replacement.peer;
+            let session_id = self.outbound_session_ids.get(&peer).copied()?;
+            let permit = if inventory.announce.is_empty() {
+                None
+            } else {
+                Some(
+                    self.outbound_peers
+                        .get(&peer)?
+                        .clone()
+                        .try_reserve_owned()
+                        .ok()?,
+                )
+            };
+            let snapshot = if candidates.is_empty() {
+                None
+            } else {
+                let encoder = self.peer_export_encoders.get(&peer)?;
+                let snapshot = encoder.snapshot();
+                if snapshot.owner_id() != encoder.owner_id() {
+                    return None;
+                }
+                let results = if let Some(results) = probe_cache.reuse_grouped_exact_export_ceiling(
+                    destination,
+                    &inventory.announce,
+                    &inventory.next_hop_override,
+                    snapshot.as_ref(),
+                ) {
+                    (results.len() == candidates.len()).then_some(results)?
+                } else {
+                    let (results, cardinality_correct) =
+                        probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
+                    if !cardinality_correct || results.iter().any(Result::is_err) {
+                        return None;
+                    }
+                    full_probe_count = full_probe_count.saturating_add(results.len());
+                    let encoded_lengths = results
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok().map(|result| result.encoded_len))
+                        .collect();
+                    probe_cache.store(
+                        destination,
+                        Arc::clone(&inventory.announce),
+                        Arc::clone(&inventory.next_hop_override),
+                        Arc::clone(&snapshot),
+                        encoded_lengths,
+                    );
+                    results
+                };
+                if results.iter().any(Result::is_err) {
+                    return None;
+                }
+                Some(snapshot)
+            };
+            prepared.push(PreparedCleanPolicyTransitionPeer {
+                peer,
+                session_id,
+                // Install the first member through a handle onto the exact
+                // chain instance that staged the destination group. Its
+                // operator-visible term-hit counters then keep tracking group
+                // evaluations even when the destination group pre-existed.
+                // Later members retain the established fresh-clone semantics.
+                export_policy: if index == 0 {
+                    destination_export_policy.map(rustbgpd_policy::PolicyChain::share)
+                } else {
+                    replacement.export_policy.clone()
+                },
+                snapshot,
+                permit,
+            });
+        }
+
+        // Revalidate owner/generation and active-session identity after the
+        // potentially expensive shared preflight, still before any mutation.
+        prepared
+            .iter()
+            .all(|member| {
+                self.outbound_session_ids.get(&member.peer).copied() == Some(member.session_id)
+                    && member.snapshot.as_ref().is_none_or(|snapshot| {
+                        self.peer_export_encoders
+                            .get(&member.peer)
+                            .is_some_and(|encoder| {
+                                let current = encoder.snapshot();
+                                current.owner_id() == snapshot.owner_id()
+                                    && current.generation() == snapshot.generation()
+                            })
+                    })
+            })
+            .then_some((prepared, full_probe_count))
+    }
+
+    /// Attempt the strict clean grouped-to-grouped unicast transition.
+    ///
+    /// The destination table and immutable diff are built once. Every writer
+    /// slot, session identity, immutable exact snapshot, probe result, and
+    /// source-exclusion assumption is validated before the first membership
+    /// change. Returning `false` is therefore a wholesale, pre-emission
+    /// fallback to the proven per-peer regroup path.
+    pub(in crate::manager) fn try_clean_group_policy_transition(
+        &mut self,
+        replacements: &[PeerExportPolicyReplacement],
+    ) -> bool {
+        #[cfg(any(test, feature = "bench-internals"))]
+        let actor_slice_started = std::time::Instant::now();
+        if replacements.len() < 2 {
+            return false;
+        }
+        let mut seen = HashSet::with_capacity(replacements.len());
+        let mut transition = None;
+        for replacement in replacements {
+            if !seen.insert(replacement.peer)
+                || !self.clean_policy_transition_peer_ready(replacement.peer)
+            {
+                return false;
+            }
+            let Some(pair) = self.clean_policy_transition_destination(
+                replacement.peer,
+                replacement.export_policy.as_ref(),
+            ) else {
+                return false;
+            };
+            if transition.is_some_and(|expected| expected != pair) {
+                return false;
+            }
+            transition = Some(pair);
+        }
+        let Some((source, destination)) = transition else {
+            return false;
+        };
+
+        // Keep the staged destination on a failed fast-path preflight: the
+        // authoritative per-peer fallback immediately consumes the same
+        // group. Rebuilding it would double policy evaluations and detach the
+        // fallback's counters from the chain instance staged here.
+        self.ensure_policy_transition_group(
+            destination,
+            replacements[0].peer,
+            replacements[0].export_policy.as_ref(),
+        );
+        let Some(inventory) = self.clean_policy_transition_inventory(source, destination) else {
+            return false;
+        };
+
+        let Some((prepared, full_probe_count)) =
+            self.prepare_clean_policy_transition_members(destination, replacements, &inventory)
+        else {
+            return false;
+        };
+
+        let materialized_routes = inventory.announce.len();
+        for member in prepared {
+            self.commit_clean_policy_transition_member(
+                member.peer,
+                source,
+                destination,
+                member.export_policy,
+            );
+            self.clear_policy_filtered_routes_for_peer(member.peer);
+            self.apply_clean_policy_transition_counters(member.peer, &inventory);
+            if let Some(permit) = member.permit {
+                permit.send(OutboundRouteUpdate {
+                    exact_export_snapshot: member.snapshot,
+                    announce_source_exclusion: Some(member.peer),
+                    announce: Arc::clone(&inventory.announce),
+                    next_hop_override: Arc::clone(&inventory.next_hop_override),
+                    ..OutboundRouteUpdate::default()
+                });
+            }
+            let advertised = self.grouped_advertised_count(member.peer).unwrap_or(0);
+            self.metrics.set_adj_rib_out_prefixes(
+                &member.peer.to_string(),
+                "all",
+                gauge_val(advertised),
+            );
+        }
+        debug!(
+            source_group = source,
+            destination_group = destination,
+            members = replacements.len(),
+            materialized_routes,
+            full_probe_count,
+            "applied shared clean export-policy transition"
+        );
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            self.policy_transition_stats.plan_builds =
+                self.policy_transition_stats.plan_builds.saturating_add(1);
+            self.policy_transition_stats.full_exact_probes = self
+                .policy_transition_stats
+                .full_exact_probes
+                .saturating_add(full_probe_count);
+            self.policy_transition_stats.route_shell_materializations = self
+                .policy_transition_stats
+                .route_shell_materializations
+                .saturating_add(materialized_routes);
+            self.policy_transition_stats.max_actor_slice = self
+                .policy_transition_stats
+                .max_actor_slice
+                .max(actor_slice_started.elapsed());
+        }
+        true
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "RIB update messages carry every supported family as one transaction"
@@ -1425,6 +1701,7 @@ impl RibManager {
             permit,
             OutboundRouteUpdate {
                 exact_export_snapshot,
+                announce_source_exclusion: None,
                 announce,
                 withdraw,
                 end_of_rib,
@@ -1449,17 +1726,13 @@ impl RibManager {
         true
     }
 
-    pub(super) fn handle_replace_peer_export_policy(
+    pub(in crate::manager) fn replace_peer_export_policy_synchronously(
         &mut self,
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) {
+    ) -> Result<(), String> {
         if !self.outbound_peers.contains_key(&peer) {
-            let _ = reply.send(Err(format!(
-                "peer {peer} not registered for outbound updates"
-            )));
-            return;
+            return Err(format!("peer {peer} not registered for outbound updates"));
         }
 
         // A content-equal replacement keeps the installed chain
@@ -1491,7 +1764,51 @@ impl RibManager {
             self.mark_outbound_dirty(peer);
         }
         self.distribute_changes(&HashSet::new(), &HashSet::new());
-        let _ = reply.send(Ok(()));
+        Ok(())
+    }
+
+    pub(super) fn handle_replace_peer_export_policy(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let _ = reply.send(self.replace_peer_export_policy_synchronously(peer, export_policy));
+    }
+
+    /// Apply a batch of replacements. The optimization is all-or-nothing:
+    /// any ambiguous member returns the complete batch to the existing
+    /// per-peer path before the first membership mutation or emission.
+    pub(super) fn handle_replace_peer_export_policies(
+        &mut self,
+        replacements: Vec<PeerExportPolicyReplacement>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if replacements.is_empty() {
+            let _ = reply.send(Ok(()));
+            return;
+        }
+        if let Some(replacement) = replacements
+            .iter()
+            .find(|replacement| !self.outbound_peers.contains_key(&replacement.peer))
+        {
+            let _ = reply.send(Err(format!(
+                "peer {} not registered for outbound updates",
+                replacement.peer
+            )));
+            return;
+        }
+        if self.try_clean_group_policy_transition(&replacements) {
+            let _ = reply.send(Ok(()));
+            return;
+        }
+        let result = replacements.into_iter().try_for_each(|replacement| {
+            self.replace_peer_export_policy_synchronously(
+                replacement.peer,
+                replacement.export_policy,
+            )
+        });
+        let _ = reply.send(result);
     }
 
     /// Force re-emission of all currently-advertised routes to a peer

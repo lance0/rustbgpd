@@ -138,6 +138,30 @@ fn representative_export_chain() -> PolicyChain {
     }])
 }
 
+fn community_export_chain(community: u32) -> PolicyChain {
+    let mut statement = blank_stmt();
+    statement.modifications.communities_add.push(community);
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn policy_regroup_routes(count: usize) -> Vec<Route> {
+    (0..count)
+        .map(|index| {
+            let bytes = u32::try_from(index)
+                .expect("benchmark route count fits u32")
+                .to_be_bytes();
+            let prefix = Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(100, bytes[1], bytes[2], bytes[3]),
+                32,
+            ));
+            make_route(prefix)
+        })
+        .collect()
+}
+
 type FanoutState = (
     RibManager,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
@@ -194,5 +218,80 @@ fn bench_fanout(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_fanout);
+type PolicyRegroupState = (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    PolicyChain,
+);
+
+fn build_policy_regroup(routes: usize, peers: usize) -> PolicyRegroupState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(
+        rx,
+        qrx,
+        None,
+        Some(Ipv4Addr::new(10, 255, 255, 255)),
+        BgpMetrics::new(),
+    );
+    let old_policy = community_export_chain(0xFDE8_0001);
+    let mut receivers = manager.bench_register_peers(
+        peers,
+        Some(&old_policy),
+        true,
+        4,
+        fanout_bench_export_encoder,
+    );
+    let seeded = policy_regroup_routes(routes);
+    let changed = seeded
+        .iter()
+        .map(|route| route.prefix)
+        .collect::<HashSet<_>>();
+    manager.bench_seed_loc_rib(seeded);
+    manager.bench_distribute(&changed);
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    (manager, receivers, community_export_chain(0xFDE8_0002))
+}
+
+fn bench_policy_regroup_resync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("policy_regroup_resync");
+    group.sample_size(10);
+    for routes in [4_096usize, 65_536] {
+        for peers in [1usize, 8, 64] {
+            let parameter = format!("{routes}/{peers}");
+            group.bench_with_input(
+                BenchmarkId::new("shared_plan", &parameter),
+                &(routes, peers),
+                |bench, &(routes, peers)| {
+                    bench.iter_batched_ref(
+                        || build_policy_regroup(routes, peers),
+                        |(manager, _receivers, next)| {
+                            let fast = manager.bench_replace_export_policy_cohort(peers, next);
+                            std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new("forced_per_peer", &parameter),
+                &(routes, peers),
+                |bench, &(routes, peers)| {
+                    bench.iter_batched_ref(
+                        || build_policy_regroup(routes, peers),
+                        |(manager, _receivers, next)| {
+                            manager.bench_replace_export_policy_per_peer(peers, next);
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_fanout, bench_policy_regroup_resync);
 criterion_main!(benches);

@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1118,6 +1118,67 @@ fn insert_test_managed_peer_with_asn(
         },
     );
     mgr.register_session(1, &peer_key);
+}
+
+fn established_export_policy_test_session(
+    addr: IpAddr,
+    attempts: Arc<AtomicUsize>,
+    fail_on_attempt: Option<usize>,
+) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    let result = if fail_on_attempt == Some(attempt) {
+                        Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                            "injected export-policy apply failure".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Established,
+                        peer_ip: addr,
+                        peer_asn: Some(65002),
+                        prefix_count: 0,
+                        negotiated_hold_time: Some(90),
+                        four_octet_as: Some(true),
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        messages_received: 0,
+                        messages_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 1,
+                        last_error: String::new(),
+                        tcp_ao_info: None,
+                        tcp_ao_protected: false,
+                    });
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
 }
 
 fn insert_test_scoped_managed_peer(
@@ -6825,6 +6886,263 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     );
 
     rib_drainer.abort();
+}
+
+#[tokio::test]
+async fn export_only_snapshot_uses_one_batched_rib_commit_and_preserves_priors() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 2)),
+    ];
+    let installs = Arc::new(AtomicUsize::new(0));
+    let batches = Arc::new(AtomicUsize::new(0));
+    let singles = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let batch_count = Arc::clone(&batches);
+    let single_count = Arc::clone(&singles);
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies {
+                    replacements,
+                    reply,
+                } => {
+                    assert_eq!(replacements.len(), peers.len());
+                    batch_count.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    single_count.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let priors = manager
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .map(|&address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(next.clone()),
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(installs.load(Ordering::SeqCst), peers.len());
+    assert_eq!(batches.load(Ordering::SeqCst), 1);
+    assert_eq!(singles.load(Ordering::SeqCst), 0);
+    assert_eq!(priors.len(), peers.len());
+    assert!(priors.iter().all(|prior| prior.export_policy.is_none()));
+    assert!(peers.iter().all(|peer| {
+        manager
+            .peers
+            .get(&key(*peer))
+            .is_some_and(|managed| managed.export_policy == Some(next.clone()))
+    }));
+
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    rib_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn export_only_snapshot_restores_newest_first_after_session_failure() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 31, 0, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 31, 0, 2));
+    let first_attempts = Arc::new(AtomicUsize::new(0));
+    let second_attempts = Arc::new(AtomicUsize::new(0));
+    let rib_single_restores = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let restores = Arc::clone(&rib_single_restores);
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    restores.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { .. } => {
+                    panic!("the RIB batch must not run after a session-side cohort failure");
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        first,
+        established_export_policy_test_session(first, Arc::clone(&first_attempts), None),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        second,
+        established_export_policy_test_session(second, Arc::clone(&second_attempts), Some(1)),
+        false,
+    );
+    let next = deny_policy_chain();
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, second]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(next.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("already-applied peers restored")),
+        "cohort failure must surface with an explicit successful rollback: {result:?}"
+    );
+    assert_eq!(first_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        second_attempts.load(Ordering::SeqCst),
+        2,
+        "the failing session must have its prior chain reasserted too"
+    );
+    assert_eq!(rib_single_restores.load(Ordering::SeqCst), 1);
+    for peer in [first, second] {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.export_policy.is_none());
+        assert!(!peer_state.pending_export_apply);
+        assert!(!peer_state.pending_refresh);
+    }
+
+    for peer in [first, second] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    rib_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 32, 0, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 32, 0, 2));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let rib_task = tokio::spawn(async move {
+        let mut restore_order = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Err("injected cohort commit failure".to_string()));
+                }
+                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
+                    restore_order.push(peer);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+        restore_order
+    });
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in [first, second] {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&attempts), None),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, second]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(next.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("already-applied peers restored")),
+        "RIB cohort failure must restore every session and RIB policy: {result:?}"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    for peer in [first, second] {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.export_policy.is_none());
+        assert!(!peer_state.pending_export_apply);
+        assert!(!peer_state.pending_refresh);
+    }
+
+    for peer in [first, second] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    assert_eq!(rib_task.await.unwrap(), vec![second, first]);
 }
 
 #[tokio::test(start_paused = true)]

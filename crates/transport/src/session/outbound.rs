@@ -330,6 +330,14 @@ impl PeerSession {
         let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
         let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
         for (i, route) in update.announce.iter().enumerate() {
+            // Group-transition envelopes may share one immutable full-cohort
+            // payload. Split horizon is still member-specific: never encode a
+            // route learned from this target back to it. Ordinary RIB paths
+            // already exclude these routes, making this branch a cheap
+            // defense-in-depth no-op outside the shared transition seam.
+            if update.announce_source_exclusion == Some(route.peer) {
+                continue;
+            }
             if !self.is_family_negotiated(&route.prefix) {
                 continue;
             }

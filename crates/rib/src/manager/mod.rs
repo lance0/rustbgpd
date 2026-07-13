@@ -39,6 +39,15 @@ use helpers::{
 };
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default)]
+struct PolicyTransitionStats {
+    plan_builds: usize,
+    full_exact_probes: usize,
+    route_shell_materializations: usize,
+    max_actor_slice: std::time::Duration,
+}
+
 #[cfg(test)]
 struct PermissiveTestExactExport;
 
@@ -444,6 +453,9 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    /// Test/benchmark-only evidence for the explicit clean policy transition.
+    #[cfg(any(test, feature = "bench-internals"))]
+    policy_transition_stats: PolicyTransitionStats,
 }
 
 /// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
@@ -951,6 +963,8 @@ impl RibManager {
             pending_extra_withdraws: HashMap::new(),
             #[cfg(test)]
             test_force_ungrouped: false,
+            #[cfg(any(test, feature = "bench-internals"))]
+            policy_transition_stats: PolicyTransitionStats::default(),
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
@@ -1527,6 +1541,16 @@ impl RibManager {
                     self.pending_extra_withdraws.len(),
                 ));
             }
+            #[cfg(test)]
+            RibUpdate::TestQueryPolicyTransitionStats { reply } => {
+                let stats = self.policy_transition_stats;
+                let _ = reply.send((
+                    stats.plan_builds,
+                    stats.full_exact_probes,
+                    stats.route_shell_materializations,
+                    stats.max_actor_slice.as_nanos(),
+                ));
+            }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }
@@ -1535,6 +1559,10 @@ impl RibManager {
                 export_policy,
                 reply,
             } => self.handle_replace_peer_export_policy(peer, export_policy, reply),
+            RibUpdate::ReplacePeerExportPolicies {
+                replacements,
+                reply,
+            } => self.handle_replace_peer_export_policies(replacements, reply),
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }
