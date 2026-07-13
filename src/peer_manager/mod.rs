@@ -18,7 +18,8 @@ use rustbgpd_transport::{
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tracing::{debug, info};
+use tokio::task::JoinSet;
+use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::policy_admin::{
@@ -71,6 +72,13 @@ const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// draining it; actor paths must fail/log within this deadline instead of
 /// blocking every peer's RPC/reconcile work behind one stalled session.
 const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Maximum number of independently owned peers drained at once during
+/// process shutdown. Each peer still drains a pending inbound candidate before
+/// its primary session, preserving the collision-owner ordering, while the
+/// fixed cross-peer cap prevents the daemon's shutdown time from growing as
+/// `peer_count * PEER_LIFECYCLE_COMMAND_TIMEOUT` under transport back-pressure.
+const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 
 /// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
 /// actor (export-policy swap, per-peer outbound refresh). Generous — the
@@ -1169,27 +1177,38 @@ impl PeerManager {
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());
                             let drained: Vec<_> = self.peers.drain().collect();
+                            let mut shutdowns = JoinSet::new();
                             for (addr, mut managed) in drained {
-                                debug!(%addr, "shutting down peer");
-                                if let Some(pending) = managed.pending_inbound.take() {
-                                    let _ = self
-                                        .shutdown_handle_bounded(
+                                if shutdowns.len() == PEER_SHUTDOWN_CONCURRENCY
+                                    && let Some(Err(error)) = shutdowns.join_next().await
+                                {
+                                    error!(%error, "peer shutdown worker failed");
+                                }
+                                shutdowns.spawn(async move {
+                                    debug!(%addr, "shutting down peer");
+                                    if let Some(pending) = managed.pending_inbound.take() {
+                                        let _ = Self::shutdown_handle_bounded_owned(
                                             addr.address,
                                             "PeerManager shutdown pending inbound",
                                             pending.handle,
                                         )
                                         .await;
-                                }
-                                if self
-                                    .shutdown_handle_bounded(
+                                    }
+                                    if Self::shutdown_handle_bounded_owned(
                                         addr.address,
                                         "PeerManager shutdown primary",
                                         managed.handle,
                                     )
                                     .await
                                     .joined()
-                                {
-                                    debug!(%addr, "peer shut down");
+                                    {
+                                        debug!(%addr, "peer shut down");
+                                    }
+                                });
+                            }
+                            while let Some(result) = shutdowns.join_next().await {
+                                if let Err(error) = result {
+                                    error!(%error, "peer shutdown worker failed");
                                 }
                             }
                             return;

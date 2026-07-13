@@ -1169,6 +1169,74 @@ struct FakePeerCounters {
     stop: AtomicU32,
 }
 
+struct TaskDropCounter(Arc<AtomicU32>);
+
+impl Drop for TaskDropCounter {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+async fn stalled_shutdown_peer_handle(dropped: Arc<AtomicU32>) -> PeerHandle {
+    let (commands, receiver) = mpsc::channel(1);
+    commands
+        .send(rustbgpd_transport::PeerCommand::Start)
+        .await
+        .expect("seed the deliberately full command channel");
+    let task = tokio::spawn(async move {
+        let _receiver = receiver;
+        let _drop_counter = TaskDropCounter(dropped);
+        std::future::pending::<Result<(), rustbgpd_transport::TransportError>>().await
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_shutdown_bounds_many_stalled_peers_by_concurrent_waves() {
+    let (tx, rx) = mpsc::channel(1);
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_count = PEER_SHUTDOWN_CONCURRENCY + 1;
+    let dropped = Arc::new(AtomicU32::new(0));
+
+    for index in 0..peer_count {
+        let host = u8::try_from(index + 1).expect("test peer count fits one IPv4 /24");
+        let addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, host));
+        let primary = stalled_shutdown_peer_handle(dropped.clone()).await;
+        insert_test_managed_peer(&mut mgr, addr, primary, false);
+        let pending = stalled_shutdown_peer_handle(dropped.clone()).await;
+        mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+            handle: pending,
+            session_id: (index + peer_count + 1) as u64,
+        });
+    }
+
+    let started = tokio::time::Instant::now();
+    let manager = tokio::spawn(mgr.run());
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager.await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed <= PEER_LIFECYCLE_COMMAND_TIMEOUT * 5,
+        "bounded cross-peer shutdown should take two pending+primary waves, took {elapsed:?}"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        u32::try_from(peer_count * 2).expect("test handle count fits u32"),
+        "every timed-out pending and primary task must be aborted and reaped"
+    );
+}
+
 fn fake_peer_handle(
     peer_addr: IpAddr,
     state: SessionState,
