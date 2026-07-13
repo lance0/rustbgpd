@@ -1270,6 +1270,12 @@ impl RibManager {
         while let Ok(update) = self.rx.try_recv() {
             drained = true;
             self.handle_update(update);
+            if self.pending_clean_policy_transition.is_some() {
+                // The accepted cohort command now owns FIFO. Leave every
+                // later primary update queued until its atomic finalize or
+                // authoritative fallback completes.
+                break;
+            }
             while self.process_next_route_chunk() {
                 drained = true;
             }
@@ -4097,11 +4103,9 @@ impl RibManager {
                         self.record_policy_transition_poll(kind, started.elapsed());
                         self.pending_clean_policy_transition = Some(next);
                     }
-                    distribution::CleanPolicyTransitionAdvance::Committed(mut done) => {
+                    distribution::CleanPolicyTransitionAdvance::Committed(done) => {
                         self.record_policy_transition_poll(kind, started.elapsed());
-                        if let Some(reply) = done.take_reply() {
-                            let _ = reply.send(Ok(()));
-                        }
+                        drop(done);
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
                         self.record_policy_transition_poll(kind, started.elapsed());

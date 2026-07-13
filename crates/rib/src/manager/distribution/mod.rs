@@ -1473,6 +1473,9 @@ impl RibManager {
                         .route_shell_materializations
                         .saturating_add(materialized_routes);
                 }
+                if let Some(reply) = pending.take_reply() {
+                    let _ = reply.send(Ok(()));
+                }
                 CleanPolicyTransitionAdvance::Committed(pending)
             }
         }
@@ -1485,7 +1488,8 @@ impl RibManager {
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
     ) -> bool {
-        let mut pending = PendingCleanPolicyTransition::new(replacements.to_vec(), None);
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let mut pending = PendingCleanPolicyTransition::new(replacements.to_vec(), Some(reply));
         loop {
             let kind = pending.poll_kind();
             let started = std::time::Instant::now();

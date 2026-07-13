@@ -7221,6 +7221,18 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         Err(oneshot::error::TryRecvError::Empty)
     ));
 
+    let (cancelled_reply, cancelled_response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers {
+            reply: cancelled_reply,
+        })
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    drop(cancelled_response);
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+
     let (readiness_reply, readiness_response) = oneshot::channel();
     readiness_tx
         .send(PeerManagerReadinessQuery::ListPeers {
