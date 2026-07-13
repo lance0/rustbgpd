@@ -124,6 +124,29 @@ impl SharedUnicastProbeCache {
             })
     }
 
+    /// Prove one strict all-success transition cohort against only its largest
+    /// source message. The snapshot contract still proves wire equivalence;
+    /// admitting the largest encoded length proves every shorter route fits
+    /// the target ceiling without allocating `routes * peers` result vectors.
+    fn reuse_grouped_exact_export_maximum(
+        &self,
+        group_id: usize,
+        announce: &Arc<[crate::route::Route]>,
+        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        target: &dyn crate::update::ExactExportSnapshot,
+    ) -> Option<Result<crate::update::ExactExportResult, crate::update::ExactExportError>> {
+        self.groups
+            .get(&group_id)?
+            .iter()
+            .filter(|entry| Self::entry_matches_payload(entry, announce, next_hop_override))
+            .find_map(|entry| {
+                let maximum = entry.encoded_lengths.iter().copied().max().unwrap_or(0);
+                let mut results =
+                    target.reuse_successful_probes(entry.source_snapshot.as_ref(), &[maximum])?;
+                (results.len() == 1).then(|| results.pop().expect("one result validated above"))
+            })
+    }
+
     fn store(
         &mut self,
         group_id: usize,
@@ -207,7 +230,138 @@ struct PreparedCleanPolicyTransitionPeer {
     session_id: u64,
     export_policy: Option<PolicyChain>,
     snapshot: Option<Arc<dyn crate::update::ExactExportSnapshot>>,
+    sender: tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
     permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+}
+
+/// One actor-owned, pre-emission clean policy transition. The RIB run loop
+/// advances exactly one bounded phase step and yields before polling it again;
+/// ordinary mutation traffic remains queued until `Finalize` completes.
+pub(super) struct PendingCleanPolicyTransition {
+    replacements: Vec<PeerExportPolicyReplacement>,
+    reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    phase: Option<CleanPolicyTransitionPhase>,
+    created_destination: Option<usize>,
+    destination_staged: bool,
+}
+
+/// The deliberately narrow five-phase transition contract approved for the
+/// shared grouped-to-grouped path. No phase before `Finalize` emits or changes
+/// committed membership.
+enum CleanPolicyTransitionPhase {
+    Classify {
+        cursor: usize,
+        seen: HashSet<IpAddr>,
+        transition: Option<(usize, usize)>,
+    },
+    StageDestination {
+        source: usize,
+        destination: usize,
+        prefixes: Option<Vec<Prefix>>,
+        cursor: usize,
+        memo: ExportMemo,
+    },
+    BuildInventory {
+        source: usize,
+        destination: usize,
+        keys: Option<Vec<(Prefix, u32)>>,
+        cursor: usize,
+        inventory: super::update_groups::CleanPolicyTransitionInventoryBuilder,
+    },
+    ProbeAndPrepare {
+        source: usize,
+        destination: usize,
+        inventory: super::update_groups::CleanPolicyTransitionInventory,
+        cursor: usize,
+        probe_cache: SharedUnicastProbeCache,
+        prepared: Vec<PreparedCleanPolicyTransitionPeer>,
+        active_probe: Option<CleanPolicyTransitionProbe>,
+        full_probe_count: usize,
+    },
+    Finalize {
+        source: usize,
+        destination: usize,
+        inventory: super::update_groups::CleanPolicyTransitionInventory,
+        prepared: Vec<PreparedCleanPolicyTransitionPeer>,
+        full_probe_count: usize,
+    },
+}
+
+struct CleanPolicyTransitionProbe {
+    peer: IpAddr,
+    session_id: u64,
+    export_policy: Option<PolicyChain>,
+    snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
+    sender: tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
+    permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+    cursor: usize,
+    encoded_lengths: Vec<usize>,
+}
+
+pub(super) enum CleanPolicyTransitionAdvance {
+    Continue(PendingCleanPolicyTransition),
+    Committed(PendingCleanPolicyTransition),
+    Fallback(PendingCleanPolicyTransition),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CleanPolicyTransitionPollKind {
+    Bounded,
+    PrefixSnapshot,
+    Finalize,
+}
+
+impl PendingCleanPolicyTransition {
+    pub(super) fn new(
+        replacements: Vec<PeerExportPolicyReplacement>,
+        reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) -> Self {
+        Self {
+            replacements,
+            reply,
+            phase: Some(CleanPolicyTransitionPhase::Classify {
+                cursor: 0,
+                seen: HashSet::new(),
+                transition: None,
+            }),
+            created_destination: None,
+            destination_staged: false,
+        }
+    }
+
+    pub(super) fn take_reply(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Sender<Result<(), String>>> {
+        self.reply.take()
+    }
+
+    pub(super) fn take_replacements(&mut self) -> Vec<PeerExportPolicyReplacement> {
+        // Drop any prepared writer permits before authoritative fallback tries
+        // to reserve/send through those same bounded channels.
+        self.phase = None;
+        std::mem::take(&mut self.replacements)
+    }
+
+    pub(super) fn poll_kind(&self) -> CleanPolicyTransitionPollKind {
+        match self.phase.as_ref() {
+            Some(
+                CleanPolicyTransitionPhase::StageDestination { prefixes: None, .. }
+                | CleanPolicyTransitionPhase::BuildInventory { keys: None, .. },
+            ) => CleanPolicyTransitionPollKind::PrefixSnapshot,
+            Some(CleanPolicyTransitionPhase::Finalize { .. }) => {
+                CleanPolicyTransitionPollKind::Finalize
+            }
+            _ => CleanPolicyTransitionPollKind::Bounded,
+        }
+    }
+
+    pub(super) fn cleanup_incomplete_destination(&self, manager: &mut RibManager) {
+        if !self.destination_staged
+            && let Some(destination) = self.created_destination
+        {
+            manager.discard_incomplete_policy_transition_group(destination);
+        }
+    }
 }
 
 #[inline(never)]
@@ -886,229 +1040,464 @@ impl RibManager {
             && !self.peer_orf_filters.contains_key(&peer)
     }
 
-    fn prepare_clean_policy_transition_members(
-        &self,
-        destination: usize,
-        replacements: &[PeerExportPolicyReplacement],
-        inventory: &super::update_groups::CleanPolicyTransitionInventory,
-    ) -> Option<(Vec<PreparedCleanPolicyTransitionPeer>, usize)> {
-        let candidates = inventory
-            .announce
-            .iter()
-            .zip(inventory.next_hop_override.iter())
-            .map(
-                |(route, next_hop_override)| crate::update::ExactExportCandidate::Unicast {
-                    route,
-                    next_hop_override: next_hop_override.as_ref(),
-                },
-            )
-            .collect::<Vec<_>>();
-        let mut probe_cache = SharedUnicastProbeCache::default();
-        let mut prepared = Vec::with_capacity(replacements.len());
-        let mut full_probe_count = 0usize;
-        let destination_export_policy = self.group_ribs.get(&destination)?.export_chain.as_ref();
-
-        for (index, replacement) in replacements.iter().enumerate() {
-            let peer = replacement.peer;
-            let session_id = self.outbound_session_ids.get(&peer).copied()?;
-            let permit = if inventory.announce.is_empty() {
-                None
-            } else {
-                Some(
-                    self.outbound_peers
-                        .get(&peer)?
-                        .clone()
-                        .try_reserve_owned()
-                        .ok()?,
-                )
-            };
-            let snapshot = if candidates.is_empty() {
-                None
-            } else {
-                let encoder = self.peer_export_encoders.get(&peer)?;
-                let snapshot = encoder.snapshot();
-                if snapshot.owner_id() != encoder.owner_id() {
-                    return None;
+    /// Advance one bounded production step of the actor-owned transition.
+    /// Every return before `Finalize` is pre-emission and leaves committed
+    /// membership and installed policy state untouched.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the five explicit phases stay together so ownership and no-emission transitions remain auditable"
+    )]
+    pub(super) fn advance_clean_policy_transition(
+        &mut self,
+        mut pending: PendingCleanPolicyTransition,
+    ) -> CleanPolicyTransitionAdvance {
+        let phase = pending
+            .phase
+            .take()
+            .expect("pending clean transition always owns one phase");
+        match phase {
+            CleanPolicyTransitionPhase::Classify {
+                mut cursor,
+                mut seen,
+                mut transition,
+            } => {
+                if pending.replacements.len() < 2 {
+                    return CleanPolicyTransitionAdvance::Fallback(pending);
                 }
-                let results = if let Some(results) = probe_cache.reuse_grouped_exact_export_ceiling(
-                    destination,
-                    &inventory.announce,
-                    &inventory.next_hop_override,
-                    snapshot.as_ref(),
-                ) {
-                    (results.len() == candidates.len()).then_some(results)?
+                let end = (cursor + super::POLICY_TRANSITION_MEMBER_SLICE)
+                    .min(pending.replacements.len());
+                for replacement in &pending.replacements[cursor..end] {
+                    if !seen.insert(replacement.peer)
+                        || !self.clean_policy_transition_peer_ready(replacement.peer)
+                    {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    }
+                    let Some(pair) = self.clean_policy_transition_destination(
+                        replacement.peer,
+                        replacement.export_policy.as_ref(),
+                    ) else {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    };
+                    if transition.is_some_and(|expected| expected != pair) {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    }
+                    transition = Some(pair);
+                }
+                cursor = end;
+                if cursor < pending.replacements.len() {
+                    pending.phase = Some(CleanPolicyTransitionPhase::Classify {
+                        cursor,
+                        seen,
+                        transition,
+                    });
                 } else {
-                    let (results, cardinality_correct) =
-                        probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
+                    let Some((source, destination)) = transition else {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    };
+                    pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
+                        source,
+                        destination,
+                        prefixes: None,
+                        cursor: 0,
+                        memo: ExportMemo::default(),
+                    });
+                }
+                CleanPolicyTransitionAdvance::Continue(pending)
+            }
+            CleanPolicyTransitionPhase::StageDestination {
+                source,
+                destination,
+                mut prefixes,
+                mut cursor,
+                mut memo,
+            } => {
+                if prefixes.is_none() {
+                    match self.begin_policy_transition_group(
+                        destination,
+                        pending.replacements[0].peer,
+                        pending.replacements[0].export_policy.as_ref(),
+                    ) {
+                        super::update_groups::PolicyTransitionGroupStart::Maintained => {
+                            pending.destination_staged = true;
+                            pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
+                                source,
+                                destination,
+                                keys: None,
+                                cursor: 0,
+                                inventory: super::update_groups::CleanPolicyTransitionInventoryBuilder::default(),
+                            });
+                        }
+                        super::update_groups::PolicyTransitionGroupStart::Created(snapshot) => {
+                            pending.created_destination = Some(destination);
+                            prefixes = Some(snapshot);
+                            pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
+                                source,
+                                destination,
+                                prefixes,
+                                cursor,
+                                memo,
+                            });
+                        }
+                    }
+                    return CleanPolicyTransitionAdvance::Continue(pending);
+                }
+
+                let snapshot = prefixes.as_ref().expect("initialized above");
+                let end = (cursor + super::POLICY_TRANSITION_ROUTE_SLICE).min(snapshot.len());
+                if cursor < end {
+                    self.stage_policy_transition_group_chunk(
+                        destination,
+                        &snapshot[cursor..end],
+                        &mut memo,
+                    );
+                    cursor = end;
+                }
+                if cursor < snapshot.len() {
+                    pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
+                        source,
+                        destination,
+                        prefixes,
+                        cursor,
+                        memo,
+                    });
+                } else {
+                    pending.destination_staged = true;
+                    pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
+                        source,
+                        destination,
+                        keys: None,
+                        cursor: 0,
+                        inventory:
+                            super::update_groups::CleanPolicyTransitionInventoryBuilder::default(),
+                    });
+                }
+                CleanPolicyTransitionAdvance::Continue(pending)
+            }
+            CleanPolicyTransitionPhase::BuildInventory {
+                source,
+                destination,
+                mut keys,
+                mut cursor,
+                mut inventory,
+            } => {
+                if keys.is_none() {
+                    let Some(snapshot) =
+                        self.begin_clean_policy_transition_inventory(source, destination)
+                    else {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    };
+                    keys = Some(snapshot);
+                    pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
+                        source,
+                        destination,
+                        keys,
+                        cursor,
+                        inventory,
+                    });
+                    return CleanPolicyTransitionAdvance::Continue(pending);
+                }
+                let snapshot = keys.as_ref().expect("initialized above");
+                let end = (cursor + super::POLICY_TRANSITION_ROUTE_SLICE).min(snapshot.len());
+                if self
+                    .extend_clean_policy_transition_inventory(
+                        source,
+                        destination,
+                        &snapshot[cursor..end],
+                        &mut inventory,
+                    )
+                    .is_none()
+                {
+                    return CleanPolicyTransitionAdvance::Fallback(pending);
+                }
+                cursor = end;
+                if cursor < snapshot.len() {
+                    pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
+                        source,
+                        destination,
+                        keys,
+                        cursor,
+                        inventory,
+                    });
+                } else {
+                    pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare {
+                        source,
+                        destination,
+                        inventory: inventory.finish(),
+                        cursor: 0,
+                        probe_cache: SharedUnicastProbeCache::default(),
+                        prepared: Vec::with_capacity(pending.replacements.len()),
+                        active_probe: None,
+                        full_probe_count: 0,
+                    });
+                }
+                CleanPolicyTransitionAdvance::Continue(pending)
+            }
+            CleanPolicyTransitionPhase::ProbeAndPrepare {
+                source,
+                destination,
+                inventory,
+                mut cursor,
+                mut probe_cache,
+                mut prepared,
+                mut active_probe,
+                mut full_probe_count,
+            } => {
+                if let Some(mut probe) = active_probe.take() {
+                    let end = (probe.cursor + super::POLICY_TRANSITION_ROUTE_SLICE)
+                        .min(inventory.announce.len());
+                    let candidates = inventory.announce[probe.cursor..end]
+                        .iter()
+                        .zip(inventory.next_hop_override[probe.cursor..end].iter())
+                        .map(|(route, next_hop_override)| {
+                            crate::update::ExactExportCandidate::Unicast {
+                                route,
+                                next_hop_override: next_hop_override.as_ref(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let (results, cardinality_correct) = probe_exact_export_announcements(
+                        probe.peer,
+                        probe.snapshot.as_ref(),
+                        &candidates,
+                    );
                     if !cardinality_correct || results.iter().any(Result::is_err) {
-                        return None;
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
                     }
                     full_probe_count = full_probe_count.saturating_add(results.len());
-                    let encoded_lengths = results
-                        .iter()
-                        .filter_map(|result| result.as_ref().ok().map(|result| result.encoded_len))
-                        .collect();
-                    probe_cache.store(
-                        destination,
-                        Arc::clone(&inventory.announce),
-                        Arc::clone(&inventory.next_hop_override),
-                        Arc::clone(&snapshot),
-                        encoded_lengths,
+                    probe.encoded_lengths.extend(
+                        results
+                            .into_iter()
+                            .filter_map(|result| result.ok().map(|accepted| accepted.encoded_len)),
                     );
-                    results
-                };
-                if results.iter().any(Result::is_err) {
-                    return None;
+                    probe.cursor = end;
+                    if probe.cursor < inventory.announce.len() {
+                        active_probe = Some(probe);
+                    } else {
+                        probe_cache.store(
+                            destination,
+                            Arc::clone(&inventory.announce),
+                            Arc::clone(&inventory.next_hop_override),
+                            Arc::clone(&probe.snapshot),
+                            probe.encoded_lengths,
+                        );
+                        prepared.push(PreparedCleanPolicyTransitionPeer {
+                            peer: probe.peer,
+                            session_id: probe.session_id,
+                            export_policy: probe.export_policy,
+                            snapshot: Some(probe.snapshot),
+                            sender: probe.sender,
+                            permit: probe.permit,
+                        });
+                        cursor += 1;
+                    }
+                } else if cursor < pending.replacements.len() {
+                    let replacement = &pending.replacements[cursor];
+                    let peer = replacement.peer;
+                    let Some(session_id) = self.outbound_session_ids.get(&peer).copied() else {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    };
+                    let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    };
+                    let permit = if inventory.announce.is_empty() {
+                        None
+                    } else {
+                        let Ok(permit) = sender.clone().try_reserve_owned() else {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        };
+                        Some(permit)
+                    };
+                    let export_policy = replacement.export_policy.clone();
+                    if inventory.announce.is_empty() {
+                        prepared.push(PreparedCleanPolicyTransitionPeer {
+                            peer,
+                            session_id,
+                            export_policy,
+                            snapshot: None,
+                            sender,
+                            permit,
+                        });
+                        cursor += 1;
+                    } else {
+                        let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        };
+                        let snapshot = encoder.snapshot();
+                        if snapshot.owner_id() != encoder.owner_id() {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        }
+                        if let Some(maximum) = probe_cache.reuse_grouped_exact_export_maximum(
+                            destination,
+                            &inventory.announce,
+                            &inventory.next_hop_override,
+                            snapshot.as_ref(),
+                        ) {
+                            if maximum.is_err() {
+                                return CleanPolicyTransitionAdvance::Fallback(pending);
+                            }
+                            prepared.push(PreparedCleanPolicyTransitionPeer {
+                                peer,
+                                session_id,
+                                export_policy,
+                                snapshot: Some(snapshot),
+                                sender,
+                                permit,
+                            });
+                            cursor += 1;
+                        } else {
+                            active_probe = Some(CleanPolicyTransitionProbe {
+                                peer,
+                                session_id,
+                                export_policy,
+                                snapshot,
+                                sender,
+                                permit,
+                                cursor: 0,
+                                encoded_lengths: Vec::with_capacity(inventory.announce.len()),
+                            });
+                        }
+                    }
                 }
-                Some(snapshot)
-            };
-            prepared.push(PreparedCleanPolicyTransitionPeer {
-                peer,
-                session_id,
-                // Install the first member through a handle onto the exact
-                // chain instance that staged the destination group. Its
-                // operator-visible term-hit counters then keep tracking group
-                // evaluations even when the destination group pre-existed.
-                // Later members retain the established fresh-clone semantics.
-                export_policy: if index == 0 {
-                    destination_export_policy.map(rustbgpd_policy::PolicyChain::share)
-                } else {
-                    replacement.export_policy.clone()
-                },
-                snapshot,
-                permit,
-            });
-        }
 
-        // Revalidate owner/generation and active-session identity after the
-        // potentially expensive shared preflight, still before any mutation.
-        prepared
-            .iter()
-            .all(|member| {
-                self.outbound_session_ids.get(&member.peer).copied() == Some(member.session_id)
-                    && member.snapshot.as_ref().is_none_or(|snapshot| {
-                        self.peer_export_encoders
+                if cursor == pending.replacements.len() && active_probe.is_none() {
+                    pending.phase = Some(CleanPolicyTransitionPhase::Finalize {
+                        source,
+                        destination,
+                        inventory,
+                        prepared,
+                        full_probe_count,
+                    });
+                } else {
+                    pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare {
+                        source,
+                        destination,
+                        inventory,
+                        cursor,
+                        probe_cache,
+                        prepared,
+                        active_probe,
+                        full_probe_count,
+                    });
+                }
+                CleanPolicyTransitionAdvance::Continue(pending)
+            }
+            CleanPolicyTransitionPhase::Finalize {
+                source,
+                destination,
+                inventory,
+                prepared,
+                full_probe_count,
+            } => {
+                let all_current = prepared.iter().all(|member| {
+                    self.outbound_session_ids.get(&member.peer).copied() == Some(member.session_id)
+                        && self.outbound_peers.get(&member.peer).is_some_and(|sender| {
+                            sender.same_channel(&member.sender) && !sender.is_closed()
+                        })
+                        && self
+                            .live_sessions
                             .get(&member.peer)
-                            .is_some_and(|encoder| {
-                                let current = encoder.snapshot();
-                                current.owner_id() == snapshot.owner_id()
-                                    && current.generation() == snapshot.generation()
-                            })
-                    })
-            })
-            .then_some((prepared, full_probe_count))
+                            .and_then(|sessions| sessions.last())
+                            .is_some_and(|session| session.session_id == member.session_id)
+                        && self.clean_policy_transition_peer_ready(member.peer)
+                        && self.clean_policy_transition_destination(
+                            member.peer,
+                            member.export_policy.as_ref(),
+                        ) == Some((source, destination))
+                        && member.snapshot.as_ref().is_none_or(|snapshot| {
+                            self.peer_export_encoders
+                                .get(&member.peer)
+                                .is_some_and(|encoder| {
+                                    let current = encoder.snapshot();
+                                    current.owner_id() == snapshot.owner_id()
+                                        && current.generation() == snapshot.generation()
+                                })
+                        })
+                        && (inventory.announce.is_empty() == member.permit.is_none())
+                });
+                if !all_current {
+                    return CleanPolicyTransitionAdvance::Fallback(pending);
+                }
+
+                let materialized_routes = inventory.announce.len();
+                for member in prepared {
+                    self.commit_clean_policy_transition_member(member.peer, source, destination);
+                    self.clear_policy_filtered_routes_for_peer(member.peer);
+                    self.apply_clean_policy_transition_counters(member.peer, &inventory);
+                    if let Some(permit) = member.permit {
+                        permit.send(OutboundRouteUpdate {
+                            exact_export_snapshot: member.snapshot,
+                            announce_source_exclusion: Some(member.peer),
+                            announce: Arc::clone(&inventory.announce),
+                            next_hop_override: Arc::clone(&inventory.next_hop_override),
+                            ..OutboundRouteUpdate::default()
+                        });
+                    }
+                    let advertised = self.grouped_advertised_count(member.peer).unwrap_or(0);
+                    self.metrics.set_adj_rib_out_prefixes(
+                        &member.peer.to_string(),
+                        "all",
+                        gauge_val(advertised),
+                    );
+                }
+                self.finish_clean_policy_transition_commit();
+                debug!(
+                    source_group = source,
+                    destination_group = destination,
+                    members = pending.replacements.len(),
+                    materialized_routes,
+                    full_probe_count,
+                    "applied shared clean export-policy transition"
+                );
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.policy_transition_stats.plan_builds =
+                        self.policy_transition_stats.plan_builds.saturating_add(1);
+                    self.policy_transition_stats.full_exact_probes = self
+                        .policy_transition_stats
+                        .full_exact_probes
+                        .saturating_add(full_probe_count);
+                    self.policy_transition_stats.route_shell_materializations = self
+                        .policy_transition_stats
+                        .route_shell_materializations
+                        .saturating_add(materialized_routes);
+                }
+                if let Some(reply) = pending.take_reply() {
+                    let _ = reply.send(Ok(()));
+                }
+                CleanPolicyTransitionAdvance::Committed(pending)
+            }
+        }
     }
 
-    /// Attempt the strict clean grouped-to-grouped unicast transition.
-    ///
-    /// The destination table and immutable diff are built once. Every writer
-    /// slot, session identity, immutable exact snapshot, probe result, and
-    /// source-exclusion assumption is validated before the first membership
-    /// change. Returning `false` is therefore a wholesale, pre-emission
-    /// fallback to the proven per-peer regroup path.
+    /// Synchronous driver used only by the benchmark seam. Production owns
+    /// the same state in the actor loop and yields after every advance call.
+    #[cfg(feature = "bench-internals")]
     pub(in crate::manager) fn try_clean_group_policy_transition(
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
     ) -> bool {
-        #[cfg(any(test, feature = "bench-internals"))]
-        let actor_slice_started = std::time::Instant::now();
-        if replacements.len() < 2 {
-            return false;
-        }
-        let mut seen = HashSet::with_capacity(replacements.len());
-        let mut transition = None;
-        for replacement in replacements {
-            if !seen.insert(replacement.peer)
-                || !self.clean_policy_transition_peer_ready(replacement.peer)
-            {
-                return false;
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let mut pending = PendingCleanPolicyTransition::new(replacements.to_vec(), Some(reply));
+        loop {
+            let kind = pending.poll_kind();
+            let started = std::time::Instant::now();
+            match self.advance_clean_policy_transition(pending) {
+                CleanPolicyTransitionAdvance::Continue(next) => {
+                    self.record_policy_transition_poll(kind, started.elapsed());
+                    pending = next;
+                }
+                CleanPolicyTransitionAdvance::Committed(done) => {
+                    self.record_policy_transition_poll(kind, started.elapsed());
+                    drop(done);
+                    return true;
+                }
+                CleanPolicyTransitionAdvance::Fallback(failed) => {
+                    self.record_policy_transition_poll(kind, started.elapsed());
+                    failed.cleanup_incomplete_destination(self);
+                    return false;
+                }
             }
-            let Some(pair) = self.clean_policy_transition_destination(
-                replacement.peer,
-                replacement.export_policy.as_ref(),
-            ) else {
-                return false;
-            };
-            if transition.is_some_and(|expected| expected != pair) {
-                return false;
-            }
-            transition = Some(pair);
         }
-        let Some((source, destination)) = transition else {
-            return false;
-        };
-
-        // Keep the staged destination on a failed fast-path preflight: the
-        // authoritative per-peer fallback immediately consumes the same
-        // group. Rebuilding it would double policy evaluations and detach the
-        // fallback's counters from the chain instance staged here.
-        self.ensure_policy_transition_group(
-            destination,
-            replacements[0].peer,
-            replacements[0].export_policy.as_ref(),
-        );
-        let Some(inventory) = self.clean_policy_transition_inventory(source, destination) else {
-            return false;
-        };
-
-        let Some((prepared, full_probe_count)) =
-            self.prepare_clean_policy_transition_members(destination, replacements, &inventory)
-        else {
-            return false;
-        };
-
-        let materialized_routes = inventory.announce.len();
-        for member in prepared {
-            self.commit_clean_policy_transition_member(
-                member.peer,
-                source,
-                destination,
-                member.export_policy,
-            );
-            self.clear_policy_filtered_routes_for_peer(member.peer);
-            self.apply_clean_policy_transition_counters(member.peer, &inventory);
-            if let Some(permit) = member.permit {
-                permit.send(OutboundRouteUpdate {
-                    exact_export_snapshot: member.snapshot,
-                    announce_source_exclusion: Some(member.peer),
-                    announce: Arc::clone(&inventory.announce),
-                    next_hop_override: Arc::clone(&inventory.next_hop_override),
-                    ..OutboundRouteUpdate::default()
-                });
-            }
-            let advertised = self.grouped_advertised_count(member.peer).unwrap_or(0);
-            self.metrics.set_adj_rib_out_prefixes(
-                &member.peer.to_string(),
-                "all",
-                gauge_val(advertised),
-            );
-        }
-        debug!(
-            source_group = source,
-            destination_group = destination,
-            members = replacements.len(),
-            materialized_routes,
-            full_probe_count,
-            "applied shared clean export-policy transition"
-        );
-        #[cfg(any(test, feature = "bench-internals"))]
-        {
-            self.policy_transition_stats.plan_builds =
-                self.policy_transition_stats.plan_builds.saturating_add(1);
-            self.policy_transition_stats.full_exact_probes = self
-                .policy_transition_stats
-                .full_exact_probes
-                .saturating_add(full_probe_count);
-            self.policy_transition_stats.route_shell_materializations = self
-                .policy_transition_stats
-                .route_shell_materializations
-                .saturating_add(materialized_routes);
-            self.policy_transition_stats.max_actor_slice = self
-                .policy_transition_stats
-                .max_actor_slice
-                .max(actor_slice_started.elapsed());
-        }
-        true
     }
 
     #[expect(
@@ -1798,17 +2187,12 @@ impl RibManager {
             )));
             return;
         }
-        if self.try_clean_group_policy_transition(&replacements) {
-            let _ = reply.send(Ok(()));
-            return;
-        }
-        let result = replacements.into_iter().try_for_each(|replacement| {
-            self.replace_peer_export_policy_synchronously(
-                replacement.peer,
-                replacement.export_policy,
-            )
-        });
-        let _ = reply.send(result);
+        assert!(
+            self.pending_clean_policy_transition.is_none(),
+            "normal RIB mutations must remain fenced behind a pending policy transition"
+        );
+        self.pending_clean_policy_transition =
+            Some(PendingCleanPolicyTransition::new(replacements, Some(reply)));
     }
 
     /// Force re-emission of all currently-advertised routes to a peer

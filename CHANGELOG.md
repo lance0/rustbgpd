@@ -283,10 +283,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Changed-policy update groups share transition work without hiding live
   export-policy counters.** Eligible grouped-to-grouped unicast reloads build
   and exact-probe one destination inventory per wire cohort, then reuse its
-  immutable payload across members. The first installed member now shares the
-  exact policy-chain instance used to stage that inventory, so
-  `rbgp policy stats` exposes the staged evaluations and continues to advance
-  as later routes arrive.
+  immutable payload across members. Every grouped membership path—optimized
+  commit, authoritative fallback/recompute, and rollback—now installs the
+  exact destination-group policy-chain counter instance for every member, so
+  `rbgp policy stats` exposes the same staged evaluations for the whole group
+  and continues to advance as later routes arrive.
+
+- **Large uniform export-policy transitions stay observable while they
+  converge.** Clean grouped-to-grouped unicast cohorts reuse one immutable
+  transition inventory and exact-probe plan. Their post-snapshot staging,
+  inventory, and probe bodies process at most 1,024 route identities per poll;
+  the preceding Loc-RIB prefix snapshot and destination-key inventory snapshot
+  remain two explicit, measured O(table) actor polls with no extrapolated hard
+  bound. Live readiness uses dedicated read-only PeerManager and RIB query
+  lanes. Ordinary mutations remain ordered behind the transaction, while
+  membership and reserved writer sends still commit as one synchronous
+  section. A successfully enqueued cohort RIB reply remains transaction-owned
+  past the ordinary five-second per-peer timeout, preventing a forward/rollback
+  race while readiness continues to be served. Pinned 65,536-route/64-peer and
+  4,096-route/700-peer receipts record 4.927 ms as the largest production
+  actor poll and 2.001 ms for the 700-member atomic finalization, both below
+  the 50 ms engineering budget. Paused-clock regressions complete in-flight
+  readiness probes with zero 200 ms timeouts, including while one session
+  policy command is independently stalled.
 
 - **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
   Ordinary grouped members whose exact probes all succeed no longer rebuild

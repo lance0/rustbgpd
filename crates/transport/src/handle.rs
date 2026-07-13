@@ -1468,7 +1468,22 @@ impl PeerHandle {
         policy: Option<PolicyChain>,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        let commands = self.commands.clone();
+        Self::update_export_policy_with(self.commands.clone(), policy, deadline).await
+    }
+
+    /// Owned-sender variant of [`Self::update_export_policy_timeout`]. This
+    /// lets an actor select the bounded session step against its own dedicated
+    /// read-only query lane without borrowing the managed peer entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, replies with one, or
+    /// does not acknowledge inside `deadline`.
+    pub async fn update_export_policy_with(
+        commands: mpsc::Sender<PeerCommand>,
+        policy: Option<PolicyChain>,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands

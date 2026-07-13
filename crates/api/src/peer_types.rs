@@ -1283,6 +1283,18 @@ pub enum PeerManagerCommand {
     },
 }
 
+/// Read-only peer-manager queries admitted between bounded policy-transaction
+/// steps. This separate lane is intentionally narrow: mutation commands remain
+/// ordered on [`PeerManagerCommand`] and cannot observe or alter a partially
+/// applied transaction.
+pub enum PeerManagerReadinessQuery {
+    /// Return a live snapshot of all configured peers.
+    ListPeers {
+        /// Reply channel returning all peer snapshots.
+        reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+}
+
 /// Information about a configured dynamic neighbor range.
 #[derive(Debug, Clone)]
 pub struct DynamicNeighborInfo {

@@ -89,7 +89,26 @@ fn wait_for_cli_json(grpc_addr: &str, daemon: &mut Daemon) -> Output {
     while Instant::now() < deadline {
         let output = rbgp(grpc_addr, &["--json", "evpn", "instances"]);
         if output.status.success() {
-            return output;
+            // The gRPC listener can become available before the first
+            // asynchronous dataplane report reaches the watch-backed EVPN
+            // status snapshot. Only that documented cold-start `unknown`
+            // state is retryable; malformed output, missing rows, and any
+            // other terminal state return immediately to the assertions
+            // below so real contract regressions are not hidden.
+            let cold_start_unknown = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .and_then(|value| {
+                    value.as_array().and_then(|rows| {
+                        rows.iter().find(|row| row["vni"] == 200).map(|row| {
+                            row["readiness"] == "unknown"
+                                && optional_json_string(row, "not_ready_reason").is_empty()
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            if !cold_start_unknown {
+                return output;
+            }
         }
         last = Some(output);
         daemon.assert_still_running();

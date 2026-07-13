@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::peer_types::{PeerInfo, PeerManagerCommand};
+use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerReadinessQuery};
 use rustbgpd_rib::RibUpdate;
 
 /// Total deadline for the core actor readiness probe.
@@ -82,6 +82,7 @@ pub struct CoreHealthSnapshot {
 #[derive(Clone)]
 pub struct CoreReadinessProbe {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    peer_mgr_readiness_tx: Option<mpsc::Sender<PeerManagerReadinessQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     gate: Option<DaemonGate>,
 }
@@ -95,9 +96,23 @@ impl CoreReadinessProbe {
     ) -> Self {
         Self {
             peer_mgr_tx,
+            peer_mgr_readiness_tx: None,
             rib_tx,
             gate: None,
         }
+    }
+
+    /// Route the peer-manager half of the probe through its dedicated
+    /// read-only lane. Production callers install this sender so readiness can
+    /// be serviced between bounded policy-transaction steps; tests and small
+    /// embedders may continue using the ordinary command lane.
+    #[must_use]
+    pub fn with_peer_manager_readiness(
+        mut self,
+        peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    ) -> Self {
+        self.peer_mgr_readiness_tx = Some(peer_mgr_readiness_tx);
+        self
     }
 
     /// Attach the process-wide [`DaemonGate`]: a recorded fault (bind
@@ -149,10 +164,17 @@ impl CoreReadinessProbe {
     ) -> Result<Vec<PeerInfo>, CoreReadinessError> {
         timeout_until(deadline, CoreReadinessError::PeerManagerTimedOut, async {
             let (reply_tx, reply_rx) = oneshot::channel();
-            self.peer_mgr_tx
-                .send(PeerManagerCommand::ListPeers { reply: reply_tx })
-                .await
-                .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
+            if let Some(readiness_tx) = &self.peer_mgr_readiness_tx {
+                readiness_tx
+                    .send(PeerManagerReadinessQuery::ListPeers { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
+            } else {
+                self.peer_mgr_tx
+                    .send(PeerManagerCommand::ListPeers { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
+            }
             reply_rx
                 .await
                 .map_err(|_| CoreReadinessError::PeerManagerDroppedReply)
@@ -332,6 +354,28 @@ mod tests {
 
         assert!(snapshot.peers.is_empty());
         assert_eq!(snapshot.total_routes, 17);
+    }
+
+    #[tokio::test]
+    async fn snapshot_uses_dedicated_peer_manager_readiness_lane_when_installed() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            let PeerManagerReadinessQuery::ListPeers { reply } =
+                readiness_rx.recv().await.expect("readiness query");
+            reply.send(Vec::new()).unwrap();
+            reply_to_rib(&mut rib_rx, 9).await;
+        });
+
+        assert_eq!(result.unwrap().total_routes, 9);
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "ordinary peer-manager command lane must remain untouched"
+        );
     }
 
     #[tokio::test]
