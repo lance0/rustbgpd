@@ -484,11 +484,10 @@ fn gr_restart_marker_remaining_time(
     expires_at: SystemTime,
     now: SystemTime,
     max_restart_time_secs: Option<u64>,
-) -> Result<Duration, std::time::SystemTimeError> {
-    let remaining = expires_at.duration_since(now)?;
-    Ok(max_restart_time_secs
-        .map(Duration::from_secs)
-        .map_or(remaining, |maximum| remaining.min(maximum)))
+) -> Option<Duration> {
+    let maximum = max_restart_time_secs.filter(|maximum| *maximum > 0)?;
+    let remaining = expires_at.duration_since(now).ok()?;
+    Some(remaining.min(Duration::from_secs(maximum)))
 }
 
 fn marker_expires_at(marker: &GrRestartMarker) -> Result<SystemTime, String> {
@@ -1404,7 +1403,7 @@ async fn run<T>(
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
         Ok(Some(expires_at)) => {
             let max_restart_time_secs = max_gr_restart_time_secs(&config);
-            if let Ok(remaining) = gr_restart_marker_remaining_time(
+            if let Some(remaining) = gr_restart_marker_remaining_time(
                 expires_at,
                 SystemTime::now(),
                 max_restart_time_secs,
@@ -1419,13 +1418,13 @@ async fn run<T>(
             } else {
                 info!(
                     marker = %gr_restart_marker_path.display(),
-                    "ignoring expired GR restart marker"
+                    "ignoring expired or unusable GR restart marker"
                 );
                 if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
                     warn!(
                         marker = %gr_restart_marker_path.display(),
                         error = %e,
-                        "failed to remove expired GR restart marker"
+                        "failed to remove expired or unusable GR restart marker"
                     );
                 }
                 None
@@ -3651,8 +3650,45 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 now + Duration::from_hours(1),
                 Some(120),
             )
-            .is_err()
+            .is_none()
         );
+    }
+
+    #[test]
+    fn gr_restart_marker_remaining_time_rejects_missing_and_zero_maximum() {
+        let now = UNIX_EPOCH + Duration::from_hours(2);
+        let expires_at = now + Duration::from_mins(2);
+
+        assert_eq!(
+            gr_restart_marker_remaining_time(expires_at, now, None),
+            None
+        );
+        assert_eq!(
+            gr_restart_marker_remaining_time(expires_at, now, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn gr_restart_marker_remaining_time_rejects_or_clamps_valid_far_future_marker() {
+        let path = unique_temp_path("gr-restart-far-future");
+        let far_future_secs = i64::MAX.unsigned_abs();
+        std::fs::write(
+            &path,
+            format!("version = 1\nexpires_at_unix = {far_future_secs}\n"),
+        )
+        .unwrap();
+        let expires_at = read_gr_restart_marker(&path).unwrap().unwrap();
+
+        assert_eq!(
+            gr_restart_marker_remaining_time(expires_at, UNIX_EPOCH, None),
+            None
+        );
+        assert_eq!(
+            gr_restart_marker_remaining_time(expires_at, UNIX_EPOCH, Some(120)).unwrap(),
+            Duration::from_mins(2)
+        );
+        remove_gr_restart_marker(&path).unwrap();
     }
 
     #[test]

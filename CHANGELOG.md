@@ -124,7 +124,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Marker-backed startup now clamps the persisted marker's remaining lifetime to
   the maximum effective `gr_restart_time`, so a wall-clock correction cannot
   extend restarting-speaker signaling or route-selection deferral beyond the
-  configured window. Expired markers still produce an immediate cold start.
+  configured window. Expired markers, or markers without a positive effective
+  restart window, produce an immediate cold start.
 
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
