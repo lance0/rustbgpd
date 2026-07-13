@@ -225,7 +225,10 @@ fn prepare_tcp_ao_add_only_plan(
         return Ok(TcpAoReloadPlan::Unchanged);
     }
 
-    let generation = if listener_status.phase == TcpAoRotationPhase::AddOnlyFailed {
+    let generation = if matches!(
+        listener_status.phase,
+        TcpAoRotationPhase::AddOnly | TcpAoRotationPhase::AddOnlyFailed
+    ) {
         listener_status.desired
     } else {
         listener_status
@@ -893,22 +896,35 @@ pub(crate) async fn reload_config_with_tcp_ao(
     let mut tcp_ao_rotation_applied = false;
     if let TcpAoReloadPlan::AddOnly(plan) = &tcp_ao_rotation_plan {
         let listener = tcp_ao_listener.expect("add-only plan requires a listener handle");
+        let desired_listener =
+            TcpAoListenerGeneration::new(plan.generation, plan.listener_keys.clone());
+        if let Err(error) = listener.preflight_add_only(desired_listener.clone()).await {
+            mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
+            error!(error = %error, "TCP-AO add-only generation rejected during complete listener kernel preflight");
+            return None;
+        }
         if let Err(error) = send_tcp_ao_preflight(peer_mgr_tx, plan).await {
             error!(error = %error, "TCP-AO add-only generation rejected during global session preflight");
             return None;
         }
-        let desired_listener =
-            TcpAoListenerGeneration::new(plan.generation, plan.listener_keys.clone());
         if let Err(error) = listener.apply_add_only(desired_listener).await {
             mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
             error!(error = %error, "TCP-AO add-only generation failed on listener; old usable MKTs remain installed and the generation is retryable");
             return None;
         }
         if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan).await {
-            listener
+            if let Err(marker_error) = listener
                 .mark_dependent_failure(plan.generation, error.clone())
-                .await;
+                .await
+            {
+                warn!(error = %marker_error, "TCP-AO listener dependent-failure marker was not acknowledged; staged generation remains globally uncommitted");
+            }
             error!(error = %error, "TCP-AO add-only generation failed on an established session; listener accepts remain generation-fenced until retry");
+            return None;
+        }
+        if let Err(error) = listener.acknowledge_global_commit(plan.generation).await {
+            mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
+            error!(error = %error, "TCP-AO add-only generation reached sessions but listener global commit acknowledgement failed; retrying the same immutable generation is required");
             return None;
         }
         tcp_ao_rotation_applied = true;
@@ -4779,7 +4795,7 @@ tcp_ao = [
         let failed_generation = TcpAoRotationGeneration::new(2).unwrap();
         let status = TcpAoRotationStatus {
             desired: failed_generation,
-            applied: failed_generation,
+            applied: TcpAoRotationGeneration::STARTUP,
             phase: TcpAoRotationPhase::AddOnlyFailed,
             last_error: Some("session apply failed".to_string()),
         };
@@ -4787,6 +4803,19 @@ tcp_ao = [
             prepare_tcp_ao_add_only_plan(&current, &desired, &status).unwrap()
         else {
             panic!("failed add-only generation should remain retryable");
+        };
+        assert_eq!(retry.generation, failed_generation);
+
+        let lost_marker_status = TcpAoRotationStatus {
+            desired: failed_generation,
+            applied: TcpAoRotationGeneration::STARTUP,
+            phase: TcpAoRotationPhase::AddOnly,
+            last_error: None,
+        };
+        let TcpAoReloadPlan::AddOnly(retry) =
+            prepare_tcp_ao_add_only_plan(&current, &desired, &lost_marker_status).unwrap()
+        else {
+            panic!("unacknowledged listener generation should remain retryable");
         };
         assert_eq!(retry.generation, failed_generation);
 

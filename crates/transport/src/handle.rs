@@ -54,6 +54,10 @@ pub enum PeerCommandError {
     /// Session-side command rejection that does not have a more specific
     /// transport variant yet.
     CommandFailed(String),
+    /// A TCP-AO live mutation may have changed the connected socket before
+    /// verification failed. The session has already discarded that stream;
+    /// the peer manager must reset every sibling collision candidate too.
+    TcpAoMutationFailed(String),
 }
 
 impl fmt::Display for PeerCommandError {
@@ -69,7 +73,7 @@ impl fmt::Display for PeerCommandError {
             Self::RouteRefreshUnsupported => f.write_str("peer lacks Route Refresh capability"),
             Self::FamilyNotNegotiated { afi, safi } => write!(f, "{afi:?}/{safi:?} not negotiated"),
             Self::SendFailed(error) => write!(f, "send failed: {error}"),
-            Self::CommandFailed(error) => f.write_str(error),
+            Self::CommandFailed(error) | Self::TcpAoMutationFailed(error) => f.write_str(error),
         }
     }
 }
@@ -326,6 +330,12 @@ pub enum PeerCommand {
         desired: crate::TcpAoSessionGeneration,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// Discard this session's connected stream after any sibling may have
+    /// partially mutated the immutable TCP-AO generation.
+    ResetTcpAoAfterFailedMutation {
+        desired_generation: crate::TcpAoRotationGeneration,
+        reply: oneshot::Sender<()>,
+    },
     /// RFC 8326 graceful-shutdown initiator: toggle attaching the
     /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
     /// session. Receiver behavior on the *other* side of the session
@@ -487,6 +497,15 @@ pub struct PeerHandle {
 const COMMAND_BUFFER: usize = 8;
 
 impl PeerHandle {
+    /// Immediately abort the owned session task for a fail-closed transport
+    /// safety boundary. Normal lifecycle code should use bounded shutdown;
+    /// this escape hatch is reserved for cases where the command channel
+    /// itself cannot acknowledge discarding a potentially mutated socket.
+    #[doc(hidden)]
+    pub fn abort_for_transport_safety(&self) {
+        self.task.abort();
+    }
+
     async fn send_simple_command_timeout(
         &self,
         command: PeerCommand,

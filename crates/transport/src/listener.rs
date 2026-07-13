@@ -69,14 +69,17 @@ pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
     tcp_ao_keys: TcpAoListenerKeyIndex,
+    /// Latest generation installed in the listener kernel inventory. This may
+    /// lead the globally committed generation while sessions are applying.
     tcp_ao_generation: TcpAoRotationGeneration,
+    tcp_ao_committed_generation: TcpAoRotationGeneration,
     rotation_rx: mpsc::Receiver<TcpAoListenerCommand>,
     rotation_tx: mpsc::Sender<TcpAoListenerCommand>,
     rotation_status_tx: watch::Sender<TcpAoRotationStatus>,
     /// Exact desired inventory retained across a failed generation. A retry
     /// may reconcile partial kernel additions, but may not redefine what the
     /// generation means.
-    failed_tcp_ao_generation: Option<TcpAoListenerGeneration>,
+    pending_tcp_ao_generation: Option<TcpAoListenerGeneration>,
 }
 
 /// One immutable desired listener inventory for the add-only rotation phase.
@@ -99,6 +102,10 @@ impl TcpAoListenerGeneration {
 }
 
 enum TcpAoListenerCommand {
+    PreflightAddOnly {
+        desired: TcpAoListenerGeneration,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
     ApplyAddOnly {
         desired: TcpAoListenerGeneration,
         reply: oneshot::Sender<std::io::Result<TcpAoRotationStatus>>,
@@ -106,7 +113,11 @@ enum TcpAoListenerCommand {
     MarkDependentFailure {
         generation: TcpAoRotationGeneration,
         error: String,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
+    AcknowledgeGlobalCommit {
+        generation: TcpAoRotationGeneration,
+        reply: oneshot::Sender<std::io::Result<TcpAoRotationStatus>>,
     },
 }
 
@@ -118,6 +129,44 @@ pub struct TcpAoListenerHandle {
 }
 
 impl TcpAoListenerHandle {
+    /// Validate the complete desired listener inventory against kernel state
+    /// without issuing a target-socket `setsockopt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener task is unavailable, the control
+    /// deadline expires, or metadata/kernel reconciliation fails closed.
+    pub async fn preflight_add_only(
+        &self,
+        desired: TcpAoListenerGeneration,
+    ) -> std::io::Result<()> {
+        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+            let (reply, response) = oneshot::channel();
+            self.tx
+                .send(TcpAoListenerCommand::PreflightAddOnly { desired, reply })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "TCP-AO listener rotation task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TCP-AO listener preflight reply dropped",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP-AO listener preflight timed out",
+            )
+        })?
+    }
+
     /// Apply one immutable successor generation. Current/RNext are untouched;
     /// removal, deprecation and owner-boundary changes are rejected.
     ///
@@ -164,26 +213,100 @@ impl TcpAoListenerHandle {
     }
 
     /// Mark a later global phase (currently established-session apply) failed
-    /// after this listener already committed the desired generation. This
-    /// makes a retry reuse the same immutable generation rather than allocate
-    /// a new one.
-    pub async fn mark_dependent_failure(&self, generation: TcpAoRotationGeneration, error: String) {
-        let _ = tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+    /// after this listener installed but did not globally commit the desired
+    /// generation. A retry reuses the same immutable generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener task is unavailable, the control
+    /// deadline expires, or the generation is stale/already committed.
+    pub async fn mark_dependent_failure(
+        &self,
+        generation: TcpAoRotationGeneration,
+        error: String,
+    ) -> std::io::Result<()> {
+        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
             let (reply, response) = oneshot::channel();
-            if self
-                .tx
+            self.tx
                 .send(TcpAoListenerCommand::MarkDependentFailure {
                     generation,
                     error,
                     reply,
                 })
                 .await
-                .is_ok()
-            {
-                let _ = response.await;
-            }
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "TCP-AO listener rotation task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TCP-AO listener dependent-failure reply dropped",
+                )
+            })?
         })
-        .await;
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP-AO listener dependent-failure marker timed out",
+            )
+        })?
+    }
+
+    /// Publish a listener generation as applied only after every established
+    /// session has acknowledged the same immutable global generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener task is unavailable, the control
+    /// deadline expires, or the installed inventory does not exactly match
+    /// the generation being committed.
+    pub async fn acknowledge_global_commit(
+        &self,
+        generation: TcpAoRotationGeneration,
+    ) -> std::io::Result<TcpAoRotationStatus> {
+        let result = tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+            let (reply, response) = oneshot::channel();
+            self.tx
+                .send(TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "TCP-AO listener rotation task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TCP-AO listener commit reply dropped",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP-AO listener commit acknowledgement timed out",
+            )
+        });
+        match result {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(error)) | Err(error) => {
+                let status = self.status();
+                if status.phase == TcpAoRotationPhase::Idle
+                    && status.desired == generation
+                    && status.applied == generation
+                {
+                    Ok(status)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 }
 
@@ -391,10 +514,11 @@ impl BgpListener {
             accept_tx,
             tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
             tcp_ao_generation: TcpAoRotationGeneration::STARTUP,
+            tcp_ao_committed_generation: TcpAoRotationGeneration::STARTUP,
             rotation_rx,
             rotation_tx,
             rotation_status_tx,
-            failed_tcp_ao_generation: None,
+            pending_tcp_ao_generation: None,
         })
     }
 
@@ -430,50 +554,36 @@ impl BgpListener {
                     continue;
                 };
                 match command {
+                    TcpAoListenerCommand::PreflightAddOnly { desired, reply } => {
+                        let result = self.preflight_add_only_generation(&desired);
+                        let _ = reply.send(result);
+                    }
                     TcpAoListenerCommand::ApplyAddOnly { desired, reply } => {
-                        let generation = desired.generation;
                         let result = self.apply_add_only_generation(&desired);
-                        let committed = result.is_ok();
-                        if reply.send(result).is_err() && committed {
-                            // The bounded caller can time out while a kernel
-                            // inventory query is still completing. Preserve a
-                            // retryable same-generation marker even when this
-                            // listener already committed the keys; otherwise
-                            // the next reload could incorrectly allocate the
-                            // following generation while the peer manager is
-                            // still one generation behind.
-                            let mut status = self.rotation_status_tx.borrow().clone();
-                            status.desired = generation;
-                            status.phase = TcpAoRotationPhase::AddOnlyFailed;
-                            status.last_error = Some(
-                                "TCP-AO listener rotation caller timed out before commit acknowledgement"
-                                    .to_string(),
-                            );
-                            self.failed_tcp_ao_generation = Some(TcpAoListenerGeneration {
-                                generation: self.tcp_ao_generation,
-                                keys: self.tcp_ao_keys.keys.clone().into(),
-                            });
-                            self.rotation_status_tx.send_replace(status);
-                        }
+                        let _ = reply.send(result);
                     }
                     TcpAoListenerCommand::MarkDependentFailure { generation, error, reply } => {
-                        if generation == self.tcp_ao_generation {
+                        let result = if generation == self.tcp_ao_generation
+                            && generation != self.tcp_ao_committed_generation
+                        {
                             let mut status = self.rotation_status_tx.borrow().clone();
+                            status.desired = generation;
+                            status.applied = self.tcp_ao_committed_generation;
                             status.phase = TcpAoRotationPhase::AddOnlyFailed;
                             status.last_error = Some(error);
-                            self.failed_tcp_ao_generation = Some(TcpAoListenerGeneration {
-                                generation: self.tcp_ao_generation,
-                                keys: self.tcp_ao_keys.keys.clone().into(),
-                            });
                             self.rotation_status_tx.send_replace(status);
+                            Ok(())
                         } else {
-                            warn!(
-                                failed_generation = generation.as_u64(),
-                                applied_generation = self.tcp_ao_generation.as_u64(),
-                                "ignoring stale TCP-AO dependent-failure marker"
-                            );
-                        }
-                        let _ = reply.send(());
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "TCP-AO dependent-failure generation is not the installed uncommitted generation",
+                            ))
+                        };
+                        let _ = reply.send(result);
+                    }
+                    TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply } => {
+                        let result = self.acknowledge_global_commit_generation(generation);
+                        let _ = reply.send(result);
                     }
                 }
             }
@@ -515,11 +625,11 @@ impl BgpListener {
         if desired.generation == self.tcp_ao_generation
             && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
         {
-            self.failed_tcp_ao_generation = None;
+            retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
             let status = TcpAoRotationStatus {
                 desired: desired.generation,
-                applied: desired.generation,
-                phase: TcpAoRotationPhase::Idle,
+                applied: self.tcp_ao_committed_generation,
+                phase: TcpAoRotationPhase::AddOnly,
                 last_error: None,
             };
             self.rotation_status_tx.send_replace(status.clone());
@@ -528,31 +638,22 @@ impl BgpListener {
 
         let mut status = TcpAoRotationStatus {
             desired: desired.generation,
-            applied: self.tcp_ao_generation,
+            applied: self.tcp_ao_committed_generation,
             phase: TcpAoRotationPhase::AddOnly,
             last_error: None,
         };
         self.rotation_status_tx.send_replace(status.clone());
 
         let apply = (|| {
-            let additions = plan_add_only_listener_generation(
+            let _additions = plan_add_only_listener_generation(
                 &self.tcp_ao_keys.keys,
                 desired.keys.as_ref(),
                 self.tcp_ao_generation,
                 desired.generation,
             )?;
-            retain_failed_listener_generation(&mut self.failed_tcp_ao_generation, desired)?;
-            for (owner, key) in additions {
-                crate::socket_opts::add_tcp_ao_config_idempotent(
-                    &self.listener,
-                    owner.peer,
-                    owner.prefix_len,
-                    None,
-                    key,
-                )
-                .map_err(|error| listener_tcp_ao_error(owner, key, &error))?;
-            }
-            let receipt_owners = desired
+            retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
+            let current_owners = self
+                .tcp_ao_keys
                 .keys
                 .iter()
                 .map(|owner| crate::socket_opts::TcpAoMktOwner {
@@ -561,11 +662,28 @@ impl BgpListener {
                     keyring: &owner.config,
                 })
                 .collect::<Vec<_>>();
-            let receipt = crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
+            let desired_owners = desired
+                .keys
+                .iter()
+                .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                    peer: owner.peer,
+                    prefix_len: owner.prefix_len,
+                    keyring: &owner.config,
+                })
+                .collect::<Vec<_>>();
+            let preflight = crate::socket_opts::preflight_tcp_ao_add_only(
                 &self.listener,
-                &receipt_owners,
+                &current_owners,
+                &desired_owners,
+                None,
             )?;
-            drop(receipt);
+            crate::socket_opts::apply_tcp_ao_add_only(
+                &self.listener,
+                preflight,
+                &desired_owners,
+                None,
+            )
+            .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)?;
             Ok::<(), std::io::Error>(())
         })();
 
@@ -573,9 +691,8 @@ impl BgpListener {
             Ok(()) => {
                 self.tcp_ao_keys = TcpAoListenerKeyIndex::new(desired.keys.to_vec());
                 self.tcp_ao_generation = desired.generation;
-                self.failed_tcp_ao_generation = None;
-                status.applied = desired.generation;
-                status.phase = TcpAoRotationPhase::Idle;
+                status.applied = self.tcp_ao_committed_generation;
+                status.phase = TcpAoRotationPhase::AddOnly;
                 self.rotation_status_tx.send_replace(status.clone());
                 Ok(status)
             }
@@ -586,6 +703,107 @@ impl BgpListener {
                 Err(error)
             }
         }
+    }
+
+    fn preflight_add_only_generation(
+        &self,
+        desired: &TcpAoListenerGeneration,
+    ) -> std::io::Result<()> {
+        let already_installed = desired.generation == self.tcp_ao_generation
+            && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice();
+        if !already_installed {
+            let _ = plan_add_only_listener_generation(
+                &self.tcp_ao_keys.keys,
+                desired.keys.as_ref(),
+                self.tcp_ao_generation,
+                desired.generation,
+            )?;
+        }
+        if self
+            .pending_tcp_ao_generation
+            .as_ref()
+            .is_some_and(|retained| retained != desired)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO failed generation retry changed its immutable listener inventory",
+            ));
+        }
+        let current = self
+            .tcp_ao_keys
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        let desired = desired
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        crate::socket_opts::preflight_tcp_ao_add_only(&self.listener, &current, &desired, None)
+            .map(drop)
+    }
+
+    fn acknowledge_global_commit_generation(
+        &mut self,
+        generation: TcpAoRotationGeneration,
+    ) -> std::io::Result<TcpAoRotationStatus> {
+        if generation == self.tcp_ao_committed_generation {
+            let status = self.rotation_status_tx.borrow().clone();
+            if status.phase == TcpAoRotationPhase::Idle
+                && status.desired == generation
+                && status.applied == generation
+            {
+                return Ok(status);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "stale TCP-AO commit acknowledgement does not match current listener status",
+            ));
+        }
+        if generation != self.tcp_ao_generation {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO global commit does not match installed listener generation",
+            ));
+        }
+        let desired = self.pending_tcp_ao_generation.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO listener has no retained uncommitted generation",
+            )
+        })?;
+        let owners = desired
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        drop(crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
+            &self.listener,
+            &owners,
+        )?);
+        self.tcp_ao_committed_generation = generation;
+        self.pending_tcp_ao_generation = None;
+        let status = TcpAoRotationStatus {
+            desired: generation,
+            applied: generation,
+            phase: TcpAoRotationPhase::Idle,
+            last_error: None,
+        };
+        self.rotation_status_tx.send_replace(status.clone());
+        Ok(status)
     }
 
     fn inspect_tcp_ao_accept(
@@ -650,7 +868,7 @@ fn listener_owner_identity(key: &TcpAoListenerKey) -> (TcpAoListenerOwnerKind, I
     (key.owner, key.peer, key.prefix_len)
 }
 
-fn retain_failed_listener_generation(
+fn retain_pending_listener_generation(
     retained: &mut Option<TcpAoListenerGeneration>,
     desired: &TcpAoListenerGeneration,
 ) -> std::io::Result<()> {
@@ -1081,50 +1299,49 @@ mod tests {
         let generation = TcpAoRotationGeneration::new(2).unwrap();
         let desired = TcpAoListenerGeneration::new(generation, vec![desired_owner]);
         let mut retained = None;
-        retain_failed_listener_generation(&mut retained, &desired).unwrap();
+        retain_pending_listener_generation(&mut retained, &desired).unwrap();
 
         let mut changed = desired.clone();
         Arc::make_mut(&mut changed.keys)[0].config.0[1].key = "different-successor".to_string();
-        assert!(retain_failed_listener_generation(&mut retained, &changed).is_err());
+        assert!(retain_pending_listener_generation(&mut retained, &changed).is_err());
         assert_eq!(retained.as_ref(), Some(&desired));
     }
 
     #[tokio::test]
-    async fn same_generation_retry_clears_dependent_failure() {
+    async fn staged_generation_failure_and_retry_keep_old_applied_generation() {
         let (accept_tx, _accept_rx) = mpsc::channel(1);
-        let listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+        let mut listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
             .await
             .unwrap();
+        let generation = TcpAoRotationGeneration::new(2).unwrap();
+        let desired = TcpAoListenerGeneration::new(generation, Vec::new());
+        listener.tcp_ao_generation = generation;
+        listener.pending_tcp_ao_generation = Some(desired.clone());
+        listener
+            .rotation_status_tx
+            .send_replace(TcpAoRotationStatus {
+                desired: generation,
+                applied: TcpAoRotationGeneration::STARTUP,
+                phase: TcpAoRotationPhase::AddOnly,
+                last_error: None,
+            });
         let handle = listener.tcp_ao_rotation_handle();
         let task = tokio::spawn(listener.run());
 
         handle
-            .mark_dependent_failure(
-                TcpAoRotationGeneration::STARTUP,
-                "session apply failed".to_string(),
-            )
-            .await;
+            .mark_dependent_failure(generation, "session apply failed".to_string())
+            .await
+            .unwrap();
         assert_eq!(handle.status().phase, TcpAoRotationPhase::AddOnlyFailed);
-        handle
-            .mark_dependent_failure(
-                TcpAoRotationGeneration::new(2).unwrap(),
-                "stale later failure".to_string(),
-            )
-            .await;
+        assert_eq!(handle.status().applied, TcpAoRotationGeneration::STARTUP);
         assert_eq!(
             handle.status().last_error.as_deref(),
             Some("session apply failed")
         );
 
-        let status = handle
-            .apply_add_only(TcpAoListenerGeneration::new(
-                TcpAoRotationGeneration::STARTUP,
-                Vec::new(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(status.phase, TcpAoRotationPhase::Idle);
-        assert_eq!(status.desired, TcpAoRotationGeneration::STARTUP);
+        let status = handle.apply_add_only(desired).await.unwrap();
+        assert_eq!(status.phase, TcpAoRotationPhase::AddOnly);
+        assert_eq!(status.desired, generation);
         assert_eq!(status.applied, TcpAoRotationGeneration::STARTUP);
         assert!(status.last_error.is_none());
 
@@ -1132,11 +1349,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_commit_ack_keeps_listener_generation_retryable() {
+    async fn dropped_dependent_failure_reply_keeps_same_generation_retryable() {
         let (accept_tx, _accept_rx) = mpsc::channel(1);
-        let listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+        let mut listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
             .await
             .unwrap();
+        let generation = TcpAoRotationGeneration::new(2).unwrap();
+        let desired = TcpAoListenerGeneration::new(generation, Vec::new());
+        listener.tcp_ao_generation = generation;
+        listener.pending_tcp_ao_generation = Some(desired);
+        listener
+            .rotation_status_tx
+            .send_replace(TcpAoRotationStatus {
+                desired: generation,
+                applied: TcpAoRotationGeneration::STARTUP,
+                phase: TcpAoRotationPhase::AddOnly,
+                last_error: None,
+            });
         let handle = listener.tcp_ao_rotation_handle();
         let mut status = handle.status_rx.clone();
         let task = tokio::spawn(listener.run());
@@ -1144,8 +1373,9 @@ mod tests {
         drop(response);
         handle
             .tx
-            .send(TcpAoListenerCommand::ApplyAddOnly {
-                desired: TcpAoListenerGeneration::new(TcpAoRotationGeneration::STARTUP, Vec::new()),
+            .send(TcpAoListenerCommand::MarkDependentFailure {
+                generation,
+                error: "injected lost marker reply".to_string(),
                 reply,
             })
             .await
@@ -1155,7 +1385,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(status.borrow().phase, TcpAoRotationPhase::AddOnlyFailed);
-        assert_eq!(status.borrow().desired, TcpAoRotationGeneration::STARTUP);
+        assert_eq!(status.borrow().desired, generation);
         assert_eq!(status.borrow().applied, TcpAoRotationGeneration::STARTUP);
 
         task.abort();
@@ -1685,7 +1915,7 @@ mod tests {
                         owner: TcpAoListenerOwnerKind::Dynamic,
                         peer: "127.0.0.0".parse().unwrap(),
                         prefix_len: 24,
-                        config: covering_config,
+                        config: covering_config.clone(),
                     },
                     TcpAoListenerKey {
                         owner: TcpAoListenerOwnerKind::Static,
@@ -1766,6 +1996,67 @@ mod tests {
         assert!(!rendered.contains("kernel-receipt-covering-secret"));
         assert!(!rendered.contains("kernel-receipt-old-secret"));
         assert!(!rendered.contains("kernel-receipt-next-secret"));
+
+        // Exercise the live connected-socket rotation path itself: complete
+        // scratch normalization + INFO/GET_KEYS preflight, ADD_KEY, and final
+        // INFO/GET_KEYS convergence without moving Current/RNext.
+        let mut desired_static = static_config.clone();
+        desired_static.0.push(TcpAoConfig {
+            key: "kernel-receipt-live-successor".to_string(),
+            send_id: 4,
+            recv_id: 4,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        });
+        let current_owners = [
+            crate::socket_opts::TcpAoMktOwner {
+                peer: "127.0.0.0".parse().unwrap(),
+                prefix_len: 24,
+                keyring: &covering_config,
+            },
+            crate::socket_opts::TcpAoMktOwner {
+                peer: "127.0.0.2".parse().unwrap(),
+                prefix_len: 32,
+                keyring: &static_config,
+            },
+        ];
+        let desired_owners = [
+            crate::socket_opts::TcpAoMktOwner {
+                peer: "127.0.0.0".parse().unwrap(),
+                prefix_len: 24,
+                keyring: &covering_config,
+            },
+            crate::socket_opts::TcpAoMktOwner {
+                peer: "127.0.0.2".parse().unwrap(),
+                prefix_len: 32,
+                keyring: &desired_static,
+            },
+        ];
+        let preflight = crate::socket_opts::preflight_tcp_ao_add_only(
+            &accepted.stream,
+            &current_owners,
+            &desired_owners,
+            Some("127.0.0.2".parse().unwrap()),
+        )
+        .unwrap();
+        let rotated = crate::socket_opts::apply_tcp_ao_add_only(
+            &accepted.stream,
+            preflight,
+            &desired_owners,
+            Some("127.0.0.2".parse().unwrap()),
+        )
+        .unwrap()
+        .expect("connected live mutation returns INFO");
+        assert_eq!(rotated.keys.len(), 4);
+        assert_eq!(rotated.current_key, 3);
+        assert_eq!(rotated.rnext_key, 3);
+        assert!(
+            rotated
+                .keys
+                .iter()
+                .any(|key| key.send_id == 4 && key.recv_id == 4)
+        );
 
         let mut mismatched = static_config.clone();
         mismatched.0[1].key = "kernel-receipt-wrong-secret".to_string();

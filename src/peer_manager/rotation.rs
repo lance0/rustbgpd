@@ -119,20 +119,87 @@ fn target_for_peer(
 async fn apply_to_session(
     commands: mpsc::Sender<PeerCommand>,
     desired: TcpAoSessionGeneration,
-) -> Result<(), String> {
+) -> Result<(), SessionApplyFailure> {
     let (reply, response) = oneshot::channel();
     tokio::time::timeout(
         PEER_LIFECYCLE_COMMAND_TIMEOUT,
         commands.send(PeerCommand::ApplyTcpAoAddOnly { desired, reply }),
     )
     .await
-    .map_err(|_| "TCP-AO session command delivery timed out".to_string())?
-    .map_err(|_| "TCP-AO session task exited before generation apply".to_string())?;
-    tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, response)
+    .map_err(|_| SessionApplyFailure::before_mutation("TCP-AO session command delivery timed out"))?
+    .map_err(|_| {
+        SessionApplyFailure::before_mutation("TCP-AO session task exited before generation apply")
+    })?;
+    let response = tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, response)
         .await
-        .map_err(|_| "TCP-AO session generation acknowledgement timed out".to_string())?
-        .map_err(|_| "TCP-AO session generation acknowledgement dropped".to_string())?
-        .map_err(|error| error.to_string())
+        .map_err(|_| {
+            SessionApplyFailure::after_delivery(
+                "TCP-AO session generation acknowledgement timed out",
+            )
+        })?
+        .map_err(|_| {
+            SessionApplyFailure::after_delivery("TCP-AO session generation acknowledgement dropped")
+        })?;
+    response.map_err(|error| SessionApplyFailure {
+        mutation_may_have_started: matches!(
+            &error,
+            rustbgpd_transport::PeerCommandError::TcpAoMutationFailed(_)
+        ),
+        message: error.to_string(),
+    })
+}
+
+struct SessionApplyFailure {
+    message: String,
+    mutation_may_have_started: bool,
+}
+
+impl SessionApplyFailure {
+    fn before_mutation(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            mutation_may_have_started: false,
+        }
+    }
+
+    fn after_delivery(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            // A dropped/timed-out acknowledgement cannot prove where the
+            // synchronous session command stopped. Reset all siblings.
+            mutation_may_have_started: true,
+        }
+    }
+}
+
+async fn reset_sessions_after_failed_mutation(
+    sessions: &[mpsc::Sender<PeerCommand>],
+    generation: TcpAoRotationGeneration,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for commands in sessions {
+        let (reply, response) = oneshot::channel();
+        let command = PeerCommand::ResetTcpAoAfterFailedMutation {
+            desired_generation: generation,
+            reply,
+        };
+        match tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, commands.send(command)).await {
+            Ok(Ok(())) => {
+                match tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, response).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        failures.push("session reset acknowledgement dropped".to_string());
+                    }
+                    Err(_) => failures.push("session reset acknowledgement timed out".to_string()),
+                }
+            }
+            Ok(Err(_)) => {
+                // An exited session cannot reuse its old connected stream.
+            }
+            Err(_) => failures.push("session reset command delivery timed out".to_string()),
+        }
+    }
+    failures
 }
 
 async fn preflight_session(
@@ -339,15 +406,38 @@ impl PeerManager {
             };
         }
 
+        let mut committed = Vec::new();
         for (peer, desired, sessions) in plan {
             let mut error = None;
-            for commands in sessions {
-                if let Err(failure) = apply_to_session(commands, desired.clone()).await {
+            for commands in &sessions {
+                if let Err(failure) = apply_to_session(commands.clone(), desired.clone()).await {
                     error = Some(failure);
                     break;
                 }
             }
-            if let Some(error) = error {
+            if let Some(failure) = error {
+                let mut error = failure.message;
+                if failure.mutation_may_have_started {
+                    let reset_failures =
+                        reset_sessions_after_failed_mutation(&sessions, generation).await;
+                    if !reset_failures.is_empty() {
+                        error = format!(
+                            "{error}; fail-closed sibling reset was incomplete: {}",
+                            reset_failures.join(", ")
+                        );
+                        // A saturated/wedged command channel cannot prove the
+                        // potentially mutated socket was discarded. Abort both
+                        // tasks so dropping their futures closes every primary
+                        // and pending child stream before any later collision
+                        // path can reuse them.
+                        if let Some(managed) = self.peers.get(&peer) {
+                            managed.handle.abort_for_transport_safety();
+                            if let Some(pending) = &managed.pending_inbound {
+                                pending.handle.abort_for_transport_safety();
+                            }
+                        }
+                    }
+                }
                 self.tcp_ao_rotation.phase = TcpAoRotationPhase::AddOnlyFailed;
                 self.tcp_ao_rotation.last_error = Some(format!(
                     "global generation stopped after peer {peer:?} failed: {error}"
@@ -367,6 +457,9 @@ impl PeerManager {
                     "TCP-AO add-only generation failed for {peer:?}: {error}"
                 ));
             }
+            committed.push((peer, desired));
+        }
+        for (peer, desired) in committed {
             let managed = self
                 .peers
                 .get_mut(&peer)
@@ -483,5 +576,55 @@ mod tests {
         );
         assert!(retain_desired_inventory(&mut retained, changed).is_err());
         assert_eq!(retained.as_ref(), Some(&desired));
+    }
+
+    #[tokio::test]
+    async fn mutation_failure_resets_primary_and_pending_session_streams() {
+        let generation = TcpAoRotationGeneration::new(2).unwrap();
+        let desired = TcpAoSessionGeneration {
+            generation,
+            active_keyring: None,
+            accepted_owners: Vec::new().into(),
+        };
+        let (primary_tx, mut primary_rx) = mpsc::channel(4);
+        let (pending_tx, mut pending_rx) = mpsc::channel(4);
+        let (primary_reset_tx, primary_reset_rx) = oneshot::channel();
+        let (pending_reset_tx, pending_reset_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let Some(PeerCommand::ApplyTcpAoAddOnly { reply, .. }) = primary_rx.recv().await else {
+                panic!("primary should receive generation apply");
+            };
+            let _ = reply.send(Err(
+                rustbgpd_transport::PeerCommandError::TcpAoMutationFailed(
+                    "injected post-add inventory failure".to_string(),
+                ),
+            ));
+            let Some(PeerCommand::ResetTcpAoAfterFailedMutation { reply, .. }) =
+                primary_rx.recv().await
+            else {
+                panic!("primary should receive fail-closed reset");
+            };
+            let _ = reply.send(());
+            let _ = primary_reset_tx.send(());
+        });
+        tokio::spawn(async move {
+            let Some(PeerCommand::ResetTcpAoAfterFailedMutation { reply, .. }) =
+                pending_rx.recv().await
+            else {
+                panic!("pending child should receive fail-closed reset");
+            };
+            let _ = reply.send(());
+            let _ = pending_reset_tx.send(());
+        });
+
+        let failure = apply_to_session(primary_tx.clone(), desired)
+            .await
+            .unwrap_err();
+        assert!(failure.mutation_may_have_started);
+        let resets =
+            reset_sessions_after_failed_mutation(&[primary_tx, pending_tx], generation).await;
+        assert!(resets.is_empty());
+        primary_reset_rx.await.unwrap();
+        pending_reset_rx.await.unwrap();
     }
 }

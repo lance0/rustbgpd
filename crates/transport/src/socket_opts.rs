@@ -238,6 +238,63 @@ pub(crate) struct TcpAoMktOwner<'a> {
     pub(crate) keyring: &'a TcpAoKeyring,
 }
 
+/// Opaque proof that a complete add-only inventory was normalized and
+/// reconciled without mutating the target socket. Secret-bearing normalized
+/// cores stay inside this module and are scrubbed on drop.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoAddOnlyPreflight {
+    desired: TcpAoMktReceipt,
+    present: Vec<bool>,
+    selection: Option<TcpAoSelection>,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoAddOnlyPreflight;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TcpAoSelection {
+    has_current: bool,
+    current: u8,
+    has_rnext: bool,
+    rnext: u8,
+}
+
+/// A live add-only apply failure, annotated with whether target-socket
+/// mutation may have begun. Callers must discard a connected stream whenever
+/// `mutation_started` is true: a failed add or verification can leave an MKT
+/// installed even though the generation did not commit.
+pub(crate) struct TcpAoAddOnlyApplyError {
+    error: io::Error,
+    mutation_started: bool,
+}
+
+impl TcpAoAddOnlyApplyError {
+    #[must_use]
+    pub(crate) const fn mutation_started(&self) -> bool {
+        self.mutation_started
+    }
+
+    pub(crate) fn into_inner(self) -> io::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Display for TcpAoAddOnlyApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for TcpAoAddOnlyApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpAoAddOnlyApplyError")
+            .field("error", &self.error)
+            .field("mutation_started", &self.mutation_started)
+            .finish()
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl PartialEq for TcpAoMktCore {
     fn eq(&self, other: &Self) -> bool {
@@ -515,12 +572,6 @@ pub(crate) fn set_tcp_ao_key(socket: &impl AsRawFd, key: &TcpAoKey<'_>) -> io::R
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TcpAoAddOutcome {
-    Added,
-    AlreadyPresent,
-}
-
 #[cfg(target_os = "linux")]
 fn rotation_record_matches_owner(
     raw: &TcpAoGetSockOpt,
@@ -589,47 +640,372 @@ fn normalized_config_core(
     })
 }
 
-/// Install one live-rotation MKT without changing Current/RNext. A retry is
-/// accepted only when the existing kernel-normalized cryptographic identity is
-/// exactly the desired one; an ID collision with different material fails
-/// closed.
 #[cfg(target_os = "linux")]
-pub(crate) fn add_tcp_ao_config_idempotent(
-    socket: &impl AsRawFd,
-    peer: IpAddr,
-    prefix_len: u8,
-    connected_peer: Option<IpAddr>,
-    config: &TcpAoConfig,
-) -> io::Result<TcpAoAddOutcome> {
-    let desired = normalized_config_core(peer, prefix_len, config)?;
-    let before = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
-    if let Some(existing) =
-        matching_rotation_core(&before, peer, prefix_len, connected_peer, config)?
-    {
-        return if existing == desired {
-            Ok(TcpAoAddOutcome::AlreadyPresent)
+fn prefixes_overlap(left: IpAddr, left_len: u8, right: IpAddr, right_len: u8) -> bool {
+    fn mask_v4(address: u32, prefix_len: u8) -> u32 {
+        if prefix_len == 0 {
+            0
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "TCP-AO rotation key identity collides with different kernel material",
-            ))
-        };
+            address & (u32::MAX << (32 - prefix_len))
+        }
+    }
+    fn mask_v6(address: u128, prefix_len: u8) -> u128 {
+        if prefix_len == 0 {
+            0
+        } else {
+            address & (u128::MAX << (128 - prefix_len))
+        }
     }
 
-    let key = tcp_ao_key_from_config(peer, prefix_len, config, TcpAoSocketRole::Listener);
-    set_tcp_ao_key(socket, &key)?;
-    let after = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
-    match matching_rotation_core(&after, peer, prefix_len, connected_peer, config)? {
-        Some(installed) if installed == desired => Ok(TcpAoAddOutcome::Added),
-        Some(_) => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "TCP-AO rotation add produced different kernel material",
-        )),
-        None => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "TCP-AO rotation add was not observable in kernel inventory",
-        )),
+    let shared_len = left_len.min(right_len);
+    match (left, right) {
+        (IpAddr::V4(left), IpAddr::V4(right)) if shared_len <= 32 => {
+            mask_v4(left.into(), shared_len) == mask_v4(right.into(), shared_len)
+        }
+        (IpAddr::V6(left), IpAddr::V6(right)) if shared_len <= 128 => {
+            mask_v6(left.into(), shared_len) == mask_v6(right.into(), shared_len)
+        }
+        _ => false,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn desired_add_only_receipt(
+    owners: &[TcpAoMktOwner<'_>],
+    connected_peer: Option<IpAddr>,
+) -> io::Result<TcpAoMktReceipt> {
+    let expected = owners
+        .iter()
+        .map(|owner| owner.keyring.0.len())
+        .sum::<usize>();
+    if expected > TCP_AO_MAX_INSPECT_KEYS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO desired inventory exceeds inspection capacity",
+        ));
+    }
+
+    let flattened = owners
+        .iter()
+        .flat_map(|owner| {
+            owner
+                .keyring
+                .iter()
+                .map(move |config| (owner.peer, owner.prefix_len, config))
+        })
+        .collect::<Vec<_>>();
+    for (index, (left_peer, left_prefix, left)) in flattened.iter().enumerate() {
+        for (right_peer, right_prefix, right) in flattened.iter().skip(index + 1) {
+            let selectors_overlap = connected_peer.is_some()
+                || prefixes_overlap(*left_peer, *left_prefix, *right_peer, *right_prefix);
+            if selectors_overlap && (left.send_id == right.send_id || left.recv_id == right.recv_id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP-AO desired inventory has a directional KeyID collision on overlapping selectors",
+                ));
+            }
+        }
+    }
+
+    let mut cores = Vec::with_capacity(expected);
+    let mut metadata = Vec::with_capacity(expected);
+    for owner in owners {
+        for config in owner.keyring {
+            cores.push(normalized_config_core(
+                owner.peer,
+                owner.prefix_len,
+                config,
+            )?);
+            metadata.push(TcpAoMktMetadata {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                preferred: config.preferred,
+                deprecated: config.deprecated,
+            });
+        }
+    }
+    Ok(TcpAoMktReceipt { cores, metadata })
+}
+
+#[cfg(target_os = "linux")]
+fn selection(info: &TcpAoInfoSnapshot) -> TcpAoSelection {
+    TcpAoSelection {
+        has_current: info.has_current_key,
+        current: info.current_key,
+        has_rnext: info.has_rnext_key,
+        rnext: info.rnext_key,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn query_rotation_inventory(
+    socket: &impl AsRawFd,
+    connected_peer: Option<IpAddr>,
+) -> io::Result<(Option<TcpAoInfoSnapshot>, Vec<TcpAoGetSockOpt>)> {
+    if connected_peer.is_some() {
+        let (info, keys) = get_tcp_ao_snapshot_with(
+            || get_tcp_ao_info_only(socket),
+            || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
+        )?;
+        Ok((Some(info), keys))
+    } else {
+        Ok((
+            None,
+            get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?,
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_add_only_subset(
+    keys: &[TcpAoGetSockOpt],
+    desired: &TcpAoMktReceipt,
+    connected_peer: Option<IpAddr>,
+) -> io::Result<Vec<bool>> {
+    let mut present = vec![false; desired.cores.len()];
+    for raw in keys {
+        let state = decode_tcp_ao_key_state(raw)?;
+        let core = mkt_core(raw)?;
+        let matches = desired
+            .cores
+            .iter()
+            .zip(&desired.metadata)
+            .enumerate()
+            .filter(|(index, (candidate, metadata))| {
+                !present[*index]
+                    && match connected_peer {
+                        Some(peer) => target_record_matches_receipt_entry(&state, peer, metadata),
+                        None => {
+                            state.peer == metadata.peer && state.prefix_len == metadata.prefix_len
+                        }
+                    }
+                    && core == **candidate
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO target inventory contains a foreign, redefined, duplicate, or ambiguous MKT",
+            ));
+        }
+        present[matches[0]] = true;
+    }
+    Ok(present)
+}
+
+#[cfg(target_os = "linux")]
+fn require_current_subset(
+    current: &[TcpAoMktOwner<'_>],
+    desired: &[TcpAoMktOwner<'_>],
+    present: &[bool],
+) -> io::Result<()> {
+    let desired_entries = desired
+        .iter()
+        .flat_map(|owner| {
+            owner
+                .keyring
+                .iter()
+                .map(move |config| (owner.peer, owner.prefix_len, config))
+        })
+        .collect::<Vec<_>>();
+    for owner in current {
+        for config in owner.keyring {
+            let matches = desired_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, (peer, prefix_len, desired))| {
+                    *peer == owner.peer
+                        && *prefix_len == owner.prefix_len
+                        && desired.send_id == config.send_id
+                        && desired.recv_id == config.recv_id
+                        && desired.algorithm == config.algorithm
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if matches.len() != 1 || !present[matches[0]] {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO target inventory is missing or redefines a current-generation MKT",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalize every desired MKT and reconcile the complete target inventory
+/// before the first live `setsockopt`. Existing target records must be an
+/// exact cryptographic subset of the desired generation, and every current
+/// record must already be present.
+#[cfg(target_os = "linux")]
+pub(crate) fn preflight_tcp_ao_add_only(
+    socket: &impl AsRawFd,
+    current: &[TcpAoMktOwner<'_>],
+    desired: &[TcpAoMktOwner<'_>],
+    connected_peer: Option<IpAddr>,
+) -> io::Result<TcpAoAddOnlyPreflight> {
+    let desired_receipt = desired_add_only_receipt(desired, connected_peer)?;
+    let (info, keys) = query_rotation_inventory(socket, connected_peer)?;
+    let present = reconcile_add_only_subset(&keys, &desired_receipt, connected_peer)?;
+    require_current_subset(current, desired, &present)?;
+    let selection = info.as_ref().map(selection);
+    Ok(TcpAoAddOnlyPreflight {
+        desired: desired_receipt,
+        present,
+        selection,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn apply_error(error: io::Error, mutation_started: bool) -> TcpAoAddOnlyApplyError {
+    TcpAoAddOnlyApplyError {
+        error,
+        mutation_started,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_add_only_sequence<V, A>(
+    present: &mut Vec<bool>,
+    mut verify: V,
+    mut add: A,
+) -> Result<bool, TcpAoAddOnlyApplyError>
+where
+    V: FnMut() -> io::Result<Vec<bool>>,
+    A: FnMut(usize) -> io::Result<()>,
+{
+    let mut mutation_started = false;
+    *present = verify().map_err(|error| apply_error(error, false))?;
+    for index in 0..present.len() {
+        if present[index] {
+            continue;
+        }
+        let before = verify().map_err(|error| apply_error(error, mutation_started))?;
+        if before != *present {
+            return Err(apply_error(
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "TCP-AO target inventory changed between add-only verification steps",
+                ),
+                mutation_started,
+            ));
+        }
+        mutation_started = true;
+        add(index).map_err(|error| apply_error(error, mutation_started))?;
+        let after = verify().map_err(|error| apply_error(error, mutation_started))?;
+        let mut expected = present.clone();
+        expected[index] = true;
+        if after != expected {
+            return Err(apply_error(
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO post-add inventory did not contain exactly the expected desired subset",
+                ),
+                mutation_started,
+            ));
+        }
+        *present = after;
+    }
+    if present.iter().any(|present| !present) {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO add-only inventory did not converge",
+            ),
+            mutation_started,
+        ));
+    }
+    let final_present = verify().map_err(|error| apply_error(error, mutation_started))?;
+    if final_present != *present {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "TCP-AO target inventory changed after add-only convergence",
+            ),
+            mutation_started,
+        ));
+    }
+    Ok(mutation_started)
+}
+
+/// Consume a complete preflight proof, revalidate it immediately before the
+/// first mutation and around every add, and return the final connected-socket
+/// snapshot when applicable.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_tcp_ao_add_only(
+    socket: &impl AsRawFd,
+    mut preflight: TcpAoAddOnlyPreflight,
+    desired: &[TcpAoMktOwner<'_>],
+    connected_peer: Option<IpAddr>,
+) -> Result<Option<TcpAoInfoSnapshot>, TcpAoAddOnlyApplyError> {
+    let configs = desired
+        .iter()
+        .flat_map(|owner| {
+            owner
+                .keyring
+                .iter()
+                .map(move |config| (owner.peer, owner.prefix_len, config))
+        })
+        .collect::<Vec<_>>();
+    if configs.len() != preflight.desired.cores.len() {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO apply inventory differs from its preflight proof",
+            ),
+            false,
+        ));
+    }
+    for (index, (peer, prefix_len, config)) in configs.iter().enumerate() {
+        let metadata = &preflight.desired.metadata[index];
+        let normalized = normalized_config_core(*peer, *prefix_len, config)
+            .map_err(|error| apply_error(error, false))?;
+        if metadata.peer != *peer
+            || metadata.prefix_len != *prefix_len
+            || metadata.preferred != config.preferred
+            || metadata.deprecated != config.deprecated
+            || normalized != preflight.desired.cores[index]
+        {
+            return Err(apply_error(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP-AO apply inventory differs from its normalized preflight proof",
+                ),
+                false,
+            ));
+        }
+    }
+
+    let desired_receipt = &preflight.desired;
+    let expected_selection = preflight.selection;
+    let verify = || -> io::Result<Vec<bool>> {
+        let (info, keys) = query_rotation_inventory(socket, connected_peer)?;
+        if info
+            .as_ref()
+            .map(selection)
+            .zip(expected_selection)
+            .is_some_and(|(actual, expected)| actual != expected)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO add-only generation changed Current/RNext selection",
+            ));
+        }
+        reconcile_add_only_subset(&keys, desired_receipt, connected_peer)
+    };
+    // Exact desired additions made by a prior interrupted retry are safe; any
+    // foreign or redefined record is rejected by `verify`.
+    let mutation_started = run_add_only_sequence(&mut preflight.present, verify, |index| {
+        let (peer, prefix_len, config) = configs[index];
+        let key = tcp_ao_key_from_config(peer, prefix_len, config, TcpAoSocketRole::Listener);
+        set_tcp_ao_key(socket, &key)
+    })?;
+    connected_peer
+        .map(|peer| get_tcp_ao_info_for_receipt(socket, desired_receipt, peer))
+        .transpose()
+        .map_err(|error| apply_error(error, mutation_started))
 }
 
 /// Inspect runtime TCP-AO socket state.
@@ -1361,17 +1737,38 @@ pub(crate) fn set_tcp_ao_rnext<T>(_socket: &T, _recv_id: u8) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn add_tcp_ao_config_idempotent<T>(
+pub(crate) fn preflight_tcp_ao_add_only<T>(
     _socket: &T,
-    _peer: std::net::IpAddr,
-    _prefix_len: u8,
+    current: &[TcpAoMktOwner<'_>],
+    desired: &[TcpAoMktOwner<'_>],
     _connected_peer: Option<std::net::IpAddr>,
-    _config: &crate::config::TcpAoConfig,
-) -> io::Result<TcpAoAddOutcome> {
+) -> io::Result<TcpAoAddOnlyPreflight> {
+    for owner in current.iter().chain(desired) {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO live rotation is only supported on Linux",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_tcp_ao_add_only<T>(
+    _socket: &T,
+    _preflight: TcpAoAddOnlyPreflight,
+    desired: &[TcpAoMktOwner<'_>],
+    _connected_peer: Option<std::net::IpAddr>,
+) -> Result<Option<TcpAoInfoSnapshot>, TcpAoAddOnlyApplyError> {
+    for owner in desired {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(TcpAoAddOnlyApplyError {
+        error: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP-AO live rotation is only supported on Linux",
+        ),
+        mutation_started: false,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -2377,6 +2774,69 @@ mod tests {
         assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha256);
         assert!(!key.set_current);
         assert!(!key.set_rnext);
+    }
+
+    #[test]
+    fn add_only_sequence_marks_nth_add_failure_as_mutating() {
+        let actual = std::cell::RefCell::new(vec![true, false, false]);
+        let adds = std::cell::Cell::new(0_usize);
+        let mut present = vec![true, false, false];
+        let error = run_add_only_sequence(
+            &mut present,
+            || Ok(actual.borrow().clone()),
+            |index| {
+                adds.set(adds.get() + 1);
+                if adds.get() == 2 {
+                    return Err(io::Error::other("injected second add failure"));
+                }
+                actual.borrow_mut()[index] = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.mutation_started());
+        assert_eq!(adds.get(), 2);
+    }
+
+    #[test]
+    fn add_only_sequence_marks_post_inventory_failure_as_mutating() {
+        let actual = std::cell::RefCell::new(vec![true, false]);
+        let mut present = actual.borrow().clone();
+        let error = run_add_only_sequence(
+            &mut present,
+            || Ok(actual.borrow().clone()),
+            |_index| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.mutation_started());
+        assert!(error.to_string().contains("post-add inventory"));
+    }
+
+    #[test]
+    fn add_only_sequence_marks_post_add_selection_failure_as_mutating() {
+        let actual = std::cell::RefCell::new(vec![true, false]);
+        let verifies = std::cell::Cell::new(0_usize);
+        let mut present = actual.borrow().clone();
+        let error = run_add_only_sequence(
+            &mut present,
+            || {
+                verifies.set(verifies.get() + 1);
+                if verifies.get() == 3 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected Current/RNext drift",
+                    ));
+                }
+                Ok(actual.borrow().clone())
+            },
+            |index| {
+                actual.borrow_mut()[index] = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.mutation_started());
+        assert!(error.to_string().contains("Current/RNext"));
     }
 
     #[test]
