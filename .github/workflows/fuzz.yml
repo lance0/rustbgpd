@@ -48,6 +48,21 @@ jobs:
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
             cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=8192
           done
+      - name: Fuzz MRT snapshot reader (2 minutes per target)
+        run: |
+          cd crates/mrt
+          # Keep target discovery fail-closed as new MRT parsers are added.
+          targets=$(cargo +nightly fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          for t in $targets; do
+            mkdir -p "fuzz/corpus/$t"
+            seeds=""
+            [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
+            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65536
+          done
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -56,3 +71,4 @@ jobs:
           path: |
             crates/wire/fuzz/artifacts/
             crates/policy/fuzz/artifacts/
+            crates/mrt/fuzz/artifacts/

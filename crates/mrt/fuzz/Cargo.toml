@@ -1,0 +1,22 @@
+[package]
+name = "rustbgpd-mrt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rustbgpd-mrt]
+path = ".."
+
+[[bin]]
+name = "snapshot_reader_drain"
+path = "fuzz_targets/snapshot_reader_drain.rs"
+test = false
+doc = false
+
+[workspace]
