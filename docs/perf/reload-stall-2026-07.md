@@ -357,7 +357,9 @@ For mechanics only, the underlying manual build-and-run shape remains:
 
 ```text
 # short run dir: the gRPC UDS path must fit SUN_LEN (~108 bytes)
-python3 bench/scale/reloadstall/gen-scenario.py 700 /tmp/rls/full 1800
+/usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin \
+  PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S \
+  "$PWD/bench/scale/reloadstall/gen-scenario.py" 700 /tmp/rls/full 1800
 cd bench/scale/reloadstall && cargo build --release
 # start the release daemon on the generated config, then:
 ./target/release/reloadstall 700 400400 1800 <daemon_pid> \
@@ -366,4 +368,7 @@ cd bench/scale/reloadstall && cargo build --release
 ```
 
 after a load-gated daemon start. A manual run is not acceptance evidence because
-it does not create or validate the complete retained artifact set.
+it does not create or validate the complete retained artifact set. The durable
+runner also invokes every Python build/process fence, generator, receipt
+constructor, and validator through that absolute `env -i` / `-I -S` contract;
+ambient Python startup configuration is not receipt authority.

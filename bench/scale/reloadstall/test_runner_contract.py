@@ -1,15 +1,46 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Static fail-closed contract tests for the retained shell driver."""
 
 from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 RUNNER = Path(__file__).with_name("run-receipt.sh")
+RELOADSTALL_ROOT = RUNNER.parent
+PYTHON_ENVIRONMENT = [
+    "/usr/bin/env",
+    "-i",
+    "LC_ALL=C",
+    "TZ=UTC",
+    "HOME=/nonexistent",
+    "PATH=/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE=1",
+]
+
+
+def isolated_python(
+    script: Path, *arguments: str, environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    extra = [f"{name}={value}" for name, value in sorted((environment or {}).items())]
+    return subprocess.run(
+        [
+            *PYTHON_ENVIRONMENT,
+            *extra,
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(script.resolve()),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 class RunnerContractTests(unittest.TestCase):
@@ -53,7 +84,7 @@ class RunnerContractTests(unittest.TestCase):
 
     def test_exact_source_build_fence_runs_before_cargo(self) -> None:
         fence = self.source.index(
-            'python3 "$source_root/bench/scale/reloadstall/build_fence.py"'
+            '"$source_root/bench/scale/reloadstall/build_fence.py"'
         )
         build = self.source.index("build_daemon_cli=(")
         self.assertLess(fence, build)
@@ -194,6 +225,95 @@ class RunnerContractTests(unittest.TestCase):
         self.assertNotIn(
             '"+$canonical_candidate_context_ref:$retained_source_ref"', self.source
         )
+
+    def test_canonical_baseline_is_current_integrated_main(self) -> None:
+        self.assertIn(
+            "readonly canonical_baseline_commit="
+            "aacb3a89527759b610bead421c80612f04d04826",
+            self.source,
+        )
+
+    def test_every_authoritative_python_path_is_absolute_and_isolated(self) -> None:
+        for fragment in (
+            "readonly python_command=/usr/bin/python3",
+            "/usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent",
+            'python_invocation=("${python_environment[@]}" "$python_command" -I -S)',
+            '"$source_root/bench/scale/reloadstall/build_fence.py"',
+            '"$source_root/bench/scale/reloadstall/process_fence.py"',
+            '"$source_root/bench/scale/reloadstall/gen-scenario.py"',
+            '"$python_command" -I -S - "$output_dir/invocation.json"',
+            '"$python_command" -I -S - "$output_dir/manifest.json"',
+            '"$source_root/bench/scale/reloadstall/validate_receipt.py" "$output_dir"',
+        ):
+            self.assertIn(fragment, self.source)
+        self.assertNotIn("\npython3 ", self.source)
+        self.assertNotIn("\n  python3 ", self.source)
+
+    def test_sitecustomize_cannot_bypass_authority_commands(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reloadstall-sitecustomize-") as raw:
+            root = Path(raw)
+            marker = root / "startup-ran"
+            (root / "sitecustomize.py").write_text(
+                "import os\n"
+                f"open({str(marker)!r}, 'w', encoding='utf-8').write('ran')\n"
+                "os._exit(0)\n",
+                encoding="utf-8",
+            )
+            hostile = {"PYTHONPATH": str(root), "PYTHONSTARTUP": str(root / "x.py")}
+
+            build = isolated_python(
+                RELOADSTALL_ROOT / "build_fence.py",
+                "--environment-only",
+                environment={**hostile, "RUSTFLAGS": "-C target-cpu=native"},
+            )
+            self.assertEqual(build.returncode, 2, build.stderr)
+            self.assertIn("RUSTFLAGS", build.stderr)
+
+            proc = root / "proc"
+            process = proc / "4242"
+            process.mkdir(parents=True)
+            (process / "stat").write_text(
+                "4242 (cargo) S 1 0 0 0 0 0\n", encoding="utf-8"
+            )
+            (process / "comm").write_text("cargo\n", encoding="utf-8")
+            (process / "cmdline").write_bytes(b"/usr/bin/cargo\0build\0")
+            (process / "cwd").symlink_to("/tmp")
+            (process / "exe").symlink_to("/usr/bin/cargo")
+            process_scan = isolated_python(
+                RELOADSTALL_ROOT / "process_fence.py",
+                "--proc-root",
+                str(proc),
+                "--root",
+                "/work/rustbgpd-policy-reload-receipt",
+                environment=hostile,
+            )
+            self.assertEqual(process_scan.returncode, 1, process_scan.stderr)
+            self.assertIn("known-executable:cargo", process_scan.stdout)
+
+            missing = isolated_python(
+                RELOADSTALL_ROOT / "validate_receipt.py",
+                str(root / "missing-receipt"),
+                environment=hostile,
+            )
+            self.assertEqual(missing.returncode, 1, missing.stderr)
+            self.assertIn('"accepted": false', missing.stdout)
+
+            bad_receipt = root / "bad-receipt"
+            bad_receipt.mkdir()
+            bad = isolated_python(
+                RELOADSTALL_ROOT / "validate_receipt.py",
+                str(bad_receipt),
+                environment=hostile,
+            )
+            self.assertEqual(bad.returncode, 1, bad.stderr)
+            self.assertIn('"accepted": false', bad.stdout)
+
+            generation = isolated_python(
+                RELOADSTALL_ROOT / "gen-scenario.py", environment=hostile
+            )
+            self.assertNotEqual(generation.returncode, 0)
+            self.assertIn("gen-scenario.py <n_peers>", generation.stderr)
+            self.assertFalse(marker.exists(), "sitecustomize executed under -I -S")
 
 
 if __name__ == "__main__":

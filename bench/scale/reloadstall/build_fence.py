@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Fail-closed build-environment and Cargo-configuration fence."""
 
 from __future__ import annotations

@@ -1,12 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Adversarial tests for the retained build-input fence."""
 
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from build_fence import (
     BuildFenceError,

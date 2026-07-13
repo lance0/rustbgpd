@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Adversarial unit tests for the retained reload-stall receipt validator."""
 
 from __future__ import annotations
@@ -6,9 +6,12 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import validate_receipt as validator
 
@@ -314,6 +317,8 @@ def make_receipt(root: Path) -> None:
             "build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin "
             f"RUSTUP_TOOLCHAIN={validator.REQUIRED_TOOLCHAIN} CARGO_TARGET_DIR=<BUILD_TARGET> "
             "RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n"
+            "python_environment=env -i LC_ALL=C TZ=UTC HOME=/nonexistent "
+            "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S\n"
             "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n"
             "harness_environment=env -i LC_ALL=C TZ=UTC\n"
             "health_environment=env -i LC_ALL=C TZ=UTC\n"
@@ -402,7 +407,11 @@ def make_receipt(root: Path) -> None:
             "allowed_cargo_config": f"{SOURCE}/.cargo/config.toml",
             "external_cargo_configs": "rejected",
         },
-        "process_fence_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
+        "process_fence_environment": {
+            **validator.PYTHON_ENVIRONMENT,
+            "isolated": True,
+            "no_site": True,
+        },
         "runtime_environments": {
             "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
             "harness": {"LC_ALL": "C", "TZ": "UTC"},
@@ -489,7 +498,7 @@ def make_receipt(root: Path) -> None:
                 "bench/scale/reloadstall/Cargo.toml",
             ],
             "build_fence": [
-                "python3",
+                *validator.PYTHON_INVOCATION,
                 f"{SOURCE}/bench/scale/reloadstall/build_fence.py",
                 "--source-root",
                 SOURCE,
@@ -505,14 +514,14 @@ def make_receipt(root: Path) -> None:
                 "--signal=TERM",
                 "--kill-after=5s",
                 "60",
-                "python3",
+                *validator.PYTHON_INVOCATION,
                 f"{SOURCE}/bench/scale/reloadstall/gen-scenario.py",
                 "700",
                 RUNTIME,
                 "1790",
             ],
             "process_fence": [
-                "python3",
+                *validator.PYTHON_INVOCATION,
                 f"{SOURCE}/bench/scale/reloadstall/process_fence.py",
                 "--root",
                 REPO,
@@ -569,7 +578,7 @@ def make_receipt(root: Path) -> None:
                 "30",
             ],
             "validate": [
-                "python3",
+                *validator.PYTHON_INVOCATION,
                 f"{SOURCE}/bench/scale/reloadstall/validate_receipt.py",
                 OUTPUT,
             ],
@@ -1085,6 +1094,23 @@ class ReceiptValidatorTests(unittest.TestCase):
             ),
         )
         self.assert_invalid("invocation.build_environment")
+
+    def test_process_fence_python_environment_mismatch_fails(self) -> None:
+        self.mutate_json(
+            "invocation.json",
+            lambda value: value["process_fence_environment"].update(
+                PYTHONPATH="/tmp/shadow"
+            ),
+        )
+        self.assert_invalid("invocation.process_fence_environment")
+
+    def test_python_provenance_mismatch_fails(self) -> None:
+        self.mutate_text(
+            "provenance.txt",
+            "/usr/bin/python3 -I -S",
+            "/usr/bin/python3",
+        )
+        self.assert_invalid("provenance.txt is missing")
 
     def test_commit_object_capture_invocation_mismatch_fails(self) -> None:
         self.mutate_json(

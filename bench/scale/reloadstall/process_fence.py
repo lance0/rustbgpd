@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Fail-closed process inventory for the retained reload-stall receipt.
 
 The receipt needs an idle host, but executable names alone are insufficient:
@@ -299,9 +299,15 @@ def ancestry(pid: int, records: Iterable[Process]) -> set[int]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", action="append", default=[])
+    parser.add_argument(
+        "--proc-root",
+        type=Path,
+        default=Path("/proc"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     try:
-        records = scan_processes()
+        records = scan_processes(args.proc_root)
     except ProcessScanError as exc:
         print(f"error: {exc}", file=os.sys.stderr)
         return 2

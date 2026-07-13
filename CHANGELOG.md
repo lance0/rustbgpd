@@ -256,7 +256,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/scale/reloadstall/` now binds the retained commit object to a complete
   immutable source tree plus a fresh-repository-validated Git bundle, pins Rust
   1.95.0 through owner-safe absolute rustup/tool paths under a controlled build
-  environment, tracks authoritative current per-prefix marker state and
+  environment, isolates every Python authority path from ambient startup and
+  site customization, tracks authoritative current per-prefix marker state and
   measurement windows through post-reload quiesce, and fails closed on source,
   build, runtime, liveness, parsing, and scenario defects, including incomplete
   ordinary live `/proc` records. It emits a validator-checked durable bundle

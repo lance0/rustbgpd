@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Fail-closed validator for a policy reload-stall receipt bundle."""
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ HOST_LOCK = "<HOST_LOCK>"
 DAEMON_PID = "<DAEMON_PID>"
 GIT = "/usr/bin/git"
 CANONICAL_REMOTE = "https://github.com/lance0/rustbgpd.git"
-CANONICAL_BASELINE_COMMIT = "b2ec55f21364978f26662b1ec35fd47ddcfce9a6"
+CANONICAL_BASELINE_COMMIT = "aacb3a89527759b610bead421c80612f04d04826"
 CANONICAL_BASELINE_CONTEXT_REF = "refs/heads/main"
 CANONICAL_CANDIDATE_CONTEXT_REF = "refs/heads/perf/policy-reload-durable-receipt"
 RETAINED_BASELINE_REF = "refs/receipt/baseline"
@@ -52,6 +52,25 @@ GIT_ENVIRONMENT = {
     "PATH": "/usr/bin:/bin",
     "TZ": "UTC",
 }
+PYTHON_ENVIRONMENT = {
+    "HOME": "/nonexistent",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "TZ": "UTC",
+}
+PYTHON_INVOCATION = [
+    "/usr/bin/env",
+    "-i",
+    "LC_ALL=C",
+    "TZ=UTC",
+    "HOME=/nonexistent",
+    "PATH=/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE=1",
+    "/usr/bin/python3",
+    "-I",
+    "-S",
+]
 COMMUNITY_VALUES = tuple(
     (int(community.split(":")[0]) << 16) | int(community.split(":")[1])
     for community in COMMUNITIES
@@ -905,13 +924,13 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     )
     require_exact(
         invocation.get("process_fence_environment"),
-        {"PYTHONDONTWRITEBYTECODE": "1"},
+        {**PYTHON_ENVIRONMENT, "isolated": True, "no_site": True},
         "invocation.process_fence_environment",
     )
     require_exact(
         commands["build_fence"],
         [
-            "python3",
+            *PYTHON_INVOCATION,
             f"{SOURCE_ROOT}/bench/scale/reloadstall/build_fence.py",
             "--source-root",
             SOURCE_ROOT,
@@ -992,7 +1011,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(
         commands["process_fence"],
         [
-            "python3",
+            *PYTHON_INVOCATION,
             f"{SOURCE_ROOT}/bench/scale/reloadstall/process_fence.py",
             "--root",
             REPO_ROOT,
@@ -1006,7 +1025,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(
         commands["validate"],
         [
-            "python3",
+            *PYTHON_INVOCATION,
             f"{SOURCE_ROOT}/bench/scale/reloadstall/validate_receipt.py",
             OUTPUT_DIR,
         ],
@@ -1021,7 +1040,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
             "--signal=TERM",
             "--kill-after=5s",
             "60",
-            "python3",
+            *PYTHON_INVOCATION,
             f"{SOURCE_ROOT}/bench/scale/reloadstall/gen-scenario.py",
             str(PEERS),
             runtime_dir,
@@ -1124,6 +1143,8 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin "
         f"RUSTUP_TOOLCHAIN={REQUIRED_TOOLCHAIN} CARGO_TARGET_DIR=<BUILD_TARGET> "
         "RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>",
+        "python_environment=env -i LC_ALL=C TZ=UTC HOME=/nonexistent "
+        "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S",
         "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info",
         "harness_environment=env -i LC_ALL=C TZ=UTC",
         "health_environment=env -i LC_ALL=C TZ=UTC",

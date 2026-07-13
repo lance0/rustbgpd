@@ -79,8 +79,12 @@ is the invoking account's regular, non-symlinked, owner-safe
 `env -i`, and Cargo/rustc/rustdoc must resolve to owner-safe absolute binaries
 inside the exact `1.95.0-x86_64-unknown-linux-gnu` toolchain. Builds use fresh
 empty home and Cargo-home directories plus the literal `/usr/bin:/bin` search
-path; provenance records the resolved tool paths and hashes, rustup, toolchain,
-sysroot, and host platform. This is a
+path. Every receipt-authority Python path uses `/usr/bin/python3 -I -S` under
+an exact `env -i` whitelist, so ambient `PYTHONPATH`, `PYTHONSTARTUP`, user-site
+packages, and `sitecustomize` cannot alter build/process fences, scenario
+generation, receipt construction, or validation. Provenance records that
+interpreter contract plus the resolved Rust tool paths and hashes, rustup,
+toolchain, sysroot, and host platform. This is a
 controlled and provenance-bound host build, not a hermetic container build.
 Daemon, harness, and health probes run
 under `env -i` with only `LC_ALL=C`, `TZ=UTC`, and daemon-only `RUST_LOG=info`.
@@ -112,10 +116,14 @@ adversarial fixtures run with:
 
 ```text
 cd bench/scale/reloadstall
-python3 -m unittest -v test_validate_receipt.py
-python3 -m unittest -v test_process_fence.py
-python3 -m unittest -v test_build_fence.py
-python3 -m unittest -v test_runner_contract.py
+receipt_python=(
+  /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin
+  PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S
+)
+"${receipt_python[@]}" "$PWD/test_validate_receipt.py" -v
+"${receipt_python[@]}" "$PWD/test_process_fence.py" -v
+"${receipt_python[@]}" "$PWD/test_build_fence.py" -v
+"${receipt_python[@]}" "$PWD/test_runner_contract.py" -v
 ```
 
 `SHA256SUMS` covers every retained input, commit object, self-contained Git
@@ -129,7 +137,8 @@ fresh repository; it does not accept a retained bundle as proof of canonical
 membership. The retained bundle, commit, archive, and fetch record support
 offline integrity and source reconstruction, but an offline-only check is not
 an acceptance result. A later acceptance audit should run
-`validate_receipt.py` from the named source commit with canonical network access;
+`validate_receipt.py` from the named source commit with canonical network access
+through the same absolute, isolated Python command shown above;
 the validator also independently imports `sources/source.bundle` into a fresh
 repository before trusting the retained commit/archive relationship.
 

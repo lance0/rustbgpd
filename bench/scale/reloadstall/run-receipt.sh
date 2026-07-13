@@ -40,8 +40,9 @@ export TZ=UTC
 readonly runner_path=/usr/bin:/bin
 export PATH=$runner_path
 readonly git_command=/usr/bin/git
+readonly python_command=/usr/bin/python3
 readonly source_remote=https://github.com/lance0/rustbgpd.git
-readonly canonical_baseline_commit=b2ec55f21364978f26662b1ec35fd47ddcfce9a6
+readonly canonical_baseline_commit=aacb3a89527759b610bead421c80612f04d04826
 readonly canonical_baseline_context_ref=refs/heads/main
 readonly canonical_candidate_context_ref=refs/heads/perf/policy-reload-durable-receipt
 readonly retained_baseline_ref=refs/receipt/baseline
@@ -50,6 +51,11 @@ git_environment=(
   /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH="$runner_path"
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
 )
+python_environment=(
+  /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH="$runner_path"
+  PYTHONDONTWRITEBYTECODE=1
+)
+python_invocation=("${python_environment[@]}" "$python_command" -I -S)
 
 usage() {
   cat <<'EOF'
@@ -136,13 +142,18 @@ done
 }
 
 for command in \
-  awk cat chmod cmp cp date env find flock git id mkdir mktemp python3 readlink \
+  awk cat chmod cmp cp date env find flock git id mkdir mktemp readlink \
   rm setsid sha256sum sleep ss stat tail tar timeout touch uname xargs; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'error: required command is missing: %s\n' "$command" >&2
     exit 1
   }
 done
+[[ -x $python_command ]] || {
+  printf 'error: required absolute Python interpreter is missing: %s\n' \
+    "$python_command" >&2
+  exit 1
+}
 
 repo_root=$("${git_environment[@]}" "$git_command" rev-parse --show-toplevel)
 cd "$repo_root"
@@ -166,8 +177,21 @@ source_status=$("${git_environment[@]}" "$git_command" status --porcelain=v1 --u
   exit 2
 }
 "${git_environment[@]}" "$git_command" diff --check "$source_sha^" "$source_sha" >/dev/null
-PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
+# Python itself must not inherit startup authority, but the opening build fence
+# must still inspect the names of ambient variables such as RUSTFLAGS. Forward
+# only redacted presence markers (plus the already-controlled PATH) through the
+# isolated interpreter environment; no ambient value reaches Python startup.
+ambient_build_python_environment=("${python_environment[@]}")
+while IFS= read -r -d '' environment_entry; do
+  environment_name=${environment_entry%%=*}
+  case "$environment_name" in
+    HOME|LC_ALL|PATH|PYTHONDONTWRITEBYTECODE|TZ) ;;
+    *) ambient_build_python_environment+=("$environment_name=<present>") ;;
+  esac
+done < <(/usr/bin/env -0)
+"${ambient_build_python_environment[@]}" "$python_command" -I -S \
+  "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
+unset ambient_build_python_environment environment_entry environment_name
 
 invoking_uid=$(/usr/bin/id -u)
 invoking_home=$(/usr/bin/awk -F: -v uid="$invoking_uid" \
@@ -529,8 +553,8 @@ source_bundle_sha256=$(sha256sum "$source_bundle" | awk '{print $1}')
 find "$source_root" -exec chmod a-w {} +
 chmod a-w "$canonical_fetch_evidence" "$canonical_refs" "$source_archive" \
   "$source_bundle" "$source_commit_object"
-PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+"${python_invocation[@]}" \
+  "$source_root/bench/scale/reloadstall/build_fence.py" \
     --source-root "$source_root" --cargo-home "$cargo_home" \
     --expected-tree "$source_tree" --require-immutable \
     >"$scratch/build-fence.txt"
@@ -539,14 +563,15 @@ sanitize_text() {
   local input=$1
   local output=$2
   local pid_value=${3:-}
-  SANITIZE_REPO_ROOT=$repo_root SANITIZE_SOURCE_ROOT=$source_root \
-  SANITIZE_BUILD_TARGET=$build_target SANITIZE_RUNTIME_DIR=$runtime_dir \
-  SANITIZE_BUILD_HOME=$build_home \
-  SANITIZE_OUTPUT_DIR=$output_dir SANITIZE_SCRATCH_DIR=$scratch \
-  SANITIZE_HOME=${HOME:-} SANITIZE_HOST_LOCK=$host_lock \
-  SANITIZE_HOSTNAME=$host_name SANITIZE_CARGO_HOME=$cargo_home \
-  SANITIZE_RUSTUP_HOME=$rustup_home SANITIZE_PID=$pid_value \
-  python3 - "$input" "$output" <<'PY'
+  "${python_environment[@]}" \
+  SANITIZE_REPO_ROOT="$repo_root" SANITIZE_SOURCE_ROOT="$source_root" \
+  SANITIZE_BUILD_TARGET="$build_target" SANITIZE_RUNTIME_DIR="$runtime_dir" \
+  SANITIZE_BUILD_HOME="$build_home" \
+  SANITIZE_OUTPUT_DIR="$output_dir" SANITIZE_SCRATCH_DIR="$scratch" \
+  SANITIZE_HOME="${HOME:-}" SANITIZE_HOST_LOCK="$host_lock" \
+  SANITIZE_HOSTNAME="$host_name" SANITIZE_CARGO_HOME="$cargo_home" \
+  SANITIZE_RUSTUP_HOME="$rustup_home" SANITIZE_PID="$pid_value" \
+  "$python_command" -I -S - "$input" "$output" <<'PY'
 import os
 import re
 import sys
@@ -619,8 +644,8 @@ build_environment=(
 # Cargo and every build script ran against a non-writable extraction. Rebuild
 # its complete Git tree after the build so any attempted content, mode, symlink,
 # or inventory mutation fails before a binary can be measured.
-PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+"${python_invocation[@]}" \
+  "$source_root/bench/scale/reloadstall/build_fence.py" \
     --source-root "$source_root" --cargo-home "$cargo_home" \
     --expected-tree "$source_tree" --require-immutable \
     >"$scratch/build-fence-after.txt"
@@ -669,13 +694,14 @@ capture_governors() {
 capture_governors "$scratch/governors.initial.tsv"
 
 process_fence=(
-  python3 "$source_root/bench/scale/reloadstall/process_fence.py"
+  "${python_invocation[@]}"
+  "$source_root/bench/scale/reloadstall/process_fence.py"
   --root "$repo_root" --root "$source_root" --root "$build_target"
 )
 capture_busy() {
   : >"$scratch/busy.tsv"
   local rc=0
-  if PYTHONDONTWRITEBYTECODE=1 "${process_fence[@]}" >"$scratch/busy.tsv"; then
+  if "${process_fence[@]}" >"$scratch/busy.tsv"; then
     rc=0
   else
     rc=$?
@@ -719,7 +745,8 @@ if ss -H -ltn | awk -v suffix=":${listen_port}" '$4 ~ suffix "$" { found=1 } END
 fi
 generator=(
   timeout --foreground --signal=TERM --kill-after=5s "$generation_timeout_seconds"
-  python3 "$source_root/bench/scale/reloadstall/gen-scenario.py"
+  "${python_invocation[@]}"
+  "$source_root/bench/scale/reloadstall/gen-scenario.py"
   "$peers" "$runtime_dir" "$listen_port"
 )
 {
@@ -751,8 +778,8 @@ harness_command=(
   "${runtime_environment[@]}" "${harness_payload[@]}"
 )
 
-SOURCE_COMMIT=$source_sha \
-python3 - "$output_dir/invocation.json" <<'PY'
+"${python_environment[@]}" SOURCE_COMMIT="$source_sha" \
+  "$python_command" -I -S - "$output_dir/invocation.json" <<'PY'
 import json
 import os
 import sys
@@ -761,6 +788,11 @@ source = "<SOURCE_ROOT>"
 target = "<BUILD_TARGET>"
 runtime = "<RUNTIME_DIR>"
 output = "<OUTPUT_DIR>"
+python = [
+    "/usr/bin/env", "-i", "LC_ALL=C", "TZ=UTC", "HOME=/nonexistent",
+    "PATH=/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
+    "/usr/bin/python3", "-I", "-S",
+]
 payload = {
     "source_commit": os.environ["SOURCE_COMMIT"],
     "build_cwd": source,
@@ -778,7 +810,15 @@ payload = {
         "allowed_cargo_config": f"{source}/.cargo/config.toml",
         "external_cargo_configs": "rejected",
     },
-    "process_fence_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
+    "process_fence_environment": {
+        "HOME": "/nonexistent",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TZ": "UTC",
+        "isolated": True,
+        "no_site": True,
+    },
     "runtime_environments": {
         "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
         "harness": {"LC_ALL": "C", "TZ": "UTC"},
@@ -788,7 +828,7 @@ payload = {
         "canonical_fetch": [
             "/usr/bin/git", "-C", "<CANONICAL_REPO>", "fetch", "--no-tags",
             "--force", "https://github.com/lance0/rustbgpd.git",
-            "+b2ec55f21364978f26662b1ec35fd47ddcfce9a6:refs/receipt/baseline",
+            "+aacb3a89527759b610bead421c80612f04d04826:refs/receipt/baseline",
             f"+{os.environ['SOURCE_COMMIT']}:refs/receipt/source",
         ],
         "archive": [
@@ -820,17 +860,17 @@ payload = {
             "--manifest-path", "bench/scale/reloadstall/Cargo.toml",
         ],
         "build_fence": [
-            "python3", f"{source}/bench/scale/reloadstall/build_fence.py",
+            *python, f"{source}/bench/scale/reloadstall/build_fence.py",
             "--source-root", source, "--cargo-home", "<CARGO_HOME>",
             "--expected-tree", "<SOURCE_TREE>", "--require-immutable",
         ],
         "generate": [
             "timeout", "--foreground", "--signal=TERM", "--kill-after=5s", "60",
-            "python3", f"{source}/bench/scale/reloadstall/gen-scenario.py", "700",
+            *python, f"{source}/bench/scale/reloadstall/gen-scenario.py", "700",
             runtime, "1790",
         ],
         "process_fence": [
-            "python3", f"{source}/bench/scale/reloadstall/process_fence.py",
+            *python, f"{source}/bench/scale/reloadstall/process_fence.py",
             "--root", "<REPO_ROOT>", "--root", source, "--root", target,
         ],
         "daemon": [
@@ -849,7 +889,9 @@ payload = {
             f"{runtime}/gen-a.rpol", f"{runtime}/gen-b.rpol", "4", "30",
         ],
         "validate": [
-            "python3", f"{source}/bench/scale/reloadstall/validate_receipt.py", output,
+            *python,
+            f"{source}/bench/scale/reloadstall/validate_receipt.py",
+            output,
         ],
     },
     "health_probe": {"timeout_seconds": 10, "interval_milliseconds": 50},
@@ -886,8 +928,8 @@ verify_exact_sources() {
     printf 'error: retained source commit/tree binding changed\n' >&2
     return 1
   }
-  PYTHONDONTWRITEBYTECODE=1 \
-    python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+  "${python_invocation[@]}" \
+    "$source_root/bench/scale/reloadstall/build_fence.py" \
       --source-root "$source_root" --cargo-home "$cargo_home" \
       --expected-tree "$source_tree" --require-immutable >/dev/null
   cmp --silent "$source_root/bench/scale/reloadstall/gen-scenario.py" \
@@ -1085,6 +1127,7 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'source_tree_verification=pre-build,post-build,measurement-boundary,post-run\n'
   printf 'build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin RUSTUP_TOOLCHAIN=%s CARGO_TARGET_DIR=<BUILD_TARGET> RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n' \
     "$required_toolchain"
+  printf 'python_environment=env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S\n'
   printf 'daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n'
   printf 'harness_environment=env -i LC_ALL=C TZ=UTC\n'
   printf 'health_environment=env -i LC_ALL=C TZ=UTC\n'
@@ -1124,19 +1167,21 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
 } >"$scratch/provenance.raw.txt"
 sanitize_text "$scratch/provenance.raw.txt" "$output_dir/provenance.txt" "$daemon_pid"
 
-SOURCE_COMMIT=$source_sha SOURCE_TREE=$source_tree \
-SOURCE_ARCHIVE_SHA256=$source_archive_sha256 SOURCE_BUNDLE_SHA256=$source_bundle_sha256 \
-SOURCE_REMOTE=$source_remote \
-CANONICAL_BASELINE_CONTEXT_REF=$canonical_baseline_context_ref \
-CANONICAL_BASELINE_COMMIT=$canonical_baseline_commit \
-CANONICAL_CANDIDATE_CONTEXT_REF=$canonical_candidate_context_ref \
-LOAD_ONE=$load_one PREFLIGHT_STARTED_WALL_NS=$preflight_started_wall_ns \
-PREFLIGHT_COMPLETED_WALL_NS=$preflight_completed_wall_ns \
-PROCESS_WALL_NS=$process_wall_ns LOAD_WALL_NS=$load_wall_ns \
-GOVERNOR_POLICY_COUNT=$governor_policy_count DAEMON_START_WALL_NS=$daemon_start_wall_ns \
-HARNESS_EXIT=$harness_exit DAEMON_ALIVE=$daemon_alive_after_harness DAEMON_EXIT=$daemon_exit \
-HEALTH_SAMPLES=$health_samples HEALTH_FAILURES=$health_failures \
-python3 - "$output_dir/manifest.json" <<'PY'
+"${python_environment[@]}" \
+SOURCE_COMMIT="$source_sha" SOURCE_TREE="$source_tree" \
+SOURCE_ARCHIVE_SHA256="$source_archive_sha256" \
+SOURCE_BUNDLE_SHA256="$source_bundle_sha256" SOURCE_REMOTE="$source_remote" \
+CANONICAL_BASELINE_CONTEXT_REF="$canonical_baseline_context_ref" \
+CANONICAL_BASELINE_COMMIT="$canonical_baseline_commit" \
+CANONICAL_CANDIDATE_CONTEXT_REF="$canonical_candidate_context_ref" \
+LOAD_ONE="$load_one" PREFLIGHT_STARTED_WALL_NS="$preflight_started_wall_ns" \
+PREFLIGHT_COMPLETED_WALL_NS="$preflight_completed_wall_ns" \
+PROCESS_WALL_NS="$process_wall_ns" LOAD_WALL_NS="$load_wall_ns" \
+GOVERNOR_POLICY_COUNT="$governor_policy_count" \
+DAEMON_START_WALL_NS="$daemon_start_wall_ns" HARNESS_EXIT="$harness_exit" \
+DAEMON_ALIVE="$daemon_alive_after_harness" DAEMON_EXIT="$daemon_exit" \
+HEALTH_SAMPLES="$health_samples" HEALTH_FAILURES="$health_failures" \
+"$python_command" -I -S - "$output_dir/manifest.json" <<'PY'
 import json
 import os
 import sys
@@ -1222,6 +1267,6 @@ verify_exact_sources
     | xargs -0 sha256sum
 ) >"$output_dir/SHA256SUMS"
 
-validation_output=$(PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$source_root/bench/scale/reloadstall/validate_receipt.py" "$output_dir")
+validation_output=$("${python_invocation[@]}" \
+  "$source_root/bench/scale/reloadstall/validate_receipt.py" "$output_dir")
 printf 'accepted receipt: %s\n%s\n' "$output_dir" "$validation_output"

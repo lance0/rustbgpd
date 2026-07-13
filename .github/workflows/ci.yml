@@ -63,14 +63,15 @@ jobs:
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
-          (
-            cd bench/scale/reloadstall
-            python3 -m unittest -v \
-              test_validate_receipt.py \
-              test_process_fence.py \
-              test_build_fence.py \
-              test_runner_contract.py
+          receipt_root="$PWD/bench/scale/reloadstall"
+          receipt_python=(
+            /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin
+            PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S
           )
+          "${receipt_python[@]}" "$receipt_root/test_validate_receipt.py" -v
+          "${receipt_python[@]}" "$receipt_root/test_process_fence.py" -v
+          "${receipt_python[@]}" "$receipt_root/test_build_fence.py" -v
+          "${receipt_python[@]}" "$receipt_root/test_runner_contract.py" -v
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail

@@ -1,17 +1,20 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S /usr/bin/python3 -I -S
 """Adversarial tests for reload-stall host process fencing."""
 
 from __future__ import annotations
 
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from process_fence import Process, ProcessScanError, find_competitors, read_process
 
 
-ROOT = "/work/rustbgpd-lan-350"
+ROOT = "/work/rustbgpd-policy-reload-receipt"
 
 
 def process(
