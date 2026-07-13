@@ -216,7 +216,7 @@ The next product milestone is operational trust for the route-server / route-
 reflector beachhead, not another breadth sprint. Work in this section outranks
 new AFI/SAFI and EVPN dataplane expansion.
 
-- **Narrow v1 role contract shipped (#862 / LAN-355).** The machine-checked
+- **Narrow v1 role contract shipped (PR #862).** The machine-checked
   contract freezes only the configuration and API used by IPv4/IPv6 route
   servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC, transactions,
   BMP/MRT/events, and the already-proven RR/controller-feed families, with

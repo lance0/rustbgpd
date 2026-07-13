@@ -47,7 +47,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dataplane, experimental, and otherwise unlisted surfaces remain outside v1.
   Compatibility and deprecation windows, the canonical transaction mutation
   path, SIGHUP reconcile limits, a release gate, and a consecutive v0.50.0 to
-  v0.51.0 route-server upgrade receipt are explicit and CI-pinned. (LAN-355)
+  v0.51.0 route-server upgrade receipt are explicit and CI-pinned. (PR #862)
 
 - **Neighbor state reports live effective transport and distribution truth.**
   TCP-AO health is refreshed read-only from the connected socket for every
