@@ -191,6 +191,43 @@ class ReceiptValidatorTests(unittest.TestCase):
                 )
             )
 
+    def test_profile_barrier_retains_evidence_without_publishing_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "profile-ready.private"
+            output = root / "profile-ready.txt"
+            raw.write_text("48291\n", encoding="ascii")
+            receipt.validate_barrier(
+                argparse.Namespace(raw=raw, expected_pid="48291", output=output)
+            )
+            retained = output.read_text(encoding="ascii")
+            self.assertEqual(retained, "barrier_reached=1\n")
+            self.assertNotIn("48291", retained)
+
+    def test_profile_barrier_rejects_mismatch_and_malformed_input(self) -> None:
+        for raw_value, expected in (
+            ("48291\n", "48292"),
+            ("48291\nextra\n", "48291"),
+            ("48291", "48291"),
+            ("0\n", "0"),
+            ("not-a-pid\n", "48291"),
+        ):
+            with (
+                self.subTest(raw=raw_value, expected=expected),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                raw = root / "profile-ready.private"
+                raw.write_text(raw_value, encoding="ascii")
+                with self.assertRaises(SystemExit):
+                    receipt.validate_barrier(
+                        argparse.Namespace(
+                            raw=raw,
+                            expected_pid=expected,
+                            output=root / "profile-ready.txt",
+                        )
+                    )
+
     def test_candidate_without_proven_ancestry_fails_closed(self) -> None:
         for ancestry in (None, "false"):
             with self.subTest(ancestry=ancestry), self.assertRaises(SystemExit):

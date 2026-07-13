@@ -38,6 +38,7 @@ BGPERF_PID=''
 TARGET_PID=''
 PRIVATE_PERF_DIR=${LAN393_PRIVATE_PERF_DIR:-$RUSTBGPD_SOURCE/target/lan393-private-perf}
 PRIVATE_PERF_DATA=$PRIVATE_PERF_DIR/full-daemon-$PROFILE.perf.data
+PRIVATE_PROFILE_READY=$PRIVATE_PERF_DIR/full-daemon-$PROFILE.profile-ready
 
 cleanup() {
     if [[ -n "$TARGET_PID" ]]; then
@@ -549,6 +550,15 @@ for _ in $(seq 1 300); do
     sleep 0.1
 done
 [[ -n "$TARGET_PID" ]]
+TARGET_NAMESPACE_PID=$(awk '
+    $1 == "NSpid:" { print $NF; found = 1 }
+    END { if (!found) exit 1 }
+' "/proc/$TARGET_PID/status")
+[[ "$TARGET_NAMESPACE_PID" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'stopped target has malformed namespace PID: %s\n' \
+        "$TARGET_NAMESPACE_PID" >&2
+    exit 1
+}
 docker top "$TARGET_CONTAINER" -eo pid,stat,args \
     | awk 'NR == 1 { print "state command"; next } { command=$3; sub(/^.*\//, "", command); print $2, command }' \
     >"$PREFIX-processes-pre-attach.txt"
@@ -563,9 +573,18 @@ printf 'running_container_image_id=%s\n' "$RUNNING_IMAGE_ID" \
     >"$PREFIX-running-image.txt"
 
 docker cp "$TARGET_CONTAINER:/root/config/config.toml" "$PREFIX-config.toml"
+mkdir -p "$PRIVATE_PERF_DIR"
+[[ ! -e "$PRIVATE_PROFILE_READY" && ! -L "$PRIVATE_PROFILE_READY" ]] || {
+    printf 'refusing existing private profile barrier: %s\n' "$PRIVATE_PROFILE_READY" >&2
+    exit 1
+}
 docker cp \
     "$TARGET_CONTAINER:/root/config/lan393-profile-ready" \
-    "$PREFIX-profile-ready.txt"
+    "$PRIVATE_PROFILE_READY"
+python3 "$VALIDATOR" barrier \
+    --raw "$PRIVATE_PROFILE_READY" \
+    --expected-pid "$TARGET_NAMESPACE_PID" \
+    --output "$PREFIX-profile-ready.txt"
 if [[ "$EHM_MODE" == enabled ]]; then
     grep -A6 '^\[event_history\]$' "$PREFIX-config.toml" \
         >"$PREFIX-event-history-config.txt"
@@ -583,7 +602,6 @@ else
         >"$PREFIX-event-history-config.txt"
 fi
 
-mkdir -p "$PRIVATE_PERF_DIR"
 [[ ! -e "$PRIVATE_PERF_DATA" ]] || {
     printf 'refusing existing private perf capture: %s\n' "$PRIVATE_PERF_DATA" >&2
     exit 1

@@ -44,6 +44,9 @@ Each of `baseline-enabled`, `baseline-disabled`, `candidate-enabled`, and
 - safe host fingerprint/toolchain, load/governor/process preflight, OCI image
   inspection, binary hashes, and builder/runtime package provenance;
 - exact generated scenario/config and explicit enabled/disabled EHM verdict;
+- normalized `barrier_reached=1` evidence for the stopped-wrapper attach point;
+  the raw PID-bearing barrier remains private under
+  `target/lan393-private-perf/`;
 - raw bgperf log/time series, normalized finite-value result CSV, two exact
   run-scoped BIRD logs, and validator output;
 - post-drain metrics, resource snapshot, daemon log, and cursor/drop/degraded

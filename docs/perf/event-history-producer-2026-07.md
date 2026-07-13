@@ -132,9 +132,12 @@ makes no independent zero-timeout claim.
 Perf attaches before the stopped wrapper execs the daemon. Raw `perf.data`
 remains under `target/lan393-private-perf/` and is represented in the public
 receipt by its SHA-256. The retained report and script have host paths and
-PID/TID/timestamps sanitized. `validate-lan393-perf.py` classifies sanitized
-stacks and emits the exact RIB-manager denominator, EHM producer numerator,
-percentage, and 5% baseline proceed verdict.
+PID/TID/timestamps sanitized. The wrapper's raw PID-bearing readiness barrier
+also remains there; the public receipt retains only `barrier_reached=1` after
+matching it to the namespace identity of the stopped host process.
+`validate-lan393-perf.py` classifies sanitized stacks and emits the exact
+RIB-manager denominator, EHM producer numerator, percentage, and 5% baseline
+proceed verdict.
 
 ## Privacy and artifact contract
 

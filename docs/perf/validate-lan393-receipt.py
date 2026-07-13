@@ -26,6 +26,7 @@ DEBIAN_RUNTIME_IMAGE = (
 )
 BGPERF2_COMMIT = "fe4fdab9f7efb56e2e98ad6e6bcffeda047761a9"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+PID_RE = re.compile(r"[1-9][0-9]*")
 
 
 def fail(message: str) -> None:
@@ -176,6 +177,28 @@ def validate_image(args: argparse.Namespace) -> None:
     print(f"event_history_mode={args.mode}")
     print(f"builder_provenance_sha256={sha256_file(args.builder_provenance)}")
     print(f"runtime_provenance_sha256={sha256_file(args.runtime_provenance)}")
+
+
+def validate_barrier(args: argparse.Namespace) -> None:
+    """Bind the stopped wrapper barrier without publishing its host PID."""
+    require_regular_file(args.raw, "private profile-ready barrier")
+    try:
+        raw = args.raw.read_text(encoding="ascii", errors="strict")
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot read private profile-ready barrier: {error}")
+    if re.fullmatch(r"[1-9][0-9]*\n", raw) is None:
+        fail("private profile-ready barrier must contain exactly one positive PID")
+    observed_pid = raw.removesuffix("\n")
+    if PID_RE.fullmatch(args.expected_pid) is None:
+        fail(f"expected profile PID is malformed: {args.expected_pid!r}")
+    require_equal(observed_pid, args.expected_pid, "profile-ready barrier PID")
+
+    require_directory(args.output.parent, "barrier receipt directory")
+    require_no_symlink_components(args.output, "barrier receipt")
+    if args.output.exists():
+        fail(f"refusing existing barrier receipt: {args.output}")
+    args.output.write_text("barrier_reached=1\n", encoding="ascii")
+    print("barrier_reached=1")
 
 
 def load_scenario(path: Path) -> dict[str, object]:
@@ -536,6 +559,14 @@ def parser() -> argparse.ArgumentParser:
     image.add_argument("--phase", choices=("baseline", "candidate"), required=True)
     image.add_argument("--mode", choices=("enabled", "disabled"), required=True)
     image.set_defaults(func=validate_image)
+
+    barrier = commands.add_parser(
+        "barrier", help="validate the private wrapper barrier and normalize its receipt"
+    )
+    barrier.add_argument("--raw", type=Path, required=True)
+    barrier.add_argument("--expected-pid", required=True)
+    barrier.add_argument("--output", type=Path, required=True)
+    barrier.set_defaults(func=validate_barrier)
 
     bgperf = commands.add_parser("bgperf", help="validate scenario and final result")
     bgperf.add_argument("--log", type=Path, required=True)
