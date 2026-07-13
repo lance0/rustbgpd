@@ -380,6 +380,7 @@ fn make_dynamic_manager_config() -> Config {
             link_bandwidth_weighted: false,
             install_blackhole_discard: false,
             allow_blackhole_broad_prefixes: false,
+            warm_cache_checkpoint_on_shutdown: false,
         },
         security: crate::config::SecurityConfig {
             grpc: crate::config::GrpcSecurityConfig {

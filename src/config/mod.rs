@@ -650,6 +650,20 @@ impl Config {
         self.runtime_state_dir().join("gr-restart.toml")
     }
 
+    /// Fixed daemon-private directory for LAN-337 warm checkpoint bundles.
+    ///
+    /// Tranche 2 deliberately has no configurable path: one path rooted in
+    /// `runtime_state_dir` keeps ownership, deployment, and marker binding
+    /// unambiguous. No boot-side restore exists yet.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "wired by the LAN-337 checkpoint coordinator slice"
+    )]
+    pub fn warm_bundle_dir(&self) -> PathBuf {
+        self.runtime_state_dir().join("warm-bundle-v1")
+    }
+
     #[must_use]
     pub fn default_grpc_uds_path(&self) -> PathBuf {
         self.runtime_state_dir().join("grpc.sock")
