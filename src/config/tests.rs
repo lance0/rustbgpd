@@ -1343,6 +1343,71 @@ tcp_ao = [
     assert_eq!(ring.selected().unwrap().send_id, 2);
 }
 
+fn tcp_ao_test_keyring(key_count: usize) -> TcpAoKeyringConfig {
+    TcpAoKeyringConfig(
+        (0..key_count)
+            .map(|key_id| TcpAoConfig {
+                key: "secret".to_string(),
+                send_id: u8::try_from(key_id).expect("test keyring is bounded to 256 keys"),
+                recv_id: u8::try_from(key_id).expect("test keyring is bounded to 256 keys"),
+                algorithm: "hmac(sha256)".to_string(),
+                preferred: false,
+                deprecated: false,
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn tcp_ao_listener_capacity_is_bounded_independently_per_address_family() {
+    let mut config = parse(valid_toml()).unwrap();
+    config.neighbors.clear();
+    for owner_index in 1..=16 {
+        if owner_index <= 15 {
+            let mut ipv4 = test_neighbor(&format!("192.0.2.{owner_index}"), 65002);
+            ipv4.tcp_ao = Some(tcp_ao_test_keyring(256));
+            config.neighbors.push(ipv4);
+        }
+
+        let mut ipv6 = test_neighbor(&format!("2001:db8::{owner_index}"), 65002);
+        ipv6.tcp_ao = Some(tcp_ao_test_keyring(256));
+        config.neighbors.push(ipv6);
+    }
+    config
+        .peer_groups
+        .insert("dynamic-ao".to_string(), PeerGroupConfig::default());
+    config.dynamic_neighbors.push(DynamicNeighborConfig {
+        prefix: "198.51.100.0/24".to_string(),
+        peer_group: "dynamic-ao".to_string(),
+        remote_asn: 65002,
+        description: None,
+        tcp_ao: Some(tcp_ao_test_keyring(256)),
+    });
+    config
+        .validate()
+        .expect("4,096 MKTs in each address family must remain valid");
+
+    let mut over_limit = test_neighbor("192.0.2.250", 65002);
+    over_limit.tcp_ao = Some(tcp_ao_test_keyring(1));
+    config.neighbors.push(over_limit);
+    let err = config
+        .validate()
+        .expect_err("4,097 IPv4 listener MKTs must be rejected");
+    match err {
+        ConfigError::InvalidNeighborConfig {
+            address,
+            field,
+            reason,
+        } => {
+            assert_eq!(address, "IPv4 BGP listener");
+            assert_eq!(field, "tcp_ao");
+            assert!(reason.contains("4097"), "{reason}");
+            assert!(reason.contains("4096"), "{reason}");
+        }
+        other => panic!("expected aggregate TCP-AO listener error, got {other}"),
+    }
+}
+
 #[test]
 fn neighbor_tcp_ao_rejects_md5_conflicts() {
     let toml_str = r#"

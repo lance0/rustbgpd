@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
-use crate::config::TcpAoAlgorithm;
+use crate::config::{TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm};
 #[cfg(target_os = "linux")]
 use crate::config::{TcpAoConfig, TcpAoKeyring};
 use socket2::Socket;
@@ -391,8 +391,6 @@ const TCP_AO_KEYF_IFINDEX: u8 = 1 << 0;
 const TCP_AO_KEYF_EXCLUDE_OPT: u8 = 1 << 1;
 #[cfg(target_os = "linux")]
 const TCP_AO_KEY_QUERY_ATTEMPTS: usize = 3;
-#[cfg(target_os = "linux")]
-const TCP_AO_MAX_DUMP_KEYS: usize = 4096;
 
 /// Add a TCP-AO key to a socket.
 ///
@@ -612,10 +610,12 @@ where
             .map(|_| TcpAoGetSockOpt::zeroed())
             .collect::<Vec<_>>();
         let matched = query(&mut raw)?;
-        if matched > TCP_AO_MAX_DUMP_KEYS {
+        if matched > TCP_AO_MAX_INSPECT_KEYS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("TCP-AO key count {matched} exceeds safety limit {TCP_AO_MAX_DUMP_KEYS}"),
+                format!(
+                    "TCP-AO key count {matched} exceeds safety limit {TCP_AO_MAX_INSPECT_KEYS}"
+                ),
             ));
         }
         if matched > capacity {
@@ -1554,7 +1554,7 @@ mod tests {
 
     #[test]
     fn tcp_ao_get_keys_bounds_growth_and_retries() {
-        let err = get_tcp_ao_keys_with(|_| Ok(TCP_AO_MAX_DUMP_KEYS + 1))
+        let err = get_tcp_ao_keys_with(|_| Ok(TCP_AO_MAX_INSPECT_KEYS + 1))
             .err()
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);

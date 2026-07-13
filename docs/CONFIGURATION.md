@@ -594,6 +594,18 @@ the complete configured keyring. rustbgpd does not set the socket-wide
 `ao_required` bit because a shared BGP listener may also serve non-TCP-AO
 neighbors.
 
+Passive-open ownership is deterministic: an exact static neighbor takes
+precedence over every dynamic selector; otherwise the longest matching dynamic
+prefix owns the session (including dynamic `/32` and `/128` selectors). Because
+Linux may inherit MKTs from every protected selector covering an accepted peer,
+rustbgpd verifies the configured union of all such owners while requiring the
+current and RNext selection to belong to the resolved owner. Overlapping
+TCP-AO owners must have pairwise-disjoint SendID sets and pairwise-disjoint
+RecvID sets. Any overlap between TCP-AO and plaintext or MD5 configuration is
+rejected. Across all static and dynamic owners, each address family may install
+at most 4,096 listener MKTs; larger configurations are rejected before listener
+startup so accepted-socket inventory inspection remains complete.
+
 Linux TCP-AO MKTs are socket state, so adding, removing, editing, or reordering
 keyring entries is restart-required. On SIGHUP, rustbgpd pins the live neighbor
 back to the startup snapshot, reports `[[neighbors]].tcp_ao` as
@@ -928,9 +940,12 @@ Validation rules:
   and length) are rejected; overlapping ranges of *different* lengths are
   allowed and resolve by longest-prefix-match at accept time
 - a TCP-AO-protected range must satisfy the TCP-AO keyring validation above;
-  authentication-boundary overlap and ownership rules are validated across
-  dynamic ranges and static neighbors, and its peer group must not configure
-  MD5
+  static exact ownership precedes dynamic longest-prefix-match; every covering
+  protected owner's keyring is reconciled as one inherited union; overlapping
+  protected owners require disjoint SendID and RecvID sets; TCP-AO/plaintext or
+  TCP-AO/MD5 overlaps are rejected; and its peer group must not configure MD5
+- static and dynamic TCP-AO keyrings may contain at most 4,096 listener MKTs
+  per address family in aggregate
 
 ### Runtime management (gRPC / `rbgp`)
 

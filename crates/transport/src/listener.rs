@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
-use crate::config::{TcpAoConfig, TcpAoKeyring};
+use crate::config::{TCP_AO_MAX_INSPECT_KEYS, TcpAoConfig, TcpAoKeyring};
 use crate::socket_opts::TcpAoInfoSnapshot;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
@@ -398,6 +398,13 @@ fn accepted_tcp_ao_info_is_valid(
     require_nondeprecated_rnext: bool,
 ) -> bool {
     let selected_rnext = owner.config.selected().map(|key| key.recv_id);
+    let belongs_to_owner = |state: &&crate::TcpAoKeyState| {
+        owner.config.iter().any(|config| {
+            config.send_id == state.send_id
+                && config.recv_id == state.recv_id
+                && config.algorithm == state.algorithm
+        })
+    };
     let current = info
         .keys
         .iter()
@@ -406,6 +413,7 @@ fn accepted_tcp_ao_info_is_valid(
                 && key.prefix_len == owner.prefix_len
                 && key.is_current
                 && key.send_id == info.current_key
+                && belongs_to_owner(key)
         })
         .collect::<Vec<_>>();
     let rnext = info
@@ -416,6 +424,7 @@ fn accepted_tcp_ao_info_is_valid(
                 && key.peer == owner.peer
                 && key.prefix_len == owner.prefix_len
                 && key.recv_id == info.rnext_key
+                && belongs_to_owner(key)
                 && (!require_nondeprecated_rnext
                     || (!key.deprecated && selected_rnext == Some(key.recv_id)))
         })
@@ -460,6 +469,7 @@ fn bind_socket2_listener_with<F>(
 where
     F: FnMut(&Socket, &TcpAoListenerKey, &TcpAoConfig) -> std::io::Result<()>,
 {
+    validate_listener_tcp_ao_capacity(options)?;
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -484,6 +494,30 @@ where
 
     let std_listener: std::net::TcpListener = socket.into();
     TcpListener::from_std(std_listener)
+}
+
+fn validate_listener_tcp_ao_capacity(options: &ListenerSocketOptions) -> std::io::Result<()> {
+    let key_count = options
+        .tcp_ao_keys
+        .iter()
+        .try_fold(0usize, |count, owner| {
+            count.checked_add(owner.config.0.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TCP-AO listener key count overflow",
+                )
+            })
+        })?;
+    if key_count > TCP_AO_MAX_INSPECT_KEYS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "TCP-AO listener key count {key_count} exceeds inspection limit \
+                 {TCP_AO_MAX_INSPECT_KEYS}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn install_listener_tcp_ao_key(
@@ -540,6 +574,7 @@ mod tests {
 
     fn tcp_ao_owner() -> TcpAoListenerKey {
         let mut config = tcp_ao_config();
+        config.0[0].send_id = 7;
         config.0[0].recv_id = 9;
         TcpAoListenerKey {
             owner: TcpAoListenerOwnerKind::Static,
@@ -547,6 +582,36 @@ mod tests {
             prefix_len: 32,
             config,
         }
+    }
+
+    fn listener_options_with_key_count(key_count: usize) -> ListenerSocketOptions {
+        let tcp_ao_keys = (0..key_count.div_ceil(256))
+            .map(|owner_index| {
+                let owner_key_count = (key_count - owner_index * 256).min(256);
+                let config = (0..owner_key_count)
+                    .map(|key_id| TcpAoConfig {
+                        key: "secret".to_string(),
+                        send_id: u8::try_from(key_id).expect("owner key count is bounded to 256"),
+                        recv_id: u8::try_from(key_id).expect("owner key count is bounded to 256"),
+                        algorithm: TcpAoAlgorithm::HmacSha256,
+                        preferred: false,
+                        deprecated: false,
+                    })
+                    .collect();
+                TcpAoListenerKey {
+                    owner: TcpAoListenerOwnerKind::Static,
+                    peer: IpAddr::V4(Ipv4Addr::new(
+                        192,
+                        0,
+                        2,
+                        u8::try_from(owner_index + 1).expect("test owner index fits IPv4"),
+                    )),
+                    prefix_len: 32,
+                    config: TcpAoKeyring(config),
+                }
+            })
+            .collect();
+        ListenerSocketOptions { tcp_ao_keys }
     }
 
     fn tcp_ao_info(current_key: u8, pkt_good: u64) -> TcpAoInfoSnapshot {
@@ -891,6 +956,22 @@ mod tests {
         assert!(!accepted_tcp_ao_info_is_valid(&info, &owner, false));
     }
 
+    #[test]
+    fn protected_accept_same_selector_selection_must_match_static_owner_keyring() {
+        let owner = tcp_ao_owner();
+        let mut info = tcp_ao_info(2, 0);
+        info.has_rnext_key = true;
+        info.rnext_key = 10;
+        info.keys[0].send_id = 2;
+        info.keys[0].recv_id = 10;
+        assert_eq!(info.keys[0].peer, owner.peer);
+        assert_eq!(info.keys[0].prefix_len, owner.prefix_len);
+        assert!(
+            !accepted_tcp_ao_info_is_valid(&info, &owner, false),
+            "a same-selector dynamic owner's key must not satisfy static-owner selection"
+        );
+    }
+
     #[tokio::test]
     async fn bind_socket2_listener_installs_tcp_ao_keys_before_listen() {
         let installed = RefCell::new(Vec::new());
@@ -960,17 +1041,38 @@ mod tests {
         tokio::task::yield_now().await;
     }
 
+    #[test]
+    fn listener_tcp_ao_capacity_accepts_4096_and_rejects_4097_before_install() {
+        let at_limit = listener_options_with_key_count(TCP_AO_MAX_INSPECT_KEYS);
+        validate_listener_tcp_ao_capacity(&at_limit).expect("4,096 listener MKTs must be valid");
+
+        let over_limit = listener_options_with_key_count(TCP_AO_MAX_INSPECT_KEYS + 1);
+        let installed = RefCell::new(0usize);
+        let err = bind_socket2_listener_with(
+            "127.0.0.1:0".parse().unwrap(),
+            &over_limit,
+            |_socket, _key, _config| {
+                *installed.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect_err("4,097 listener MKTs must fail before socket programming");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("4097"), "{err}");
+        assert_eq!(*installed.borrow(), 0);
+    }
+
     /// Bounded privileged/kernel receipt for GitHub #158. Run on a Linux host
     /// with `CONFIG_TCP_AO=y`:
-    /// `cargo test -p rustbgpd-transport dynamic_prefix_tcp_ao_two_key_kernel_receipt -- --ignored`
+    /// `cargo test -p rustbgpd-transport overlapping_tcp_ao_owned_union_kernel_receipt -- --ignored`
     #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
     #[expect(
         clippy::too_many_lines,
-        reason = "privileged receipt covers the complete two-key kernel lifecycle"
+        reason = "privileged receipt covers overlapping owners and a two-key lifecycle"
     )]
-    async fn dynamic_prefix_tcp_ao_two_key_kernel_receipt() {
+    async fn overlapping_tcp_ao_owned_union_kernel_receipt() {
         use std::time::Duration;
 
         fn connect_from(
@@ -1000,19 +1102,27 @@ mod tests {
             Ok(socket)
         }
 
-        let config = TcpAoKeyring(vec![
+        let covering_config = TcpAoKeyring(vec![TcpAoConfig {
+            key: "kernel-receipt-covering-secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }]);
+        let static_config = TcpAoKeyring(vec![
             TcpAoConfig {
                 key: "kernel-receipt-old-secret".to_string(),
-                send_id: 1,
-                recv_id: 1,
+                send_id: 2,
+                recv_id: 2,
                 algorithm: TcpAoAlgorithm::HmacSha256,
                 preferred: false,
                 deprecated: true,
             },
             TcpAoConfig {
                 key: "kernel-receipt-next-secret".to_string(),
-                send_id: 2,
-                recv_id: 2,
+                send_id: 3,
+                recv_id: 3,
                 algorithm: TcpAoAlgorithm::HmacSha256,
                 preferred: true,
                 deprecated: false,
@@ -1023,12 +1133,20 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             accept_tx,
             ListenerSocketOptions {
-                tcp_ao_keys: vec![TcpAoListenerKey {
-                    owner: TcpAoListenerOwnerKind::Dynamic,
-                    peer: "127.0.0.0".parse().unwrap(),
-                    prefix_len: 24,
-                    config: config.clone(),
-                }],
+                tcp_ao_keys: vec![
+                    TcpAoListenerKey {
+                        owner: TcpAoListenerOwnerKind::Dynamic,
+                        peer: "127.0.0.0".parse().unwrap(),
+                        prefix_len: 24,
+                        config: covering_config,
+                    },
+                    TcpAoListenerKey {
+                        owner: TcpAoListenerOwnerKind::Static,
+                        peer: "127.0.0.2".parse().unwrap(),
+                        prefix_len: 32,
+                        config: static_config.clone(),
+                    },
+                ],
             },
         )
         .await
@@ -1036,7 +1154,7 @@ mod tests {
         let destination = listener.local_addr().unwrap();
         let task = tokio::spawn(listener.run());
 
-        let signed_config = config.clone();
+        let signed_config = static_config.clone();
         let signed = tokio::task::spawn_blocking(move || {
             connect_from(
                 "127.0.0.2".parse().unwrap(),
@@ -1056,34 +1174,56 @@ mod tests {
             "127.0.0.2".parse::<IpAddr>().unwrap()
         );
         let info = accepted.tcp_ao_info.as_ref().expect("accepted AO snapshot");
-        assert_eq!(info.current_key, 2);
-        assert_eq!(info.rnext_key, 2);
-        assert_eq!(info.keys.len(), 2, "GET_KEYS must return the complete ring");
-        for key in &info.keys {
-            assert_eq!(key.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
-            assert_eq!(key.prefix_len, 24);
-            assert_eq!(key.algorithm, TcpAoAlgorithm::HmacSha256);
-        }
-        let old = &info.keys[0];
-        assert_eq!((old.send_id, old.recv_id), (1, 1));
+        assert_eq!(info.current_key, 3);
+        assert_eq!(info.rnext_key, 3);
+        assert_eq!(
+            info.keys.len(),
+            3,
+            "GET_KEYS must return the complete covering-owner union"
+        );
+        let find_key = |peer: &str, prefix_len, send_id, recv_id| {
+            let peer = peer.parse::<IpAddr>().unwrap();
+            info.keys
+                .iter()
+                .find(|key| {
+                    key.peer == peer
+                        && key.prefix_len == prefix_len
+                        && key.send_id == send_id
+                        && key.recv_id == recv_id
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing GET_KEYS entry {peer}/{prefix_len} \
+                         send_id={send_id} recv_id={recv_id}: {:?}",
+                        info.keys
+                    )
+                })
+        };
+        let covering = find_key("127.0.0.0", 24, 1, 1);
+        assert_eq!(covering.algorithm, TcpAoAlgorithm::HmacSha256);
+        assert!(!covering.is_current);
+        assert!(!covering.is_rnext);
+        let old = find_key("127.0.0.2", 32, 2, 2);
+        assert_eq!(old.algorithm, TcpAoAlgorithm::HmacSha256);
         assert!(old.deprecated);
         assert!(!old.preferred);
         assert!(!old.is_current);
         assert!(!old.is_rnext);
-        let selected = &info.keys[1];
-        assert_eq!((selected.send_id, selected.recv_id), (2, 2));
+        let selected = find_key("127.0.0.2", 32, 3, 3);
+        assert_eq!(selected.algorithm, TcpAoAlgorithm::HmacSha256);
         assert!(selected.preferred);
         assert!(!selected.deprecated);
         assert!(selected.is_current);
         assert!(selected.is_rnext);
         let rendered = format!("{info:?}");
+        assert!(!rendered.contains("kernel-receipt-covering-secret"));
         assert!(!rendered.contains("kernel-receipt-old-secret"));
         assert!(!rendered.contains("kernel-receipt-next-secret"));
 
-        let mut mismatched = config.clone();
+        let mut mismatched = static_config.clone();
         mismatched.0[1].key = "kernel-receipt-wrong-secret".to_string();
         let protected_mismatch = tokio::task::spawn_blocking(move || {
-            connect_from("127.0.0.3".parse().unwrap(), destination, Some(&mismatched))
+            connect_from("127.0.0.2".parse().unwrap(), destination, Some(&mismatched))
         })
         .await
         .unwrap();
@@ -1093,7 +1233,7 @@ mod tests {
         );
 
         let protected_unsigned = tokio::task::spawn_blocking(move || {
-            connect_from("127.0.0.3".parse().unwrap(), destination, None)
+            connect_from("127.0.0.2".parse().unwrap(), destination, None)
         })
         .await
         .unwrap();

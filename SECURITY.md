@@ -59,7 +59,7 @@ input from the network. It runs under continuous fuzzing in CI.
 
 - **TCP MD5 (RFC 2385):** Supported. Linux only.
 - **GTSM (RFC 5082):** Supported. Configurable per peer.
-- **TCP-AO (RFC 5925):** Supported for static neighbors and direct dynamic-prefix listener keys on Linux (ADR-0062), including ordered startup keyrings, fail-closed accepted-socket inventory validation, and live API/CLI health. Keyring edits require a daemon restart; live rotation remains tracked in LAN-16 / #159.
+- **TCP-AO (RFC 5925):** Supported for static neighbors and direct dynamic-prefix listener keys on Linux (ADR-0062), including ordered startup keyrings, fail-closed accepted-socket owned-union validation, and live API/CLI health. Static-exact selection precedes dynamic longest-prefix-match; overlapping protected owners require directionally disjoint KeyIDs, AO/plaintext or AO/MD5 overlaps are rejected, and listener inventories are capped at 4,096 MKTs per address family. Keyring edits require a daemon restart; live rotation remains tracked in LAN-16 / #159.
 - **gRPC:** Unix domain socket by default (local-only). TCP listeners
   are opt-in via config. Per-listener bearer-token authentication is
   available via `token_file`. Native mTLS terminates in-process on TCP

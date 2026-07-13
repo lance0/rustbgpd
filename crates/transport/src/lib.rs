@@ -27,7 +27,10 @@ pub use session::export::fanout_bench_export_encoder;
 #[cfg(feature = "bench-internals")]
 pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 
-pub use config::{RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring, TransportConfig};
+pub use config::{
+    RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring,
+    TransportConfig,
+};
 pub use error::TransportError;
 pub use event_sink::{
     NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,

@@ -19,9 +19,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   within the keyring. The preferred key, or otherwise the first declared
   non-deprecated key, is selected for startup transmission while every key is
   installed and reconciled against the kernel. Partial installation and
-  accepted-socket inventory mismatches fail closed. Keyring changes, including
-  reordering, remain restart-required; live rotation remains tracked in
-  LAN-16 / #159. (LAN-389)
+  accepted-socket inventory mismatches fail closed. For passive opens, static
+  exact ownership precedes dynamic longest-prefix-match and the kernel
+  inventory must equal the union of every covering protected owner. Overlapping
+  owners require directionally disjoint SendID and RecvID sets;
+  TCP-AO/plaintext and TCP-AO/MD5 overlaps remain invalid. Listener inventories
+  are capped at 4,096 MKTs per address family so inspection cannot truncate a
+  valid configuration. Keyring changes, including reordering, remain
+  restart-required; live rotation remains tracked in LAN-16 / #159. (LAN-389)
 
 - **Narrow v1 route-server / route-reflector compatibility contract.** A
   machine-checked inventory now pins only the proven IPv4/IPv6 unicast RS/RR

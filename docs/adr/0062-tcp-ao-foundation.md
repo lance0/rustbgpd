@@ -110,9 +110,15 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
   feature skip M43 with a warning instead of failing unrelated dataplane gates.
 - Direct `[[dynamic_neighbors]].tcp_ao` installs a prefix keyring before listen,
-  rejects overlapping authentication boundaries, fails closed when accepted
-  socket inspection is missing or inconsistent, and pins protected edits until
-  restart. Runtime range CRUD cannot mutate or overlap a protected range.
+  fails closed when accepted socket inspection is missing or inconsistent, and
+  pins protected edits until restart. Static-exact ownership precedes dynamic
+  longest-prefix-match; Linux's inherited inventory is reconciled as the union
+  of every covering protected owner. Such owners may overlap only when their
+  SendID sets and RecvID sets are each pairwise disjoint. TCP-AO/plaintext and
+  TCP-AO/MD5 overlaps remain rejected. The aggregate listener inventory is
+  capped at 4,096 MKTs per address family so the bounded inspection path can
+  always verify it completely. Runtime range CRUD cannot mutate or overlap a
+  protected range.
 
 Ordered startup keyrings are now supported. A singleton retains the legacy
 table shape; multi-key rings are ordered arrays. The preferred key, or the

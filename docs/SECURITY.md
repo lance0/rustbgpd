@@ -206,8 +206,15 @@ never logged or exported. Protected-range reload and runtime CRUD remain
 restart-gated. Neighbor API/CLI queries refresh read-only TCP-AO KeyIDs,
 redacted MKT inventory, and cumulative verification counters from the live
 connected socket without exposing key material. Startup keyrings are
-supported; live rotation without restart (LAN-16 / #159) and metrics exposure
-of per-socket inspection remain deferred.
+supported. Static exact owners take precedence over dynamic longest-prefix
+matches; accepted sockets must expose the owned union of all covering protected
+selectors, while current and RNext selection must belong to the resolved owner.
+Overlapping TCP-AO owners require directionally disjoint SendID and RecvID sets;
+TCP-AO/plaintext and TCP-AO/MD5 overlaps are rejected. Config validation and
+transport binding enforce the same 4,096-MKT inspection ceiling independently
+for each listener address family, preventing a valid configuration from
+exceeding the fail-closed inspection path. Live rotation without restart
+(LAN-16 / #159) and metrics exposure of per-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 

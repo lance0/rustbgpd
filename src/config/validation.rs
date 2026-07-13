@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
+use rustbgpd_transport::TCP_AO_MAX_INSPECT_KEYS;
+
 use super::parse::{
     ChainDirection, parse_families, parse_named_policy, parse_neighbor_set, parse_policy,
     resolve_chain,
@@ -971,6 +973,8 @@ impl Config {
             }
         }
 
+        validate_tcp_ao_listener_capacity(self, &parsed_dynamic_prefixes)?;
+
         // Validate dynamic_neighbor_limit range
         if let Some(limit) = self.global.dynamic_neighbor_limit
             && (limit == 0 || limit > 5000)
@@ -1892,6 +1896,70 @@ fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoKeyringConfig) -> Result<
             field: "tcp_ao.deprecated".to_string(),
             reason: "at least one key must not be deprecated".to_string(),
         });
+    }
+    Ok(())
+}
+
+fn validate_tcp_ao_listener_capacity(
+    config: &Config,
+    parsed_dynamic_prefixes: &[(IpAddr, u8)],
+) -> Result<(), ConfigError> {
+    let mut ipv4_keys = 0usize;
+    let mut ipv6_keys = 0usize;
+    for neighbor in &config.neighbors {
+        let Some(tcp_ao) = &neighbor.tcp_ao else {
+            continue;
+        };
+        let address = neighbor
+            .address
+            .parse::<IpAddr>()
+            .expect("neighbor addresses were validated before TCP-AO capacity");
+        let count = if address.is_ipv4() {
+            &mut ipv4_keys
+        } else {
+            &mut ipv6_keys
+        };
+        *count =
+            count
+                .checked_add(tcp_ao.len())
+                .ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                    address: "BGP listener".to_string(),
+                    field: "tcp_ao".to_string(),
+                    reason: "aggregate TCP-AO listener key count overflow".to_string(),
+                })?;
+    }
+    for (range, (address, _prefix_len)) in
+        config.dynamic_neighbors.iter().zip(parsed_dynamic_prefixes)
+    {
+        let Some(tcp_ao) = &range.tcp_ao else {
+            continue;
+        };
+        let count = if address.is_ipv4() {
+            &mut ipv4_keys
+        } else {
+            &mut ipv6_keys
+        };
+        *count =
+            count
+                .checked_add(tcp_ao.len())
+                .ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                    address: "BGP listener".to_string(),
+                    field: "tcp_ao".to_string(),
+                    reason: "aggregate TCP-AO listener key count overflow".to_string(),
+                })?;
+    }
+
+    for (family, key_count) in [("IPv4", ipv4_keys), ("IPv6", ipv6_keys)] {
+        if key_count > TCP_AO_MAX_INSPECT_KEYS {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: format!("{family} BGP listener"),
+                field: "tcp_ao".to_string(),
+                reason: format!(
+                    "aggregate key count {key_count} exceeds accepted-socket inspection limit \
+                     {TCP_AO_MAX_INSPECT_KEYS}"
+                ),
+            });
+        }
     }
     Ok(())
 }

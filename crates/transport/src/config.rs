@@ -6,6 +6,15 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
 
+/// Maximum TCP-AO Master Key Tuples that may be installed on and inspected
+/// from one listener socket.
+///
+/// Linux reports the complete inherited MKT inventory for an accepted socket.
+/// Bounding the listener inventory to the inspection ceiling keeps the
+/// fail-closed accepted-socket reconciliation reachable for every valid
+/// configuration.
+pub const TCP_AO_MAX_INSPECT_KEYS: usize = 4096;
+
 /// Private AS removal mode for eBGP outbound `AS_PATH` manipulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemovePrivateAs {
