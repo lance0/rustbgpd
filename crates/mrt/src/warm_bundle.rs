@@ -13,8 +13,9 @@
 //!
 //! Publication fsyncs and renames the content-addressed MRT artifact before it
 //! atomically replaces `manifest.json`, the commit point, then fsyncs the
-//! directory. A failure before the manifest rename leaves the previous commit
-//! authoritative. A failure after it can expose only the complete new commit.
+//! directory. Any reported failure rolls back destination entries to the exact
+//! state observed before publication; only a successful return exposes the new
+//! commit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -24,7 +25,8 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nix::fcntl::{OFlag, open, openat, renameat};
+use nix::errno::Errno;
+use nix::fcntl::{OFlag, RenameFlags, open, openat, renameat2};
 use nix::sys::stat::Mode;
 use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
 use serde::{Deserialize, Serialize};
@@ -555,17 +557,8 @@ fn write_warm_bundle_inner(
         },
         view_route_counts,
     };
-    let mut encoded = serde_json::to_vec(&manifest).map_err(WarmBundleError::CorruptManifest)?;
-    encoded.push(b'\n');
-    let manifest_size = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
-    if manifest_size > MAX_WARM_BUNDLE_MANIFEST_BYTES {
-        return Err(WarmBundleError::FileTooLarge {
-            role: "manifest",
-            actual: manifest_size,
-            cap: MAX_WARM_BUNDLE_MANIFEST_BYTES,
-        });
-    }
-    write_atomic_at(
+    let encoded = encode_manifest_bounded(&manifest, MAX_WARM_BUNDLE_MANIFEST_BYTES)?;
+    let artifact_publication = write_atomic_at(
         directory,
         &manifest.snapshot.path,
         snapshot,
@@ -573,15 +566,106 @@ fn write_warm_bundle_inner(
         fault,
         budget,
     )?;
-    write_atomic_at(
+    if let Err(error) = write_atomic_at(
         directory,
         WARM_BUNDLE_MANIFEST_FILE,
         &encoded,
         AtomicRole::Manifest,
         fault,
         budget,
-    )?;
+    ) {
+        if artifact_publication == AtomicPublication::Created {
+            remove_committed_destination(directory, &manifest.snapshot.path)?;
+        }
+        return Err(error);
+    }
     Ok(manifest)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ManifestWriteFailure {
+    Limit { attempted: usize },
+    Allocation { attempted: usize },
+}
+
+struct BoundedManifestWriter {
+    bytes: Vec<u8>,
+    cap: usize,
+    failure: Option<ManifestWriteFailure>,
+}
+
+impl BoundedManifestWriter {
+    fn new(cap: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            cap,
+            failure: None,
+        }
+    }
+}
+
+impl io::Write for BoundedManifestWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        let attempted = self.bytes.len().checked_add(input.len()).ok_or_else(|| {
+            self.failure = Some(ManifestWriteFailure::Limit {
+                attempted: usize::MAX,
+            });
+            io::Error::other("manifest size overflow")
+        })?;
+        if attempted > self.cap {
+            self.failure = Some(ManifestWriteFailure::Limit { attempted });
+            return Err(io::Error::other("manifest size limit exceeded"));
+        }
+        if attempted > self.bytes.capacity() {
+            let target = attempted
+                .max(self.bytes.capacity().max(4096).saturating_mul(2))
+                .min(self.cap);
+            if self
+                .bytes
+                .try_reserve_exact(target.saturating_sub(self.bytes.len()))
+                .is_err()
+            {
+                self.failure = Some(ManifestWriteFailure::Allocation { attempted });
+                return Err(io::Error::other("manifest allocation failed"));
+            }
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_manifest_bounded(
+    manifest: &WarmBundleManifestV1,
+    cap: u64,
+) -> Result<Vec<u8>, WarmBundleError> {
+    let cap = usize::try_from(cap).map_err(|_| WarmBundleError::AllocationFailed {
+        role: "manifest",
+        requested: cap,
+    })?;
+    let mut writer = BoundedManifestWriter::new(cap);
+    let result = serde_json::to_writer(&mut writer, manifest)
+        .and_then(|()| io::Write::write_all(&mut writer, b"\n").map_err(serde_json::Error::io));
+    if let Err(error) = result {
+        return match writer.failure {
+            Some(ManifestWriteFailure::Limit { attempted }) => Err(WarmBundleError::FileTooLarge {
+                role: "manifest",
+                actual: u64::try_from(attempted).unwrap_or(u64::MAX),
+                cap: u64::try_from(cap).unwrap_or(u64::MAX),
+            }),
+            Some(ManifestWriteFailure::Allocation { attempted }) => {
+                Err(WarmBundleError::AllocationFailed {
+                    role: "manifest",
+                    requested: u64::try_from(attempted).unwrap_or(u64::MAX),
+                })
+            }
+            None => Err(WarmBundleError::CorruptManifest(error)),
+        };
+    }
+    Ok(writer.bytes)
 }
 
 fn validate_manifest(
@@ -1168,16 +1252,42 @@ enum AtomicRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicPublication {
+    Created,
+    Reused,
+    Replaced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultPoint {
     None,
     ArtifactWrite,
     ArtifactFileSync,
     ArtifactRename,
+    #[cfg(test)]
+    ArtifactCancelAfterFileSync,
+    #[cfg(test)]
+    ArtifactCancelAfterRename,
+    #[cfg(test)]
+    ArtifactCancelAfterDirSync,
     ArtifactDirSync,
     ManifestWrite,
     ManifestFileSync,
     ManifestRename,
+    #[cfg(test)]
+    ManifestCancelAfterFileSync,
+    #[cfg(test)]
+    ManifestCancelAfterRename,
+    #[cfg(test)]
+    ManifestCancelAfterDirSync,
     ManifestDirSync,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicBoundary {
+    FileSync,
+    Rename,
+    DirectorySync,
 }
 
 fn stage(role: AtomicRole, ordinal: u8) -> FaultPoint {
@@ -1201,6 +1311,63 @@ fn fail_if(selected: FaultPoint, current: FaultPoint) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+fn cancel_at_boundary_if(
+    selected: FaultPoint,
+    role: AtomicRole,
+    boundary: AtomicBoundary,
+) -> Result<(), WarmBundleError> {
+    if matches!(
+        (selected, role, boundary),
+        (
+            FaultPoint::ArtifactCancelAfterFileSync,
+            AtomicRole::Artifact,
+            AtomicBoundary::FileSync
+        ) | (
+            FaultPoint::ArtifactCancelAfterRename,
+            AtomicRole::Artifact,
+            AtomicBoundary::Rename
+        ) | (
+            FaultPoint::ArtifactCancelAfterDirSync,
+            AtomicRole::Artifact,
+            AtomicBoundary::DirectorySync
+        ) | (
+            FaultPoint::ManifestCancelAfterFileSync,
+            AtomicRole::Manifest,
+            AtomicBoundary::FileSync
+        ) | (
+            FaultPoint::ManifestCancelAfterRename,
+            AtomicRole::Manifest,
+            AtomicBoundary::Rename
+        ) | (
+            FaultPoint::ManifestCancelAfterDirSync,
+            AtomicRole::Manifest,
+            AtomicBoundary::DirectorySync
+        )
+    ) {
+        Err(WarmSnapshotBudgetError::Cancelled.into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "production and fault-injection builds share the transactional call site"
+)]
+fn cancel_at_boundary_if(
+    _selected: FaultPoint,
+    _role: AtomicRole,
+    _boundary: AtomicBoundary,
+) -> Result<(), WarmBundleError> {
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "atomic staging, publication, durability, and rollback form one transaction"
+)]
 fn write_atomic_at(
     directory: &WarmBundleDirectory,
     name: &str,
@@ -1208,10 +1375,11 @@ fn write_atomic_at(
     role: AtomicRole,
     fault: FaultPoint,
     budget: Option<&WarmSnapshotBudget>,
-) -> Result<(), WarmBundleError> {
+) -> Result<AtomicPublication, WarmBundleError> {
     let display = directory.display_path.join(name);
     let (temp_name, mut file) = create_temp(directory, name)?;
-    let result = (|| -> Result<(), WarmBundleError> {
+    let mut committed = None;
+    let result = (|| -> Result<AtomicPublication, WarmBundleError> {
         if let Some(budget) = budget {
             budget.check()?;
         }
@@ -1229,14 +1397,64 @@ fn write_atomic_at(
         fail_if(fault, stage(role, 1)).map_err(|source| io_error(&display, source))?;
         file.sync_all()
             .map_err(|source| io_error(&display, source))?;
+        cancel_at_boundary_if(fault, role, AtomicBoundary::FileSync)?;
         if let Some(budget) = budget {
             budget.check()?;
         }
         drop(file);
         fail_if(fault, stage(role, 2)).map_err(|source| io_error(&display, source))?;
-        renameat(&directory.file, temp_name.as_str(), &directory.file, name)
-            .map_err(errno_io)
-            .map_err(|source| io_error(&display, source))?;
+        let publication = match role {
+            AtomicRole::Artifact => match renameat2(
+                &directory.file,
+                temp_name.as_str(),
+                &directory.file,
+                name,
+                RenameFlags::RENAME_NOREPLACE,
+            ) {
+                Ok(()) => AtomicPublication::Created,
+                Err(Errno::EEXIST) => {
+                    verify_existing_entry(directory, name, bytes, budget)?;
+                    unlinkat(
+                        &directory.file,
+                        temp_name.as_str(),
+                        UnlinkatFlags::NoRemoveDir,
+                    )
+                    .map_err(errno_io)
+                    .map_err(|source| io_error(&display, source))?;
+                    directory
+                        .file
+                        .sync_all()
+                        .map_err(|source| io_error(&display, source))?;
+                    cancel_at_boundary_if(fault, role, AtomicBoundary::DirectorySync)?;
+                    return Ok(AtomicPublication::Reused);
+                }
+                Err(error) => return Err(io_error(&display, errno_io(error))),
+            },
+            AtomicRole::Manifest => match renameat2(
+                &directory.file,
+                temp_name.as_str(),
+                &directory.file,
+                name,
+                RenameFlags::RENAME_EXCHANGE,
+            ) {
+                Ok(()) => AtomicPublication::Replaced,
+                Err(Errno::ENOENT) => {
+                    renameat2(
+                        &directory.file,
+                        temp_name.as_str(),
+                        &directory.file,
+                        name,
+                        RenameFlags::RENAME_NOREPLACE,
+                    )
+                    .map_err(errno_io)
+                    .map_err(|source| io_error(&display, source))?;
+                    AtomicPublication::Created
+                }
+                Err(error) => return Err(io_error(&display, errno_io(error))),
+            },
+        };
+        committed = Some(publication);
+        cancel_at_boundary_if(fault, role, AtomicBoundary::Rename)?;
         if let Some(budget) = budget {
             budget.check()?;
         }
@@ -1245,19 +1463,144 @@ fn write_atomic_at(
             .file
             .sync_all()
             .map_err(|source| io_error(&display, source))?;
+        cancel_at_boundary_if(fault, role, AtomicBoundary::DirectorySync)?;
         if let Some(budget) = budget {
             budget.check()?;
         }
-        Ok(())
+        Ok(publication)
     })();
-    if result.is_err() {
+    let publication = match result {
+        Ok(publication) => publication,
+        Err(error) => {
+            if let Some(publication) = committed
+                && let Err(rollback_error) =
+                    rollback_atomic_destination(directory, name, &temp_name, publication)
+            {
+                return Err(rollback_error);
+            }
+            remove_temporary_entry(directory, &temp_name)?;
+            return Err(error);
+        }
+    };
+    if publication == AtomicPublication::Replaced {
+        // The exchange left the prior complete manifest at the temporary name.
+        // Its cleanup is not part of the new manifest's commit: after the new
+        // directory entry has been synced, failure to remove this hidden backup
+        // must not turn a successful durable commit into an error.
         let _ = unlinkat(
             &directory.file,
             temp_name.as_str(),
             UnlinkatFlags::NoRemoveDir,
         );
+        let _ = directory.file.sync_all();
     }
-    result
+    Ok(publication)
+}
+
+fn verify_existing_entry(
+    directory: &WarmBundleDirectory,
+    name: &str,
+    expected: &[u8],
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<(), WarmBundleError> {
+    let display = directory.display_path.join(name);
+    let mut file = open_entry(directory, name, "snapshot", OFlag::O_RDONLY, Mode::empty())?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| io_error(&display, source))?;
+    if metadata.len() != u64::try_from(expected.len()).unwrap_or(u64::MAX) {
+        return Err(io_error(
+            &display,
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing content-addressed artifact has the wrong length",
+            ),
+        ));
+    }
+    let mut offset = 0usize;
+    let mut chunk = [0u8; STREAM_BUFFER_BYTES];
+    while offset < expected.len() {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        let read = file
+            .read(&mut chunk)
+            .map_err(|source| io_error(&display, source))?;
+        if read == 0 || chunk[..read] != expected[offset..offset + read] {
+            return Err(io_error(
+                &display,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing content-addressed artifact bytes differ",
+                ),
+            ));
+        }
+        offset += read;
+    }
+    Ok(())
+}
+
+fn rollback_atomic_destination(
+    directory: &WarmBundleDirectory,
+    name: &str,
+    temp_name: &str,
+    publication: AtomicPublication,
+) -> Result<(), WarmBundleError> {
+    let display = directory.display_path.join(name);
+    match publication {
+        AtomicPublication::Created => {
+            unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir)
+                .map_err(errno_io)
+                .map_err(|source| io_error(&display, source))?;
+        }
+        AtomicPublication::Replaced => {
+            renameat2(
+                &directory.file,
+                temp_name,
+                &directory.file,
+                name,
+                RenameFlags::RENAME_EXCHANGE,
+            )
+            .map_err(errno_io)
+            .map_err(|source| io_error(&display, source))?;
+        }
+        AtomicPublication::Reused => return Ok(()),
+    }
+    directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(&display, source))?;
+    Ok(())
+}
+
+fn remove_committed_destination(
+    directory: &WarmBundleDirectory,
+    name: &str,
+) -> Result<(), WarmBundleError> {
+    let display = directory.display_path.join(name);
+    match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => {}
+        Err(error) => return Err(io_error(&display, errno_io(error))),
+    }
+    directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(&display, source))
+}
+
+fn remove_temporary_entry(
+    directory: &WarmBundleDirectory,
+    name: &str,
+) -> Result<(), WarmBundleError> {
+    let display = directory.display_path.join(name);
+    match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => {}
+        Err(error) => return Err(io_error(&display, errno_io(error))),
+    }
+    directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(&display, source))
 }
 
 fn create_temp(
@@ -1382,6 +1725,19 @@ mod tests {
         WarmBundleDirectory::open(dir.path()).unwrap()
     }
 
+    fn directory_image(dir: &tempfile::TempDir) -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn cancelled_bounded_writer_publishes_no_artifact_or_manifest() {
         let temp = tempfile::tempdir().unwrap();
@@ -1431,6 +1787,42 @@ mod tests {
             0,
             "oversized writer input must not publish an artifact, manifest, or temp file"
         );
+    }
+
+    #[test]
+    fn manifest_serialization_stops_at_the_eight_mib_cap() {
+        let mut id = identity();
+        id.views = (0..=u16::MAX)
+            .map(|suffix| WarmBundleViewV1 {
+                kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+                peer: IpAddr::V6(Ipv6Addr::from(
+                    0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + u128::from(suffix),
+                )),
+                peer_asn: 64_500,
+                peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+                family: WarmBundleFamilyV1::Ipv4Unicast,
+                add_path_receive: false,
+            })
+            .collect();
+        let manifest = WarmBundleManifestV1 {
+            format_version: WARM_BUNDLE_FORMAT_VERSION,
+            snapshot: WarmBundleArtifactV1 {
+                path: snapshot_name(SHA),
+                size_bytes: 0,
+                sha256: SHA.to_string(),
+            },
+            view_route_counts: vec![0; id.views.len()],
+            identity: id,
+        };
+
+        assert!(matches!(
+            encode_manifest_bounded(&manifest, MAX_WARM_BUNDLE_MANIFEST_BYTES),
+            Err(WarmBundleError::FileTooLarge {
+                role: "manifest",
+                actual,
+                cap: MAX_WARM_BUNDLE_MANIFEST_BYTES,
+            }) if actual > MAX_WARM_BUNDLE_MANIFEST_BYTES
+        ));
     }
 
     fn record(output: &mut Vec<u8>, subtype: u16, payload: &[u8]) {
@@ -2014,36 +2406,58 @@ mod tests {
     }
 
     #[test]
-    fn every_atomic_failure_has_an_old_or_complete_commit_point() {
+    fn every_atomic_failure_rolls_back_exact_destination_state() {
         for fault in [
             FaultPoint::ArtifactWrite,
             FaultPoint::ArtifactFileSync,
             FaultPoint::ArtifactRename,
+            FaultPoint::ArtifactCancelAfterFileSync,
+            FaultPoint::ArtifactCancelAfterRename,
+            FaultPoint::ArtifactCancelAfterDirSync,
             FaultPoint::ArtifactDirSync,
             FaultPoint::ManifestWrite,
             FaultPoint::ManifestFileSync,
             FaultPoint::ManifestRename,
+            FaultPoint::ManifestCancelAfterFileSync,
+            FaultPoint::ManifestCancelAfterRename,
+            FaultPoint::ManifestCancelAfterDirSync,
             FaultPoint::ManifestDirSync,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let dir = opened(&temp);
             let old = identity();
             publish(&dir, &old);
+            let before = directory_image(&temp);
             let mut next = old.clone();
             next.checkpoint_generation = "boot-42".to_string();
+            next.peer_index_table_view = "boot-42".to_string();
             next.snapshot_revision += 1;
             next.created_at_utc_seconds += 1;
             let result =
                 write_warm_bundle_inner(&dir, next.clone(), &valid_snapshot(&next), fault, None);
             assert!(result.is_err(), "{fault:?}");
-            if fault == FaultPoint::ManifestDirSync {
-                assert!(load_warm_bundle(&dir, &expected(&next), freshness()).is_ok());
-            } else {
-                assert!(
-                    load_warm_bundle(&dir, &expected(&old), freshness()).is_ok(),
-                    "{fault:?}"
-                );
-            }
+            assert_eq!(directory_image(&temp), before, "{fault:?}");
+            assert!(
+                load_warm_bundle(&dir, &expected(&old), freshness()).is_ok(),
+                "{fault:?}"
+            );
+
+            let empty = tempfile::tempdir().unwrap();
+            let empty_dir = opened(&empty);
+            let first = identity();
+            let result = write_warm_bundle_inner(
+                &empty_dir,
+                first.clone(),
+                &valid_snapshot(&first),
+                fault,
+                None,
+            );
+            assert!(result.is_err(), "first publication at {fault:?}");
+            assert_eq!(
+                directory_image(&empty),
+                BTreeMap::new(),
+                "first publication at {fault:?}"
+            );
         }
     }
 

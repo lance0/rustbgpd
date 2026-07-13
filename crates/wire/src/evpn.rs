@@ -547,7 +547,7 @@ impl EvpnRoute {
 ///
 /// EAD per-ES and EAD per-EVI share a wire format but get distinct variants
 /// here so the RIB never accidentally collapses them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EvpnRouteKey {
     /// Type 1 per-ES key.
     EadPerEs {
