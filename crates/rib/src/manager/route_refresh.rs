@@ -1170,6 +1170,7 @@ impl RibManager {
                 rtc_announce,
                 rtc_withdraw,
                 group_prior,
+                None,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());

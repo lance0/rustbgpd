@@ -831,6 +831,7 @@ impl RibManager {
                     vec![],
                     vec![],
                     group_prior,
+                    None,
                 ) {
                     warn!(%peer, "outbound channel full — VPN update deferred");
                     self.mark_outbound_dirty(peer);

@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use super::*;
@@ -88,6 +89,143 @@ impl ExactExportEncoder for MockExactExportEncoder {
     fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
         Arc::new(MockExactExportSnapshot {
             config: self.config.read().unwrap().clone(),
+            probed: Arc::clone(&self.probed),
+        })
+    }
+}
+
+struct ReusableExactExportEncoder {
+    owner_id: u64,
+    wire_profile: u64,
+    encoded_len: usize,
+    max_len: usize,
+    wrong_reuse_cardinality: bool,
+    probed: Arc<AtomicUsize>,
+}
+
+impl ReusableExactExportEncoder {
+    fn new(owner_id: u64, wire_profile: u64) -> Arc<Self> {
+        Arc::new(Self {
+            owner_id,
+            wire_profile,
+            encoded_len: 64,
+            max_len: 4_096,
+            wrong_reuse_cardinality: false,
+            probed: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn with_wrong_reuse_cardinality(owner_id: u64, wire_profile: u64) -> Arc<Self> {
+        Arc::new(Self {
+            owner_id,
+            wire_profile,
+            encoded_len: 64,
+            max_len: 4_096,
+            wrong_reuse_cardinality: true,
+            probed: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn with_limits(
+        owner_id: u64,
+        wire_profile: u64,
+        encoded_len: usize,
+        max_len: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            owner_id,
+            wire_profile,
+            encoded_len,
+            max_len,
+            wrong_reuse_cardinality: false,
+            probed: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn probe_count(&self) -> usize {
+        self.probed.load(Ordering::Relaxed)
+    }
+}
+
+struct ReusableExactExportSnapshot {
+    owner_id: u64,
+    wire_profile: u64,
+    encoded_len: usize,
+    max_len: usize,
+    wrong_reuse_cardinality: bool,
+    probed: Arc<AtomicUsize>,
+}
+
+impl ReusableExactExportSnapshot {
+    fn result_for_len(&self, encoded_len: usize) -> Result<ExactExportResult, ExactExportError> {
+        if encoded_len > self.max_len {
+            return Err(ExactExportError::new(
+                ExactExportErrorCode::MessageTooLong,
+                format_args!(
+                    "fixture UPDATE is {encoded_len} bytes; maximum is {} bytes",
+                    self.max_len
+                ),
+            ));
+        }
+        Ok(ExactExportResult {
+            encoded_len,
+            max_len: self.max_len,
+            generation: 1,
+        })
+    }
+}
+
+impl ExactExportSnapshot for ReusableExactExportSnapshot {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn generation(&self) -> u64 {
+        1
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        self.probed.fetch_add(1, Ordering::Relaxed);
+        self.result_for_len(self.encoded_len)
+    }
+
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        let source = source.as_any().downcast_ref::<Self>()?;
+        (self.wire_profile == source.wire_profile).then(|| {
+            if self.wrong_reuse_cardinality {
+                return Vec::new();
+            }
+            encoded_lengths
+                .iter()
+                .map(|encoded_len| self.result_for_len(*encoded_len))
+                .collect()
+        })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl ExactExportEncoder for ReusableExactExportEncoder {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
+        Arc::new(ReusableExactExportSnapshot {
+            owner_id: self.owner_id,
+            wire_profile: self.wire_profile,
+            encoded_len: self.encoded_len,
+            max_len: self.max_len,
+            wrong_reuse_cardinality: self.wrong_reuse_cardinality,
             probed: Arc::clone(&self.probed),
         })
     }
@@ -201,6 +339,38 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
         batch.labeled_withdraw,
         batch.rtc_announce,
         batch.rtc_withdraw,
+    )
+}
+
+fn commit_shared_unicast_with_cache(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    announce: Arc<[Route]>,
+    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    group_prior: HashSet<ExactExportKey>,
+    cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
+) -> bool {
+    manager.try_send_and_commit_outbound_update_with_group_prior(
+        peer,
+        next_hop_override,
+        announce,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        group_prior,
+        Some((7, cache)),
     )
 }
 
@@ -663,6 +833,187 @@ async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
         .await
         .unwrap();
     result.await.unwrap()
+}
+
+#[test]
+fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
+    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 40));
+    let limited = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let source_encoder = ReusableExactExportEncoder::with_limits(40, 77, 512, 4_096);
+    let limited_encoder = ReusableExactExportEncoder::with_limits(41, 77, 512, 128);
+    let mut manager = test_manager();
+    let mut source_rx = register_exact_target(&mut manager, source, source_encoder.clone());
+    let mut limited_rx = register_exact_target(&mut manager, limited, limited_encoder.clone());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24);
+    let route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 40));
+    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let route_identity = (route.prefix, route.path_id);
+    let announce: Arc<[Route]> = vec![route].into();
+    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+
+    assert!(commit_shared_unicast_with_cache(
+        &mut manager,
+        source,
+        Arc::clone(&announce),
+        Arc::clone(&next_hop_override),
+        HashSet::new(),
+        &mut cache,
+    ));
+    let source_update = source_rx.try_recv().unwrap();
+    assert_eq!(source_update.announce.len(), 1);
+    assert!(source_update.withdraw.is_empty());
+    assert_eq!(source_encoder.probe_count(), 1);
+
+    assert!(commit_shared_unicast_with_cache(
+        &mut manager,
+        limited,
+        Arc::clone(&announce),
+        Arc::clone(&next_hop_override),
+        HashSet::from([key.clone()]),
+        &mut cache,
+    ));
+    let limited_update = limited_rx.try_recv().unwrap();
+    assert!(limited_update.announce.is_empty());
+    assert_eq!(limited_update.withdraw, vec![route_identity]);
+    assert!(manager.peer_unexportable[&limited].contains(&key));
+    assert_eq!(
+        limited_encoder.probe_count(),
+        0,
+        "the limited target must reject by rechecking the cached encoded length"
+    );
+}
+
+#[tokio::test]
+async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let mut receivers = Vec::new();
+    let mut encoders = Vec::new();
+    for octet in 10..74 {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet));
+        let encoder = ReusableExactExportEncoder::new(u64::from(octet), u64::from(octet % 2));
+        receivers.push(peer_up_with_encoder(&tx, peer, encoder.clone()).await);
+        encoders.push(encoder);
+        assert_eq!(update_group(&tx, peer).await, "group:0");
+    }
+
+    let source = Ipv4Addr::new(198, 51, 100, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![make_route(prefix, source)],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert_eq!(
+        encoders
+            .iter()
+            .map(|encoder| encoder.probe_count())
+            .sum::<usize>(),
+        2,
+        "64 grouped members across two compatible wire profiles should require two encodes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    let b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 21));
+    let encoder_a = MockExactExportEncoder::accepting(41);
+    let encoder_b = MockExactExportEncoder::accepting(41);
+    let mut receiver_a = peer_up_with_encoder(&tx, a, encoder_a.clone()).await;
+    let mut receiver_b = peer_up_with_encoder(&tx, b, encoder_b.clone()).await;
+    assert_eq!(update_group(&tx, a).await, "group:0");
+    assert_eq!(update_group(&tx, b).await, "group:0");
+
+    let source = Ipv4Addr::new(198, 51, 100, 2);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![make_route(prefix, source)],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(receiver_a.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(receiver_b.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        encoder_a.probed().len() + encoder_b.probed().len(),
+        2,
+        "the trait's default refusal must preserve one exact probe per member"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    let b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let encoder_a = ReusableExactExportEncoder::with_wrong_reuse_cardinality(30, 9);
+    let encoder_b = ReusableExactExportEncoder::with_wrong_reuse_cardinality(31, 9);
+    let mut receiver_a = peer_up_with_encoder(&tx, a, encoder_a.clone()).await;
+    let mut receiver_b = peer_up_with_encoder(&tx, b, encoder_b.clone()).await;
+    assert_eq!(update_group(&tx, a).await, "group:0");
+    assert_eq!(update_group(&tx, b).await, "group:0");
+
+    let source = Ipv4Addr::new(198, 51, 100, 3);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![make_route(prefix, source)],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(receiver_a.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(receiver_b.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        encoder_a.probe_count() + encoder_b.probe_count(),
+        2,
+        "wrong reuse cardinality must fall back to each target's exact batch probe"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 #[tokio::test]

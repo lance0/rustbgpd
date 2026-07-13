@@ -584,6 +584,24 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
             .collect()
     }
 
+    /// Reapply this target snapshot's ceiling and generation to successful
+    /// exact probes produced by `source`.
+    ///
+    /// Implementations must return `None` unless they can prove that both
+    /// snapshots produce identical wire bytes for the same candidate after
+    /// excluding only the target-owned message ceiling and identity fields.
+    /// Probe failures are deliberately not representable here: callers may
+    /// reuse only encoded lengths from successful source probes. The returned
+    /// vector must preserve the input lengths' cardinality and order.
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        let _ = (source, encoded_lengths);
+        None
+    }
+
     /// Concrete type hook used by the owning transport at the trust boundary.
     fn as_any(&self) -> &dyn Any;
 }

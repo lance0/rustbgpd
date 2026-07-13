@@ -45,6 +45,219 @@ mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
 
+/// Maximum wire-equivalence cohorts retained for one update group.
+///
+/// Eight covers the small set of negotiated/profile variants expected inside
+/// one staging group while placing a strict bound on both retained encoded
+/// lengths and compatibility checks for adversarially heterogeneous peers.
+const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
+
+/// Successful exact-export probes for one update-group's shared unicast
+/// payload. Entries live for one [`RibManager::distribute_changes`] pass only.
+///
+/// Pointer identity is deliberate: the group staging path builds one aligned
+/// pair of `Arc` slices and clones those exact Arcs into ordinary clean
+/// members. Content-equal per-peer/resync vectors must not enter this cache.
+/// The outer group-id buckets prevent unrelated groups from contributing to a
+/// target's bounded compatibility scan.
+#[derive(Default)]
+pub(in crate::manager) struct SharedUnicastProbeCache {
+    groups: HashMap<usize, Vec<SharedUnicastProbeCacheEntry>>,
+}
+
+struct SharedUnicastProbeCacheEntry {
+    announce: Arc<[crate::route::Route]>,
+    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    source_snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
+    encoded_lengths: Vec<usize>,
+}
+
+impl SharedUnicastProbeCache {
+    fn entry_matches_payload(
+        entry: &SharedUnicastProbeCacheEntry,
+        announce: &Arc<[crate::route::Route]>,
+        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    ) -> bool {
+        Arc::ptr_eq(&entry.announce, announce)
+            && Arc::ptr_eq(&entry.next_hop_override, next_hop_override)
+    }
+
+    fn recheck(
+        &self,
+        group_id: usize,
+        announce: &Arc<[crate::route::Route]>,
+        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        target: &dyn crate::update::ExactExportSnapshot,
+    ) -> Option<Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>>
+    {
+        self.groups
+            .get(&group_id)?
+            .iter()
+            .filter(|entry| Self::entry_matches_payload(entry, announce, next_hop_override))
+            .find_map(|entry| {
+                let results = target.reuse_successful_probes(
+                    entry.source_snapshot.as_ref(),
+                    &entry.encoded_lengths,
+                )?;
+                (results.len() == entry.encoded_lengths.len()).then_some(results)
+            })
+    }
+
+    fn store(
+        &mut self,
+        group_id: usize,
+        announce: Arc<[crate::route::Route]>,
+        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        source_snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
+        encoded_lengths: Vec<usize>,
+    ) {
+        let group_entries = self.groups.entry(group_id).or_default();
+        if group_entries.len() >= MAX_SHARED_UNICAST_PROBE_COHORTS {
+            return;
+        }
+        group_entries.push(SharedUnicastProbeCacheEntry {
+            announce,
+            next_hop_override,
+            source_snapshot,
+            encoded_lengths,
+        });
+    }
+}
+
+#[cfg(test)]
+mod shared_unicast_probe_cache_tests {
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::update::{
+        ExactExportCandidate, ExactExportError, ExactExportResult, ExactExportSnapshot,
+    };
+
+    struct RefusingSnapshot {
+        profile: u64,
+        rechecks: Arc<AtomicUsize>,
+    }
+
+    impl ExactExportSnapshot for RefusingSnapshot {
+        fn owner_id(&self) -> u64 {
+            self.profile
+        }
+
+        fn generation(&self) -> u64 {
+            1
+        }
+
+        fn probe_announcement(
+            &self,
+            _candidate: ExactExportCandidate<'_>,
+        ) -> Result<ExactExportResult, ExactExportError> {
+            Ok(ExactExportResult {
+                encoded_len: 64,
+                max_len: 4_096,
+                generation: 1,
+            })
+        }
+
+        fn reuse_successful_probes(
+            &self,
+            source: &dyn ExactExportSnapshot,
+            _encoded_lengths: &[usize],
+        ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+            self.rechecks.fetch_add(1, Ordering::Relaxed);
+            let source = source.as_any().downcast_ref::<Self>()?;
+            (self.profile == source.profile).then(Vec::new)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn shared_payload_cohort_storage_and_rechecks_are_strictly_bounded() {
+        let announce: Arc<[crate::route::Route]> = Vec::new().into();
+        let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = Vec::new().into();
+        let mut cache = SharedUnicastProbeCache::default();
+
+        for profile in 0..(MAX_SHARED_UNICAST_PROBE_COHORTS + 5) {
+            cache.store(
+                7,
+                Arc::clone(&announce),
+                Arc::clone(&next_hop_override),
+                Arc::new(RefusingSnapshot {
+                    profile: u64::try_from(profile).unwrap(),
+                    rechecks: Arc::new(AtomicUsize::new(0)),
+                }),
+                vec![64],
+            );
+        }
+        assert_eq!(cache.groups[&7].len(), MAX_SHARED_UNICAST_PROBE_COHORTS);
+        let different_next_hop: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+        cache.store(
+            7,
+            Arc::clone(&announce),
+            Arc::clone(&different_next_hop),
+            Arc::new(RefusingSnapshot {
+                profile: 99,
+                rechecks: Arc::new(AtomicUsize::new(0)),
+            }),
+            vec![64],
+        );
+        assert_eq!(
+            cache.groups[&7].len(),
+            MAX_SHARED_UNICAST_PROBE_COHORTS,
+            "the cap applies to the whole group bucket, even for another payload Arc pair"
+        );
+
+        for group_id in 100..164 {
+            cache.store(
+                group_id,
+                Arc::clone(&announce),
+                Arc::clone(&next_hop_override),
+                Arc::new(RefusingSnapshot {
+                    profile: u64::try_from(group_id).unwrap(),
+                    rechecks: Arc::new(AtomicUsize::new(0)),
+                }),
+                vec![64],
+            );
+        }
+        assert_eq!(cache.groups.len(), 65);
+        assert!(
+            cache
+                .groups
+                .iter()
+                .all(|(group_id, entries)| *group_id == 7 || entries.len() == 1)
+        );
+
+        let rechecks = Arc::new(AtomicUsize::new(0));
+        let target = RefusingSnapshot {
+            profile: u64::MAX,
+            rechecks: Arc::clone(&rechecks),
+        };
+        assert!(
+            cache
+                .recheck(7, &announce, &next_hop_override, &target)
+                .is_none()
+        );
+        assert_eq!(
+            rechecks.load(Ordering::Relaxed),
+            MAX_SHARED_UNICAST_PROBE_COHORTS,
+            "an incompatible target must inspect no more than the retained cohort cap"
+        );
+        assert!(
+            cache
+                .recheck(100, &announce, &next_hop_override, &target)
+                .is_none()
+        );
+        assert_eq!(
+            rechecks.load(Ordering::Relaxed),
+            MAX_SHARED_UNICAST_PROBE_COHORTS + 1,
+            "a lookup must inspect only the requested group-id bucket"
+        );
+    }
+}
+
 /// RFC 9494 §4.4 export restriction: an LLGR-stale route "SHOULD NOT be
 /// advertised to any neighbor from which the Long-Lived Graceful Restart
 /// Capability has not been received". For an eBGP target that means
@@ -546,6 +759,7 @@ impl RibManager {
             rtc_announce,
             rtc_withdraw,
             HashSet::new(),
+            None,
         )
     }
 
@@ -575,6 +789,7 @@ impl RibManager {
         mut rtc_announce: Vec<crate::route::RtcRibRoute>,
         mut rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
         group_prior: HashSet<crate::update::ExactExportKey>,
+        mut shared_unicast_probe_cache: Option<(usize, &mut SharedUnicastProbeCache)>,
     ) -> bool {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
@@ -733,21 +948,81 @@ impl RibManager {
                     .iter()
                     .map(ExactExportCandidate::key)
                     .collect::<Vec<_>>();
-                let results = snapshot.probe_announcements(&candidates);
-                let results = if results.len() == candidates.len() {
+                // Ordinary clean update-group members receive Arc clones of
+                // one shared unicast payload. Reuse a prior member's
+                // successful encoded lengths only when the concrete target
+                // snapshot proves it can safely recheck them. Mixed-family
+                // envelopes stay on the ordinary exact batch path so result
+                // ordering remains unchanged.
+                let has_non_unicast_payload = !flowspec_announce.is_empty()
+                    || !flowspec_withdraw.is_empty()
+                    || !evpn_announce.is_empty()
+                    || !evpn_withdraw.is_empty()
+                    || !bgpls_announce.is_empty()
+                    || !bgpls_withdraw.is_empty()
+                    || !vpn_announce.is_empty()
+                    || !vpn_withdraw.is_empty()
+                    || !labeled_announce.is_empty()
+                    || !labeled_withdraw.is_empty()
+                    || !rtc_announce.is_empty()
+                    || !rtc_withdraw.is_empty();
+                let cache_eligible = !announce.is_empty()
+                    && candidates.len() == announce.len()
+                    && !has_non_unicast_payload
+                    && shared_unicast_probe_cache.is_some();
+                let reused_results = cache_eligible
+                    .then(|| {
+                        shared_unicast_probe_cache
+                            .as_mut()
+                            .and_then(|(group_id, cache)| {
+                                cache.recheck(
+                                    *group_id,
+                                    &announce,
+                                    &next_hop_override,
+                                    snapshot.as_ref(),
+                                )
+                            })
+                    })
+                    .flatten();
+                let results = if let Some(results) = reused_results {
+                    debug_assert_eq!(results.len(), candidates.len());
                     results
                 } else {
-                    warn!(
-                        %peer,
-                        expected = candidates.len(),
-                        actual = results.len(),
-                        "exact export batch probe violated its result cardinality contract — falling back to fail-closed scalar probes"
-                    );
-                    candidates
-                        .iter()
-                        .copied()
-                        .map(|candidate| snapshot.probe_announcement(candidate))
-                        .collect()
+                    let batch_results = snapshot.probe_announcements(&candidates);
+                    let cardinality_correct = batch_results.len() == candidates.len();
+                    let results = if cardinality_correct {
+                        batch_results
+                    } else {
+                        warn!(
+                            %peer,
+                            expected = candidates.len(),
+                            actual = batch_results.len(),
+                            "exact export batch probe violated its result cardinality contract — falling back to fail-closed scalar probes"
+                        );
+                        candidates
+                            .iter()
+                            .copied()
+                            .map(|candidate| snapshot.probe_announcement(candidate))
+                            .collect()
+                    };
+                    if cache_eligible && cardinality_correct && results.iter().all(Result::is_ok) {
+                        let encoded_lengths = results
+                            .iter()
+                            .filter_map(|result| {
+                                result.as_ref().ok().map(|result| result.encoded_len)
+                            })
+                            .collect();
+                        if let Some((group_id, cache)) = shared_unicast_probe_cache.as_mut() {
+                            cache.store(
+                                *group_id,
+                                Arc::clone(&announce),
+                                Arc::clone(&next_hop_override),
+                                Arc::clone(snapshot),
+                                encoded_lengths,
+                            );
+                        }
+                    }
+                    results
                 };
                 (candidate_keys, results)
             };
@@ -1670,6 +1945,7 @@ impl RibManager {
         // matrix; disqualified peers take the per-peer staging path
         // exactly as before.
         let group_stage = self.stage_update_groups(best_changed, &mut export_memo);
+        let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         for peer in peers {
             let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
@@ -2486,6 +2762,7 @@ impl RibManager {
                 shared_unicast.is_none() || (announce.is_empty() && nh_override_flags.is_empty()),
                 "shared group payload must not coexist with per-peer staged unicast"
             );
+            let shared_unicast_cache_group = shared_unicast.as_ref().and(member_of);
             let (announce, nh_override_flags): super::update_groups::SharedUnicastPayload =
                 match shared_unicast {
                     Some(shared) => shared,
@@ -2608,6 +2885,7 @@ impl RibManager {
                     rtc_announce,
                     rtc_withdraw,
                     group_prior,
+                    shared_unicast_cache_group.map(|gid| (gid, &mut shared_unicast_probe_cache)),
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,

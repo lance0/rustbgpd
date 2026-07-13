@@ -85,6 +85,23 @@ impl std::fmt::Debug for SessionExportProfile {
 }
 
 impl SessionExportProfile {
+    /// Whether two profiles produce identical bytes for the same candidate.
+    ///
+    /// Snapshot identity, generation, and the negotiated message ceiling do
+    /// not affect the bytes. Cloning and normalizing those fields before using
+    /// the derived full-struct equality keeps newly-added wire inputs in this
+    /// proof by default instead of requiring a parallel allow-list.
+    fn has_same_wire_encoding(&self, other: &Self) -> bool {
+        let mut this = self.clone();
+        let mut other = other.clone();
+        for profile in [&mut this, &mut other] {
+            profile.owner_id = 0;
+            profile.generation = 0;
+            profile.extended_messages = false;
+        }
+        this == other
+    }
+
     pub(super) fn capture(session: &PeerSession) -> Self {
         let local_addr = session
             .read_half
@@ -1760,6 +1777,41 @@ impl ExactExportSnapshot for SessionExportProfile {
             .collect()
     }
 
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        let source = source.as_any().downcast_ref::<Self>()?;
+        if !self.has_same_wire_encoding(source) {
+            return None;
+        }
+
+        let max_len = self.max_message_len();
+        Some(
+            encoded_lengths
+                .iter()
+                .copied()
+                .map(|encoded_len| {
+                    if encoded_len > max_len {
+                        Err(ExactExportError::new(
+                            ExactExportErrorCode::MessageTooLong,
+                            format_args!(
+                                "encoded UPDATE is {encoded_len} bytes; negotiated maximum is {max_len} bytes"
+                            ),
+                        ))
+                    } else {
+                        Ok(ExactExportResult {
+                            encoded_len,
+                            max_len,
+                            generation: self.generation,
+                        })
+                    }
+                })
+                .collect(),
+        )
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -2076,6 +2128,130 @@ mod tests {
         assert_eq!(result.generation, snapshot.generation());
         assert!(result.encoded_len <= result.max_len);
         assert!(snapshot.as_any().is::<SessionExportProfile>());
+    }
+
+    #[test]
+    fn successful_exact_probe_reuse_reowns_identity_generation_and_ceiling() {
+        let config = config_with_auth_secret("not-retained");
+        let mut source = SessionExportProfile::initial(&config, None, false);
+        source.owner_id = 11;
+        source.generation = 3;
+        let mut target = source.clone();
+        target.owner_id = 29;
+        target.generation = 17;
+
+        let reused = target
+            .reuse_successful_probes(&source, &[1_234, 2_345])
+            .expect("identity-only differences preserve wire equivalence");
+
+        assert_eq!(
+            reused,
+            vec![
+                Ok(ExactExportResult {
+                    encoded_len: 1_234,
+                    max_len: usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                    generation: 17,
+                }),
+                Ok(ExactExportResult {
+                    encoded_len: 2_345,
+                    max_len: usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                    generation: 17,
+                }),
+            ],
+            "batch order and cardinality are preserved with target-owned metadata"
+        );
+    }
+
+    #[test]
+    fn successful_extended_probe_reuse_reapplies_smaller_target_ceiling() {
+        let config = config_with_auth_secret("not-retained");
+        let mut source = SessionExportProfile::initial(&config, None, false);
+        source.extended_messages = true;
+        source.owner_id = 11;
+        source.generation = 3;
+        let mut target = source.clone();
+        target.extended_messages = false;
+        target.owner_id = 29;
+        target.generation = 17;
+        let encoded_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN) + 1;
+
+        let error = target
+            .reuse_successful_probes(&source, &[encoded_len])
+            .expect("the message ceiling does not affect encoded bytes")
+            .pop()
+            .expect("one source length produces one target result")
+            .expect_err("the successful 64K probe must be rejected by a 4K target");
+
+        assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
+        assert!(error.detail().contains(&encoded_len.to_string()));
+        assert!(
+            error
+                .detail()
+                .contains(&rustbgpd_wire::MAX_MESSAGE_LEN.to_string())
+        );
+    }
+
+    #[test]
+    fn failed_source_probe_exposes_no_reusable_encoded_length() {
+        let config = config_with_auth_secret("not-retained");
+        let source = SessionExportProfile::initial(&config, None, false);
+        let mut target = source.clone();
+        target.extended_messages = true;
+        let source_result: Result<ExactExportResult, ExactExportError> =
+            Err(ExactExportError::new(
+                ExactExportErrorCode::MessageTooLong,
+                "source 4K ceiling rejected the candidate",
+            ));
+
+        let reused = source_result.ok().and_then(|successful| {
+            target.reuse_successful_probes(&source, &[successful.encoded_len])
+        });
+
+        assert!(
+            reused.is_none(),
+            "a failed source probe has no successful length to cache or reuse"
+        );
+    }
+
+    #[test]
+    fn successful_exact_probe_reuse_refuses_wire_profile_differences() {
+        type ProfileMutation = fn(&mut SessionExportProfile);
+
+        let config = config_with_auth_secret("not-retained");
+        let target = SessionExportProfile::initial(&config, None, false);
+        let cases: [(&str, ProfileMutation); 8] = [
+            ("local ASN", |profile| profile.local_asn += 1),
+            ("router ID", |profile| {
+                profile.local_router_id = Ipv4Addr::new(192, 0, 2, 99);
+            }),
+            ("route-server mode", |profile| {
+                profile.route_server_client = !profile.route_server_client;
+            }),
+            ("four-octet ASN encoding", |profile| {
+                profile.four_octet_as = !profile.four_octet_as;
+            }),
+            ("extended next hop", |profile| {
+                profile.extended_nexthop_ipv4 = !profile.extended_nexthop_ipv4;
+            }),
+            ("Add-Path", |profile| {
+                profile.add_path_send_families = Arc::from(vec![(Afi::Ipv4, Safi::Unicast)]);
+            }),
+            ("local address", |profile| {
+                profile.local_addr = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)));
+            }),
+            ("graceful shutdown", |profile| {
+                profile.advertise_graceful_shutdown = !profile.advertise_graceful_shutdown;
+            }),
+        ];
+
+        for (name, mutate) in cases {
+            let mut source = target.clone();
+            mutate(&mut source);
+            assert!(
+                target.reuse_successful_probes(&source, &[1_234]).is_none(),
+                "must not reuse across a {name} difference"
+            );
+        }
     }
 
     #[test]
