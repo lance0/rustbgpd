@@ -283,7 +283,9 @@ surface. When multiple mechanisms apply, its primary-label precedence is
 `ADD_PATH` > `PER_CLIENT_BEST` > `ORR` > `SINGLE_BEST`. It is `UNKNOWN` when the
 peer has no active outbound registration; `UNSPECIFIED` remains the
 backward-compatible value returned by older servers. This field is independent
-of the diagnostic `update_group` label.
+of the diagnostic `update_group` label. A peer eligible for both per-client-best
+and ORR reports `PER_CLIENT_BEST` because it is the primary label; that value
+does not mean its configured ORR vantage is inactive.
 
 `NeighborState.selection_deferral` is empty on a cold start. During a planned,
 marker-backed RFC 4724 restart it reports one row per frozen address-family

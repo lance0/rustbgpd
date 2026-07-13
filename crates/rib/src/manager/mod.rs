@@ -1072,6 +1072,17 @@ impl RibManager {
             return 0;
         }
         let family = prefix_family(prefix);
+        // The exact family map is subordinate to the negotiated Add-Path
+        // send set. Keep this check ahead of the map lookup so a malformed
+        // cross-crate payload can never enable Add-Path for an unnegotiated
+        // family in release builds.
+        if !self
+            .peer_add_path_send_families
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family))
+        {
+            return 0;
+        }
         if let Some(limit) = self
             .peer_add_path_send_limits
             .get(&peer)
@@ -1079,15 +1090,7 @@ impl RibManager {
         {
             return *limit;
         }
-        if self
-            .peer_add_path_send_families
-            .get(&peer)
-            .is_some_and(|families| families.contains(&family))
-        {
-            send_max
-        } else {
-            0
-        }
+        send_max
     }
 
     /// Resolve the export policy for a peer: per-peer if set, else global.
@@ -1286,7 +1289,31 @@ impl RibManager {
                 // reconfiguration surface (a decrease requires a new session
                 // so excess advertised path IDs are withdrawn by teardown).
                 if self.outbound_session_ids.get(&peer).copied() == Some(session_id) {
-                    let new_limits: HashMap<_, _> = limits.into_iter().collect();
+                    let send_families = self
+                        .peer_add_path_send_families
+                        .get(&peer)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut rejected_families = Vec::new();
+                    let new_limits: HashMap<_, _> = limits
+                        .into_iter()
+                        .filter(|(family, _)| {
+                            let accepted = send_families.contains(family);
+                            if !accepted {
+                                rejected_families.push(*family);
+                            }
+                            accepted
+                        })
+                        .collect();
+                    if !rejected_families.is_empty() {
+                        rejected_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                        rejected_families.dedup();
+                        warn!(
+                            %peer,
+                            ?rejected_families,
+                            "ignoring Paths-Limit entries outside the negotiated Add-Path send families"
+                        );
+                    }
                     let scalar_limit = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
                     let effective_limit_changed = self
                         .peer_add_path_send_families
