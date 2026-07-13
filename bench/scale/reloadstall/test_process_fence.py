@@ -66,7 +66,7 @@ class ProcessFenceTests(unittest.TestCase):
                 20,
                 1,
                 "new_benchmark",
-                "/home/lance/projects/rustbgpd-next/target/release/new_benchmark",
+                "/work/rustbgpd-next/target/release/new_benchmark",
             )
         )
         self.assertEqual(found[0][1], "rustbgpd-root-executable")
