@@ -607,12 +607,11 @@ fn write_warm_bundle_inner(
 /// Remove only names created by this module, after the manifest commit is
 /// durable. Unknown entries are deliberately left alone. The current
 /// manifest's exact content-addressed snapshot is never a cleanup candidate.
-#[cfg_attr(not(test), allow(unused_variables))]
 fn cleanup_committed_bundle(
     directory: &WarmBundleDirectory,
     current_snapshot: &str,
     committed_manifest: &[u8],
-    fault: FaultPoint,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
     budget: Option<&WarmSnapshotBudget>,
 ) -> Result<u64, WarmBundleError> {
     #[cfg(test)]
@@ -1503,13 +1502,12 @@ fn cancel_at_boundary_if(
     clippy::too_many_lines,
     reason = "atomic staging, publication, durability, and rollback form one transaction"
 )]
-#[cfg_attr(not(test), allow(unused_variables))]
 fn write_atomic_at(
     directory: &WarmBundleDirectory,
     name: &str,
     bytes: &[u8],
     role: AtomicRole,
-    fault: FaultPoint,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
     budget: Option<&WarmSnapshotBudget>,
 ) -> Result<AtomicPublication, WarmBundleError> {
     let display = directory.display_path.join(name);
