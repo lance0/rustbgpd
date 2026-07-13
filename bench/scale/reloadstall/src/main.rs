@@ -684,9 +684,13 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 /// trailing gap to e_us only when `trailing` is set (control windows).
 fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 {
     let ev = ctx.obs[i].events.lock().unwrap();
+    max_gap_ms_for_events(&ev, s_us, e_us, trailing)
+}
+
+fn max_gap_ms_for_events(ev: &[Event], s_us: u64, e_us: u64, trailing: bool) -> f64 {
     let mut last = s_us;
     let mut max_gap = 0u64;
-    for e in ev.iter() {
+    for e in ev {
         if e.t_us < s_us {
             continue;
         }
@@ -966,48 +970,66 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            let (active_min, active_max, completed_observers) = ctx
-                .obs
-                .iter()
-                .map(|observer| {
-                    let generation = observer.generation.lock().unwrap();
-                    (generation.active, generation.complete())
-                })
-                .fold((u64::MAX, 0, 0usize), |(min, max, completed), row| {
-                    (
-                        min.min(row.0),
-                        max.max(row.0),
-                        completed + usize::from(row.1),
-                    )
-                });
-            if active_min != expected
-                || active_max != expected
-                || completed_observers != n_peers as usize
-            {
-                eprintln!(
-                    "FAIL: reload {r} current-generation completion mismatch: \
-                     min={active_min} max={active_max} target={expected} \
-                     observers={completed_observers}/{n_peers}"
-                );
-                std::process::exit(1);
-            }
             let community = format!(
                 "{}:{}",
                 expected_community >> 16,
                 expected_community & 0xffff
             );
+            // Keep observing the session through the quiesce interval. In
+            // particular, an inactive/markerless late replacement must either
+            // remain a failure or move the authoritative completion timestamp
+            // to its later active reassertion. Do not freeze receipt metrics
+            // until this complete window has elapsed.
+            guarded_sleep(
+                &ctx,
+                Duration::from_secs(20),
+                &format!("reload {r} quiesce"),
+            )
+            .await;
+            let generation_snapshots: Vec<(u64, Option<u64>)> = ctx
+                .obs
+                .iter()
+                .map(|observer| {
+                    let generation = observer.generation.lock().unwrap();
+                    (generation.active, generation.completed_at_us)
+                })
+                .collect();
+            let (verified_min, verified_max, verified_observers) =
+                generation_snapshots.iter().fold(
+                    (u64::MAX, 0, 0usize),
+                    |(minimum, maximum, complete), (active, completed_at_us)| {
+                        (
+                            minimum.min(*active),
+                            maximum.max(*active),
+                            complete + usize::from(completed_at_us.is_some()),
+                        )
+                    },
+                );
+            if verified_min != expected
+                || verified_max != expected
+                || verified_observers != n_peers as usize
+            {
+                eprintln!(
+                    "FAIL: reload {r} post-quiesce current-generation mismatch: \
+                     active_min={verified_min} active_max={verified_max} target={expected} \
+                     observers={verified_observers}/{n_peers}"
+                );
+                std::process::exit(1);
+            }
             println!(
                 "reload {r} current_generation_complete \
                  contract=current-state-generation-community-v2 \
-                 community={community} observers={completed_observers}/{n_peers} \
-                 active_prefixes_per_observer={active_min} target={expected}"
+                 community={community} observers={verified_observers}/{n_peers} \
+                 active_prefixes_per_observer={verified_min} target={expected}"
             );
-            // Per-observer completion + max gap over the reload window.
+            // Per-observer completion + max gap now use the authoritative
+            // timestamp after the full quiesce. A revoke/reassert sequence
+            // therefore extends both the completion and UPDATE-gap windows.
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
-            for i in 0..n_peers as usize {
-                if let Some(tc) = completion_us(&ctx, i) {
+            for (i, (_, completed_at_us)) in generation_snapshots.iter().enumerate() {
+                if let Some(tc) = *completed_at_us {
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
                     // Leading stall: SIGHUP -> first UPDATE of any kind.
@@ -1025,33 +1047,6 @@ fn main() {
                 rss_mib(pid),
                 ctx.obs[0].last_comms.lock().unwrap().clone()
             );
-            // Keep observing the session through the quiesce interval. In
-            // particular, the final cycle must not report a stale `true` just
-            // before a reader or writer notices a closed transport.
-            guarded_sleep(
-                &ctx,
-                Duration::from_secs(20),
-                &format!("reload {r} quiesce"),
-            )
-            .await;
-            let (verified_min, verified_observers) =
-                ctx.obs
-                    .iter()
-                    .fold((u64::MAX, 0usize), |(minimum, complete), observer| {
-                        let generation = observer.generation.lock().unwrap();
-                        (
-                            minimum.min(generation.active),
-                            complete + usize::from(generation.complete()),
-                        )
-                    });
-            if verified_min != expected || verified_observers != n_peers as usize {
-                eprintln!(
-                    "FAIL: reload {r} post-quiesce current-generation mismatch: \
-                     active_min={verified_min} target={expected} \
-                     observers={verified_observers}/{n_peers}"
-                );
-                std::process::exit(1);
-            }
             println!(
                 "reload {r} current_generation_verified \
                  contract=current-state-generation-community-v2 \
@@ -1121,6 +1116,49 @@ mod tests {
         assert_eq!(progress.active, 0);
         assert_eq!(progress.completed_at_us, None);
         assert!(!progress.complete());
+    }
+
+    #[test]
+    fn quiesce_reassertion_moves_authoritative_completion_and_gap() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(2, 2, 2, 0);
+        progress.replace(0, MarkerState::Active, 10).unwrap();
+        progress.replace(1, MarkerState::Active, 20).unwrap();
+        let first_completion = progress.completed_at_us.unwrap();
+
+        progress.replace(1, MarkerState::Inactive, 30).unwrap();
+        assert_eq!(progress.completed_at_us, None);
+        progress.replace(1, MarkerState::Active, 2_000_030).unwrap();
+        let authoritative_completion = progress.completed_at_us.unwrap();
+        assert_eq!(authoritative_completion, 2_000_030);
+
+        let events = [
+            Event {
+                t_us: 10,
+                base_ann: 1,
+                other: 0,
+            },
+            Event {
+                t_us: 20,
+                base_ann: 1,
+                other: 0,
+            },
+            Event {
+                t_us: 30,
+                base_ann: 1,
+                other: 0,
+            },
+            Event {
+                t_us: authoritative_completion,
+                base_ann: 1,
+                other: 0,
+            },
+        ];
+        assert!(max_gap_ms_for_events(&events, 0, first_completion, false) < 1.0);
+        assert_eq!(
+            max_gap_ms_for_events(&events, 0, authoritative_completion, false),
+            2_000.0
+        );
     }
 
     #[test]

@@ -8,8 +8,10 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -34,6 +36,14 @@ SOURCE_ROOT = "<SOURCE_ROOT>"
 BUILD_TARGET = "<BUILD_TARGET>"
 HOST_LOCK = "<HOST_LOCK>"
 DAEMON_PID = "<DAEMON_PID>"
+GIT = "/usr/bin/git"
+GIT_ENVIRONMENT = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "HOME": "/nonexistent",
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin",
+    "TZ": "UTC",
+}
 COMMUNITY_VALUES = tuple(
     (int(community.split(":")[0]) << 16) | int(community.split(":")[1])
     for community in COMMUNITIES
@@ -63,6 +73,7 @@ REQUIRED_FILES = {
     "sources/reloadstall-main.rs",
     "sources/run-receipt.sh",
     "sources/source.commit",
+    "sources/source.bundle",
     "sources/source.tar",
     "sources/validate_receipt.py",
 }
@@ -74,6 +85,7 @@ SOURCE_FILES = {
     "sources/reloadstall-main.rs",
     "sources/run-receipt.sh",
     "sources/source.commit",
+    "sources/source.bundle",
     "sources/source.tar",
     "sources/validate_receipt.py",
 }
@@ -204,6 +216,77 @@ def git_tree_id(entries: dict[str, Any]) -> bytes:
         rendered.append((sort_key, mode + b" " + encoded_name + b"\0" + object_id))
     payload = b"".join(row for _, row in sorted(rendered, key=lambda row: row[0]))
     return git_object_id("tree", payload)
+
+
+def run_git(arguments: list[str], *, label: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            [GIT, *arguments],
+            check=False,
+            capture_output=True,
+            env=GIT_ENVIRONMENT,
+        )
+    except OSError as exc:
+        fail(f"cannot execute trusted Git for {label}: {exc}")
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        fail(f"Git {label} failed: {detail or f'exit {completed.returncode}'}")
+    return completed.stdout
+
+
+def validate_source_bundle(root: Path, manifest: dict[str, Any]) -> None:
+    bundle_path = root / "sources/source.bundle"
+    source = require_mapping(manifest["source"], "manifest.source")
+    require_exact(
+        hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
+        source["bundle_sha256"],
+        "source bundle SHA-256",
+    )
+    heads = run_git(
+        ["bundle", "list-heads", str(bundle_path)], label="bundle head listing"
+    ).decode("ascii", errors="strict")
+    require_exact(heads, f"{source['commit']} HEAD\n", "source bundle advertised head")
+
+    with tempfile.TemporaryDirectory(prefix="reloadstall-bundle-") as temporary:
+        repository = Path(temporary) / "fresh.git"
+        run_git(["init", "--bare", "--quiet", str(repository)], label="repository init")
+        run_git(
+            ["-C", str(repository), "bundle", "verify", str(bundle_path)],
+            label="bundle verification",
+        )
+        run_git(
+            [
+                "-C",
+                str(repository),
+                "fetch",
+                "--quiet",
+                str(bundle_path),
+                "HEAD:refs/receipt/source",
+            ],
+            label="fresh-repository bundle import",
+        )
+        imported_commit = run_git(
+            ["-C", str(repository), "rev-parse", "refs/receipt/source"],
+            label="imported commit lookup",
+        ).decode("ascii").strip()
+        imported_tree = run_git(
+            ["-C", str(repository), "rev-parse", "refs/receipt/source^{tree}"],
+            label="imported tree lookup",
+        ).decode("ascii").strip()
+        require_exact(imported_commit, source["commit"], "source bundle commit")
+        require_exact(imported_tree, source["tree"], "source bundle tree")
+        require_exact(
+            run_git(
+                ["-C", str(repository), "cat-file", "commit", "refs/receipt/source"],
+                label="imported commit read",
+            ),
+            (root / "sources/source.commit").read_bytes(),
+            "source bundle commit object",
+        )
+        run_git(
+            ["-C", str(repository), "fsck", "--full", "--strict"],
+            label="fresh-repository object verification",
+        )
 
 
 def validate_source_archive(root: Path, manifest: dict[str, Any]) -> None:
@@ -341,12 +424,15 @@ def validate_manifest(root: Path) -> dict[str, Any]:
     commit = source.get("commit")
     tree = source.get("tree")
     archive_sha256 = source.get("archive_sha256")
+    bundle_sha256 = source.get("bundle_sha256")
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
         fail("manifest.source.commit must be a full lowercase commit SHA")
     if not isinstance(tree, str) or not COMMIT_RE.fullmatch(tree):
         fail("manifest.source.tree must be a full lowercase tree SHA")
     if not isinstance(archive_sha256, str) or not SHA256_RE.fullmatch(archive_sha256):
         fail("manifest.source.archive_sha256 must be a lowercase SHA-256")
+    if not isinstance(bundle_sha256, str) or not SHA256_RE.fullmatch(bundle_sha256):
+        fail("manifest.source.bundle_sha256 must be a lowercase SHA-256")
     require_exact(source.get("head"), commit, "manifest.source.head")
     require_exact(source.get("clean"), True, "manifest.source.clean")
     require_exact(
@@ -559,6 +645,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     commands = require_mapping(invocation.get("commands"), "invocation.commands")
     for name in (
         "archive",
+        "bundle",
         "commit_object",
         "build_daemon_cli",
         "build_fence",
@@ -658,6 +745,17 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         commands["commit_object"],
         ["git", "cat-file", "commit", manifest["source"]["commit"]],
         "invocation.commands.commit_object",
+    )
+    require_exact(
+        commands["bundle"],
+        [
+            "git",
+            "bundle",
+            "create",
+            f"{OUTPUT_DIR}/sources/source.bundle",
+            "HEAD",
+        ],
+        "invocation.commands.bundle",
     )
     require_exact(
         commands["extract"],
@@ -777,14 +875,16 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         f"source_tree={manifest['source']['tree']}",
         f"source_commit_object_sha={manifest['source']['commit']}",
         f"source_archive_sha256={manifest['source']['archive_sha256']}",
+        f"source_bundle_sha256={manifest['source']['bundle_sha256']}",
         "source_remote=https://github.com/lance0/rustbgpd.git",
         "build_source_root=<SOURCE_ROOT>",
         "build_target_dir=<BUILD_TARGET>",
         "host_lock=<HOST_LOCK>",
         "runtime_dir=<RUNTIME_DIR>",
         "output_dir=<OUTPUT_DIR>",
-        "rustc ",
-        "cargo ",
+        "rustc 1.95.0 ",
+        "cargo 1.95.0 ",
+        "rustdoc 1.95.0 ",
         "rustbgpd_sha256=",
         "rbgp_sha256=",
         "reloadstall_sha256=",
@@ -809,26 +909,31 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     ):
         if required not in rendered:
             fail(f"provenance.txt is missing {required!r}")
-    for tool_name in (
-        "cargo_command",
-        "cargo_resolved",
-        "rustc_command",
-        "rustc_resolved",
-        "rustup_command",
-        "rustup_resolved",
-        "rustdoc_command",
-        "rustdoc_resolved",
-        "active_toolchain",
-        "rustc_sysroot",
-    ):
-        if len(re.findall(rf"^{tool_name}=\S.*$", rendered, re.M)) != 1:
+    toolchain_root = f"<RUSTUP_HOME>/toolchains/{REQUIRED_TOOLCHAIN}"
+    expected_tool_values = {
+        "cargo_command": f"{toolchain_root}/bin/cargo",
+        "cargo_resolved": f"{toolchain_root}/bin/cargo",
+        "rustc_command": f"{toolchain_root}/bin/rustc",
+        "rustc_resolved": f"{toolchain_root}/bin/rustc",
+        "rustup_command": "<HOME>/.cargo/bin/rustup",
+        "rustup_resolved": "<HOME>/.cargo/bin/rustup",
+        "rustdoc_command": f"{toolchain_root}/bin/rustdoc",
+        "rustdoc_resolved": f"{toolchain_root}/bin/rustdoc",
+        "active_toolchain": REQUIRED_TOOLCHAIN,
+        "rustc_sysroot": toolchain_root,
+    }
+    for tool_name, expected_value in expected_tool_values.items():
+        matches = re.findall(rf"^{tool_name}=(\S.*)$", rendered, re.M)
+        if len(matches) != 1:
             fail(f"provenance.txt must contain one resolved {tool_name}")
+        require_exact(matches[0], expected_value, f"provenance.txt {tool_name}")
     for hash_name in (
         "root_Cargo.lock_sha256",
         "reloadstall_Cargo.lock_sha256",
         "cargo_tool_sha256",
         "rustc_tool_sha256",
         "rustdoc_tool_sha256",
+        "rustup_tool_sha256",
         "rustbgpd_sha256",
         "rbgp_sha256",
         "reloadstall_sha256",
@@ -1154,6 +1259,7 @@ def validate_receipt(path: str | Path) -> dict[str, Any]:
     validate_checksums(root, files)
     validate_publication_safety(root, files)
     manifest = validate_manifest(root)
+    validate_source_bundle(root, manifest)
     validate_source_archive(root, manifest)
     validate_preflight(root, manifest)
     validate_invocation(root, manifest)

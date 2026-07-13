@@ -12,11 +12,13 @@ from typing import Mapping
 
 
 REQUIRED_RUSTUP_TOOLCHAIN = "1.95.0-x86_64-unknown-linux-gnu"
+CONTROLLED_PATH = "/usr/bin:/bin"
 FORBIDDEN_EXACT = {
     "AR",
     "ARFLAGS",
     "AS",
     "ASFLAGS",
+    "BASH_ENV",
     "CC",
     "CFLAGS",
     "CMAKE",
@@ -46,12 +48,15 @@ FORBIDDEN_EXACT = {
     "RUSTC_WRAPPER",
     "RUSTDOCFLAGS",
     "RUSTFLAGS",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
     "TARGET_AR",
     "TARGET_CC",
     "TARGET_CXX",
     "TARGET_RANLIB",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_INCREMENTAL",
+    "ENV",
 }
 FORBIDDEN_PREFIXES = (
     "AR_",
@@ -59,6 +64,7 @@ FORBIDDEN_PREFIXES = (
     "AS_",
     "ASFLAGS_",
     "BINDGEN_",
+    "BASH_FUNC_",
     "CC_",
     "CFLAGS_",
     "CMAKE_",
@@ -76,6 +82,7 @@ FORBIDDEN_PREFIXES = (
     "PROTOC_",
     "RANLIB_",
     "RANLIBFLAGS_",
+    "ZSH_FUNC_",
     "CARGO_BUILD_",
     "CARGO_PROFILE_",
     "CARGO_TARGET_",
@@ -145,11 +152,10 @@ def validate_environment(environ: Mapping[str, str]) -> None:
         raise BuildFenceError(
             "forbidden retained-build environment variables: " + ", ".join(rejected)
         )
-    requested_toolchain = environ.get("RUSTUP_TOOLCHAIN")
-    if requested_toolchain not in (None, REQUIRED_RUSTUP_TOOLCHAIN):
+    path = environ.get("PATH")
+    if path != CONTROLLED_PATH:
         raise BuildFenceError(
-            "RUSTUP_TOOLCHAIN must be unset or exactly "
-            f"{REQUIRED_RUSTUP_TOOLCHAIN}, got {requested_toolchain!r}"
+            f"PATH must be exactly {CONTROLLED_PATH!r}, got {path!r}"
         )
 
 

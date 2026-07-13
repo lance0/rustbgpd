@@ -1,7 +1,31 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+[[ $- == *p* ]] || {
+  printf '%s\n' 'error: run-receipt.sh must be executed directly in privileged shell mode' >&2
+  exit 2
+}
+initial_functions=$(declare -F)
+[[ -z $initial_functions ]] || {
+  printf '%s\n' 'error: inherited shell functions are forbidden' >&2
+  printf '%s\n' "$initial_functions" >&2
+  exit 2
+}
+inherited_function_variables=()
+while IFS= read -r -d '' environment_entry; do
+  environment_name=${environment_entry%%=*}
+  case "$environment_name" in
+    BASH_FUNC_*|ZSH_FUNC_*) inherited_function_variables+=("$environment_name") ;;
+  esac
+done < <(/usr/bin/env -0)
+((${#inherited_function_variables[@]} == 0)) || {
+  printf '%s\n' 'error: exported shell functions are forbidden' >&2
+  printf '  %s\n' "${inherited_function_variables[@]}" >&2
+  exit 2
+}
 export LC_ALL=C
 export TZ=UTC
+readonly runner_path=/usr/bin:/bin
+export PATH=$runner_path
 
 usage() {
   cat <<'EOF'
@@ -42,7 +66,7 @@ readonly build_timeout_seconds=1800
 readonly generation_timeout_seconds=60
 readonly harness_timeout_seconds=4200
 readonly required_toolchain=1.95.0-x86_64-unknown-linux-gnu
-readonly build_path=/usr/bin:/bin
+readonly build_path=$runner_path
 
 while (($#)); do
   case "$1" in
@@ -88,8 +112,8 @@ done
 }
 
 for command in \
-  awk cargo cat chmod cmp cp date env find flock git mkdir mktemp python3 readlink \
-  rm rustc rustup setsid sha256sum sleep ss tail tar timeout touch uname xargs; do
+  awk cat chmod cmp cp date env find flock git id mkdir mktemp python3 readlink \
+  rm setsid sha256sum sleep ss stat tail tar timeout touch uname xargs; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'error: required command is missing: %s\n' "$command" >&2
     exit 1
@@ -122,28 +146,105 @@ git diff --check "$source_sha^" "$source_sha" >/dev/null
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
 
-rustup_command=$(command -v rustup)
+invoking_uid=$(/usr/bin/id -u)
+invoking_home=$(/usr/bin/awk -F: -v uid="$invoking_uid" \
+  '$3 == uid { if (found) { duplicate=1; next } print $6; found=1 }
+   END { if (duplicate || !found) exit 2 }' /etc/passwd) || {
+  printf 'error: cannot resolve one account home for uid %s from /etc/passwd\n' \
+    "$invoking_uid" >&2
+  exit 2
+}
+[[ $invoking_home == /* ]] || {
+  printf 'error: account home must be absolute: %s\n' "$invoking_home" >&2
+  exit 2
+}
+readonly rustup_command="$invoking_home/.cargo/bin/rustup"
+readonly rustup_home="$invoking_home/.rustup"
+[[ -f $rustup_command && ! -L $rustup_command && -x $rustup_command ]] || {
+  printf 'error: trusted rustup must be a regular non-symlink executable: %s\n' \
+    "$rustup_command" >&2
+  exit 2
+}
+rustup_owner=$(/usr/bin/stat -c %u "$rustup_command")
+rustup_mode_text=$(/usr/bin/stat -c %a "$rustup_command")
+rustup_mode=$((8#$rustup_mode_text))
+[[ $rustup_owner == "$invoking_uid" && $((rustup_mode & 0022)) -eq 0 ]] || {
+  printf 'error: trusted rustup owner/mode is unsafe: path=%s owner=%s mode=%s\n' \
+    "$rustup_command" "$rustup_owner" "$rustup_mode_text" >&2
+  exit 2
+}
 rustup_resolved=$(readlink -f "$rustup_command")
-rustup toolchain list | awk -v required="$required_toolchain" \
+[[ $rustup_resolved == "$rustup_command" ]] || {
+  printf 'error: trusted rustup path must resolve to itself: path=%s resolved=%s\n' \
+    "$rustup_command" "$rustup_resolved" >&2
+  exit 2
+}
+tool_query_environment=(
+  env -i LC_ALL=C TZ=UTC HOME="$invoking_home" RUSTUP_HOME="$rustup_home"
+  PATH="$runner_path"
+)
+"${tool_query_environment[@]}" "$rustup_command" toolchain list \
+  | awk -v required="$required_toolchain" \
   '$1 == required { found=1 } END { exit !found }' || {
   printf 'error: exact retained-build toolchain is not installed: %s\n' \
     "$required_toolchain" >&2
   exit 2
 }
-cargo_command=$(rustup which --toolchain "$required_toolchain" cargo)
-rustc_command=$(rustup which --toolchain "$required_toolchain" rustc)
-rustdoc_command=$(rustup which --toolchain "$required_toolchain" rustdoc)
+cargo_command=$("${tool_query_environment[@]}" "$rustup_command" which \
+  --toolchain "$required_toolchain" cargo)
+rustc_command=$("${tool_query_environment[@]}" "$rustup_command" which \
+  --toolchain "$required_toolchain" rustc)
+rustdoc_command=$("${tool_query_environment[@]}" "$rustup_command" which \
+  --toolchain "$required_toolchain" rustdoc)
 cargo_resolved=$(readlink -f "$cargo_command")
 rustc_resolved=$(readlink -f "$rustc_command")
 rustdoc_resolved=$(readlink -f "$rustdoc_command")
+for tool in cargo rustc rustdoc; do
+  command_variable="${tool}_command"
+  resolved_variable="${tool}_resolved"
+  selected=${!command_variable}
+  resolved=${!resolved_variable}
+  expected="$rustup_home/toolchains/$required_toolchain/bin/$tool"
+  [[ $selected == "$expected" && $resolved == "$expected" \
+      && -f $resolved && ! -L $resolved && -x $resolved ]] || {
+    printf 'error: rustup selected an unexpected %s: selected=%s resolved=%s expected=%s\n' \
+      "$tool" "$selected" "$resolved" "$expected" >&2
+    exit 2
+  }
+  tool_owner=$(/usr/bin/stat -c %u "$resolved")
+  tool_mode_text=$(/usr/bin/stat -c %a "$resolved")
+  tool_mode=$((8#$tool_mode_text))
+  [[ $tool_owner == "$invoking_uid" && $((tool_mode & 0022)) -eq 0 ]] || {
+    printf 'error: selected %s owner/mode is unsafe: owner=%s mode=%s\n' \
+      "$tool" "$tool_owner" "$tool_mode_text" >&2
+    exit 2
+  }
+done
 active_toolchain=$required_toolchain
-rustc_release=$(rustup run "$required_toolchain" rustc -V | awk '{print $2}')
+rustc_release=$("${tool_query_environment[@]}" "$rustc_command" -V | awk '{print $2}')
 [[ $rustc_release == 1.95.0 ]] || {
   printf 'error: retained-build rustc release mismatch: actual=%s expected=1.95.0\n' \
     "$rustc_release" >&2
   exit 2
 }
-rustc_sysroot=$(rustup run "$required_toolchain" rustc --print sysroot)
+cargo_release=$("${tool_query_environment[@]}" "$cargo_command" -V | awk '{print $2}')
+[[ $cargo_release == 1.95.0 ]] || {
+  printf 'error: retained-build cargo release mismatch: actual=%s expected=1.95.0\n' \
+    "$cargo_release" >&2
+  exit 2
+}
+rustdoc_release=$("${tool_query_environment[@]}" "$rustdoc_command" -V | awk '{print $2}')
+[[ $rustdoc_release == 1.95.0 ]] || {
+  printf 'error: retained-build rustdoc release mismatch: actual=%s expected=1.95.0\n' \
+    "$rustdoc_release" >&2
+  exit 2
+}
+rustc_sysroot=$("${tool_query_environment[@]}" "$rustc_command" --print sysroot)
+[[ $rustc_sysroot == "$rustup_home/toolchains/$required_toolchain" ]] || {
+  printf 'error: retained-build sysroot mismatch: actual=%s expected=%s\n' \
+    "$rustc_sysroot" "$rustup_home/toolchains/$required_toolchain" >&2
+  exit 2
+}
 [[ ${HOME:-} == /* ]] || {
   printf 'error: HOME must be an absolute path for the retained build: %s\n' \
     "${HOME:-<unset>}" >&2
@@ -265,6 +366,7 @@ printf '%s' "$source_status" >"$output_dir/source-status.txt"
 # extracted tree is read-only and every build output lives outside it.
 source_archive="$output_dir/sources/source.tar"
 source_commit_object="$output_dir/sources/source.commit"
+source_bundle="$output_dir/sources/source.bundle"
 git cat-file commit "$source_sha" >"$source_commit_object"
 retained_commit_sha=$(git hash-object -t commit "$source_commit_object")
 [[ $retained_commit_sha == "$source_sha" ]] || {
@@ -285,6 +387,31 @@ archive_commit=$(git get-tar-commit-id <"$source_archive")
     "$archive_commit" "$source_sha" >&2
   exit 1
 }
+git bundle create "$source_bundle" HEAD
+bundle_heads=$(git bundle list-heads "$source_bundle")
+[[ $bundle_heads == "$source_sha HEAD" ]] || {
+  printf 'error: retained source bundle head mismatch: actual=%s expected=%s HEAD\n' \
+    "$bundle_heads" "$source_sha" >&2
+  exit 1
+}
+bundle_check="$scratch/bundle-check.git"
+git init --bare --quiet "$bundle_check"
+git -C "$bundle_check" bundle verify "$source_bundle" \
+  >"$scratch/bundle-verify.txt" 2>&1
+git -C "$bundle_check" fetch --quiet "$source_bundle" \
+  HEAD:refs/receipt/source
+bundle_commit=$(git -C "$bundle_check" rev-parse refs/receipt/source)
+bundle_tree=$(git -C "$bundle_check" rev-parse 'refs/receipt/source^{tree}')
+git -C "$bundle_check" cat-file commit refs/receipt/source \
+  >"$scratch/bundle-source.commit"
+[[ $bundle_commit == "$source_sha" && $bundle_tree == "$source_tree" ]] || {
+  printf 'error: fresh-repository bundle mismatch: commit=%s tree=%s\n' \
+    "$bundle_commit" "$bundle_tree" >&2
+  exit 1
+}
+cmp --silent "$source_commit_object" "$scratch/bundle-source.commit"
+git -C "$bundle_check" fsck --full --strict >/dev/null
+rm -rf "$bundle_check"
 tar --extract --file="$source_archive" --directory="$source_root" \
   --no-same-owner --no-same-permissions
 cp "$source_root/bench/scale/reloadstall/gen-scenario.py" \
@@ -300,8 +427,9 @@ cp "$source_root/bench/scale/reloadstall/run-receipt.sh" \
 cp "$source_root/bench/scale/reloadstall/validate_receipt.py" \
   "$output_dir/sources/validate_receipt.py"
 source_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
+source_bundle_sha256=$(sha256sum "$source_bundle" | awk '{print $1}')
 find "$source_root" -exec chmod a-w {} +
-chmod a-w "$source_archive" "$source_commit_object"
+chmod a-w "$source_archive" "$source_bundle" "$source_commit_object"
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
     --source-root "$source_root" --cargo-home "$cargo_home" \
@@ -318,7 +446,7 @@ sanitize_text() {
   SANITIZE_OUTPUT_DIR=$output_dir SANITIZE_SCRATCH_DIR=$scratch \
   SANITIZE_HOME=${HOME:-} SANITIZE_HOST_LOCK=$host_lock \
   SANITIZE_HOSTNAME=$host_name SANITIZE_CARGO_HOME=$cargo_home \
-  SANITIZE_RUSTUP_HOME=${RUSTUP_HOME:-} SANITIZE_PID=$pid_value \
+  SANITIZE_RUSTUP_HOME=$rustup_home SANITIZE_PID=$pid_value \
   python3 - "$input" "$output" <<'PY'
 import os
 import re
@@ -371,7 +499,7 @@ build_harness=(
 )
 build_environment=(
   env -i LC_ALL=C TZ=UTC HOME="$build_home" CARGO_HOME="$cargo_home"
-  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$build_path"
+  RUSTUP_HOME="$rustup_home" PATH="$build_path"
   RUSTUP_TOOLCHAIN="$required_toolchain" CARGO_TARGET_DIR="$build_target"
   RUSTC="$rustc_command" RUSTDOC="$rustdoc_command"
 )
@@ -565,6 +693,9 @@ payload = {
         "commit_object": [
             "git", "cat-file", "commit", os.environ["SOURCE_COMMIT"],
         ],
+        "bundle": [
+            "git", "bundle", "create", f"{output}/sources/source.bundle", "HEAD",
+        ],
         "extract": [
             "tar", "--extract", f"--file={output}/sources/source.tar",
             f"--directory={source}", "--no-same-owner", "--no-same-permissions",
@@ -620,11 +751,17 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
 
 verify_exact_sources() {
-  local current_archive_sha256 current_commit_sha current_commit_tree
+  local current_archive_sha256 current_bundle_sha256 current_commit_sha current_commit_tree
   current_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
   [[ $current_archive_sha256 == "$source_archive_sha256" ]] || {
     printf 'error: retained source archive changed: actual=%s expected=%s\n' \
       "$current_archive_sha256" "$source_archive_sha256" >&2
+    return 1
+  }
+  current_bundle_sha256=$(sha256sum "$source_bundle" | awk '{print $1}')
+  [[ $current_bundle_sha256 == "$source_bundle_sha256" ]] || {
+    printf 'error: retained source bundle changed: actual=%s expected=%s\n' \
+      "$current_bundle_sha256" "$source_bundle_sha256" >&2
     return 1
   }
   current_commit_sha=$(git hash-object -t commit "$source_commit_object")
@@ -808,6 +945,7 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'source_tree=%s\n' "$source_tree"
   printf 'source_commit_object_sha=%s\n' "$retained_commit_sha"
   printf 'source_archive_sha256=%s\n' "$source_archive_sha256"
+  printf 'source_bundle_sha256=%s\n' "$source_bundle_sha256"
   printf 'source_remote=%s\n' "$source_remote"
   printf 'build_source_root=<SOURCE_ROOT>\n'
   printf 'build_target_dir=<BUILD_TARGET>\n'
@@ -837,8 +975,9 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   git show --no-patch \
     --format='source_parent=%P%nsource_author_date=%aI%nsource_commit_date=%cI%nsource_subject=%s' \
     "$source_sha"
-  "$rustc_command" -Vv
-  "$cargo_command" -V
+  "${tool_query_environment[@]}" "$rustc_command" -Vv
+  "${tool_query_environment[@]}" "$cargo_command" -V
+  "${tool_query_environment[@]}" "$rustdoc_command" -V
   uname -srmo
   if command -v lscpu >/dev/null 2>&1; then
     lscpu
@@ -862,6 +1001,7 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'cargo_tool_sha256=%s\n' "$(sha256sum "$cargo_resolved" | awk '{print $1}')"
   printf 'rustc_tool_sha256=%s\n' "$(sha256sum "$rustc_resolved" | awk '{print $1}')"
   printf 'rustdoc_tool_sha256=%s\n' "$(sha256sum "$rustdoc_resolved" | awk '{print $1}')"
+  printf 'rustup_tool_sha256=%s\n' "$(sha256sum "$rustup_resolved" | awk '{print $1}')"
   printf 'rustbgpd_sha256=%s\n' "$(sha256sum "$daemon_bin" | awk '{print $1}')"
   printf 'rbgp_sha256=%s\n' "$(sha256sum "$cli_bin" | awk '{print $1}')"
   printf 'reloadstall_sha256=%s\n' "$(sha256sum "$harness_bin" | awk '{print $1}')"
@@ -869,7 +1009,8 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
 sanitize_text "$scratch/provenance.raw.txt" "$output_dir/provenance.txt" "$daemon_pid"
 
 SOURCE_COMMIT=$source_sha SOURCE_TREE=$source_tree \
-SOURCE_ARCHIVE_SHA256=$source_archive_sha256 SOURCE_REMOTE=$source_remote \
+SOURCE_ARCHIVE_SHA256=$source_archive_sha256 SOURCE_BUNDLE_SHA256=$source_bundle_sha256 \
+SOURCE_REMOTE=$source_remote \
 LOAD_ONE=$load_one PREFLIGHT_STARTED_WALL_NS=$preflight_started_wall_ns \
 PREFLIGHT_COMPLETED_WALL_NS=$preflight_completed_wall_ns \
 PROCESS_WALL_NS=$process_wall_ns LOAD_WALL_NS=$load_wall_ns \
@@ -889,6 +1030,7 @@ manifest = {
         "head": os.environ["SOURCE_COMMIT"],
         "tree": os.environ["SOURCE_TREE"],
         "archive_sha256": os.environ["SOURCE_ARCHIVE_SHA256"],
+        "bundle_sha256": os.environ["SOURCE_BUNDLE_SHA256"],
         "remote": os.environ["SOURCE_REMOTE"],
         "clean": True,
     },

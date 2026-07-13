@@ -21,8 +21,19 @@ def process(
     *argv: str,
     cwd: str = "/tmp",
     exe: str = "",
+    state: str = "S",
+    kernel_thread: bool = False,
 ) -> Process:
-    return Process(pid=pid, ppid=ppid, comm=comm, argv=tuple(argv), cwd=cwd, exe=exe)
+    return Process(
+        pid=pid,
+        ppid=ppid,
+        comm=comm,
+        argv=tuple(argv),
+        cwd=cwd,
+        exe=exe,
+        state=state,
+        kernel_thread=kernel_thread,
+    )
 
 
 class ProcessFenceTests(unittest.TestCase):
@@ -157,22 +168,49 @@ class ProcfsCompatibilityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def make_record(self, pid: int = 20) -> Path:
+    def make_record(
+        self, pid: int = 20, *, state: str = "S", flags: int = 0, links: bool = True
+    ) -> Path:
         base = self.proc / str(pid)
         base.mkdir()
         (base / "stat").write_text(
-            f"{pid} (cargo worker) S 1 0 0 0 0\n", encoding="utf-8"
+            f"{pid} (cargo worker) {state} 1 0 0 0 0 {flags}\n", encoding="utf-8"
         )
         (base / "comm").write_text("cargo\n", encoding="utf-8")
         (base / "cmdline").write_bytes(b"cargo\0build\0")
+        if links:
+            (base / "cwd").symlink_to("/tmp")
+            (base / "exe").symlink_to("/usr/bin/cargo")
         return base
 
-    def test_complete_record_is_read_even_without_kernel_thread_links(self) -> None:
+    def test_complete_live_record_reads_required_links(self) -> None:
         self.make_record()
         record = read_process(20, self.proc)
         self.assertIsNotNone(record)
         self.assertEqual(record.ppid, 1)
+        self.assertEqual(record.cwd, "/tmp")
+        self.assertEqual(record.exe, "/usr/bin/cargo")
+
+    def test_missing_links_are_allowed_for_proven_zombie(self) -> None:
+        self.make_record(state="Z", links=False)
+        record = read_process(20, self.proc)
+        self.assertIsNotNone(record)
+        self.assertEqual(record.state, "Z")
+        self.assertEqual(record.cwd, "")
         self.assertEqual(record.exe, "")
+
+    def test_missing_links_are_allowed_for_proven_kernel_thread(self) -> None:
+        self.make_record(flags=0x00200000, links=False)
+        record = read_process(20, self.proc)
+        self.assertIsNotNone(record)
+        self.assertTrue(record.kernel_thread)
+        self.assertEqual(record.cwd, "")
+        self.assertEqual(record.exe, "")
+
+    def test_missing_links_for_live_ordinary_process_fail_closed(self) -> None:
+        self.make_record(links=False)
+        with self.assertRaisesRegex(ProcessScanError, "incomplete procfs link"):
+            read_process(20, self.proc)
 
     def test_vanished_pid_is_the_only_silent_skip(self) -> None:
         self.assertIsNone(read_process(20, self.proc))
@@ -181,6 +219,14 @@ class ProcfsCompatibilityTests(unittest.TestCase):
         base = self.make_record()
         (base / "stat").write_text("malformed\n", encoding="utf-8")
         with self.assertRaisesRegex(ProcessScanError, "malformed procfs stat"):
+            read_process(20, self.proc)
+
+    def test_malformed_stat_flags_are_rejected(self) -> None:
+        base = self.make_record()
+        (base / "stat").write_text(
+            "20 (cargo worker) S 1 0 0 0 0 invalid\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ProcessScanError, "malformed procfs numeric field"):
             read_process(20, self.proc)
 
     def test_missing_required_file_is_rejected_while_pid_exists(self) -> None:

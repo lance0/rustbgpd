@@ -44,13 +44,17 @@ bench/scale/reloadstall/run-receipt.sh \
 `run-receipt.sh` owns the shared host lock, exact-source release builds, short
 UDS-safe runtime directory, daemon and health-probe lifecycle, and a timestamped
 final load/process/all-governor snapshot immediately before daemon start. It
-retains the requested Git commit object plus a `git archive`, proves the
-commit object's tree header matches the archive tree, extracts that archive
-into a read-only source tree, and sends every Cargo build, scenario
+retains the requested Git commit object, a `git archive`, and a self-contained
+Git bundle whose only advertised head is the requested commit. Before building,
+the runner verifies and imports that bundle into a fresh bare repository,
+requires the imported commit bytes and tree to match the retained evidence,
+and runs a strict Git object check. It then extracts the archive into a
+read-only source tree and sends every Cargo build, scenario
 generation, process-fence scan, and final validation through that exact tree;
 Cargo output lives in a separate scratch target directory. The validator
-reconstructs the Git tree object from the archive and requires its SHA-1 to
-equal the retained commit's tree before accepting the bundle. The runner makes
+repeats the fresh-repository bundle import, then reconstructs the Git tree
+object from the archive and requires its SHA-1 to equal the imported commit's
+tree before accepting the receipt. The runner makes
 files and directories non-writable and rechecks the complete extracted tree
 before and after the build, at the measurement boundary, and after the run. Every
 build is capped at 1,800 seconds, scenario generation at 60 seconds, and the
@@ -60,12 +64,16 @@ seconds each, and each reload at 900 seconds. INT/TERM reaches terminal cleanup
 that tracks and bounds the harness, health probe, and daemon before escalating
 to KILL. The build fence rejects compiler/linker/profile/target overrides and
 external Cargo configuration, allowing only the archived regular
-`.cargo/config.toml`. Builds use `env -i`, fresh empty home and Cargo-home
-directories, the literal
-`/usr/bin:/bin` search path, and exact Rust
-`1.95.0-x86_64-unknown-linux-gnu`; provenance records the
-resolved Cargo/rustc/rustdoc paths and hashes, rustup, toolchain, sysroot, and
-host platform. This is a
+`.cargo/config.toml`. The runner must be executed directly through its
+privileged-mode Bash shebang; inherited shell functions, shell startup hooks,
+ambient Rust selection variables, and a non-literal `PATH` fail closed. Rustup
+is the invoking account's regular, non-symlinked, owner-safe
+`~/.cargo/bin/rustup`; every selection query runs by absolute path under
+`env -i`, and Cargo/rustc/rustdoc must resolve to owner-safe absolute binaries
+inside the exact `1.95.0-x86_64-unknown-linux-gnu` toolchain. Builds use fresh
+empty home and Cargo-home directories plus the literal `/usr/bin:/bin` search
+path; provenance records the resolved tool paths and hashes, rustup, toolchain,
+sysroot, and host platform. This is a
 controlled and provenance-bound host build, not a hermetic container build.
 Daemon, harness, and health probes run
 under `env -i` with only `LC_ALL=C`, `TZ=UTC`, and daemon-only `RUST_LOG=info`.
@@ -75,16 +83,21 @@ invocation, and provenance included) normalizes host paths, hostname, and
 the daemon PID to stable placeholders while preserving the exact source
 commit/tree/archive and binary hashes. Unexpected extra artifacts fail
 validation rather than escaping that publication-safety contract. The final
-host fence inspects process argv, cwd, and descendants, including interpreted
-benchmarks and Cargo target binaries; the shared lock remains the first line of
-coordination. The exact-source validator accepts only the fixed 700 ×
+host fence inspects process argv, cwd, executable, state, and descendants,
+including interpreted benchmarks and Cargo target binaries. Missing cwd/exe
+links are accepted only for a `/proc/<pid>/stat`-proven zombie or kernel thread;
+an incomplete ordinary live record fails closed. The shared lock remains the
+first line of coordination. The exact-source validator accepts only the fixed 700 ×
 400,400 shape with four complete alternating-marker cycles, where each cycle
 proves exact current receiver-state coverage for its active A or B policy
-marker both at completion and after the 20-second quiesce, 700/700
+marker after the full 20-second quiesce, 700/700
 observers, 399,828 expected non-self prefixes per observer, daemon-side
 continuity, zero health failures, zero base withdrawals, zero active/inactive
 marker conflicts, zero duplicate/malformed/out-of-range/self prefix identities,
-and a worst-observer UPDATE gap below 1,000 ms. The generated
+and a worst-observer UPDATE gap below 1,000 ms. Completion and maximum-gap
+metrics are computed only after quiesce from the final authoritative completion
+timestamp, so a late revoke/reassert sequence extends both measurement windows.
+The generated
 global, security, policy, gRPC, and neighbor mappings are exact: extra keys or
 policy text invalidate the receipt.
 The validator's
@@ -98,13 +111,15 @@ python3 -m unittest -v test_build_fence.py
 python3 -m unittest -v test_runner_contract.py
 ```
 
-`SHA256SUMS` covers every retained input, commit object, full source archive, selected source
-copy, log, preflight sample, invocation, manifest, and provenance file; only
+`SHA256SUMS` covers every retained input, commit object, self-contained Git
+bundle, full source archive, selected source copy, log, preflight sample,
+invocation, manifest, and provenance file; only
 `SHA256SUMS` itself is excluded. There is deliberately no unsummed
 `validation.json`: acceptance is the exact validator's successful exit and JSON
 printed by the wrapper after the complete checksum inventory passes. A later
-audit should run `validate_receipt.py` from the named source commit (or from a
-separately verified extraction of `sources/source.tar`) against the bundle.
+audit should run `validate_receipt.py` from the named source commit against the
+receipt; that validator independently imports `sources/source.bundle` into a
+fresh repository before trusting the retained commit/archive relationship.
 
 ## Build and run
 

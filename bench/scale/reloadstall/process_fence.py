@@ -68,6 +68,7 @@ KNOWN_NAMES = BUILD_NAMES | DAEMON_AND_BENCH_NAMES
 RUSTBGPD_TREE_RE = re.compile(r"(?:^|/)rustbgpd(?:-[^/]*)?/")
 TARGET_BINARY_RE = re.compile(r"/target/(?:debug|release)/(?:deps/)?[^/]+$")
 HASH_SUFFIX_RE = re.compile(r"-[0-9a-f]{7,32}$")
+PF_KTHREAD = 0x00200000
 
 
 class ProcessScanError(RuntimeError):
@@ -82,6 +83,8 @@ class Process:
     argv: tuple[str, ...]
     cwd: str
     exe: str = ""
+    state: str = "S"
+    kernel_thread: bool = False
 
     @property
     def command(self) -> str:
@@ -192,12 +195,17 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
         if close < 0:
             raise ProcessScanError(f"malformed procfs stat for pid {pid}")
         fields = stat[close + 2 :].split()
-        if len(fields) < 2:
+        if len(fields) < 7:
             raise ProcessScanError(f"malformed procfs stat for pid {pid}")
+        state = fields[0]
+        if len(state) != 1 or not state.isalpha():
+            raise ProcessScanError(f"malformed procfs state for pid {pid}")
         try:
             ppid = int(fields[1])
+            flags = int(fields[6])
         except ValueError as exc:
-            raise ProcessScanError(f"malformed procfs ppid for pid {pid}") from exc
+            raise ProcessScanError(f"malformed procfs numeric field for pid {pid}") from exc
+        kernel_thread = bool(flags & PF_KTHREAD)
         comm = (base / "comm").read_text(encoding="utf-8").strip()
         if not comm:
             raise ProcessScanError(f"empty procfs comm for pid {pid}")
@@ -205,8 +213,15 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
         argv = tuple(
             value.decode("utf-8", errors="replace") for value in raw_argv if value
         )
-        cwd = read_optional_proc_link(base / "cwd", base, pid)
-        exe = read_optional_proc_link(base / "exe", base, pid)
+        allow_missing_links = state == "Z" or kernel_thread
+        cwd = read_proc_link(
+            base / "cwd", base, pid, allow_missing=allow_missing_links
+        )
+        exe = read_proc_link(
+            base / "exe", base, pid, allow_missing=allow_missing_links
+        )
+        if not base.exists():
+            return None
     except FileNotFoundError as exc:
         # A process may disappear between directory enumeration and the first
         # read. Only that race is benign. A missing file while the PID
@@ -224,17 +239,28 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
         if exc.errno in (errno.ENOENT, errno.ESRCH) and not base.exists():
             return None
         raise ProcessScanError(f"cannot inspect procfs record for pid {pid}: {exc}") from exc
-    return Process(pid=pid, ppid=ppid, comm=comm, argv=argv, cwd=cwd, exe=exe)
+    return Process(
+        pid=pid,
+        ppid=ppid,
+        comm=comm,
+        argv=argv,
+        cwd=cwd,
+        exe=exe,
+        state=state,
+        kernel_thread=kernel_thread,
+    )
 
 
-def read_optional_proc_link(path: Path, base: Path, pid: int) -> str:
+def read_proc_link(
+    path: Path, base: Path, pid: int, *, allow_missing: bool
+) -> str:
     try:
         return os.readlink(path)
     except FileNotFoundError as exc:
-        # Kernel threads and zombies legitimately lack cwd/exe links. They are
-        # still classifiable from comm/argv. A vanished process is likewise a
-        # benign race.
-        if not base.exists() or path.name in {"cwd", "exe"}:
+        # Only a stat-proven zombie/kernel thread may legitimately lack these
+        # links. A vanished PID is checked once more by read_process before it
+        # is silently skipped; every other incomplete live record fails closed.
+        if not base.exists() or allow_missing:
             return ""
         raise ProcessScanError(f"incomplete procfs link for pid {pid}: {path}") from exc
     except PermissionError as exc:

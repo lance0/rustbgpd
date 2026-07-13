@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -61,21 +63,62 @@ class RunnerContractTests(unittest.TestCase):
             "readonly required_toolchain=1.95.0-x86_64-unknown-linux-gnu",
             self.source,
         )
-        self.assertIn("readonly build_path=/usr/bin:/bin", self.source)
+        self.assertIn("readonly runner_path=/usr/bin:/bin", self.source)
+        self.assertIn("readonly build_path=$runner_path", self.source)
         self.assertIn('PATH="$build_path"', self.source)
         self.assertNotIn('PATH="$PATH"', self.source)
         self.assertIn('RUSTUP_TOOLCHAIN="$required_toolchain"', self.source)
         self.assertIn('RUSTC="$rustc_command" RUSTDOC="$rustdoc_command"', self.source)
         self.assertIn(
-            'rustc_command=$(rustup which --toolchain "$required_toolchain" rustc)',
+            'readonly rustup_command="$invoking_home/.cargo/bin/rustup"',
             self.source,
         )
+        self.assertIn('"$rustup_command" which', self.source)
+        self.assertIn('"$rustc_command" -V', self.source)
+        self.assertIn('"$cargo_command" -V', self.source)
+        self.assertIn('"$rustdoc_command" -V', self.source)
+        self.assertNotIn("command -v rustup", self.source)
+        self.assertNotIn("rustup which", self.source)
         self.assertNotIn("RUSTC=/usr/bin/rustc", self.source)
+
+    def test_runner_rejects_inherited_shell_function_selection(self) -> None:
+        self.assertTrue(self.source.startswith("#!/bin/bash -p\n"))
+        self.assertIn("initial_functions=$(declare -F)", self.source)
+        self.assertIn("inherited shell functions are forbidden", self.source)
+        self.assertIn("exported shell functions are forbidden", self.source)
+
+        environment = os.environ.copy()
+        environment["BASH_FUNC_rustup%%"] = "() { echo fake; }"
+        completed = subprocess.run(
+            [RUNNER, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("exported shell functions are forbidden", completed.stderr)
+
+    def test_runner_does_not_trust_ambient_path(self) -> None:
+        environment = os.environ.copy()
+        environment["PATH"] = "/tmp/shadow"
+        completed = subprocess.run(
+            [RUNNER, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Run the retained LAN-350", completed.stdout)
 
     def test_commit_object_and_complete_tree_are_reverified(self) -> None:
         for fragment in (
             'git cat-file commit "$source_sha" >"$source_commit_object"',
             'git hash-object -t commit "$source_commit_object"',
+            'git bundle create "$source_bundle" HEAD',
+            'git -C "$bundle_check" bundle verify "$source_bundle"',
+            'git -C "$bundle_check" fetch --quiet "$source_bundle"',
             '--expected-tree "$source_tree" --require-immutable',
             'find "$source_root" -exec chmod a-w {} +',
             "source_tree_verification=pre-build,post-build,measurement-boundary,post-run",

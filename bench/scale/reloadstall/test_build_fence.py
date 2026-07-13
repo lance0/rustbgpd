@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
-import os
 from pathlib import Path
 
 from build_fence import (
     BuildFenceError,
+    CONTROLLED_PATH,
     REQUIRED_RUSTUP_TOOLCHAIN,
     cargo_config_candidates,
     forbidden_environment,
@@ -56,24 +57,43 @@ class BuildEnvironmentFenceTests(unittest.TestCase):
             "CFLAGS_x86_64_unknown_linux_gnu",
             "LDFLAGS",
             "LDFLAGS_x86_64_unknown_linux_gnu",
+            "BASH_ENV",
+            "BASH_FUNC_rustup%%",
+            "ENV",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "ZSH_FUNC_rustup",
         }
         self.assertEqual(forbidden_environment({name: "x" for name in names}), sorted(names))
 
-    def test_only_exact_pinned_toolchain_is_allowed(self) -> None:
+    def test_only_controlled_selection_environment_is_allowed(self) -> None:
         self.assertEqual(
             forbidden_environment(
                 {
                     "CARGO_HOME": "/cache/cargo",
-                    "RUSTUP_HOME": "/cache/rustup",
-                    "RUSTUP_TOOLCHAIN": REQUIRED_RUSTUP_TOOLCHAIN,
                 }
             ),
             [],
         )
-        validate_environment({"RUSTUP_TOOLCHAIN": REQUIRED_RUSTUP_TOOLCHAIN})
-        validate_environment({})
-        with self.assertRaisesRegex(BuildFenceError, "must be unset or exactly"):
-            validate_environment({"RUSTUP_TOOLCHAIN": "stable"})
+        validate_environment({"PATH": CONTROLLED_PATH})
+        with self.assertRaisesRegex(BuildFenceError, "forbidden retained-build"):
+            validate_environment(
+                {
+                    "PATH": CONTROLLED_PATH,
+                    "RUSTUP_TOOLCHAIN": REQUIRED_RUSTUP_TOOLCHAIN,
+                }
+            )
+        with self.assertRaisesRegex(BuildFenceError, "PATH must be exactly"):
+            validate_environment({"PATH": "/tmp/shadow:/usr/bin:/bin"})
+
+    def test_exported_shell_function_spoof_is_rejected(self) -> None:
+        with self.assertRaisesRegex(BuildFenceError, "BASH_FUNC_rustup"):
+            validate_environment(
+                {
+                    "PATH": CONTROLLED_PATH,
+                    "BASH_FUNC_rustup%%": "() { echo fake; }",
+                }
+            )
 
 
 class CargoConfigFenceTests(unittest.TestCase):

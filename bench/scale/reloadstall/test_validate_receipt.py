@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
+import subprocess
 import tempfile
-import tarfile
 import unittest
 from pathlib import Path
 
@@ -29,25 +28,65 @@ ARCHIVE_FILES = {
 }
 
 
-def archive_tree() -> str:
-    tree = {}
-    for path, content in ARCHIVE_FILES.items():
-        node = tree
-        parts = path.split("/")
-        for component in parts[:-1]:
-            node = node.setdefault(component, {})
-        node[parts[-1]] = ("100644", validator.git_object_id("blob", content))
-    return validator.git_tree_id(tree).hex()
+def fixture_git(repository: Path, *arguments: str, environment=None) -> bytes:
+    if environment is None:
+        environment = validator.GIT_ENVIRONMENT
+    completed = subprocess.run(
+        [validator.GIT, "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        env=environment,
+    )
+    return completed.stdout
 
 
-TREE = archive_tree()
-COMMIT_PAYLOAD = (
-    f"tree {TREE}\n"
-    "author Receipt Fixture <fixture@example.invalid> 0 +0000\n"
-    "committer Receipt Fixture <fixture@example.invalid> 0 +0000\n"
-    "\nfixture commit\n"
-).encode()
-COMMIT = validator.git_object_id("commit", COMMIT_PAYLOAD).hex()
+def source_evidence() -> tuple[str, str, bytes, bytes, bytes]:
+    """Create one real Git commit, archive, and self-contained bundle fixture."""
+    with tempfile.TemporaryDirectory(prefix="reloadstall-fixture-repo-") as raw:
+        repository = Path(raw) / "repository"
+        repository.mkdir()
+        fixture_git(repository, "init", "--quiet")
+        for relative, content in ARCHIVE_FILES.items():
+            path = repository / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        fixture_git(repository, "add", "--all")
+        environment = validator.GIT_ENVIRONMENT.copy()
+        environment.update(
+            {
+                "GIT_AUTHOR_NAME": "Receipt Fixture",
+                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+                "GIT_COMMITTER_NAME": "Receipt Fixture",
+                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+            }
+        )
+        fixture_git(
+            repository,
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture commit",
+            environment=environment,
+        )
+        commit = fixture_git(repository, "rev-parse", "HEAD").decode().strip()
+        tree = fixture_git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
+        commit_payload = fixture_git(repository, "cat-file", "commit", "HEAD")
+        archive = Path(raw) / "source.tar"
+        bundle = Path(raw) / "source.bundle"
+        fixture_git(
+            repository,
+            "archive",
+            "--format=tar",
+            f"--output={archive}",
+            "HEAD",
+        )
+        fixture_git(repository, "bundle", "create", str(bundle), "HEAD")
+        return commit, tree, commit_payload, archive.read_bytes(), bundle.read_bytes()
+
+
+COMMIT, TREE, COMMIT_PAYLOAD, ARCHIVE_BYTES, BUNDLE_BYTES = source_evidence()
 
 
 def write(path: Path, text: str) -> None:
@@ -56,20 +95,7 @@ def write(path: Path, text: str) -> None:
 
 
 def source_archive() -> bytes:
-    output = io.BytesIO()
-    with tarfile.open(
-        fileobj=output,
-        mode="w",
-        format=tarfile.PAX_FORMAT,
-        pax_headers={"comment": COMMIT},
-    ) as archive:
-        for path, content in ARCHIVE_FILES.items():
-            info = tarfile.TarInfo(path)
-            info.mode = 0o644
-            info.mtime = 0
-            info.size = len(content)
-            archive.addfile(info, io.BytesIO(content))
-    return output.getvalue()
+    return ARCHIVE_BYTES
 
 
 def policy(reject: str, community: str) -> str:
@@ -188,6 +214,7 @@ def make_receipt(root: Path) -> None:
     generation_b = policy("198.51.100.0/24", "65500:2000")
     archive_bytes = source_archive()
     archive_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    bundle_sha256 = hashlib.sha256(BUNDLE_BYTES).hexdigest()
     files = {
         "build.log": "build ok\n",
         "daemon.log": daemon_log(),
@@ -206,16 +233,17 @@ def make_receipt(root: Path) -> None:
             f"source_commit={COMMIT}\nsource_tree={TREE}\n"
             f"source_commit_object_sha={COMMIT}\n"
             f"source_archive_sha256={archive_sha256}\n"
+            f"source_bundle_sha256={bundle_sha256}\n"
             "source_remote=https://github.com/lance0/rustbgpd.git\n"
             "build_source_root=<SOURCE_ROOT>\nbuild_target_dir=<BUILD_TARGET>\n"
             "host_lock=<HOST_LOCK>\nruntime_dir=<RUNTIME_DIR>\n"
             "output_dir=<OUTPUT_DIR>\n"
-            "cargo_command=<CARGO_HOME>/bin/cargo\n"
-            "cargo_resolved=<CARGO_HOME>/bin/rustup\n"
-            "rustc_command=<CARGO_HOME>/bin/rustc\n"
-            "rustc_resolved=<CARGO_HOME>/bin/rustup\n"
-            "rustup_command=<CARGO_HOME>/bin/rustup\n"
-            "rustup_resolved=<CARGO_HOME>/bin/rustup\n"
+            f"cargo_command=<RUSTUP_HOME>/toolchains/{validator.REQUIRED_TOOLCHAIN}/bin/cargo\n"
+            f"cargo_resolved=<RUSTUP_HOME>/toolchains/{validator.REQUIRED_TOOLCHAIN}/bin/cargo\n"
+            f"rustc_command=<RUSTUP_HOME>/toolchains/{validator.REQUIRED_TOOLCHAIN}/bin/rustc\n"
+            f"rustc_resolved=<RUSTUP_HOME>/toolchains/{validator.REQUIRED_TOOLCHAIN}/bin/rustc\n"
+            "rustup_command=<HOME>/.cargo/bin/rustup\n"
+            "rustup_resolved=<HOME>/.cargo/bin/rustup\n"
             "rustdoc_command=<RUSTUP_HOME>/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustdoc\n"
             "rustdoc_resolved=<RUSTUP_HOME>/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustdoc\n"
             f"active_toolchain={validator.REQUIRED_TOOLCHAIN}\n"
@@ -231,12 +259,14 @@ def make_receipt(root: Path) -> None:
             "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n"
             "harness_environment=env -i LC_ALL=C TZ=UTC\n"
             "health_environment=env -i LC_ALL=C TZ=UTC\n"
-            "rustc 1.95.0\ncargo 1.95.0\n"
+            "rustc 1.95.0 (fixture)\ncargo 1.95.0 (fixture)\n"
+            "rustdoc 1.95.0 (fixture)\n"
             f"root_Cargo.lock_sha256={'4' * 64}\n"
             f"reloadstall_Cargo.lock_sha256={'5' * 64}\n"
             f"cargo_tool_sha256={'6' * 64}\n"
             f"rustc_tool_sha256={'7' * 64}\n"
             f"rustdoc_tool_sha256={'8' * 64}\n"
+            f"rustup_tool_sha256={'9' * 64}\n"
             f"rustbgpd_sha256={'1' * 64}\nrbgp_sha256={'2' * 64}\n"
             f"reloadstall_sha256={'3' * 64}\n"
             "environment_RUSTFLAGS=<unset>\n"
@@ -273,6 +303,7 @@ def make_receipt(root: Path) -> None:
     for relative, text in files.items():
         write(root / relative, text)
     (root / "sources/source.tar").write_bytes(archive_bytes)
+    (root / "sources/source.bundle").write_bytes(BUNDLE_BYTES)
     (root / "sources/source.commit").write_bytes(COMMIT_PAYLOAD)
     invocation = {
         "source_commit": COMMIT,
@@ -307,6 +338,13 @@ def make_receipt(root: Path) -> None:
                 COMMIT,
             ],
             "commit_object": ["git", "cat-file", "commit", COMMIT],
+            "bundle": [
+                "git",
+                "bundle",
+                "create",
+                f"{OUTPUT}/sources/source.bundle",
+                "HEAD",
+            ],
             "extract": [
                 "tar",
                 "--extract",
@@ -446,6 +484,7 @@ def make_receipt(root: Path) -> None:
             "head": COMMIT,
             "tree": TREE,
             "archive_sha256": archive_sha256,
+            "bundle_sha256": bundle_sha256,
             "remote": "https://github.com/lance0/rustbgpd.git",
             "clean": True,
         },
@@ -568,6 +607,12 @@ class ReceiptValidatorTests(unittest.TestCase):
         resign(self.root)
         self.assert_invalid("source archive SHA-256")
 
+    def test_source_bundle_tamper_fails_even_when_resigned(self) -> None:
+        bundle = self.root / "sources/source.bundle"
+        bundle.write_bytes(bundle.read_bytes() + b"tamper")
+        resign(self.root)
+        self.assert_invalid("source bundle SHA-256")
+
     def test_retained_source_copy_must_match_archive(self) -> None:
         write(self.root / "sources/process_fence.py", "# replacement\n")
         resign(self.root)
@@ -577,21 +622,31 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.mutate_json(
             "manifest.json", lambda value: value["source"].update(tree="b" * 40)
         )
-        self.assert_invalid("retained commit/tree binding")
+        self.assert_invalid("source bundle tree")
 
     def test_retained_commit_object_tamper_fails_even_when_resigned(self) -> None:
         path = self.root / "sources/source.commit"
         path.write_bytes(path.read_bytes().replace(b"fixture commit", b"forged commit"))
         resign(self.root)
-        self.assert_invalid("retained Git commit object")
+        self.assert_invalid("source bundle commit object")
 
-    def test_synthetic_nonexistent_commit_claim_is_rejected(self) -> None:
+    def test_self_consistent_synthetic_commit_absent_from_bundle_is_rejected(self) -> None:
+        synthetic_payload = COMMIT_PAYLOAD.replace(b"fixture commit", b"synthetic commit")
+        claimed = validator.git_object_id("commit", synthetic_payload).hex()
+        (self.root / "sources/source.commit").write_bytes(synthetic_payload)
+        self.mutate_json(
+            "manifest.json",
+            lambda value: value["source"].update(commit=claimed, head=claimed),
+        )
+        self.assert_invalid("source bundle advertised head")
+
+    def test_nonexistent_manifest_commit_is_rejected_by_bundle_head(self) -> None:
         claimed = "a" * 40
         self.mutate_json(
             "manifest.json",
             lambda value: value["source"].update(commit=claimed, head=claimed),
         )
-        self.assert_invalid("retained Git commit object")
+        self.assert_invalid("source bundle advertised head")
 
     def test_short_source_revision_fails_even_when_resigned(self) -> None:
         self.mutate_json(
@@ -783,6 +838,14 @@ class ReceiptValidatorTests(unittest.TestCase):
             lambda value: value["build_environment"].update(RUSTC="/usr/bin/rustc"),
         )
         self.assert_invalid("invocation.build_environment")
+
+    def test_resolved_rustup_shadow_fails(self) -> None:
+        self.mutate_text(
+            "provenance.txt",
+            "rustup_command=<HOME>/.cargo/bin/rustup",
+            "rustup_command=/tmp/shadow/rustup",
+        )
+        self.assert_invalid("provenance.txt rustup_command")
 
     def test_build_path_shadow_fails(self) -> None:
         self.mutate_json(
