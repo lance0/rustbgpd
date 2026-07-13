@@ -27,6 +27,7 @@ SCHEMA_PATH = ROOT / "docs/rustbgpd.schema.json"
 GRPC_INVENTORY_PATH = ROOT / "docs/grpc-method-inventory.json"
 WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
 JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
+V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
 
 
 def fail(message: str) -> None:
@@ -384,6 +385,8 @@ def release_line_chain_error(
 ) -> str | None:
     if not transitions:
         return "at least one consecutive-release upgrade exercise is required"
+    if transitions[0][0] != V1_UPGRADE_HISTORY_ORIGIN:
+        return "upgrade exercise history must retain the canonical v0.50.0 origin"
 
     targets = [target for _, target in transitions]
     if targets != sorted(targets) or len(targets) != len(set(targets)):
@@ -449,6 +452,12 @@ def check_release_line_selftests() -> None:
             "disconnected chain",
             [(v0_49, v0_50), (v0_51, v0_52)],
             (0, 52, 0),
+            False,
+        ),
+        (
+            "rewritten history origin",
+            [(v0_49, v0_50), (v0_50, v1_0)],
+            (1, 0, 0),
             False,
         ),
         ("stale target", [(v0_50, v0_51)], (0, 52, 1), False),

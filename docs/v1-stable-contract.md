@@ -122,9 +122,9 @@ inventory records the source/target releases, file and semantic TOML digests,
 validation test, and result. The latest exercise must end at the workspace
 release-line anchor (`vMAJOR.MINOR.0`); the exact workspace patch remains
 recorded separately in `baseline_release`. Exercises form one contiguous chain
-of adjacent minor release lines, with an explicit transition into a new major.
-Future stable-surface migrations add a new consecutive-release fixture rather
-than overwriting this receipt.
+of adjacent minor release lines from the canonical `v0.50.0` history origin,
+with an explicit transition into a new major. Future stable-surface migrations
+add a new consecutive-release fixture rather than overwriting this receipt.
 
 ## Release gate
 

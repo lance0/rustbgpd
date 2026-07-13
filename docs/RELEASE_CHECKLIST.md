@@ -80,11 +80,11 @@ The project remains public alpha outside the explicit
       release. The latest receipt must end at the workspace release-line anchor
       (`vMAJOR.MINOR.0`), while `baseline_release` must match the exact workspace
       version. Receipts form one contiguous chain of adjacent minor release
-      lines, with an explicit transition into a new major; immutable files must
-      still match their source git tag. The current workspace target is proven
-      by its parser test before tagging; both tags are required once an exercise
-      is historical. Add a new receipt for a real migration; do not overwrite
-      older evidence.
+      lines from the canonical `v0.50.0` history origin, with an explicit
+      transition into a new major; immutable files must still match their source
+      git tag. The current workspace target is proven by its parser test before
+      tagging; both tags are required once an exercise is historical. Add a new
+      receipt for a real migration; do not overwrite older evidence.
 - [ ] Inventoried CLI commands preserve their path and command name. Flags,
       positional arguments, defaults, exit behavior, and human output are not
       covered unless separately inventoried.
