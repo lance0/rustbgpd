@@ -396,6 +396,8 @@ def release_line_chain_error(
         next_major = target[0] == source[0] + 1 and target[1] == 0
         if not (same_major_next_minor or next_major):
             return "upgrade exercise is not between consecutive release lines"
+        if index == 0 and next_major:
+            return "major-boundary exercise must retain its preceding release-line receipt"
         if index and source != transitions[index - 1][1]:
             return "upgrade exercises must form one contiguous release-line chain"
 
@@ -428,6 +430,7 @@ def check_release_line_selftests() -> None:
             (1, 0, 1),
             True,
         ),
+        ("lone major transition", [(v0_50, v1_0)], (1, 0, 0), False),
         ("nonzero exercise patch", [(v0_50, (0, 51, 1))], (0, 51, 1), False),
         ("skipped minor", [(v0_49, v0_51)], (0, 51, 0), False),
         (
@@ -440,6 +443,12 @@ def check_release_line_selftests() -> None:
             "duplicate target",
             [(v0_50, v0_51), (v0_50, v0_51)],
             (0, 51, 0),
+            False,
+        ),
+        (
+            "disconnected chain",
+            [(v0_49, v0_50), (v0_51, v0_52)],
+            (0, 52, 0),
             False,
         ),
         ("stale target", [(v0_50, v0_51)], (0, 52, 1), False),
