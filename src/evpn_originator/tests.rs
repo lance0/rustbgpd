@@ -74,6 +74,64 @@ fn suppress_local_instance_with(v: u32, threshold: u32, recovery: Duration) -> E
     )
 }
 
+// Duplicate-MAC deadlines use `std::time::Instant`, so Tokio's paused clock
+// cannot advance them. Keep integration tests safely on the active side of the
+// deadline, then seed the pure detector with an explicit elapsed timeline.
+// The detector crate separately pins the exact before/at-deadline semantics.
+const TEST_QUARANTINE_RECOVERY: Duration = Duration::from_hours(1);
+
+fn seed_elapsed_quarantine(state: &mut OriginatorState, inst: &EvpnInstance, key: DuplicateMacKey) {
+    assert!(
+        state.active_duplicate_mac_quarantines.contains(&key),
+        "test must first exercise the real quarantine-activation path"
+    );
+    assert!(
+        state.duplicate_mac_detector.clear(key),
+        "active quarantine must have detector state"
+    );
+    // Do not subtract the one-hour integration hold from `Instant::now()`:
+    // a freshly booted CI runner may have less monotonic uptime. The detector
+    // owns deadline arithmetic and has exact boundary tests; use a 1 ns hold
+    // here to construct the same elapsed state without an uptime assumption.
+    let elapsed_config = DuplicateMacConfig::new(
+        inst.duplicate_mac_detection.action,
+        inst.duplicate_mac_detection.window,
+        inst.duplicate_mac_detection.threshold,
+        Duration::from_nanos(1),
+    )
+    .expect("one-nanosecond recovery is a valid detector policy");
+    let now = Instant::now();
+    let recorded_at = now
+        .checked_sub(Duration::from_nanos(2))
+        .expect("test Instant supports a two-nanosecond offset");
+    let decision = state
+        .duplicate_mac_detector
+        .record_move(key, recorded_at, elapsed_config);
+    let DuplicateMacDecision::Quarantined { until, .. } = decision else {
+        panic!("threshold-one test policy must recreate quarantine, got {decision:?}");
+    };
+    assert!(
+        until < now,
+        "explicit test timeline must put quarantine strictly past its deadline"
+    );
+}
+
+async fn assert_quarantine_survives_scheduler_delay(
+    state: &OriginatorState,
+    key: DuplicateMacKey,
+    iteration: usize,
+) {
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        state
+            .duplicate_mac_detector
+            .is_quarantined(key, Instant::now()),
+        "iteration {iteration}: scheduler delay must not expire quarantine"
+    );
+}
+
 #[test]
 fn duplicate_mac_quarantine_publisher_tracks_active_set() {
     let inst = suppress_local_instance(100);
@@ -420,11 +478,8 @@ async fn duplicate_mac_suppress_local_first_learn_does_not_withdraw_unadvertised
 
 #[tokio::test]
 async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
-    let instances = instance_table_with(suppress_local_instance_with(
-        100,
-        1,
-        Duration::from_millis(1),
-    ));
+    let inst = suppress_local_instance_with(100, 1, TEST_QUARANTINE_RECOVERY);
+    let instances = instance_table_with(inst.clone());
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
     let (log, _responder) = rib_capture_responder(rib_rx);
     let metrics = BgpMetrics::new();
@@ -471,7 +526,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    seed_elapsed_quarantine(&mut state, &inst, DuplicateMacKey::new(vni(100), mac(0xAA)));
     recover_duplicate_macs(
         &mut state,
         &instances,
@@ -669,27 +724,40 @@ async fn duplicate_mac_manual_clear_unknown_vni_returns_unknown_vni() {
 
 #[tokio::test]
 async fn duplicate_mac_mac_ip_quarantine_replays_multiple_live_ips_after_recovery() {
-    let instances = instance_table_with(suppress_local_instance_with(
-        100,
-        1,
-        Duration::from_millis(1),
-    ));
-    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
-    let (log, _responder) = rib_capture_responder(rib_rx);
-    let metrics = BgpMetrics::new();
-    let counts = OriginatedLocalMacCounts::default();
-    let mut state = originator_state(&instances);
-    state.remote_mac_ip_view.insert(
-        (vni(100), mac(0xAA), ipa("192.0.2.10")),
-        remote_mac_ip_view(0xAA, "192.0.2.10", Some(3)),
-    );
+    for iteration in 0..16 {
+        let inst = suppress_local_instance_with(100, 1, TEST_QUARANTINE_RECOVERY);
+        let instances = instance_table_with(inst.clone());
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = originator_state(&instances);
+        state.remote_mac_ip_view.insert(
+            (vni(100), mac(0xAA), ipa("192.0.2.10")),
+            remote_mac_ip_view(0xAA, "192.0.2.10", Some(3)),
+        );
 
-    for ip in ["192.0.2.10", "192.0.2.11"] {
+        for ip in ["192.0.2.10", "192.0.2.11"] {
+            observe_test(
+                LocalMacObservation::IpAdded {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ip: ipa(ip),
+                },
+                &mut state,
+                &instances,
+                &rib_tx,
+                &metrics,
+                &counts,
+            )
+            .await;
+        }
+
         observe_test(
-            LocalMacObservation::IpAdded {
+            LocalMacObservation::Learned {
                 vni: vni(100),
                 mac: mac(0xAA),
-                ip: ipa(ip),
+                ifindex: 10,
             },
             &mut state,
             &instances,
@@ -698,77 +766,66 @@ async fn duplicate_mac_mac_ip_quarantine_replays_multiple_live_ips_after_recover
             &counts,
         )
         .await;
+
+        assert!(
+            log.lock().await.is_empty(),
+            "iteration {iteration}: pending quarantine must suppress every live IP"
+        );
+        assert_eq!(
+            state
+                .live_mac_ip
+                .get(&vni(100))
+                .and_then(|per_vni| per_vni.get(&mac(0xAA)))
+                .cloned()
+                .unwrap_or_default(),
+            BTreeSet::from([ipa("192.0.2.10"), ipa("192.0.2.11")]),
+            "iteration {iteration}: suppressed live IPs remain cached for replay"
+        );
+
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        assert_quarantine_survives_scheduler_delay(&state, key, iteration).await;
+        seed_elapsed_quarantine(&mut state, &inst, key);
+
+        observe_test(
+            LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert!(
+            log.lock().await.is_empty(),
+            "iteration {iteration}: elapsed quarantine must wait for recovery replay"
+        );
+
+        recover_duplicate_macs(
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+                RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.11"))),
+            ],
+            "iteration {iteration}: recovery must replay all IPs without a MAC-only route"
+        );
+        assert_quarantine_metric(&metrics, 100, 0xAA, 0);
     }
-
-    observe_test(
-        LocalMacObservation::Learned {
-            vni: vni(100),
-            mac: mac(0xAA),
-            ifindex: 10,
-        },
-        &mut state,
-        &instances,
-        &rib_tx,
-        &metrics,
-        &counts,
-    )
-    .await;
-
-    assert!(
-        log.lock().await.is_empty(),
-        "pending MAC+IP quarantine must suppress every live IP, not inject later pending IPs"
-    );
-    assert_eq!(
-        state
-            .live_mac_ip
-            .get(&vni(100))
-            .and_then(|per_vni| per_vni.get(&mac(0xAA)))
-            .cloned()
-            .unwrap_or_default(),
-        BTreeSet::from([ipa("192.0.2.10"), ipa("192.0.2.11")]),
-        "suppressed live IPs remain cached for timed replay"
-    );
-
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    observe_test(
-        LocalMacObservation::Learned {
-            vni: vni(100),
-            mac: mac(0xAA),
-            ifindex: 10,
-        },
-        &mut state,
-        &instances,
-        &rib_tx,
-        &metrics,
-        &counts,
-    )
-    .await;
-    assert!(
-        log.lock().await.is_empty(),
-        "expired quarantine must wait for recovery replay instead of emitting MAC-only while live IPs exist"
-    );
-
-    recover_duplicate_macs(
-        &mut state,
-        &instances,
-        &rib_tx,
-        &metrics,
-        &counts,
-        &std::collections::BTreeMap::new(),
-        &std::collections::BTreeSet::new(),
-    )
-    .await;
-
-    let actions = log.lock().await.clone();
-    assert_eq!(
-        actions,
-        vec![
-            RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
-            RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.11"))),
-        ],
-        "recovery should replay every still-live MAC+IP binding without a MAC-only route"
-    );
-    assert_quarantine_metric(&metrics, 100, 0xAA, 0);
 }
 
 #[tokio::test]
@@ -3677,7 +3734,7 @@ async fn runtime_model_undrain_respects_duplicate_mac_quarantine() {
 async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
     // The timed quarantine recovery path goes through the same replay
     // primitive; while the VNI is drained it must not re-originate.
-    let inst = suppress_local_instance_with(100, 1, Duration::from_millis(1));
+    let inst = suppress_local_instance_with(100, 1, TEST_QUARANTINE_RECOVERY);
     let instances = instance_table_with(inst.clone());
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
     let (log, _responder) = rib_capture_responder(rib_rx);
@@ -3702,6 +3759,7 @@ async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
         &drained,
     )
     .await;
+    let key = DuplicateMacKey::new(vni(100), mac(0xAA));
     assert!(record_duplicate_mac_move(
         &metrics,
         &mut state,
@@ -3709,7 +3767,7 @@ async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
         vni(100),
         mac(0xAA)
     ));
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    seed_elapsed_quarantine(&mut state, &inst, key);
 
     recover_duplicate_macs(
         &mut state,
@@ -3726,6 +3784,15 @@ async fn duplicate_mac_recovery_replay_is_suppressed_while_drained() {
         log.lock().await.is_empty(),
         "quarantine recovery on a drained VNI must not replay the MAC"
     );
+    assert!(
+        !state.active_duplicate_mac_quarantines.contains(&key),
+        "elapsed quarantine must leave the active sidecar before drain suppresses replay"
+    );
+    assert!(
+        !state.duplicate_mac_detector.has_state(key),
+        "elapsed quarantine must leave detector state before drain suppresses replay"
+    );
+    assert_quarantine_metric(&metrics, 100, 0xAA, 0);
 }
 
 // --- In-place FDB port-move detection (`ObservedOnVxlanPort`) ---
