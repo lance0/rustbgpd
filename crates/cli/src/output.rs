@@ -942,6 +942,11 @@ mod tests {
         assert_json_shape(value, contract, contract_id);
         for nested in contract["nested_json_contracts"].as_array().unwrap() {
             match nested["path"].as_str().unwrap() {
+                "selection_deferral[]" => {
+                    for row in value["selection_deferral"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
                 "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
                 "tcp_ao.keys[]" => {
                     for key in value["tcp_ao"]["keys"].as_array().unwrap() {
@@ -1214,7 +1219,7 @@ mod tests {
                 waiter_session_id: Some(42),
                 blocking_waiters: 2,
                 remaining_millis: 1_500,
-                release_reason: String::new(),
+                release_reason: "all_eor".to_string(),
             }],
         };
 
