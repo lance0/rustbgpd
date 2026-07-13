@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from process_fence import Process, find_competitors
+from process_fence import Process, ProcessScanError, find_competitors, read_process
 
 
 ROOT = "/work/rustbgpd-lan-350"
@@ -144,6 +147,60 @@ class ProcessFenceTests(unittest.TestCase):
         record = process(20, 1, "cargo", "cargo", "bad\tvalue\nnext")
         self.assertNotIn("\t", record.command)
         self.assertNotIn("\n", record.command)
+
+
+class ProcfsCompatibilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tempdir.name)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def make_record(self, pid: int = 20) -> Path:
+        base = self.proc / str(pid)
+        base.mkdir()
+        (base / "stat").write_text(
+            f"{pid} (cargo worker) S 1 0 0 0 0\n", encoding="utf-8"
+        )
+        (base / "comm").write_text("cargo\n", encoding="utf-8")
+        (base / "cmdline").write_bytes(b"cargo\0build\0")
+        return base
+
+    def test_complete_record_is_read_even_without_kernel_thread_links(self) -> None:
+        self.make_record()
+        record = read_process(20, self.proc)
+        self.assertIsNotNone(record)
+        self.assertEqual(record.ppid, 1)
+        self.assertEqual(record.exe, "")
+
+    def test_vanished_pid_is_the_only_silent_skip(self) -> None:
+        self.assertIsNone(read_process(20, self.proc))
+
+    def test_malformed_stat_is_rejected(self) -> None:
+        base = self.make_record()
+        (base / "stat").write_text("malformed\n", encoding="utf-8")
+        with self.assertRaisesRegex(ProcessScanError, "malformed procfs stat"):
+            read_process(20, self.proc)
+
+    def test_missing_required_file_is_rejected_while_pid_exists(self) -> None:
+        base = self.make_record()
+        (base / "comm").unlink()
+        with self.assertRaisesRegex(ProcessScanError, "incomplete procfs record"):
+            read_process(20, self.proc)
+
+    def test_hidepid_permission_error_is_rejected(self) -> None:
+        self.make_record()
+        original = Path.read_bytes
+
+        def denied(path: Path) -> bytes:
+            if path.name == "cmdline":
+                raise PermissionError("denied")
+            return original(path)
+
+        with mock.patch.object(Path, "read_bytes", denied):
+            with self.assertRaisesRegex(ProcessScanError, "permission/hidepid"):
+                read_process(20, self.proc)
 
 
 if __name__ == "__main__":

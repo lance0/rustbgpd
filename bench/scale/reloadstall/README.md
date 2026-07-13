@@ -44,12 +44,15 @@ bench/scale/reloadstall/run-receipt.sh \
 `run-receipt.sh` owns the shared host lock, exact-source release builds, short
 UDS-safe runtime directory, daemon and health-probe lifecycle, and a timestamped
 final load/process/all-governor snapshot immediately before daemon start. It
-retains a `git archive` carrying the requested commit marker, extracts that
-archive into a read-only source tree, and sends every Cargo build, scenario
+retains the requested Git commit object plus a `git archive`, proves the
+commit object's tree header matches the archive tree, extracts that archive
+into a read-only source tree, and sends every Cargo build, scenario
 generation, process-fence scan, and final validation through that exact tree;
 Cargo output lives in a separate scratch target directory. The validator
 reconstructs the Git tree object from the archive and requires its SHA-1 to
-equal the retained source tree before accepting the bundle. Every
+equal the retained commit's tree before accepting the bundle. The runner makes
+files and directories non-writable and rechecks the complete extracted tree
+before and after the build, at the measurement boundary, and after the run. Every
 build is capped at 1,800 seconds, scenario generation at 60 seconds, and the
 whole harness at 4,200 seconds; the harness additionally caps each stub
 connect/OPEN at 15 seconds, all establishment and initial convergence at 120
@@ -57,8 +60,14 @@ seconds each, and each reload at 900 seconds. INT/TERM reaches terminal cleanup
 that tracks and bounds the harness, health probe, and daemon before escalating
 to KILL. The build fence rejects compiler/linker/profile/target overrides and
 external Cargo configuration, allowing only the archived regular
-`.cargo/config.toml`, while provenance records the resolved Cargo, rustc,
-rustup, active toolchain, and sysroot. Daemon, harness, and health probes run
+`.cargo/config.toml`. Builds use `env -i`, fresh empty home and Cargo-home
+directories, the literal
+`/usr/bin:/bin` search path, and exact Rust
+`1.95.0-x86_64-unknown-linux-gnu`; provenance records the
+resolved Cargo/rustc/rustdoc paths and hashes, rustup, toolchain, sysroot, and
+host platform. This is a
+controlled and provenance-bound host build, not a hermetic container build.
+Daemon, harness, and health probes run
 under `env -i` with only `LC_ALL=C`, `TZ=UTC`, and daemon-only `RUST_LOG=info`.
 Every
 retained public text surface (build and daemon output, generated config,
@@ -70,10 +79,12 @@ host fence inspects process argv, cwd, and descendants, including interpreted
 benchmarks and Cargo target binaries; the shared lock remains the first line of
 coordination. The exact-source validator accepts only the fixed 700 ×
 400,400 shape with four complete alternating-marker cycles, where each cycle
-proves unique prefix coverage for its active A or B policy marker, 700/700
+proves exact current receiver-state coverage for its active A or B policy
+marker both at completion and after the 20-second quiesce, 700/700
 observers, 399,828 expected non-self prefixes per observer, daemon-side
 continuity, zero health failures, zero base withdrawals, zero active/inactive
-marker conflicts, and a worst-observer UPDATE gap below 1,000 ms. The generated
+marker conflicts, zero duplicate/malformed/out-of-range/self prefix identities,
+and a worst-observer UPDATE gap below 1,000 ms. The generated
 global, security, policy, gRPC, and neighbor mappings are exact: extra keys or
 policy text invalidate the receipt.
 The validator's
@@ -87,7 +98,7 @@ python3 -m unittest -v test_build_fence.py
 python3 -m unittest -v test_runner_contract.py
 ```
 
-`SHA256SUMS` covers every retained input, full source archive, selected source
+`SHA256SUMS` covers every retained input, commit object, full source archive, selected source
 copy, log, preflight sample, invocation, manifest, and provenance file; only
 `SHA256SUMS` itself is excluded. There is deliberately no unsummed
 `validation.json`: acceptance is the exact validator's successful exit and JSON

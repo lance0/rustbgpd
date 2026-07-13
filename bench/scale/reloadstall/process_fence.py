@@ -11,6 +11,7 @@ exact copy retained in the source archive can run before the measurement.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 from dataclasses import dataclass
@@ -67,6 +68,10 @@ KNOWN_NAMES = BUILD_NAMES | DAEMON_AND_BENCH_NAMES
 RUSTBGPD_TREE_RE = re.compile(r"(?:^|/)rustbgpd(?:-[^/]*)?/")
 TARGET_BINARY_RE = re.compile(r"/target/(?:debug|release)/(?:deps/)?[^/]+$")
 HASH_SUFFIX_RE = re.compile(r"-[0-9a-f]{7,32}$")
+
+
+class ProcessScanError(RuntimeError):
+    """Procfs could not provide a complete, trustworthy process inventory."""
 
 
 @dataclass(frozen=True)
@@ -184,35 +189,72 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
     try:
         stat = (base / "stat").read_text(encoding="utf-8")
         close = stat.rfind(")")
+        if close < 0:
+            raise ProcessScanError(f"malformed procfs stat for pid {pid}")
         fields = stat[close + 2 :].split()
-        if close < 0 or len(fields) < 2:
-            return None
-        ppid = int(fields[1])
+        if len(fields) < 2:
+            raise ProcessScanError(f"malformed procfs stat for pid {pid}")
+        try:
+            ppid = int(fields[1])
+        except ValueError as exc:
+            raise ProcessScanError(f"malformed procfs ppid for pid {pid}") from exc
         comm = (base / "comm").read_text(encoding="utf-8").strip()
+        if not comm:
+            raise ProcessScanError(f"empty procfs comm for pid {pid}")
         raw_argv = (base / "cmdline").read_bytes().split(b"\0")
         argv = tuple(
             value.decode("utf-8", errors="replace") for value in raw_argv if value
         )
-        try:
-            cwd = os.readlink(base / "cwd")
-        except OSError:
-            cwd = ""
-        try:
-            exe = os.readlink(base / "exe")
-        except OSError:
-            exe = ""
-    except (OSError, UnicodeError, ValueError):
-        return None
+        cwd = read_optional_proc_link(base / "cwd", base, pid)
+        exe = read_optional_proc_link(base / "exe", base, pid)
+    except FileNotFoundError as exc:
+        # A process may disappear between directory enumeration and the first
+        # read. Only that race is benign. A missing file while the PID
+        # directory remains visible means procfs is incomplete and must fail.
+        if not base.exists():
+            return None
+        raise ProcessScanError(f"incomplete procfs record for pid {pid}: {exc}") from exc
+    except PermissionError as exc:
+        raise ProcessScanError(
+            f"procfs permission/hidepid prevents inspection of pid {pid}: {exc}"
+        ) from exc
+    except UnicodeError as exc:
+        raise ProcessScanError(f"non-UTF-8 procfs metadata for pid {pid}: {exc}") from exc
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ESRCH) and not base.exists():
+            return None
+        raise ProcessScanError(f"cannot inspect procfs record for pid {pid}: {exc}") from exc
     return Process(pid=pid, ppid=ppid, comm=comm, argv=argv, cwd=cwd, exe=exe)
+
+
+def read_optional_proc_link(path: Path, base: Path, pid: int) -> str:
+    try:
+        return os.readlink(path)
+    except FileNotFoundError as exc:
+        # Kernel threads and zombies legitimately lack cwd/exe links. They are
+        # still classifiable from comm/argv. A vanished process is likewise a
+        # benign race.
+        if not base.exists() or path.name in {"cwd", "exe"}:
+            return ""
+        raise ProcessScanError(f"incomplete procfs link for pid {pid}: {path}") from exc
+    except PermissionError as exc:
+        raise ProcessScanError(
+            f"procfs permission/hidepid prevents reading {path.name} for pid {pid}"
+        ) from exc
 
 
 def scan_processes(proc_root: Path = Path("/proc")) -> list[Process]:
     records = []
-    for entry in proc_root.iterdir():
-        if entry.name.isdigit():
-            record = read_process(int(entry.name), proc_root)
-            if record is not None:
-                records.append(record)
+    try:
+        entries = list(proc_root.iterdir())
+    except (OSError, PermissionError) as exc:
+        raise ProcessScanError(f"cannot enumerate procfs {proc_root}: {exc}") from exc
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        record = read_process(int(entry.name), proc_root)
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -232,7 +274,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", action="append", default=[])
     args = parser.parse_args()
-    records = scan_processes()
+    try:
+        records = scan_processes()
+    except ProcessScanError as exc:
+        print(f"error: {exc}", file=os.sys.stderr)
+        return 2
     competitors = find_competitors(records, ancestry(os.getpid(), records), args.root)
     for process, reason in competitors:
         print(f"{reason}\t{process.pid}\t{process.command}")

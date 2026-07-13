@@ -253,9 +253,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-advertisement ~155 s p50 / ~308 s wall (~0.44 s/peer) at 700 clients ×
   400,400 routes — but remain non-acceptance evidence because their complete
   inputs and outputs were not retained. The revision-pinned wrapper under
-  `bench/scale/reloadstall/` now fails closed on source, build, runtime,
-  liveness, parsing, and scenario defects and emits a validator-checked durable
-  bundle for the pending acceptance rerun. The daemon-side scenario generator
+  `bench/scale/reloadstall/` now binds the retained commit object to a complete
+  immutable source tree, pins Rust 1.95.0 under a controlled build environment,
+  tracks exact current per-prefix marker state through post-reload quiesce, and
+  fails closed on source, build, runtime, liveness, parsing, and scenario
+  defects. It emits a validator-checked durable bundle for the pending
+  acceptance rerun. The daemon-side scenario generator
   is committed at `bench/scale/reloadstall/gen-scenario.py`. (LAN-350)
 
 ## [0.51.0] — 2026-07-11

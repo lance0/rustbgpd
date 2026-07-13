@@ -24,7 +24,8 @@ EXPECTED = PREFIXES - PER_PEER
 RELOADS = 4
 CONTROL_SECS = 30
 PORT = 1790
-CONTRACT = "unique-prefix-generation-community-v1"
+CONTRACT = "current-state-generation-community-v2"
+REQUIRED_TOOLCHAIN = "1.95.0-x86_64-unknown-linux-gnu"
 COMMUNITIES = ("65500:2000", "65500:1000", "65500:2000", "65500:1000")
 RUNTIME_DIR = "<RUNTIME_DIR>"
 OUTPUT_DIR = "<OUTPUT_DIR>"
@@ -61,6 +62,7 @@ REQUIRED_FILES = {
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
     "sources/run-receipt.sh",
+    "sources/source.commit",
     "sources/source.tar",
     "sources/validate_receipt.py",
 }
@@ -71,6 +73,7 @@ SOURCE_FILES = {
     "sources/process_fence.py",
     "sources/reloadstall-main.rs",
     "sources/run-receipt.sh",
+    "sources/source.commit",
     "sources/source.tar",
     "sources/validate_receipt.py",
 }
@@ -207,6 +210,20 @@ def validate_source_archive(root: Path, manifest: dict[str, Any]) -> None:
     archive_path = root / "sources/source.tar"
     archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     source = require_mapping(manifest["source"], "manifest.source")
+    commit_payload = (root / "sources/source.commit").read_bytes()
+    require_exact(
+        git_object_id("commit", commit_payload).hex(),
+        source["commit"],
+        "retained Git commit object",
+    )
+    first_line = commit_payload.splitlines()[:1]
+    if len(first_line) != 1 or not first_line[0].startswith(b"tree "):
+        fail("retained Git commit object lacks a tree header")
+    try:
+        commit_tree = first_line[0][len(b"tree ") :].decode("ascii")
+    except UnicodeDecodeError as exc:
+        fail(f"retained Git commit tree is not ASCII: {exc}")
+    require_exact(commit_tree, source["tree"], "retained commit/tree binding")
     require_exact(
         archive_digest,
         source["archive_sha256"],
@@ -413,6 +430,11 @@ def validate_manifest(root: Path) -> dict[str, Any]:
     require_exact(result.get("parse_errors"), 0, "manifest.result.parse_errors")
     require_exact(result.get("base_withdrawals"), 0, "manifest.result.base_withdrawals")
     require_exact(result.get("marker_conflicts"), 0, "manifest.result.marker_conflicts")
+    require_exact(
+        result.get("route_identity_defects"),
+        0,
+        "manifest.result.route_identity_defects",
+    )
     return manifest
 
 
@@ -510,6 +532,15 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         invocation.get("build_environment"),
         {
             "CARGO_TARGET_DIR": BUILD_TARGET,
+            "LC_ALL": "C",
+            "TZ": "UTC",
+            "HOME": "<BUILD_HOME>",
+            "CARGO_HOME": "<CARGO_HOME>",
+            "RUSTUP_HOME": "<RUSTUP_HOME>",
+            "PATH": "/usr/bin:/bin",
+            "RUSTUP_TOOLCHAIN": REQUIRED_TOOLCHAIN,
+            "RUSTC": "<RUSTC_COMMAND>",
+            "RUSTDOC": "<RUSTDOC_COMMAND>",
             "allowed_cargo_config": f"{SOURCE_ROOT}/.cargo/config.toml",
             "external_cargo_configs": "rejected",
         },
@@ -528,6 +559,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     commands = require_mapping(invocation.get("commands"), "invocation.commands")
     for name in (
         "archive",
+        "commit_object",
         "build_daemon_cli",
         "build_fence",
         "build_harness",
@@ -605,6 +637,9 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
             SOURCE_ROOT,
             "--cargo-home",
             "<CARGO_HOME>",
+            "--expected-tree",
+            "<SOURCE_TREE>",
+            "--require-immutable",
         ],
         "invocation.commands.build_fence",
     )
@@ -618,6 +653,11 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
             manifest["source"]["commit"],
         ],
         "invocation.commands.archive",
+    )
+    require_exact(
+        commands["commit_object"],
+        ["git", "cat-file", "commit", manifest["source"]["commit"]],
+        "invocation.commands.commit_object",
     )
     require_exact(
         commands["extract"],
@@ -735,6 +775,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     for required in (
         f"source_commit={manifest['source']['commit']}",
         f"source_tree={manifest['source']['tree']}",
+        f"source_commit_object_sha={manifest['source']['commit']}",
         f"source_archive_sha256={manifest['source']['archive_sha256']}",
         "source_remote=https://github.com/lance0/rustbgpd.git",
         "build_source_root=<SOURCE_ROOT>",
@@ -750,6 +791,13 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml",
         "external_cargo_configs=<none>",
         "build_override_fence=clear",
+        "source_tree_verification=pre-build,post-build,measurement-boundary,post-run",
+        f"required_toolchain={REQUIRED_TOOLCHAIN}",
+        f"active_toolchain={REQUIRED_TOOLCHAIN}",
+        "build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> "
+        "CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin "
+        f"RUSTUP_TOOLCHAIN={REQUIRED_TOOLCHAIN} CARGO_TARGET_DIR=<BUILD_TARGET> "
+        "RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>",
         "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info",
         "harness_environment=env -i LC_ALL=C TZ=UTC",
         "health_environment=env -i LC_ALL=C TZ=UTC",
@@ -768,6 +816,8 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
         "rustc_resolved",
         "rustup_command",
         "rustup_resolved",
+        "rustdoc_command",
+        "rustdoc_resolved",
         "active_toolchain",
         "rustc_sysroot",
     ):
@@ -776,6 +826,9 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     for hash_name in (
         "root_Cargo.lock_sha256",
         "reloadstall_Cargo.lock_sha256",
+        "cargo_tool_sha256",
+        "rustc_tool_sha256",
+        "rustdoc_tool_sha256",
         "rustbgpd_sha256",
         "rbgp_sha256",
         "reloadstall_sha256",
@@ -971,10 +1024,10 @@ def validate_harness_log(root: Path) -> None:
         )
         one_line(
             lines,
-            rf"reload {reload_index} unique_generation_complete "
+            rf"reload {reload_index} current_generation_complete "
             rf"contract={CONTRACT} community={community} observers={PEERS}/{PEERS} "
-            rf"unique_prefixes_per_observer={EXPECTED} target={EXPECTED}",
-            f"reload {reload_index} unique generation",
+            rf"active_prefixes_per_observer={EXPECTED} target={EXPECTED}",
+            f"reload {reload_index} current generation completion",
         )
         completion = stats(lines, f"reload {reload_index} completion_s")
         gap = stats(lines, f"reload {reload_index} maxgap_ms")
@@ -998,12 +1051,19 @@ def validate_harness_log(root: Path) -> None:
             fail(f"reload {reload_index} lacks the expected delivered community sample")
         one_line(
             lines,
+            rf"reload {reload_index} current_generation_verified "
+            rf"contract={CONTRACT} community={community} observers={PEERS}/{PEERS} "
+            rf"active_prefixes_per_observer={EXPECTED} target={EXPECTED}",
+            f"reload {reload_index} post-quiesce current generation",
+        )
+        one_line(
+            lines,
             rf"reload {reload_index} sessions_up {PEERS}/{PEERS}",
             f"reload {reload_index} session continuity",
         )
     one_line(
         lines,
-        r"defects parse_errors=0 base_withdrawals=0 marker_conflicts=0",
+        r"defects parse_errors=0 base_withdrawals=0 marker_conflicts=0 route_identity_defects=0",
         "zero-defect counters",
     )
     one_line(lines, r"done rss_mib=[0-9]+", "completion")

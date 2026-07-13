@@ -14,7 +14,6 @@ from pathlib import Path
 import validate_receipt as validator
 
 
-COMMIT = "a" * 40
 RUNTIME = validator.RUNTIME_DIR
 OUTPUT = validator.OUTPUT_DIR
 REPO = validator.REPO_ROOT
@@ -42,6 +41,13 @@ def archive_tree() -> str:
 
 
 TREE = archive_tree()
+COMMIT_PAYLOAD = (
+    f"tree {TREE}\n"
+    "author Receipt Fixture <fixture@example.invalid> 0 +0000\n"
+    "committer Receipt Fixture <fixture@example.invalid> 0 +0000\n"
+    "\nfixture commit\n"
+).encode()
+COMMIT = validator.git_object_id("commit", COMMIT_PAYLOAD).hex()
 
 
 def write(path: Path, text: str) -> None:
@@ -123,19 +129,22 @@ def harness_log() -> str:
         rows.extend(
             [
                 f"reload {reload_index} SIGHUP wall_us={reload_index}00 policy=<RUNTIME_DIR>/gen-{generation}.rpol",
-                f"reload {reload_index} unique_generation_complete "
+                f"reload {reload_index} current_generation_complete "
                 f"contract={validator.CONTRACT} community={community} "
-                "observers=700/700 unique_prefixes_per_observer=399828 target=399828",
+                "observers=700/700 active_prefixes_per_observer=399828 target=399828",
                 f"reload {reload_index} completion_s: p50=154.00 p95=290.00 max=309.00 (n=700)",
                 f"reload {reload_index} maxgap_ms: p50=744.00 p95=760.00 max=820.00 (n=700)",
                 f"reload {reload_index} first_update_ms: p50=1.00 p95=2.00 max=3.00 (n=700)",
                 f"reload {reload_index} rss_mib before=815 after=900 comms_sample=[{community_value}]",
+                f"reload {reload_index} current_generation_verified "
+                f"contract={validator.CONTRACT} community={community} "
+                "observers=700/700 active_prefixes_per_observer=399828 target=399828",
                 f"reload {reload_index} sessions_up 700/700",
             ]
         )
     rows.extend(
         [
-            "defects parse_errors=0 base_withdrawals=0 marker_conflicts=0",
+            "defects parse_errors=0 base_withdrawals=0 marker_conflicts=0 route_identity_defects=0",
             "done rss_mib=1303",
         ]
     )
@@ -195,6 +204,7 @@ def make_receipt(root: Path) -> None:
         ),
         "provenance.txt": (
             f"source_commit={COMMIT}\nsource_tree={TREE}\n"
+            f"source_commit_object_sha={COMMIT}\n"
             f"source_archive_sha256={archive_sha256}\n"
             "source_remote=https://github.com/lance0/rustbgpd.git\n"
             "build_source_root=<SOURCE_ROOT>\nbuild_target_dir=<BUILD_TARGET>\n"
@@ -206,17 +216,27 @@ def make_receipt(root: Path) -> None:
             "rustc_resolved=<CARGO_HOME>/bin/rustup\n"
             "rustup_command=<CARGO_HOME>/bin/rustup\n"
             "rustup_resolved=<CARGO_HOME>/bin/rustup\n"
-            "active_toolchain=stable-x86_64-unknown-linux-gnu (default)\n"
-            "rustc_sysroot=<RUSTUP_HOME>/toolchains/stable-x86_64-unknown-linux-gnu\n"
+            "rustdoc_command=<RUSTUP_HOME>/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustdoc\n"
+            "rustdoc_resolved=<RUSTUP_HOME>/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustdoc\n"
+            f"active_toolchain={validator.REQUIRED_TOOLCHAIN}\n"
+            f"required_toolchain={validator.REQUIRED_TOOLCHAIN}\n"
+            f"rustc_sysroot=<RUSTUP_HOME>/toolchains/{validator.REQUIRED_TOOLCHAIN}\n"
             "allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml\n"
             "external_cargo_configs=<none>\n"
             "build_override_fence=clear\n"
+            "source_tree_verification=pre-build,post-build,measurement-boundary,post-run\n"
+            "build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin "
+            f"RUSTUP_TOOLCHAIN={validator.REQUIRED_TOOLCHAIN} CARGO_TARGET_DIR=<BUILD_TARGET> "
+            "RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n"
             "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n"
             "harness_environment=env -i LC_ALL=C TZ=UTC\n"
             "health_environment=env -i LC_ALL=C TZ=UTC\n"
             "rustc 1.95.0\ncargo 1.95.0\n"
             f"root_Cargo.lock_sha256={'4' * 64}\n"
             f"reloadstall_Cargo.lock_sha256={'5' * 64}\n"
+            f"cargo_tool_sha256={'6' * 64}\n"
+            f"rustc_tool_sha256={'7' * 64}\n"
+            f"rustdoc_tool_sha256={'8' * 64}\n"
             f"rustbgpd_sha256={'1' * 64}\nrbgp_sha256={'2' * 64}\n"
             f"reloadstall_sha256={'3' * 64}\n"
             "environment_RUSTFLAGS=<unset>\n"
@@ -253,11 +273,21 @@ def make_receipt(root: Path) -> None:
     for relative, text in files.items():
         write(root / relative, text)
     (root / "sources/source.tar").write_bytes(archive_bytes)
+    (root / "sources/source.commit").write_bytes(COMMIT_PAYLOAD)
     invocation = {
         "source_commit": COMMIT,
         "build_cwd": SOURCE,
         "build_environment": {
             "CARGO_TARGET_DIR": TARGET,
+            "LC_ALL": "C",
+            "TZ": "UTC",
+            "HOME": "<BUILD_HOME>",
+            "CARGO_HOME": "<CARGO_HOME>",
+            "RUSTUP_HOME": "<RUSTUP_HOME>",
+            "PATH": "/usr/bin:/bin",
+            "RUSTUP_TOOLCHAIN": validator.REQUIRED_TOOLCHAIN,
+            "RUSTC": "<RUSTC_COMMAND>",
+            "RUSTDOC": "<RUSTDOC_COMMAND>",
             "allowed_cargo_config": f"{SOURCE}/.cargo/config.toml",
             "external_cargo_configs": "rejected",
         },
@@ -276,6 +306,7 @@ def make_receipt(root: Path) -> None:
                 f"--output={OUTPUT}/sources/source.tar",
                 COMMIT,
             ],
+            "commit_object": ["git", "cat-file", "commit", COMMIT],
             "extract": [
                 "tar",
                 "--extract",
@@ -323,6 +354,9 @@ def make_receipt(root: Path) -> None:
                 SOURCE,
                 "--cargo-home",
                 "<CARGO_HOME>",
+                "--expected-tree",
+                "<SOURCE_TREE>",
+                "--require-immutable",
             ],
             "generate": [
                 "timeout",
@@ -459,6 +493,7 @@ def make_receipt(root: Path) -> None:
             "parse_errors": 0,
             "base_withdrawals": 0,
             "marker_conflicts": 0,
+            "route_identity_defects": 0,
         },
     }
     write(root / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -542,7 +577,21 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.mutate_json(
             "manifest.json", lambda value: value["source"].update(tree="b" * 40)
         )
-        self.assert_invalid("source archive Git tree")
+        self.assert_invalid("retained commit/tree binding")
+
+    def test_retained_commit_object_tamper_fails_even_when_resigned(self) -> None:
+        path = self.root / "sources/source.commit"
+        path.write_bytes(path.read_bytes().replace(b"fixture commit", b"forged commit"))
+        resign(self.root)
+        self.assert_invalid("retained Git commit object")
+
+    def test_synthetic_nonexistent_commit_claim_is_rejected(self) -> None:
+        claimed = "a" * 40
+        self.mutate_json(
+            "manifest.json",
+            lambda value: value["source"].update(commit=claimed, head=claimed),
+        )
+        self.assert_invalid("retained Git commit object")
 
     def test_short_source_revision_fails_even_when_resigned(self) -> None:
         self.mutate_json(
@@ -559,15 +608,21 @@ class ReceiptValidatorTests(unittest.TestCase):
         self.mutate_text("harness.log", "peers=700", "peers=699")
         self.assert_invalid("shape header")
 
-    def test_missing_unique_generation_proof_fails(self) -> None:
+    def test_missing_current_generation_proof_fails(self) -> None:
         self.mutate_text(
-            "harness.log", "unique_generation_complete", "generation_complete"
+            "harness.log", "current_generation_complete", "generation_complete"
         )
-        self.assert_invalid("reload 1 unique generation")
+        self.assert_invalid("reload 1 current generation completion")
+
+    def test_missing_post_quiesce_current_state_proof_fails(self) -> None:
+        self.mutate_text(
+            "harness.log", "current_generation_verified", "generation_verified"
+        )
+        self.assert_invalid("reload 1 post-quiesce current generation")
 
     def test_stale_generation_marker_fails(self) -> None:
         self.mutate_text("harness.log", "community=65500:2000", "community=65500:1000")
-        self.assert_invalid("reload 1 unique generation")
+        self.assert_invalid("reload 1 current generation completion")
 
     def test_partial_observer_stats_fail(self) -> None:
         self.mutate_text(
@@ -712,6 +767,38 @@ class ReceiptValidatorTests(unittest.TestCase):
 
         self.mutate_json("invocation.json", mutate)
         self.assert_invalid("build_harness")
+
+    def test_build_toolchain_override_fails(self) -> None:
+        self.mutate_json(
+            "invocation.json",
+            lambda value: value["build_environment"].update(
+                RUSTUP_TOOLCHAIN="stable"
+            ),
+        )
+        self.assert_invalid("invocation.build_environment")
+
+    def test_build_rustc_shadow_fails(self) -> None:
+        self.mutate_json(
+            "invocation.json",
+            lambda value: value["build_environment"].update(RUSTC="/usr/bin/rustc"),
+        )
+        self.assert_invalid("invocation.build_environment")
+
+    def test_build_path_shadow_fails(self) -> None:
+        self.mutate_json(
+            "invocation.json",
+            lambda value: value["build_environment"].update(
+                PATH="/tmp/shadow:/usr/bin:/bin"
+            ),
+        )
+        self.assert_invalid("invocation.build_environment")
+
+    def test_commit_object_capture_invocation_mismatch_fails(self) -> None:
+        self.mutate_json(
+            "invocation.json",
+            lambda value: value["commands"]["commit_object"].pop(),
+        )
+        self.assert_invalid("commands.commit_object")
 
     def test_harness_outer_timeout_mismatch_fails(self) -> None:
         def mutate(value) -> None:

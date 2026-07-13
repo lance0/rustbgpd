@@ -63,6 +63,14 @@ jobs:
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
+          (
+            cd bench/scale/reloadstall
+            python3 -m unittest -v \
+              test_validate_receipt.py \
+              test_process_fence.py \
+              test_build_fence.py \
+              test_runner_contract.py
+          )
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail

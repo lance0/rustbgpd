@@ -21,7 +21,7 @@ Options:
 This is an acceptance run, not a configurable smoke test. It always runs 700
 real BGP sessions, 400,400 routes, four reload cycles across two alternating
 policy generations, a
-30-second control window, and the unique-prefix generation-community completion
+30-second control window, and the current-state generation-community completion
 contract. It acquires the shared rustbgpd host lock, requires every exposed CPU
 frequency policy to use the performance governor, waits for one-minute load
 below 2.0, and refuses competing benchmark/build/daemon processes.
@@ -41,6 +41,8 @@ readonly required_governor=performance
 readonly build_timeout_seconds=1800
 readonly generation_timeout_seconds=60
 readonly harness_timeout_seconds=4200
+readonly required_toolchain=1.95.0-x86_64-unknown-linux-gnu
+readonly build_path=/usr/bin:/bin
 
 while (($#)); do
   case "$1" in
@@ -120,22 +122,31 @@ git diff --check "$source_sha^" "$source_sha" >/dev/null
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$repo_root/bench/scale/reloadstall/build_fence.py" --environment-only
 
-cargo_command=$(command -v cargo)
-rustc_command=$(command -v rustc)
 rustup_command=$(command -v rustup)
+rustup_resolved=$(readlink -f "$rustup_command")
+rustup toolchain list | awk -v required="$required_toolchain" \
+  '$1 == required { found=1 } END { exit !found }' || {
+  printf 'error: exact retained-build toolchain is not installed: %s\n' \
+    "$required_toolchain" >&2
+  exit 2
+}
+cargo_command=$(rustup which --toolchain "$required_toolchain" cargo)
+rustc_command=$(rustup which --toolchain "$required_toolchain" rustc)
+rustdoc_command=$(rustup which --toolchain "$required_toolchain" rustdoc)
 cargo_resolved=$(readlink -f "$cargo_command")
 rustc_resolved=$(readlink -f "$rustc_command")
-rustup_resolved=$(readlink -f "$rustup_command")
-active_toolchain=$(rustup show active-toolchain)
-rustc_sysroot=$(rustc --print sysroot)
-cargo_home=${CARGO_HOME:-${HOME}/.cargo}
+rustdoc_resolved=$(readlink -f "$rustdoc_command")
+active_toolchain=$required_toolchain
+rustc_release=$(rustup run "$required_toolchain" rustc -V | awk '{print $2}')
+[[ $rustc_release == 1.95.0 ]] || {
+  printf 'error: retained-build rustc release mismatch: actual=%s expected=1.95.0\n' \
+    "$rustc_release" >&2
+  exit 2
+}
+rustc_sysroot=$(rustup run "$required_toolchain" rustc --print sysroot)
 [[ ${HOME:-} == /* ]] || {
   printf 'error: HOME must be an absolute path for the retained build: %s\n' \
     "${HOME:-<unset>}" >&2
-  exit 2
-}
-[[ $cargo_home == /* ]] || {
-  printf 'error: CARGO_HOME must resolve from an absolute path: %s\n' "$cargo_home" >&2
   exit 2
 }
 if [[ -n ${RUSTUP_HOME:-} && $RUSTUP_HOME != /* ]]; then
@@ -174,6 +185,8 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/rustbgpd-reload-receipt.XXXXXX")
 runtime_dir=$(mktemp -d /tmp/rls.XXXXXX)
 source_root="$scratch/source"
 build_target="$scratch/target"
+cargo_home="$scratch/cargo-home"
+build_home="$scratch/build-home"
 host_name=$(uname -n)
 daemon_pid=
 health_pid=
@@ -228,6 +241,7 @@ cleanup() {
     terminate_pid_bounded daemon "$daemon_pid" 30 group || true
     daemon_pid=
   fi
+  chmod -R u+w "$source_root" >/dev/null 2>&1 || true
   rm -rf "$scratch" "$runtime_dir"
 }
 
@@ -242,13 +256,28 @@ trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
 mkdir "$output_dir"
-mkdir "$output_dir/scenario" "$output_dir/sources" "$source_root" "$build_target"
+mkdir "$output_dir/scenario" "$output_dir/sources" "$source_root" "$build_target" \
+  "$cargo_home" "$build_home"
 printf '%s' "$source_status" >"$output_dir/source-status.txt"
 
 # Materialize the exact Git object named by --source-sha before any build or
 # generation.  The retained archive is the canonical source input; the
 # extracted tree is read-only and every build output lives outside it.
 source_archive="$output_dir/sources/source.tar"
+source_commit_object="$output_dir/sources/source.commit"
+git cat-file commit "$source_sha" >"$source_commit_object"
+retained_commit_sha=$(git hash-object -t commit "$source_commit_object")
+[[ $retained_commit_sha == "$source_sha" ]] || {
+  printf 'error: retained commit object mismatch: actual=%s expected=%s\n' \
+    "$retained_commit_sha" "$source_sha" >&2
+  exit 1
+}
+retained_commit_tree=$(awk 'NR == 1 && $1 == "tree" { print $2 }' "$source_commit_object")
+[[ $retained_commit_tree == "$source_tree" ]] || {
+  printf 'error: retained commit tree mismatch: actual=%s expected=%s\n' \
+    "$retained_commit_tree" "$source_tree" >&2
+  exit 1
+}
 git archive --format=tar --output="$source_archive" "$source_sha"
 archive_commit=$(git get-tar-commit-id <"$source_archive")
 [[ $archive_commit == "$source_sha" ]] || {
@@ -271,11 +300,12 @@ cp "$source_root/bench/scale/reloadstall/run-receipt.sh" \
 cp "$source_root/bench/scale/reloadstall/validate_receipt.py" \
   "$output_dir/sources/validate_receipt.py"
 source_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
-find "$source_root" -type f -exec chmod a-w {} +
-chmod a-w "$source_archive"
+find "$source_root" -exec chmod a-w {} +
+chmod a-w "$source_archive" "$source_commit_object"
 PYTHONDONTWRITEBYTECODE=1 \
   python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
     --source-root "$source_root" --cargo-home "$cargo_home" \
+    --expected-tree "$source_tree" --require-immutable \
     >"$scratch/build-fence.txt"
 
 sanitize_text() {
@@ -284,9 +314,10 @@ sanitize_text() {
   local pid_value=${3:-}
   SANITIZE_REPO_ROOT=$repo_root SANITIZE_SOURCE_ROOT=$source_root \
   SANITIZE_BUILD_TARGET=$build_target SANITIZE_RUNTIME_DIR=$runtime_dir \
+  SANITIZE_BUILD_HOME=$build_home \
   SANITIZE_OUTPUT_DIR=$output_dir SANITIZE_SCRATCH_DIR=$scratch \
   SANITIZE_HOME=${HOME:-} SANITIZE_HOST_LOCK=$host_lock \
-  SANITIZE_HOSTNAME=$host_name SANITIZE_CARGO_HOME=${CARGO_HOME:-} \
+  SANITIZE_HOSTNAME=$host_name SANITIZE_CARGO_HOME=$cargo_home \
   SANITIZE_RUSTUP_HOME=${RUSTUP_HOME:-} SANITIZE_PID=$pid_value \
   python3 - "$input" "$output" <<'PY'
 import os
@@ -298,6 +329,7 @@ text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="strict")
 pairs = (
     (os.environ.get("SANITIZE_SOURCE_ROOT", ""), "<SOURCE_ROOT>"),
     (os.environ.get("SANITIZE_BUILD_TARGET", ""), "<BUILD_TARGET>"),
+    (os.environ.get("SANITIZE_BUILD_HOME", ""), "<BUILD_HOME>"),
     (os.environ.get("SANITIZE_REPO_ROOT", ""), "<REPO_ROOT>"),
     (os.environ.get("SANITIZE_RUNTIME_DIR", ""), "<RUNTIME_DIR>"),
     (os.environ.get("SANITIZE_OUTPUT_DIR", ""), "<OUTPUT_DIR>"),
@@ -337,17 +369,34 @@ build_harness=(
   "$cargo_command" build --release --locked
   --manifest-path bench/scale/reloadstall/Cargo.toml
 )
+build_environment=(
+  env -i LC_ALL=C TZ=UTC HOME="$build_home" CARGO_HOME="$cargo_home"
+  RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$build_path"
+  RUSTUP_TOOLCHAIN="$required_toolchain" CARGO_TARGET_DIR="$build_target"
+  RUSTC="$rustc_command" RUSTDOC="$rustdoc_command"
+)
 {
   printf '+ cd %q\n' "$source_root"
-  printf '+ CARGO_TARGET_DIR=%q ' "$build_target"
+  printf '+ '
+  printf '%q ' "${build_environment[@]}"
   printf '%q ' "${build_daemon_cli[@]}"
   printf '\n'
-  (cd "$source_root" && CARGO_TARGET_DIR="$build_target" "${build_daemon_cli[@]}")
-  printf '+ CARGO_TARGET_DIR=%q ' "$build_target"
+  (cd "$source_root" && "${build_environment[@]}" "${build_daemon_cli[@]}")
+  printf '+ '
+  printf '%q ' "${build_environment[@]}"
   printf '%q ' "${build_harness[@]}"
   printf '\n'
-  (cd "$source_root" && CARGO_TARGET_DIR="$build_target" "${build_harness[@]}")
+  (cd "$source_root" && "${build_environment[@]}" "${build_harness[@]}")
 } >"$scratch/build.raw.log" 2>&1
+
+# Cargo and every build script ran against a non-writable extraction. Rebuild
+# its complete Git tree after the build so any attempted content, mode, symlink,
+# or inventory mutation fails before a binary can be measured.
+PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+    --source-root "$source_root" --cargo-home "$cargo_home" \
+    --expected-tree "$source_tree" --require-immutable \
+    >"$scratch/build-fence-after.txt"
 
 daemon_bin="$build_target/release/rustbgpd"
 cli_bin="$build_target/release/rbgp"
@@ -490,6 +539,15 @@ payload = {
     "build_cwd": source,
     "build_environment": {
         "CARGO_TARGET_DIR": target,
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "HOME": "<BUILD_HOME>",
+        "CARGO_HOME": "<CARGO_HOME>",
+        "RUSTUP_HOME": "<RUSTUP_HOME>",
+        "PATH": "/usr/bin:/bin",
+        "RUSTUP_TOOLCHAIN": "1.95.0-x86_64-unknown-linux-gnu",
+        "RUSTC": "<RUSTC_COMMAND>",
+        "RUSTDOC": "<RUSTDOC_COMMAND>",
         "allowed_cargo_config": f"{source}/.cargo/config.toml",
         "external_cargo_configs": "rejected",
     },
@@ -503,6 +561,9 @@ payload = {
         "archive": [
             "git", "archive", "--format=tar",
             f"--output={output}/sources/source.tar", os.environ["SOURCE_COMMIT"],
+        ],
+        "commit_object": [
+            "git", "cat-file", "commit", os.environ["SOURCE_COMMIT"],
         ],
         "extract": [
             "tar", "--extract", f"--file={output}/sources/source.tar",
@@ -521,6 +582,7 @@ payload = {
         "build_fence": [
             "python3", f"{source}/bench/scale/reloadstall/build_fence.py",
             "--source-root", source, "--cargo-home", "<CARGO_HOME>",
+            "--expected-tree", "<SOURCE_TREE>", "--require-immutable",
         ],
         "generate": [
             "timeout", "--foreground", "--signal=TERM", "--kill-after=5s", "60",
@@ -558,13 +620,29 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PY
 
 verify_exact_sources() {
-  local current_archive_sha256
+  local current_archive_sha256 current_commit_sha current_commit_tree
   current_archive_sha256=$(sha256sum "$source_archive" | awk '{print $1}')
   [[ $current_archive_sha256 == "$source_archive_sha256" ]] || {
     printf 'error: retained source archive changed: actual=%s expected=%s\n' \
       "$current_archive_sha256" "$source_archive_sha256" >&2
     return 1
   }
+  current_commit_sha=$(git hash-object -t commit "$source_commit_object")
+  [[ $current_commit_sha == "$source_sha" ]] || {
+    printf 'error: retained source commit changed: actual=%s expected=%s\n' \
+      "$current_commit_sha" "$source_sha" >&2
+    return 1
+  }
+  current_commit_tree=$(awk 'NR == 1 && $1 == "tree" { print $2 }' \
+    "$source_commit_object")
+  [[ $current_commit_tree == "$source_tree" ]] || {
+    printf 'error: retained source commit/tree binding changed\n' >&2
+    return 1
+  }
+  PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$source_root/bench/scale/reloadstall/build_fence.py" \
+      --source-root "$source_root" --cargo-home "$cargo_home" \
+      --expected-tree "$source_tree" --require-immutable >/dev/null
   cmp --silent "$source_root/bench/scale/reloadstall/gen-scenario.py" \
   "$output_dir/sources/gen-scenario.py"
   cmp --silent "$source_root/bench/scale/reloadstall/build_fence.py" \
@@ -728,6 +806,7 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
 {
   printf 'source_commit=%s\n' "$source_sha"
   printf 'source_tree=%s\n' "$source_tree"
+  printf 'source_commit_object_sha=%s\n' "$retained_commit_sha"
   printf 'source_archive_sha256=%s\n' "$source_archive_sha256"
   printf 'source_remote=%s\n' "$source_remote"
   printf 'build_source_root=<SOURCE_ROOT>\n'
@@ -739,13 +818,19 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'cargo_resolved=%s\n' "$cargo_resolved"
   printf 'rustc_command=%s\n' "$rustc_command"
   printf 'rustc_resolved=%s\n' "$rustc_resolved"
+  printf 'rustdoc_command=%s\n' "$rustdoc_command"
+  printf 'rustdoc_resolved=%s\n' "$rustdoc_resolved"
   printf 'rustup_command=%s\n' "$rustup_command"
   printf 'rustup_resolved=%s\n' "$rustup_resolved"
   printf 'active_toolchain=%s\n' "$active_toolchain"
+  printf 'required_toolchain=%s\n' "$required_toolchain"
   printf 'rustc_sysroot=%s\n' "$rustc_sysroot"
   printf 'allowed_cargo_config=<SOURCE_ROOT>/.cargo/config.toml\n'
   printf 'external_cargo_configs=<none>\n'
   printf 'build_override_fence=clear\n'
+  printf 'source_tree_verification=pre-build,post-build,measurement-boundary,post-run\n'
+  printf 'build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin RUSTUP_TOOLCHAIN=%s CARGO_TARGET_DIR=<BUILD_TARGET> RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n' \
+    "$required_toolchain"
   printf 'daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n'
   printf 'harness_environment=env -i LC_ALL=C TZ=UTC\n'
   printf 'health_environment=env -i LC_ALL=C TZ=UTC\n'
@@ -764,13 +849,19 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   for variable in \
     RUSTFLAGS RUSTDOCFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
     CARGO_ENCODED_RUSTFLAGS CARGO_INCREMENTAL CARGO_TARGET_DIR CARGO_HOME \
-    RUSTUP_HOME RUSTUP_TOOLCHAIN CC CFLAGS LDFLAGS SOURCE_DATE_EPOCH; do
+    RUSTUP_HOME RUSTUP_TOOLCHAIN AR ARFLAGS AS ASFLAGS CC CFLAGS CMAKE \
+    CMAKE_FLAGS CPP CPPFLAGS CRATE_CC_NO_DEFAULTS CXX CXXFLAGS LD LDFLAGS \
+    LIBCLANG_PATH MAKE MAKEFLAGS NINJA PKG_CONFIG PROTOC RANLIB RANLIBFLAGS \
+    RING_PREGENERATE_ASM SOURCE_DATE_EPOCH; do
     printf 'environment_%s=%s\n' "$variable" "${!variable-<unset>}"
   done
   printf 'root_Cargo.lock_sha256=%s\n' \
     "$(sha256sum "$source_root/Cargo.lock" | awk '{print $1}')"
   printf 'reloadstall_Cargo.lock_sha256=%s\n' \
     "$(sha256sum "$source_root/bench/scale/reloadstall/Cargo.lock" | awk '{print $1}')"
+  printf 'cargo_tool_sha256=%s\n' "$(sha256sum "$cargo_resolved" | awk '{print $1}')"
+  printf 'rustc_tool_sha256=%s\n' "$(sha256sum "$rustc_resolved" | awk '{print $1}')"
+  printf 'rustdoc_tool_sha256=%s\n' "$(sha256sum "$rustdoc_resolved" | awk '{print $1}')"
   printf 'rustbgpd_sha256=%s\n' "$(sha256sum "$daemon_bin" | awk '{print $1}')"
   printf 'rbgp_sha256=%s\n' "$(sha256sum "$cli_bin" | awk '{print $1}')"
   printf 'reloadstall_sha256=%s\n' "$(sha256sum "$harness_bin" | awk '{print $1}')"
@@ -821,7 +912,7 @@ manifest = {
         "reloads": 4,
         "control_seconds": 30,
         "listen_port": 1790,
-        "completion_contract": "unique-prefix-generation-community-v1",
+        "completion_contract": "current-state-generation-community-v2",
         "generation_communities": [
             "65500:2000", "65500:1000", "65500:2000", "65500:1000",
         ],
@@ -847,6 +938,7 @@ manifest = {
         "parse_errors": 0,
         "base_withdrawals": 0,
         "marker_conflicts": 0,
+        "route_identity_defects": 0,
     },
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:

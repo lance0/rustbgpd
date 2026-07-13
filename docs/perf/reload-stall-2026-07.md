@@ -63,10 +63,12 @@ were resolved before the corrected historical run:
    repeated base-prefix announcements as additional completion progress,
    so a duplicate could close an observer's measurement window before
    every unique prefix carrying the new policy-generation community had
-   arrived. The harness now requires every expected *unique* base prefix
-   with the expected generation marker (a per-observer bitmap, own slice
-   excluded), so completion means the observer genuinely holds the full
-   re-advertised table under the new policy — not an early duplicate.
+   arrived. The retained rerun harness now goes further: a per-observer table
+   tracks the *current* marker state of every expected non-self /24. Inactive
+   or markerless replacements revoke completion, duplicate/malformed/out-of-
+   range/self identities fail the run, and exact active coverage is rechecked
+   after each 20-second quiesce. The historical result predates this stronger
+   durable acceptance contract and remains diagnosis only.
 
 2. **Silent outbound truncation (daemon).** Validating the corrected
    harness at a smaller shape (20 clients × 20,000 routes, so 1000
@@ -303,11 +305,18 @@ bench/scale/reloadstall/run-receipt.sh \
   --output-dir target/reloadstall-receipt/<unique-run-id>
 ```
 
-The wrapper acquires the shared host lock, retains the requested commit as a
-full Git archive, reconstructs and builds from a read-only extraction with both
-lockfiles, rejects inherited compiler/linker/profile/target overrides and every
-Cargo config except the archived regular `.cargo/config.toml`, records the
-resolved toolchain, generates the exact 700-neighbor inputs from that
+The wrapper acquires the shared host lock, retains the requested commit object
+and a full Git archive, proves the commit's tree matches the reconstructed
+archive tree, and builds from an entirely non-writable extraction with both
+lockfiles. It rejects inherited compiler/linker/profile/target overrides and
+every Cargo config except the archived regular `.cargo/config.toml`, fixes the
+build environment to fresh empty home and Cargo-home directories, exact Rust
+`1.95.0-x86_64-unknown-linux-gnu`, and the literal `/usr/bin:/bin` host-tool
+path, and records the resolved tool paths and hashes plus the host platform.
+This is a controlled host build, not a claim of hermetic
+system-tool inputs. It verifies the complete extracted Git tree before and
+after building, at the measurement boundary, and after the run, then generates
+the exact 700-neighbor inputs from that
 extraction, then
 takes a timestamped final snapshot of every CPU-frequency governor, one-minute
 load below 2.0, and the argv/cwd/process-tree-checked empty competing-process set
@@ -315,8 +324,10 @@ immediately before daemon start. It runs the daemon, health probe, and
 alternating-marker harness, then retains publication-safe normalized output,
 the daemon run-window log, inputs, invocations, provenance, archive, and complete
 checksums. Its exact-source validator reconstructs the archive's Git tree and
-fails closed unless every reload proves 700/700 observers × 399,828 unique
-non-self prefixes under the expected alternating community, the worst
+fails closed unless every reload proves 700/700 observers × 399,828 current
+non-self prefixes under the expected alternating community at completion and
+again after quiesce, with no malformed/duplicate/out-of-range/self identities;
+the worst
 observer stays below the precommitted 1,000 ms gate, all four daemon reloads
 complete, session continuity is proven daemon-side, and every health query
 succeeds. Builds, generation, per-stub OPEN, total establishment, initial

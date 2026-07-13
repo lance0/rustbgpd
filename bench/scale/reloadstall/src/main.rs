@@ -20,6 +20,7 @@
 // recorded data shape matches what produced the receipt.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -76,43 +77,69 @@ struct Obs {
 
 #[derive(Default)]
 struct GenerationProgress {
-    seen: Vec<u64>,
-    unique: u64,
+    current: Vec<MarkerState>,
+    active: u64,
     target: u64,
     excluded_start: usize,
     excluded_end: usize,
     completed_at_us: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MarkerState {
+    #[default]
+    Missing,
+    Active,
+    Inactive,
+    Markerless,
+    Excluded,
+}
+
 impl GenerationProgress {
     fn reset(&mut self, total_prefixes: u32, target: u64, excluded_start: u32, excluded_len: u32) {
-        self.seen.clear();
-        self.seen
-            .resize(usize::try_from(total_prefixes).unwrap().div_ceil(64), 0);
-        self.unique = 0;
+        self.current.clear();
+        self.current.resize(
+            usize::try_from(total_prefixes).unwrap(),
+            MarkerState::Missing,
+        );
+        self.active = 0;
         self.target = target;
         self.excluded_start = usize::try_from(excluded_start).unwrap();
         self.excluded_end = usize::try_from(excluded_start + excluded_len).unwrap();
+        self.current[self.excluded_start..self.excluded_end].fill(MarkerState::Excluded);
         self.completed_at_us = None;
     }
 
-    fn observe(&mut self, prefix_index: usize, t_us: u64) {
-        if (self.excluded_start..self.excluded_end).contains(&prefix_index) {
-            return;
-        }
-        let word = prefix_index / 64;
-        let bit = 1u64 << (prefix_index % 64);
-        let Some(slot) = self.seen.get_mut(word) else {
-            return;
+    fn replace(
+        &mut self,
+        prefix_index: usize,
+        state: MarkerState,
+        t_us: u64,
+    ) -> Result<(), &'static str> {
+        let Some(slot) = self.current.get_mut(prefix_index) else {
+            return Err("out-of-range base prefix identity");
         };
-        if *slot & bit != 0 {
-            return;
+        if *slot == MarkerState::Excluded {
+            return Err("observer received its own base prefix");
         }
-        *slot |= bit;
-        self.unique += 1;
-        if self.unique >= self.target && self.completed_at_us.is_none() {
+        if *slot == MarkerState::Active && state != MarkerState::Active {
+            self.active -= 1;
+        } else if *slot != MarkerState::Active && state == MarkerState::Active {
+            self.active += 1;
+        }
+        *slot = state;
+        if self.active == self.target && self.completed_at_us.is_none() {
             self.completed_at_us = Some(t_us);
+        } else if self.active != self.target {
+            // Completion describes current receiver state, not cumulative
+            // history. An inactive or markerless replacement revokes it.
+            self.completed_at_us = None;
         }
+        Ok(())
+    }
+
+    fn complete(&self) -> bool {
+        self.active == self.target && self.completed_at_us.is_some()
     }
 }
 
@@ -129,6 +156,8 @@ struct Ctx {
     base_withdrawals: AtomicU64,
     /// UPDATEs carrying both the active and inactive generation markers.
     marker_conflicts: AtomicU64,
+    /// Duplicate, malformed, out-of-range, or self base-prefix identities.
+    route_identity_defects: AtomicU64,
 }
 
 fn now_us(ctx: &Ctx) -> u64 {
@@ -147,14 +176,17 @@ fn require_healthy(ctx: &Ctx, phase: &str) {
     let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
     let base_withdrawals = ctx.base_withdrawals.load(Ordering::Relaxed);
     let marker_conflicts = ctx.marker_conflicts.load(Ordering::Relaxed);
+    let route_identity_defects = ctx.route_identity_defects.load(Ordering::Relaxed);
     if sessions != ctx.n_peers as usize
         || parse_errors != 0
         || base_withdrawals != 0
         || marker_conflicts != 0
+        || route_identity_defects != 0
     {
         eprintln!(
             "FAIL: {phase} health defect: sessions_up={sessions}/{} parse_errors={parse_errors} \
-             base_withdrawals={base_withdrawals} marker_conflicts={marker_conflicts}",
+             base_withdrawals={base_withdrawals} marker_conflicts={marker_conflicts} \
+             route_identity_defects={route_identity_defects}",
             ctx.n_peers
         );
         std::process::exit(1);
@@ -214,22 +246,46 @@ fn base_prefix_index(prefix: Ipv4Prefix, total_prefixes: u32) -> Option<usize> {
     (index < total_prefixes).then(|| usize::try_from(index).unwrap())
 }
 
-fn observe_generation(
-    progress: &mut GenerationProgress,
-    expected_community: u32,
-    communities: &[u32],
+fn marker_state(expected: u32, communities: &[u32]) -> MarkerState {
+    let inactive = match expected {
+        COMMUNITY_GEN_A => COMMUNITY_GEN_B,
+        COMMUNITY_GEN_B => COMMUNITY_GEN_A,
+        _ => return MarkerState::Markerless,
+    };
+    if communities.contains(&expected) {
+        MarkerState::Active
+    } else if communities.contains(&inactive) {
+        MarkerState::Inactive
+    } else {
+        MarkerState::Markerless
+    }
+}
+
+fn validated_base_indices(
     announced: &[Ipv4Prefix],
     total_prefixes: u32,
-    t_us: u64,
-) {
-    if expected_community == 0 || !communities.contains(&expected_community) {
-        return;
-    }
+    excluded_start: usize,
+    excluded_end: usize,
+) -> Result<Vec<usize>, &'static str> {
+    let mut indices = Vec::new();
+    let mut unique = HashSet::new();
     for prefix in announced {
-        if let Some(index) = base_prefix_index(*prefix, total_prefixes) {
-            progress.observe(index, t_us);
+        let first = prefix.addr.octets()[0];
+        if !(20..30).contains(&first) {
+            continue;
         }
+        let Some(index) = base_prefix_index(*prefix, total_prefixes) else {
+            return Err("malformed or out-of-range base prefix identity");
+        };
+        if (excluded_start..excluded_end).contains(&index) {
+            return Err("observer received its own base prefix");
+        }
+        if !unique.insert(index) {
+            return Err("duplicate base prefix identity in one UPDATE");
+        }
+        indices.push(index);
     }
+    Ok(indices)
 }
 
 fn generation_marker_conflict(expected: u32, communities: &[u32]) -> bool {
@@ -488,30 +544,48 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 continue;
                             }
                         };
-                        let mut base = 0u32;
-                        let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
                         let total_prefixes = rctx.n_peers * rctx.per_peer;
-                        let withdrawn_base = parsed
-                            .withdrawn
-                            .iter()
-                            .filter(|entry| {
-                                base_prefix_index(entry.prefix, total_prefixes).is_some()
-                            })
-                            .count();
+                        let own_start = usize::try_from(i * rctx.per_peer).unwrap();
+                        let own_end = own_start + usize::try_from(rctx.per_peer).unwrap();
+                        let announced_prefixes: Vec<Ipv4Prefix> =
+                            parsed.announced.iter().map(|entry| entry.prefix).collect();
+                        let base_indices = match validated_base_indices(
+                            &announced_prefixes,
+                            total_prefixes,
+                            own_start,
+                            own_end,
+                        ) {
+                            Ok(indices) => indices,
+                            Err(error) => {
+                                eprintln!("stub {i} invalid base announcement: {error}");
+                                rctx.route_identity_defects.fetch_add(1, Ordering::Relaxed);
+                                Vec::new()
+                            }
+                        };
+                        let base = u32::try_from(base_indices.len()).unwrap();
+                        let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
+                        let withdrawn_prefixes: Vec<Ipv4Prefix> =
+                            parsed.withdrawn.iter().map(|entry| entry.prefix).collect();
+                        let withdrawn_base = match validated_base_indices(
+                            &withdrawn_prefixes,
+                            total_prefixes,
+                            own_start,
+                            own_end,
+                        ) {
+                            Ok(indices) => indices.len(),
+                            Err(error) => {
+                                eprintln!("stub {i} invalid base withdrawal: {error}");
+                                rctx.route_identity_defects.fetch_add(1, Ordering::Relaxed);
+                                0
+                            }
+                        };
                         if withdrawn_base != 0 {
                             rctx.base_withdrawals.fetch_add(
                                 u64::try_from(withdrawn_base).unwrap(),
                                 Ordering::Relaxed,
                             );
                         }
-                        for e in &parsed.announced {
-                            let first = e.prefix.addr.octets()[0];
-                            if (20..30).contains(&first) {
-                                base += 1;
-                            } else {
-                                other += 1;
-                            }
-                        }
+                        other += u32::try_from(parsed.announced.len()).unwrap_or(0) - base;
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
                         if base > 0 {
@@ -531,14 +605,17 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                             if generation_marker_conflict(expected, communities) {
                                 rctx.marker_conflicts.fetch_add(1, Ordering::Relaxed);
                             }
-                            if expected != 0 && communities.contains(&expected) {
+                            if expected != 0 {
+                                let state = marker_state(expected, communities);
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
-                                    for e in &parsed.announced {
-                                        if let Some(index) =
-                                            base_prefix_index(e.prefix, total_prefixes)
-                                        {
-                                            generation.observe(index, t_us);
+                                    for &index in &base_indices {
+                                        if let Err(error) = generation.replace(index, state, t_us) {
+                                            eprintln!(
+                                                "stub {i} invalid generation replacement: {error}"
+                                            );
+                                            rctx.route_identity_defects
+                                                .fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                 }
@@ -705,6 +782,7 @@ fn main() {
             parse_errors: AtomicU64::new(0),
             base_withdrawals: AtomicU64::new(0),
             marker_conflicts: AtomicU64::new(0),
+            route_identity_defects: AtomicU64::new(0),
         });
         println!("# reloadstall peers={n_peers} prefixes={total} per_peer={per_peer} pid={pid}");
 
@@ -888,24 +966,27 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            let (generation_min, generation_max, completed_observers) = ctx
+            let (active_min, active_max, completed_observers) = ctx
                 .obs
                 .iter()
-                .map(|observer| observer.generation.lock().unwrap().unique)
-                .fold((u64::MAX, 0, 0usize), |(min, max, completed), unique| {
+                .map(|observer| {
+                    let generation = observer.generation.lock().unwrap();
+                    (generation.active, generation.complete())
+                })
+                .fold((u64::MAX, 0, 0usize), |(min, max, completed), row| {
                     (
-                        min.min(unique),
-                        max.max(unique),
-                        completed + usize::from(unique == expected),
+                        min.min(row.0),
+                        max.max(row.0),
+                        completed + usize::from(row.1),
                     )
                 });
-            if generation_min != expected
-                || generation_max != expected
+            if active_min != expected
+                || active_max != expected
                 || completed_observers != n_peers as usize
             {
                 eprintln!(
-                    "FAIL: reload {r} unique-generation completion mismatch: \
-                     min={generation_min} max={generation_max} target={expected} \
+                    "FAIL: reload {r} current-generation completion mismatch: \
+                     min={active_min} max={active_max} target={expected} \
                      observers={completed_observers}/{n_peers}"
                 );
                 std::process::exit(1);
@@ -916,10 +997,10 @@ fn main() {
                 expected_community & 0xffff
             );
             println!(
-                "reload {r} unique_generation_complete \
-                 contract=unique-prefix-generation-community-v1 \
+                "reload {r} current_generation_complete \
+                 contract=current-state-generation-community-v2 \
                  community={community} observers={completed_observers}/{n_peers} \
-                 unique_prefixes_per_observer={generation_min} target={expected}"
+                 active_prefixes_per_observer={active_min} target={expected}"
             );
             // Per-observer completion + max gap over the reload window.
             let mut comp_s: Vec<f64> = Vec::new();
@@ -953,6 +1034,30 @@ fn main() {
                 &format!("reload {r} quiesce"),
             )
             .await;
+            let (verified_min, verified_observers) =
+                ctx.obs
+                    .iter()
+                    .fold((u64::MAX, 0usize), |(minimum, complete), observer| {
+                        let generation = observer.generation.lock().unwrap();
+                        (
+                            minimum.min(generation.active),
+                            complete + usize::from(generation.complete()),
+                        )
+                    });
+            if verified_min != expected || verified_observers != n_peers as usize {
+                eprintln!(
+                    "FAIL: reload {r} post-quiesce current-generation mismatch: \
+                     active_min={verified_min} target={expected} \
+                     observers={verified_observers}/{n_peers}"
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "reload {r} current_generation_verified \
+                 contract=current-state-generation-community-v2 \
+                 community={community} observers={verified_observers}/{n_peers} \
+                 active_prefixes_per_observer={verified_min} target={expected}"
+            );
             let up = live_sessions(&ctx);
             println!("reload {r} sessions_up {up}/{n_peers}");
         }
@@ -960,10 +1065,11 @@ fn main() {
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
         let base_withdrawals = ctx.base_withdrawals.load(Ordering::Relaxed);
         let marker_conflicts = ctx.marker_conflicts.load(Ordering::Relaxed);
+        let route_identity_defects = ctx.route_identity_defects.load(Ordering::Relaxed);
         require_healthy(&ctx, "final");
         println!(
             "defects parse_errors={parse_errors} base_withdrawals={base_withdrawals} \
-             marker_conflicts={marker_conflicts}"
+             marker_conflicts={marker_conflicts} route_identity_defects={route_identity_defects}"
         );
         println!("done rss_mib={}", rss_mib(pid));
         std::process::exit(0);
@@ -975,56 +1081,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generation_progress_counts_unique_prefixes_only() {
+    fn generation_progress_tracks_current_receiver_state() {
         let mut progress = GenerationProgress::default();
         progress.reset(128, 2, 100, 26);
 
-        progress.observe(7, 10);
-        progress.observe(7, 20);
-        assert_eq!(
-            progress.unique, 1,
-            "a duplicate announce is not completion progress"
-        );
+        progress.replace(7, MarkerState::Active, 10).unwrap();
+        progress.replace(7, MarkerState::Active, 20).unwrap();
+        assert_eq!(progress.active, 1, "replacement does not double count");
         assert_eq!(progress.completed_at_us, None);
 
-        progress.observe(63, 30);
-        assert_eq!(progress.unique, 2);
+        progress.replace(63, MarkerState::Active, 30).unwrap();
+        assert_eq!(progress.active, 2);
         assert_eq!(progress.completed_at_us, Some(30));
-        progress.observe(64, 40);
-        assert_eq!(
-            progress.completed_at_us,
-            Some(30),
-            "completion time is stable"
-        );
+        assert!(progress.complete());
     }
 
     #[test]
-    fn generation_progress_rejects_stale_policy_markers() {
+    fn late_inactive_only_replacement_revokes_completion() {
         let mut progress = GenerationProgress::default();
-        progress.reset(128, 1, 100, 27);
-        let announced = [base_prefix(7)];
+        progress.reset(2, 2, 2, 0);
+        progress.replace(0, MarkerState::Active, 10).unwrap();
+        progress.replace(1, MarkerState::Active, 20).unwrap();
+        assert!(progress.complete());
 
-        observe_generation(
-            &mut progress,
-            COMMUNITY_GEN_B,
-            &[COMMUNITY_GEN_A],
-            &announced,
-            128,
-            10,
-        );
-        assert_eq!(progress.unique, 0);
+        progress.replace(1, MarkerState::Inactive, 30).unwrap();
+        assert_eq!(progress.active, 1);
         assert_eq!(progress.completed_at_us, None);
+        assert!(!progress.complete());
+    }
 
-        observe_generation(
-            &mut progress,
-            COMMUNITY_GEN_B,
-            &[COMMUNITY_GEN_B],
-            &announced,
-            128,
-            20,
-        );
-        assert_eq!(progress.unique, 1);
-        assert_eq!(progress.completed_at_us, Some(20));
+    #[test]
+    fn late_markerless_replacement_revokes_completion() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(1, 1, 1, 0);
+        progress.replace(0, MarkerState::Active, 10).unwrap();
+        assert!(progress.complete());
+
+        progress.replace(0, MarkerState::Markerless, 20).unwrap();
+        assert_eq!(progress.active, 0);
+        assert_eq!(progress.completed_at_us, None);
+        assert!(!progress.complete());
     }
 
     #[test]
@@ -1051,16 +1147,48 @@ mod tests {
     fn generation_progress_rejects_observers_own_slice() {
         let mut progress = GenerationProgress::default();
         progress.reset(4, 3, 2, 1);
+        assert_eq!(
+            progress.replace(2, MarkerState::Active, 10),
+            Err("observer received its own base prefix")
+        );
+        assert_eq!(progress.active, 0);
+    }
 
-        progress.observe(0, 10);
-        progress.observe(1, 20);
-        progress.observe(2, 30);
-        assert_eq!(progress.unique, 2, "own prefix must not advance completion");
-        assert_eq!(progress.completed_at_us, None);
+    #[test]
+    fn base_identity_validation_rejects_duplicates_wrong_lengths_and_range() {
+        let duplicate = [base_prefix(7), base_prefix(7)];
+        assert_eq!(
+            validated_base_indices(&duplicate, 128, 100, 128),
+            Err("duplicate base prefix identity in one UPDATE")
+        );
+        let wrong_length = [Ipv4Prefix::new(Ipv4Addr::new(20, 0, 7, 0), 25)];
+        assert_eq!(
+            validated_base_indices(&wrong_length, 128, 100, 128),
+            Err("malformed or out-of-range base prefix identity")
+        );
+        let out_of_range = [base_prefix(128)];
+        assert_eq!(
+            validated_base_indices(&out_of_range, 128, 100, 128),
+            Err("malformed or out-of-range base prefix identity")
+        );
+        let own = [base_prefix(100)];
+        assert_eq!(
+            validated_base_indices(&own, 128, 100, 128),
+            Err("observer received its own base prefix")
+        );
+    }
 
-        progress.observe(3, 40);
-        assert_eq!(progress.unique, 3);
-        assert_eq!(progress.completed_at_us, Some(40));
+    #[test]
+    fn marker_state_distinguishes_active_inactive_and_markerless() {
+        assert_eq!(
+            marker_state(COMMUNITY_GEN_B, &[COMMUNITY_GEN_B]),
+            MarkerState::Active
+        );
+        assert_eq!(
+            marker_state(COMMUNITY_GEN_B, &[COMMUNITY_GEN_A]),
+            MarkerState::Inactive
+        );
+        assert_eq!(marker_state(COMMUNITY_GEN_B, &[]), MarkerState::Markerless);
     }
 
     #[test]
