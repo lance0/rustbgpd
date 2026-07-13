@@ -85,6 +85,29 @@ fn keyring_is_append_only(current: &TcpAoKeyring, desired: &TcpAoKeyring) -> boo
     desired.0.starts_with(&current.0) && desired.selected() == current.selected()
 }
 
+fn record_tcp_ao_generation_applied(
+    status: &mut TcpAoRotationStatus,
+    generation: TcpAoRotationGeneration,
+) {
+    *status = TcpAoRotationStatus {
+        desired: generation,
+        applied: generation,
+        phase: TcpAoRotationPhase::Idle,
+        last_error: None,
+    };
+}
+
+fn complete_tcp_ao_generation<'a>(
+    global: &mut TcpAoRotationStatus,
+    protected_peers: impl Iterator<Item = &'a mut TcpAoRotationStatus>,
+    generation: TcpAoRotationGeneration,
+) {
+    for status in protected_peers {
+        record_tcp_ao_generation_applied(status, generation);
+    }
+    record_tcp_ao_generation_applied(global, generation);
+}
+
 fn target_for_peer(
     peer: &PeerKey,
     is_dynamic: bool,
@@ -374,6 +397,14 @@ impl PeerManager {
                 }
                 self.tcp_ao_desired_inventory = None;
             }
+            complete_tcp_ao_generation(
+                &mut self.tcp_ao_rotation,
+                self.peers
+                    .values_mut()
+                    .filter(|managed| managed.tcp_ao_protected)
+                    .map(|managed| &mut managed.tcp_ao_rotation),
+                generation,
+            );
             return Ok(());
         }
         let desired_inventory =
@@ -406,7 +437,6 @@ impl PeerManager {
             };
         }
 
-        let mut committed = Vec::new();
         for (peer, desired, sessions) in plan {
             let mut error = None;
             for commands in &sessions {
@@ -457,9 +487,11 @@ impl PeerManager {
                     "TCP-AO add-only generation failed for {peer:?}: {error}"
                 ));
             }
-            committed.push((peer, desired));
-        }
-        for (peer, desired) in committed {
+            // This peer's primary and pending child have both acknowledged the
+            // immutable generation. Record that durable per-peer truth before
+            // moving to the next peer. A later peer failure changes the phase
+            // to failed, but must not erase which earlier peers actually
+            // applied the generation.
             let managed = self
                 .peers
                 .get_mut(&peer)
@@ -478,21 +510,18 @@ impl PeerManager {
             } else {
                 desired.active_keyring
             };
-            managed.tcp_ao_rotation = TcpAoRotationStatus {
-                desired: generation,
-                applied: generation,
-                phase: TcpAoRotationPhase::Idle,
-                last_error: None,
-            };
+            record_tcp_ao_generation_applied(&mut managed.tcp_ao_rotation, generation);
         }
         self.tcp_ao_generation = generation;
         self.tcp_ao_desired_inventory = None;
-        self.tcp_ao_rotation = TcpAoRotationStatus {
-            desired: generation,
-            applied: generation,
-            phase: TcpAoRotationPhase::Idle,
-            last_error: None,
-        };
+        complete_tcp_ao_generation(
+            &mut self.tcp_ao_rotation,
+            self.peers
+                .values_mut()
+                .filter(|managed| managed.tcp_ao_protected)
+                .map(|managed| &mut managed.tcp_ao_rotation),
+            generation,
+        );
         Ok(())
     }
 }
@@ -500,8 +529,14 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_manager::ManagedPeer;
+    use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_transport::TcpAoListenerOwnerKind;
-    use rustbgpd_transport::{TcpAoAlgorithm, TcpAoConfig};
+    use rustbgpd_transport::{
+        PeerCommandError, PeerHandle, TcpAoAlgorithm, TcpAoConfig, TransportConfig,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
 
     fn key(send_id: u8, recv_id: u8) -> TcpAoConfig {
         TcpAoConfig {
@@ -626,5 +661,182 @@ mod tests {
         assert!(resets.is_empty());
         primary_reset_rx.await.unwrap();
         pending_reset_rx.await.unwrap();
+    }
+
+    fn rotation_peer_handle(apply_result: Result<(), PeerCommandError>) -> PeerHandle {
+        let (commands, mut rx) = mpsc::channel(4);
+        let task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    PeerCommand::ApplyTcpAoAddOnly { reply, .. } => {
+                        let _ = reply.send(apply_result.clone());
+                    }
+                    PeerCommand::Shutdown
+                    | PeerCommand::Stop { .. }
+                    | PeerCommand::CollisionDump => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        PeerHandle::from_parts(commands, task)
+    }
+
+    fn install_rotation_peer(
+        manager: &mut PeerManager,
+        address: IpAddr,
+        session_id: u64,
+        handle: PeerHandle,
+        keyring: TcpAoKeyring,
+    ) -> PeerKey {
+        let peer = PeerKey::new(address, None);
+        let mut transport = TransportConfig::new(
+            PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1)),
+            SocketAddr::new(address, 179),
+        );
+        transport.tcp_ao = Some(keyring);
+        manager.peers.insert(
+            peer.clone(),
+            ManagedPeer {
+                handle,
+                session_id,
+                remote_asn: 65_002,
+                description: address.to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(90),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                tcp_ao_protected: true,
+                tcp_ao_rotation: TcpAoRotationStatus::default(),
+                accepted_dynamic_range: None,
+                pending_refresh: false,
+                pending_export_apply: false,
+                advertise_graceful_shutdown: false,
+            },
+        );
+        manager.register_session(session_id, &peer);
+        peer
+    }
+
+    #[tokio::test]
+    async fn later_peer_failure_preserves_earlier_peer_applied_generation() {
+        let old = TcpAoRotationGeneration::STARTUP;
+        let new = old.next().unwrap();
+        let (_manager_tx, manager_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let mut manager = PeerManager::new(
+            manager_rx,
+            65_001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let old_keyring = TcpAoKeyring(vec![key(1, 11)]);
+        let desired_keyring = TcpAoKeyring(vec![key(1, 11), key(2, 12)]);
+        let peer_a = install_rotation_peer(
+            &mut manager,
+            "192.0.2.1".parse().unwrap(),
+            1,
+            rotation_peer_handle(Ok(())),
+            old_keyring.clone(),
+        );
+        let peer_b = install_rotation_peer(
+            &mut manager,
+            "192.0.2.2".parse().unwrap(),
+            2,
+            rotation_peer_handle(Err(PeerCommandError::CommandFailed(
+                "injected peer B apply failure".to_string(),
+            ))),
+            old_keyring,
+        );
+        let static_keyrings = vec![
+            (peer_a.clone(), desired_keyring.clone()),
+            (peer_b.clone(), desired_keyring),
+        ];
+
+        let error = manager
+            .apply_tcp_ao_add_only(new, &[], &static_keyrings)
+            .await
+            .unwrap_err();
+        assert!(error.contains("injected peer B apply failure"));
+
+        let peer_a = &manager.peers[&peer_a];
+        let peer_b = &manager.peers[&peer_b];
+        assert_eq!(peer_a.tcp_ao_rotation.applied, new);
+        assert_eq!(peer_b.tcp_ao_rotation.applied, old);
+        assert_eq!(
+            peer_a.tcp_ao_rotation.phase,
+            TcpAoRotationPhase::AddOnlyFailed
+        );
+        assert_eq!(
+            peer_b.tcp_ao_rotation.phase,
+            TcpAoRotationPhase::AddOnlyFailed
+        );
+        assert_eq!(peer_a.transport_config.tcp_ao.as_ref().unwrap().0.len(), 2);
+        assert_eq!(peer_b.transport_config.tcp_ao.as_ref().unwrap().0.len(), 1);
+        assert_eq!(manager.tcp_ao_generation, old);
+        assert_eq!(manager.tcp_ao_rotation.applied, old);
+    }
+
+    #[tokio::test]
+    async fn same_generation_recovery_clears_global_and_peer_accept_fences() {
+        let old = TcpAoRotationGeneration::STARTUP;
+        let recovered = old.next().unwrap();
+        let staged = || TcpAoRotationStatus {
+            desired: recovered,
+            applied: recovered,
+            phase: TcpAoRotationPhase::AddOnly,
+            last_error: Some("lost listener commit acknowledgement".to_string()),
+        };
+        let (_manager_tx, manager_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let mut manager = PeerManager::new(
+            manager_rx,
+            65_001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        manager.tcp_ao_generation = recovered;
+        manager.tcp_ao_rotation = staged();
+        let keyring = TcpAoKeyring(vec![key(1, 11), key(2, 12)]);
+        let peer = install_rotation_peer(
+            &mut manager,
+            "192.0.2.1".parse().unwrap(),
+            1,
+            // A same-generation recovery must only repair bookkeeping; it
+            // must not re-send the already acknowledged socket mutation.
+            rotation_peer_handle(Err(PeerCommandError::CommandFailed(
+                "same-generation mutation was unexpectedly replayed".to_string(),
+            ))),
+            keyring.clone(),
+        );
+        manager.peers.get_mut(&peer).unwrap().tcp_ao_rotation = staged();
+
+        manager
+            .apply_tcp_ao_add_only(recovered, &[], &[(peer.clone(), keyring)])
+            .await
+            .unwrap();
+
+        for status in [
+            &manager.tcp_ao_rotation,
+            &manager.peers[&peer].tcp_ao_rotation,
+        ] {
+            assert_eq!(status.desired, recovered);
+            assert_eq!(status.applied, recovered);
+            assert_eq!(status.phase, TcpAoRotationPhase::Idle);
+            assert!(status.last_error.is_none());
+        }
     }
 }

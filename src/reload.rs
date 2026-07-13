@@ -221,14 +221,15 @@ fn prepare_tcp_ao_add_only_plan(
             )));
         }
     }
-    if !changed {
+    let recovering_listener_commit = matches!(
+        listener_status.phase,
+        TcpAoRotationPhase::AddOnly | TcpAoRotationPhase::AddOnlyFailed
+    );
+    if !changed && !recovering_listener_commit {
         return Ok(TcpAoReloadPlan::Unchanged);
     }
 
-    let generation = if matches!(
-        listener_status.phase,
-        TcpAoRotationPhase::AddOnly | TcpAoRotationPhase::AddOnlyFailed
-    ) {
+    let generation = if recovering_listener_commit {
         listener_status.desired
     } else {
         listener_status
@@ -4829,6 +4830,59 @@ tcp_ao = [
                 .unwrap(),
             TcpAoReloadPlan::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn tcp_ao_equal_config_recovers_unacknowledged_commit_then_allows_later_append() {
+        let two_keys = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+]"#,
+        );
+        let current = Config::load_toml_with_diagnostics(&two_keys, "current").unwrap();
+        let desired = Config::load_toml_with_diagnostics(&two_keys, "desired").unwrap();
+        let generation_two = TcpAoRotationGeneration::new(2).unwrap();
+        for phase in [
+            TcpAoRotationPhase::AddOnly,
+            TcpAoRotationPhase::AddOnlyFailed,
+        ] {
+            let unacknowledged = TcpAoRotationStatus {
+                desired: generation_two,
+                applied: TcpAoRotationGeneration::STARTUP,
+                phase,
+                last_error: (phase == TcpAoRotationPhase::AddOnlyFailed)
+                    .then(|| "injected commit rejection".to_string()),
+            };
+            let TcpAoReloadPlan::AddOnly(recovery) =
+                prepare_tcp_ao_add_only_plan(&current, &desired, &unacknowledged).unwrap()
+            else {
+                panic!("equal config must recover the staged listener generation");
+            };
+            assert_eq!(recovery.generation, generation_two);
+            assert_eq!(recovery.static_keyrings[0].1.0.len(), 2);
+        }
+
+        let three_keys = two_keys.replace(
+            "  { key = \"successor\", send_id = 2, recv_id = 12, algorithm = \"hmac(sha256)\" }\n]",
+            "  { key = \"successor\", send_id = 2, recv_id = 12, algorithm = \"hmac(sha256)\" },\n  { key = \"later\", send_id = 3, recv_id = 13, algorithm = \"hmac(sha256)\" }\n]",
+        );
+        let later = Config::load_toml_with_diagnostics(&three_keys, "later").unwrap();
+        let committed = TcpAoRotationStatus {
+            desired: generation_two,
+            applied: generation_two,
+            phase: TcpAoRotationPhase::Idle,
+            last_error: None,
+        };
+        let TcpAoReloadPlan::AddOnly(next) =
+            prepare_tcp_ao_add_only_plan(&current, &later, &committed).unwrap()
+        else {
+            panic!("later append should not remain fenced after recovery");
+        };
+        assert_eq!(next.generation, TcpAoRotationGeneration::new(3).unwrap());
+        assert_eq!(next.static_keyrings[0].1.0.len(), 3);
     }
 
     #[test]
