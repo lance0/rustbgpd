@@ -24,9 +24,60 @@ Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Backs
 
-- `docs/perf/reload-stall-2026-07.md` (LAN-333). The full daemon-side scenario
-  (700 `[[neighbors]]` route-server-client blocks, `member-in` / `member-out`
-  rpol chains, gRPC UDS, and the two policy generations) is pinned there.
+- `docs/perf/reload-stall-2026-07.md` (LAN-333/LAN-350). The full daemon-side
+  scenario (700 `[[neighbors]]` route-server-client blocks, `member-in` /
+  `member-out` rpol chains, gRPC UDS, and the two policy generations) is pinned
+  here. The corrected historical run remains non-acceptance evidence until the
+  durable wrapper below produces a complete validated bundle.
+
+## Retained acceptance run
+
+Run only from the exact clean commit under test, with an output path that does
+not exist yet:
+
+```text
+bench/scale/reloadstall/run-receipt.sh \
+  --source-sha <full-40-hex-clean-HEAD> \
+  --output-dir target/reloadstall-receipt/<unique-run-id>
+```
+
+`run-receipt.sh` owns the shared host lock, exact-source release builds, short
+UDS-safe runtime directory, daemon and health-probe lifecycle, and a timestamped
+final load/process/all-governor snapshot immediately before daemon start. It
+retains a `git archive` carrying the requested commit marker, extracts that
+archive into a read-only source tree, and sends every Cargo build, scenario
+generation, process-fence scan, and final validation through that exact tree;
+Cargo output lives in a separate scratch target directory. The validator
+reconstructs the Git tree object from the archive and requires its SHA-1 to
+equal the retained source tree before accepting the bundle. Every
+retained public text surface (build and daemon output, generated config,
+invocation, and provenance included) normalizes host paths, hostname, and
+the daemon PID to stable placeholders while preserving the exact source
+commit/tree/archive and binary hashes. Unexpected extra artifacts fail
+validation rather than escaping that publication-safety contract. The final
+host fence inspects process argv, cwd, and descendants, including interpreted
+benchmarks and Cargo target binaries; the shared lock remains the first line of
+coordination. The exact-source validator accepts only the fixed 700 ×
+400,400 shape with four complete alternating-marker cycles, where each cycle
+proves unique prefix coverage for its active A or B policy marker, 700/700
+observers, 399,828 expected non-self prefixes per observer, daemon-side
+continuity, zero health failures, and a worst-observer UPDATE gap below 1,000 ms.
+The validator's
+adversarial fixtures run with:
+
+```text
+cd bench/scale/reloadstall
+python3 -m unittest -v test_validate_receipt.py
+python3 -m unittest -v test_process_fence.py
+```
+
+`SHA256SUMS` covers every retained input, full source archive, selected source
+copy, log, preflight sample, invocation, manifest, and provenance file; only
+`SHA256SUMS` itself is excluded. There is deliberately no unsummed
+`validation.json`: acceptance is the exact validator's successful exit and JSON
+printed by the wrapper after the complete checksum inventory passes. A later
+audit should run `validate_receipt.py` from the named source commit (or from a
+separately verified extraction of `sources/source.tar`) against the bundle.
 
 ## Build and run
 
@@ -63,7 +114,8 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 - `reloads` — number of SIGHUP reload cycles.
 - `control_secs` — quiet control-window length (baseline inter-UPDATE gap).
 
-Receipt run shape (heavy — 700 real sessions × 400k routes; do not run casually):
+Underlying harness shape (heavy; manual invocation is mechanics-only and does
+not create an acceptance receipt):
 
 ```text
 reloadstall 700 400400 <port> <daemon_pid> <live.rpol> <gen-a.rpol> <gen-b.rpol> 4 30

@@ -216,18 +216,23 @@ The next product milestone is operational trust for the route-server / route-
 reflector beachhead, not another breadth sprint. Work in this section outranks
 new AFI/SAFI and EVPN dataplane expansion.
 
-- **Define the narrow v1 role contract.** Freeze only the configuration and API
-  used by IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA,
-  Roles/OTC, transactions, BMP/MRT/events, and the already-proven RR/controller-
-  feed families. Publish explicit stability, migration, deprecation, and
-  compatibility rules. Keep EVPN VTEP/IRB alpha and out of this first contract.
-- **Make changed-policy reload the primary performance program.** First rerun
-  the corrected 700-client × 400,400-route harness with unique-generation
-  completion. Then compute shared group-to-group migration work once, chunk
-  member resync so queries and churn interleave, and gate repeated heterogeneous
-  reloads on completion time, control-query latency, session continuity, and
-  folded advertised-state equivalence. The withdrawn historical `< 1 s` claim
-  is not evidence until the corrected run replaces it.
+- **Narrow v1 role contract shipped (#862 / LAN-355).** The machine-checked
+  contract freezes only the configuration and API used by IPv4/IPv6 route
+  servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC, transactions,
+  BMP/MRT/events, and the already-proven RR/controller-feed families, with
+  explicit stability, migration, deprecation, and compatibility rules. EVPN
+  VTEP/IRB remains alpha and outside this first contract.
+- **Make changed-policy reload the primary performance program.** A corrected
+  unique-prefix 700-client × 400,400-route rerun under alternating A/B policy
+  markers happened, but its exact raw output, daemon log, generated inputs,
+  and provenance were not retained as one durable bundle. First rerun it through
+  the revision-pinned LAN-350 wrapper
+  and fail-closed validator. Then compute shared group-to-group migration work
+  once, chunk member resync so queries and churn interleave, and gate repeated
+  heterogeneous reloads on completion time, control-query latency, session
+  continuity, and folded advertised-state equivalence. Both the original
+  occurrence-counted run and the corrected-but-unarchived `< 1 s` result remain
+  non-acceptance evidence until the retained receipt replaces them.
 - **Expose groupability before apply.** Config transaction planning now projects
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded

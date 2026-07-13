@@ -118,7 +118,7 @@ struct Ctx {
     per_peer: u32,
     daemon: SocketAddr,
     obs: Vec<Obs>,
-    /// Daemon UPDATEs the stub failed to decode — a daemon defect that
+    /// Daemon messages the stub failed to frame or decode — a daemon defect that
     /// invalidates the run (see the reader and the exit check in `main`).
     parse_errors: AtomicU64,
 }
@@ -342,23 +342,30 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
     let (mut reader, mut writer) = stream.into_split();
 
     // Writer task: outbound messages + periodic keepalive.
+    let wctx = Arc::clone(&ctx);
     tokio::spawn(async move {
         let mut ka_tick = tokio::time::interval(Duration::from_secs(u64::from(HOLD_TIME) / 3));
         ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ka_tick.tick().await;
         loop {
-            tokio::select! {
+            let live = tokio::select! {
                 Some(msg) = tx_rx.recv() => {
-                    let Ok(bytes) = encode_message(&msg) else { return };
-                    if writer.write_all(&bytes).await.is_err() { return; }
+                    let Ok(bytes) = encode_message(&msg) else { break };
+                    writer.write_all(&bytes).await.is_ok()
                 }
                 _ = ka_tick.tick() => {
                     let bytes = encode_message(&Message::Keepalive).unwrap();
-                    if writer.write_all(&bytes).await.is_err() { return; }
+                    writer.write_all(&bytes).await.is_ok()
                 }
-                else => return,
+                else => break,
+            };
+            if !live {
+                break;
             }
         }
+        wctx.obs[i as usize]
+            .established
+            .store(false, Ordering::Relaxed);
     });
 
     // Reader task: frame, decode, record UPDATE arrivals, answer
@@ -386,7 +393,13 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 let total = match peek_message_length(&frame, MAX_MESSAGE_LEN) {
                     Ok(Some(len)) => usize::from(len),
                     Ok(None) => break,
-                    Err(_) => return,
+                    Err(_) => {
+                        rctx.parse_errors.fetch_add(1, Ordering::Relaxed);
+                        rctx.obs[i as usize]
+                            .established
+                            .store(false, Ordering::Relaxed);
+                        return;
+                    }
                 };
                 if frame.len() < total {
                     break;
@@ -394,7 +407,13 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 let mut mb = frame.split_to(total).freeze();
                 let msg = match decode_message(&mut mb, MAX_MESSAGE_LEN) {
                     Ok(m) => m,
-                    Err(_) => return,
+                    Err(_) => {
+                        rctx.parse_errors.fetch_add(1, Ordering::Relaxed);
+                        rctx.obs[i as usize]
+                            .established
+                            .store(false, Ordering::Relaxed);
+                        return;
+                    }
                 };
                 match msg {
                     Message::Update(u) => {
@@ -486,6 +505,12 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 .refresh_pending
                                 .store(false, Ordering::Release);
                         });
+                    }
+                    Message::Notification(_) => {
+                        rctx.obs[i as usize]
+                            .established
+                            .store(false, Ordering::Relaxed);
+                        return;
                     }
                     _ => {}
                 }
@@ -742,7 +767,7 @@ fn main() {
                     break;
                 }
                 ticks += 1;
-                if ticks % 20 == 0 {
+                if ticks.is_multiple_of(20) {
                     let sat = (0..n_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
@@ -757,6 +782,39 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            let (generation_min, generation_max, completed_observers) = ctx
+                .obs
+                .iter()
+                .map(|observer| observer.generation.lock().unwrap().unique)
+                .fold((u64::MAX, 0, 0usize), |(min, max, completed), unique| {
+                    (
+                        min.min(unique),
+                        max.max(unique),
+                        completed + usize::from(unique == expected),
+                    )
+                });
+            if generation_min != expected
+                || generation_max != expected
+                || completed_observers != n_peers as usize
+            {
+                eprintln!(
+                    "FAIL: reload {r} unique-generation completion mismatch: \
+                     min={generation_min} max={generation_max} target={expected} \
+                     observers={completed_observers}/{n_peers}"
+                );
+                std::process::exit(1);
+            }
+            let community = format!(
+                "{}:{}",
+                expected_community >> 16,
+                expected_community & 0xffff
+            );
+            println!(
+                "reload {r} unique_generation_complete \
+                 contract=unique-prefix-generation-community-v1 \
+                 community={community} observers={completed_observers}/{n_peers} \
+                 unique_prefixes_per_observer={generation_min} target={expected}"
+            );
             // Per-observer completion + max gap over the reload window.
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
@@ -780,14 +838,16 @@ fn main() {
                 rss_mib(pid),
                 ctx.obs[0].last_comms.lock().unwrap().clone()
             );
+            // Keep observing the session through the quiesce interval. In
+            // particular, the final cycle must not report a stale `true` just
+            // before a reader or writer notices a closed transport.
+            tokio::time::sleep(Duration::from_secs(20)).await;
             let up = ctx
                 .obs
                 .iter()
                 .filter(|o| o.established.load(Ordering::Relaxed))
                 .count();
             println!("reload {r} sessions_up {up}/{n_peers}");
-            // Quiesce between reloads.
-            tokio::time::sleep(Duration::from_secs(20)).await;
         }
 
         println!("done rss_mib={}", rss_mib(pid));
