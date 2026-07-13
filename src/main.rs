@@ -4641,16 +4641,15 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
 
     #[test]
     fn gr_restart_marker_remaining_time_rejects_or_clamps_valid_far_future_v2_marker() {
-        let path = unique_temp_path("gr-restart-far-future");
+        let (_dir, store) = marker_store();
         let far_future_secs = i64::MAX.unsigned_abs();
-        std::fs::write(
-            &path,
-            format!(
-                "version = 2\nexpires_at_unix = {far_future_secs}\ncheckpoint_generation = \"far-future-generation\"\n"
-            ),
-        )
-        .unwrap();
-        let marker = read_gr_restart_marker(&path).unwrap().unwrap();
+        let expires_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(far_future_secs))
+            .unwrap();
+        store
+            .write_selected(expires_at, Some("far-future-generation"))
+            .unwrap();
+        let marker = store.read().unwrap().unwrap();
         assert_eq!(
             marker.checkpoint_generation.as_deref(),
             Some("far-future-generation")
@@ -4664,7 +4663,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             gr_restart_marker_remaining_time(marker.expires_at, UNIX_EPOCH, Some(120)).unwrap(),
             Duration::from_mins(2)
         );
-        remove_gr_restart_marker(&path).unwrap();
+        store.remove().unwrap();
     }
 
     #[test]
