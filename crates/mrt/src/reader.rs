@@ -157,9 +157,15 @@ pub struct SnapshotEntry {
     pub peer: MrtPeerEntry,
     /// Unix timestamp when this route was originated.
     pub originated_time: u32,
-    /// Add-Path path identifier (RFC 8050). 0 = no Add-Path,
-    /// mirroring the writer's convention.
+    /// Add-Path path identifier (RFC 8050). Legacy non-Add-Path subtypes
+    /// always use 0; Add-Path subtypes may also legitimately carry 0.
+    /// Inspect [`Self::add_path`] to distinguish the record subtype.
     pub path_id: u32,
+    /// Whether this entry came from an RFC 8050 Add-Path RIB subtype.
+    ///
+    /// This is separate from `path_id`: zero is a valid path identifier and
+    /// therefore cannot identify the record subtype by itself.
+    pub add_path: bool,
     /// Decoded path attributes, excluding `MP_REACH_NLRI` — the MRT
     /// reduced form (RFC 6396 §4.3.4) carries only the next-hop, which
     /// is surfaced via `next_hop` / `link_local_next_hop` instead.
@@ -416,7 +422,7 @@ impl<'a> SnapshotReader<'a> {
         self.collector_bgp_id
     }
 
-    /// View name from the `PEER_INDEX_TABLE` (lossily decoded UTF-8).
+    /// UTF-8 view name from the `PEER_INDEX_TABLE`.
     #[must_use]
     pub fn view_name(&self) -> &str {
         &self.view_name
@@ -589,6 +595,7 @@ impl<'a> SnapshotReader<'a> {
             peer: peer.clone(),
             originated_time,
             path_id,
+            add_path,
             attributes: decoded.attributes,
             next_hop: decoded.next_hop,
             link_local_next_hop: decoded.link_local_next_hop,
@@ -630,8 +637,11 @@ fn parse_peer_index_table(
     let id = cur.take(4, "collector BGP ID")?;
     let collector_bgp_id = Ipv4Addr::new(id[0], id[1], id[2], id[3]);
     let view_name_len = cur.u16("view name length")?;
-    let view_name =
-        String::from_utf8_lossy(cur.take(usize::from(view_name_len), "view name")?).into_owned();
+    let view_name_offset = cur.offset();
+    let view_name_bytes = cur.take(usize::from(view_name_len), "view name")?;
+    let view_name = std::str::from_utf8(view_name_bytes)
+        .map_err(|_| malformed(view_name_offset, "view name is not valid UTF-8"))?
+        .to_owned();
     let peer_count = cur.u16("peer count")?;
     let mut peers = Vec::with_capacity(usize::from(peer_count).min(1024));
     for _ in 0..peer_count {
