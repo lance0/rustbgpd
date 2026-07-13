@@ -2008,8 +2008,10 @@ pub(super) fn remove_private_asns(
 mod tests {
     use super::*;
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
-    use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
+    use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Ipv4Prefix, encode_message};
+    use tokio::sync::mpsc;
 
     fn config_with_auth_secret(secret: &str) -> TransportConfig {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
@@ -2029,6 +2031,29 @@ mod tests {
         config
     }
 
+    fn capture_dynamic_profile(negotiated_remote_asn: u32) -> SessionExportProfile {
+        let peer = PeerConfig::new(65_001, 0, Ipv4Addr::new(10, 0, 0, 1));
+        let config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let mut session = PeerSession::new(
+            config,
+            BgpMetrics::new(),
+            command_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let mut negotiated = NegotiatedSession::default();
+        negotiated.peer_asn = negotiated_remote_asn;
+        session.negotiated = Some(negotiated);
+        SessionExportProfile::capture(&session)
+    }
+
     #[test]
     fn export_profile_never_retains_or_formats_transport_auth_secrets() {
         const SENTINEL: &str = "lan-380-profile-must-not-retain-this-secret";
@@ -2039,6 +2064,21 @@ mod tests {
         assert!(!rendered.contains(SENTINEL));
         assert!(!rendered.contains("tcp_ao"));
         assert!(!rendered.contains("md5"));
+    }
+
+    #[test]
+    fn live_capture_classifies_dynamic_peer_from_negotiated_asn() {
+        let ebgp = capture_dynamic_profile(65_002);
+        let ibgp = capture_dynamic_profile(65_001);
+
+        assert!(
+            ebgp.is_ebgp(),
+            "dynamic remote_asn=0 must use the negotiated eBGP ASN"
+        );
+        assert!(
+            !ibgp.is_ebgp(),
+            "dynamic remote_asn=0 must preserve a negotiated same-AS session"
+        );
     }
 
     #[test]
