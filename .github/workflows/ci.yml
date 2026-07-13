@@ -42,6 +42,8 @@ jobs:
       - run: cargo check -p rustbgpd-rib --features bench-internals --benches
       # Transport has the same feature-gated `bench-internals` bench surface.
       - run: cargo check -p rustbgpd-transport --features bench-internals --benches
+      # API owns the feature-gated LAN-393 event-history producer bench.
+      - run: cargo check -p rustbgpd-api --features bench-internals --benches
       # Same class of gap for the root crate: `bench-internals` exposes
       # `pub mod config` (and its EVPN reload-diff dependencies) in the
       # lib, a surface the default `--all-targets` clippy never compiles.
@@ -61,6 +63,23 @@ jobs:
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
+      - name: Check LAN-393 fail-closed measurement tooling
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/lan393-venv"
+          "$RUNNER_TEMP/lan393-venv/bin/pip" install --disable-pip-version-check 'PyYAML==6.0.2'
+          bash docs/perf/test-lan393-host-fence.sh
+          "$RUNNER_TEMP/lan393-venv/bin/python" -m unittest -v \
+            docs/perf/test_validate_lan393_receipt.py \
+            docs/perf/test_validate_lan393_criterion.py \
+            docs/perf/test_validate_lan393_perf.py \
+            docs/perf/test_validate_lan393_full_comparison.py
+          shellcheck -x \
+            docs/perf/lan393-host-fence.sh \
+            docs/perf/run-lan393-criterion.sh \
+            docs/perf/run-lan393-full-daemon.sh \
+            docs/perf/bgperf-rustbgpd-ehm-wrapper.sh \
+            docs/perf/test-lan393-host-fence.sh
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:

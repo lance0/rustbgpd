@@ -104,15 +104,16 @@ class ReceiptValidatorTests(unittest.TestCase):
         *,
         row: list[str] | None = None,
         phase: str = "baseline",
+        mode: str = "enabled",
     ) -> argparse.Namespace:
-        scenario = root / f"full-daemon-{phase}-scenario.yaml"
+        scenario = root / f"full-daemon-{phase}-{mode}-scenario.yaml"
         log = root / "bgperf.log"
         result = root / "result.csv"
-        run_receipt_dir = root / f"lan393-{phase}"
+        run_receipt_dir = root / f"lan393-{phase}-{mode}"
         source_tester_logs = run_receipt_dir / "tester"
         source_tester_logs.mkdir(parents=True)
         source_scenario = run_receipt_dir / "scenario.yaml"
-        tester_logs = root / f"full-daemon-{phase}-tester-logs"
+        tester_logs = root / f"full-daemon-{phase}-{mode}-tester-logs"
         tester_logs.mkdir()
         # The pinned helper intentionally excludes NEXT_HOP RMT diagnostics.
         (source_tester_logs / "10.10.0.3.log").write_text(
@@ -136,7 +137,8 @@ class ReceiptValidatorTests(unittest.TestCase):
             scenario=scenario,
             result=result,
             phase=phase,
-            bench_name=f"lan393-{phase}",
+            mode=mode,
+            bench_name=f"lan393-{phase}-{mode}",
             run_receipt_dir=run_receipt_dir,
             source_scenario=source_scenario,
             source_tester_log_dir=source_tester_logs,
@@ -234,6 +236,21 @@ class ReceiptValidatorTests(unittest.TestCase):
             )
             with self.assertRaises(SystemExit):
                 receipt.validate_bgperf(args)
+
+    def test_nonfinite_negative_and_inconsistent_metrics_fail_closed(self) -> None:
+        for index, value in ((11, "nan"), (12, "-1"), (13, "inf"), (14, "101")):
+            with self.subTest(index=index, value=value), tempfile.TemporaryDirectory() as directory:
+                row = successful_result()
+                row[index] = value
+                with self.assertRaises(SystemExit):
+                    receipt.validate_bgperf(self.bgperf_files(Path(directory), row=row))
+
+        with tempfile.TemporaryDirectory() as directory:
+            row = successful_result()
+            row[8] = "5"
+            row[10] = "9"
+            with self.assertRaises(SystemExit):
+                receipt.validate_bgperf(self.bgperf_files(Path(directory), row=row))
 
     def test_stale_default_logs_are_not_receipt_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -367,14 +384,14 @@ class ReceiptValidatorTests(unittest.TestCase):
     def test_tester_logs_are_bound_to_phase_and_bench_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             args = self.bgperf_files(Path(directory))
-            args.bench_name = "lan393-candidate"
+            args.bench_name = "lan393-candidate-enabled"
             with self.assertRaises(SystemExit):
                 receipt.validate_bgperf(args)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             args = self.bgperf_files(root)
-            wrong_dir = root / "full-daemon-candidate-tester-logs"
+            wrong_dir = root / "full-daemon-candidate-enabled-tester-logs"
             args.tester_log_dir.rename(wrong_dir)
             args.tester_log_dir = wrong_dir
             with self.assertRaises(SystemExit):
@@ -393,6 +410,7 @@ class ReceiptValidatorTests(unittest.TestCase):
             )[1],
             "org.rustbgpd.bgperf2.rust-toolchain": "1.95",
             "org.rustbgpd.lan393.profile-phase": "baseline",
+            "org.rustbgpd.lan393.event-history-mode": "enabled",
         }
         inspect = root / "inspect.json"
         inspect.write_text(
@@ -433,6 +451,7 @@ class ReceiptValidatorTests(unittest.TestCase):
             source_commit=BASELINE,
             bgperf2_commit=BGPERF2,
             phase="baseline",
+            mode="enabled",
         )
 
     def test_image_labels_and_provenance_are_bound(self) -> None:

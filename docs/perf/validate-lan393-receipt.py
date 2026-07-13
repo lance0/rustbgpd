@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -110,6 +112,9 @@ def validate_identity(args: argparse.Namespace) -> None:
 
 
 def validate_image(args: argparse.Namespace) -> None:
+    require_regular_file(args.inspect, "Docker image inspection")
+    require_regular_file(args.builder_provenance, "builder provenance")
+    require_regular_file(args.runtime_provenance, "runtime provenance")
     require_equal(args.bgperf2_commit, BGPERF2_COMMIT, "pinned bgperf2 commit")
     inspect = json.loads(args.inspect.read_text(encoding="utf-8"))
     if not isinstance(inspect, list) or len(inspect) != 1:
@@ -130,6 +135,7 @@ def validate_image(args: argparse.Namespace) -> None:
         )[1],
         "org.rustbgpd.bgperf2.rust-toolchain": "1.95",
         "org.rustbgpd.lan393.profile-phase": args.phase,
+        "org.rustbgpd.lan393.event-history-mode": args.mode,
     }
     for name, expected in expected_labels.items():
         require_equal(labels.get(name), expected, f"OCI label {name}")
@@ -167,6 +173,7 @@ def validate_image(args: argparse.Namespace) -> None:
     print(f"image_id={image_id}")
     print(f"source_commit={args.source_commit}")
     print(f"bgperf2_commit={args.bgperf2_commit}")
+    print(f"event_history_mode={args.mode}")
     print(f"builder_provenance_sha256={sha256_file(args.builder_provenance)}")
     print(f"runtime_provenance_sha256={sha256_file(args.runtime_provenance)}")
 
@@ -189,6 +196,11 @@ def load_scenario(path: Path) -> dict[str, object]:
 
 def validate_scenario(path: Path) -> dict[str, object]:
     scenario = load_scenario(path)
+    require_equal(
+        set(scenario),
+        {"local_prefix", "monitor", "policy", "target", "testers"},
+        "scenario top-level keys",
+    )
     require_equal(scenario.get("local_prefix"), "10.10.0.0/16", "scenario local_prefix")
     require_equal(scenario.get("policy"), {}, "scenario policy")
 
@@ -285,7 +297,7 @@ def validate_bird_tester_logs(
     BIRD timeout detector; its CSV timeout field is therefore compatibility
     data, not timeout evidence.
     """
-    expected_bench_name = f"lan393-{args.phase}"
+    expected_bench_name = f"lan393-{args.phase}-{args.mode}"
     require_equal(args.bench_name, expected_bench_name, "bgperf bench name")
     require_equal(
         args.run_receipt_dir.name,
@@ -305,7 +317,7 @@ def validate_bird_tester_logs(
     )
     require_equal(
         args.tester_log_dir.name,
-        f"full-daemon-{args.phase}-tester-logs",
+        f"full-daemon-{args.phase}-{args.mode}-tester-logs",
         "retained tester-log directory",
     )
     require_regular_file(args.source_scenario, "source run-scoped scenario")
@@ -364,6 +376,7 @@ def validate_bird_tester_logs(
         )
 
     print(f"profile_phase={args.phase}")
+    print(f"event_history_mode={args.mode}")
     print(f"bgperf_bench_name={args.bench_name}")
     print("bird_error_rule=case-sensitive RMT excluding NEXT_HOP")
     print("bird_error_lines=0")
@@ -438,6 +451,41 @@ def validate_bgperf(args: argparse.Namespace) -> None:
         require_equal(row[index], value, f"bgperf result field {RESULT_HEADER[index]}")
     if not row[2]:
         fail("bgperf result has no rustbgpd version identity")
+
+    def finite_number(index: int, *, positive: bool = False) -> float:
+        label = RESULT_HEADER[index]
+        try:
+            value = float(row[index])
+        except ValueError:
+            fail(f"bgperf result field {label} is not numeric: {row[index]!r}")
+        if not math.isfinite(value) or value < 0 or (positive and value == 0):
+            fail(f"bgperf result field {label} is not finite and valid: {row[index]!r}")
+        return value
+
+    monitor_wait = finite_number(7)
+    elapsed = finite_number(8)
+    first_received = finite_number(9)
+    tester_window = finite_number(10)
+    total_time = finite_number(11, positive=True)
+    finite_number(12)
+    finite_number(13, positive=True)
+    min_idle = finite_number(14)
+    finite_number(15)
+    cores = finite_number(18, positive=True)
+    if not cores.is_integer():
+        fail(f"bgperf result field cores is not an integer: {row[18]!r}")
+    if min_idle > 100:
+        fail(f"bgperf result min idle exceeds 100%: {row[14]!r}")
+    if first_received > elapsed or tester_window > elapsed or elapsed > total_time:
+        fail("bgperf timing fields violate first/tester <= elapsed <= total")
+    if monitor_wait > total_time:
+        fail("bgperf monitor wait exceeds total time")
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?(?:B|KB|MB|GB|TB)", row[19]) is None:
+        fail(f"bgperf result memory identity is malformed: {row[19]!r}")
+    try:
+        datetime.date.fromisoformat(row[17])
+    except ValueError:
+        fail(f"bgperf result date is malformed: {row[17]!r}")
     try:
         adapter_tester_errors = int(row[20])
     except ValueError:
@@ -458,6 +506,7 @@ def validate_bgperf(args: argparse.Namespace) -> None:
     print("prefixes_per_peer=100000")
     print("required=200000")
     print("received=200000")
+    print(f"event_history_mode={args.mode}")
     print("tester_errors=0")
     print("tester_error_authority=run_scoped_bird_logs")
     print(f"adapter_tester_errors_ignored={adapter_tester_errors}")
@@ -485,12 +534,14 @@ def parser() -> argparse.ArgumentParser:
     image.add_argument("--source-commit", required=True)
     image.add_argument("--bgperf2-commit", required=True)
     image.add_argument("--phase", choices=("baseline", "candidate"), required=True)
+    image.add_argument("--mode", choices=("enabled", "disabled"), required=True)
     image.set_defaults(func=validate_image)
 
     bgperf = commands.add_parser("bgperf", help="validate scenario and final result")
     bgperf.add_argument("--log", type=Path, required=True)
     bgperf.add_argument("--scenario", type=Path, required=True)
     bgperf.add_argument("--phase", choices=("baseline", "candidate"), required=True)
+    bgperf.add_argument("--mode", choices=("enabled", "disabled"), required=True)
     bgperf.add_argument("--bench-name", required=True)
     bgperf.add_argument("--run-receipt-dir", type=Path, required=True)
     bgperf.add_argument("--source-scenario", type=Path, required=True)

@@ -33,5 +33,8 @@ ps() {
 snapshot=$(lan393_competing_process_snapshot)
 [[ $(wc -l <<<"$snapshot") -eq 15 ]]
 [[ "$snapshot" != *'sleep 30'* ]]
+[[ "$snapshot" != *'/repo/'* ]]
+[[ "$snapshot" != *'101 '* ]]
+[[ "$snapshot" == *'event_history_'* ]]
 
 printf '%s\n' 'LAN-393 host-fence adversarial probes passed'

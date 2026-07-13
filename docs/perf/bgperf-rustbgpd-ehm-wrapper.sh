@@ -9,8 +9,14 @@ case "${1:-}" in
 esac
 
 config=$1
-if ! grep -q '^\[event_history\]$' "$config"; then
-    cat >>"$config" <<'EOF'
+mode=${LAN393_EVENT_HISTORY_MODE:-}
+case "$mode" in
+    enabled)
+        if grep -q '^\[event_history\]$' "$config"; then
+            printf '%s\n' 'event_history block unexpectedly supplied by bgperf2' >&2
+            exit 1
+        fi
+        cat >>"$config" <<'EOF'
 
 [event_history]
 enabled = true
@@ -19,7 +25,18 @@ path = "/var/lib/rustbgpd/events.db"
 synchronous = "full"
 queue_capacity = 262144
 EOF
-fi
+        ;;
+    disabled)
+        if grep -q '^\[event_history\]$' "$config"; then
+            printf '%s\n' 'disabled profile contains an event_history block' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        printf 'LAN393_EVENT_HISTORY_MODE must be enabled or disabled, got %s\n' "$mode" >&2
+        exit 2
+        ;;
+esac
 
 # bgperf2 launches this entrypoint through `docker exec`, so the container init
 # PID is not the daemon PID. Stop this exec process at a host-visible barrier;

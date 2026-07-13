@@ -83,7 +83,10 @@ lan393_competing_process_snapshot() {
              $2 ~ /^validate($|-)/ || $2 ~ /^evpn-tester($|-)/ ||
              $2 ~ /^evpn-monitor($|-)/ || $2 ~ /^rustbgpd-evpn-/ ||
              $0 ~ /[[:space:]]bgperf2\.py[[:space:]]/) {
-                print
+                # Retain only the bounded executable name. PIDs and argv can
+                # contain usernames, checkout paths, tokens, or unrelated
+                # command-line data and are not required to prove the fence.
+                print $2
             }
         '
 }
