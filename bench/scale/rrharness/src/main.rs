@@ -26,6 +26,7 @@ use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_transport::fanout_bench_export_encoder;
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Origin, PathAttribute, Prefix,
     RpkiValidation, Safi,
@@ -227,6 +228,13 @@ async fn setup(n_clients: u32) -> Harness {
                 }
             }
         });
+        tx.send(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 1,
+            encoder: fanout_bench_export_encoder(),
+        })
+        .await
+        .unwrap();
         tx.send(RibUpdate::PeerUp {
             peer,
             session_id: 1,
@@ -622,6 +630,18 @@ mod tests {
         assert!(validate_clock_ticks(-1).is_err());
         assert!(validate_clock_ticks(0).is_err());
         assert_eq!(validate_clock_ticks(250).unwrap(), 250);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authoritative_encoder_allows_fail_closed_manager_to_stage_routes() {
+        let harness = setup(2).await;
+        harness.inject_flood_block(0, 8).await;
+        tokio::time::timeout(Duration::from_secs(5), harness.wait_staged(8))
+            .await
+            .expect("exact-export-enabled harness must stage the tiny table");
+        tokio::time::timeout(Duration::from_secs(5), harness.wait_drained(16))
+            .await
+            .expect("two synthetic clients must drain every staged route");
     }
 
     #[test]

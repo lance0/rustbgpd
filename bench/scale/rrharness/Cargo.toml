@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rustbgpd-rib = { path = "../../../crates/rib" }
+rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-internals"] }
 rustbgpd-wire = { path = "../../../crates/wire" }
 rustbgpd-telemetry = { path = "../../../crates/telemetry" }
 tokio = { version = "1", features = ["full"] }
