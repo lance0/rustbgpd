@@ -585,9 +585,11 @@ sudo install -m 0755 /tmp/rustbgpd-vX.Y.Z /usr/local/bin/rustbgpd
 sudo systemctl start rustbgpd
 ```
 
-GR is on by default; the peer side advertises `R=1` on the next OPEN.
-On a healthy GR-aware peer (FRR / BIRD / current GoBGP), the data path
-stays up across the restart window.
+GR is on by default; after a coordinated shutdown rustbgpd advertises `R=1`
+on the next OPEN. A GR-aware peer may retain eligible routes while sessions
+rebuild, but rustbgpd advertises `forwarding_preserved = false`: this is not a
+guarantee of forwarding continuity, and the peer may withdraw or replace routes
+until normal convergence.
 
 ### Schema migration
 
@@ -619,7 +621,9 @@ Routing state is **not restored**. The optional shutdown checkpoint contains
 only eligible pre-policy Adj-RIB-In views for future use; Loc-RIB,
 Adj-RIB-Out, and policy evaluation state are not checkpointed, and the current
 startup path loads none of it. Routing state rebuilds from peer routes after
-restart (with GR, the data path stays up while the rebuild happens).
+restart. GR and checkpoint state support bounded control-plane restart
+handling, but do not guarantee forwarding continuity; peers may withdraw or
+replace routes, and therefore forwarding, until normal convergence.
 
 The config file itself is mutable across runs: neighbor add/delete
 operations via gRPC persist back to the config file (see
