@@ -294,10 +294,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in bounded slices, and service live readiness through dedicated read-only
   PeerManager and RIB query lanes. Ordinary mutations remain ordered behind
   the transaction, while membership and reserved writer sends still commit as
-  one synchronous section. A pinned 65,536-route/64-peer receipt records a
-  1.676 ms maximum actor slice, down from 83.2-93.2 ms, and the paused-clock
-  regression completes eight in-flight readiness probes with zero 200 ms
-  timeouts.
+  one synchronous section. Pinned 65,536-route/64-peer and
+  4,096-route/700-peer receipts record 4.523 ms as the largest production
+  actor poll and 3.224 ms for the 700-member atomic finalization, both below
+  the 50 ms engineering budget. Paused-clock regressions complete in-flight
+  readiness probes with zero 200 ms timeouts, including while one session
+  policy command is independently stalled.
 
 - **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
   Ordinary grouped members whose exact probes all succeed no longer rebuild

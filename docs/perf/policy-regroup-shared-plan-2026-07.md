@@ -2,10 +2,10 @@
 
 ## Scope
 
-This receipt measures the strict clean update-group policy-transition path. It
-does not claim loaded reload acceptance: the 700-peer campaign remains rejected
-until the separate PeerManager readiness lane and the measured actor-slice
-residual are addressed.
+This receipt measures the strict clean update-group policy-transition path and
+its bounded-readiness follow-up. It does not claim loaded reload acceptance:
+the prior 700-peer campaign remains rejected until a fresh integrated run
+supersedes it.
 
 The optimized path is deliberately limited to clean grouped-to-grouped unicast
 members whose staging profile differs only by export-chain content. It builds
@@ -97,40 +97,40 @@ route-shell materializations scale with routes times compatible wire profiles,
 not routes times peers. At 65,536 routes and 64 compatible peers that is 65,536
 probes/materializations instead of the per-peer reference shape's 4,194,304.
 
-## Residual and next gate
+## Original scheduling residual
 
-The initial and rebased maximum synchronous RIB actor-slice samples were 83.2
-ms and 93.2 ms. This sample-level variance does not change the conclusion:
-both exceed the 50 ms engineering budget. The next tranche must slice only
-this explicit shared-plan builder/emitter and drain the existing priority-query
-lane between slices; it must not generalize chunking to every
-`distribute_changes` shape.
+The original and rebased PR-1 maximum synchronous RIB actor samples were 83.2
+ms and 93.2 ms. Both exceeded the 50 ms engineering budget. The follow-up below
+closes that specific scheduler-visible gap without generalizing chunking to
+other `distribute_changes` shapes.
 
 These results are microbenchmark evidence only. They do not accept or replace
-the loaded reload campaign, which remains blocked on that responsiveness work
-and the PeerManager readiness-query lane.
+the loaded reload campaign.
 
 ## Bounded responsiveness follow-up
 
-The follow-up source `106df0cd` is a true stack on the shared-plan head
-`2c5ad2bd`. It keeps the strict PR-1 eligibility and fallback rules, but bounds
-only the expensive shared-plan preflight: destination staging, immutable diff
-construction, and exact probing process at most 1,024 route identities before
-servicing up to eight requests from the existing RIB priority-query lane.
-Successful exact-probe reuse now checks only the cohort's largest encoded
-message for each compatible member. The snapshot contract still proves wire
+The follow-up measurement source is `29781f6d`, based on merged shared-plan
+main `d6d07a76`. It keeps the strict PR-1 eligibility and fallback rules. One
+actor-owned pending transition has exactly five phases: `Classify`,
+`StageDestination`, `BuildInventory`, `ProbeAndPrepare`, and `Finalize`. The
+RIB advances one production step, services only the explicitly enumerated
+read-only priority lane, then calls `tokio::task::yield_now`. It does not poll
+normal mutations, route batches, resync, GR/LLGR, refresh, selection, or other
+timers while the transaction is pending. Route-scaled steps process at most
+1,024 identities and classification processes at most eight members per poll.
+
+Successful exact-probe reuse checks only the cohort's largest encoded message
+for each compatible member. The snapshot contract still proves wire
 equivalence, and admitting the maximum proves every shorter message fits;
 incompatible wire profiles still perform their own chunked full probe.
 
-The final membership move and reserved-permit sends remain one synchronous,
-infallible section. Priority queries cannot observe half-applied membership.
-Every writer permit and exact snapshot is acquired before that section, then
-owner, generation, and active-session identity are revalidated. A preflight
-failure discards the local inventory and takes the authoritative whole-cohort
-fallback before emission. Dropping the caller does not cancel an applied
-prefix of the transaction: PeerManager continues to a complete RIB commit or
-the existing newest-first rollback before returning to its normal mutation
-lane.
+The final poll revalidates every active session, registration channel, encoder
+owner/generation, source/destination classification, and reserved writer permit
+before changing membership. Membership, counter replay, and all
+reserved-permit sends then remain one synchronous section, so a priority query
+observes either the old cohort or the complete new cohort. An incomplete
+unowned destination is discarded before authoritative fallback. Dropping the
+caller or closing the input channels does not cancel the owned transition.
 
 PeerManager also has a dedicated, type-narrow `ListPeers` readiness channel.
 The production `/readyz` path uses that channel plus the RIB priority-query
@@ -162,14 +162,31 @@ cargo test -p rustbgpd-rib \
   clean_policy_transition_builds_and_probes_once_per_wire_cohort -- --nocapture
 ```
 
-### Actor-slice receipt
+A current-thread scheduler regression creates a priority query only after the
+first transition poll has completed. It proves that the query sees old
+committed membership, no optimized envelope has been emitted, and queued
+`PeerDown` plus a second replacement remain FIFO behind finalization:
+
+```console
+cargo test -p rustbgpd-rib \
+  clean_policy_transition_yields_to_queries_and_fences_mutations -- --nocapture
+```
+
+Paused-time coverage also holds a session policy command for 250 ms, then
+proves a live peer snapshot completes inside the unchanged 200 ms core
+deadline with the independently stalled session marked stale. A separate
+failure test interleaves readiness before a rejected RIB commit and preserves
+newest-first rollback and prior policy state.
+
+### Actor-poll receipts
 
 - Toolchain: `rustc 1.97.0 (2d8144b78 2026-07-07)`.
 - CPU: AMD Ryzen Threadripper 7970X 32-Cores.
 - Profile: Criterion release benchmark, 1 second warm-up, 3 second target
   measurement, 10 samples, no plot.
-- Workload: the same 65,536-route, 64-peer, real-encoder shared policy-regroup
-  case described above.
+- Workloads: the same 65,536-route/64-peer real-encoder transition, plus a
+  4,096-route/700-peer run that isolates the largest required atomic member
+  finalization.
 
 ```console
 RUSTBGPD_POLICY_TRANSITION_RECEIPT=1 \
@@ -178,19 +195,47 @@ cargo bench -p rustbgpd-transport --features bench-internals --bench fanout -- \
   --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
 ```
 
-The recorded result was 79.289 ms (77.908-80.799 ms) total transition time,
-with this counter receipt:
+The 65,536-route/64-peer result was 81.399 ms (80.573-82.337 ms) total
+transition time, with this production state-machine receipt:
 
 ```text
 fast=true
 plans=1
 full_exact_probes=65536
 route_shell_materializations=65536
-max_actor_slice_ns=1675871
+actor_polls=267
+max_actor_poll_ns=4522858
+max_prefix_snapshot_poll_ns=4522858
+max_finalize_poll_ns=2365980
 ```
 
-The 1.676 ms maximum recorded slice is below the 50 ms engineering budget and
-replaces the PR-1 samples of 83.2-93.2 ms. Total time remains microbenchmark
-evidence, not a loaded-reload acceptance claim. The exclusive 700-peer campaign
-must run from a fresh integrated SHA before the rejected campaign can be
-superseded.
+The 700-member finalization gate ran with:
+
+```console
+RUSTBGPD_POLICY_TRANSITION_RECEIPT=1 \
+RUSTBGPD_POLICY_TRANSITION_LARGE_RECEIPT=1 \
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout -- \
+  'policy_regroup_resync/shared_plan/4096/700' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+It completed in 8.152 ms (7.835-8.380 ms) total:
+
+```text
+fast=true
+plans=1
+full_exact_probes=4096
+route_shell_materializations=4096
+actor_polls=803
+max_actor_poll_ns=3223607
+max_prefix_snapshot_poll_ns=363616
+max_finalize_poll_ns=3223607
+```
+
+The largest recorded production poll was 4.523 ms and the 700-member atomic
+finalization was 3.224 ms, both below the 50 ms engineering budget. The old
+1.676 ms pseudo-slice result is intentionally withdrawn: it measured internal
+`try_recv` checkpoints without proving a Tokio scheduling opportunity. Total
+times and individual poll samples remain microbenchmark evidence, not a loaded
+reload acceptance claim. The exclusive 700-peer campaign must run from a fresh
+integrated SHA before the rejected campaign can be superseded.
