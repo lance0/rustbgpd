@@ -119,9 +119,12 @@ compiles, and validates that archived fixture under v0.51.0/current code. A
 version-bump PR therefore does not require the not-yet-created target tag;
 historical exercises require both release tags. The
 inventory records the source/target releases, file and semantic TOML digests,
-validation test, and result. It must end at the workspace release and start at
-the immediately previous minor. Future stable-surface migrations add a new
-consecutive-release fixture rather than overwriting this receipt.
+validation test, and result. The latest exercise must end at the workspace
+release-line anchor (`vMAJOR.MINOR.0`); the exact workspace patch remains
+recorded separately in `baseline_release`. Exercises form one contiguous chain
+of adjacent minor release lines from the canonical `v0.50.0` history origin,
+with an explicit transition into a new major. Future stable-surface migrations
+add a new consecutive-release fixture rather than overwriting this receipt.
 
 ## Release gate
 

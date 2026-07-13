@@ -27,6 +27,7 @@ SCHEMA_PATH = ROOT / "docs/rustbgpd.schema.json"
 GRPC_INVENTORY_PATH = ROOT / "docs/grpc-method-inventory.json"
 WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
 JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
+V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
 
 
 def fail(message: str) -> None:
@@ -364,6 +365,109 @@ def tagged_file(tag: str, path: str) -> bytes | None:
     return result.stdout if result.returncode == 0 else None
 
 
+ReleaseVersion = tuple[int, int, int]
+ReleaseTransition = tuple[ReleaseVersion, ReleaseVersion]
+
+
+def parse_release_tag(tag: str) -> ReleaseVersion:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    if not match:
+        fail(f"upgrade exercise release must be a full vMAJOR.MINOR.PATCH tag: {tag!r}")
+    return tuple(map(int, match.groups()))
+
+
+def release_line(version: ReleaseVersion) -> ReleaseVersion:
+    return (version[0], version[1], 0)
+
+
+def release_line_chain_error(
+    transitions: list[ReleaseTransition], baseline_version: ReleaseVersion
+) -> str | None:
+    if not transitions:
+        return "at least one consecutive-release upgrade exercise is required"
+    if transitions[0][0] != V1_UPGRADE_HISTORY_ORIGIN:
+        return "upgrade exercise history must retain the canonical v0.50.0 origin"
+
+    targets = [target for _, target in transitions]
+    if targets != sorted(targets) or len(targets) != len(set(targets)):
+        return "upgrade exercises must be ordered by unique target release"
+
+    for index, (source, target) in enumerate(transitions):
+        if source[2] != 0 or target[2] != 0:
+            return "upgrade exercise endpoints must be release-line anchors with patch zero"
+        same_major_next_minor = target[0] == source[0] and target[1] == source[1] + 1
+        next_major = target[0] == source[0] + 1 and target[1] == 0
+        if not (same_major_next_minor or next_major):
+            return "upgrade exercise is not between consecutive release lines"
+        if index == 0 and next_major:
+            return "major-boundary exercise must retain its preceding release-line receipt"
+        if index and source != transitions[index - 1][1]:
+            return "upgrade exercises must form one contiguous release-line chain"
+
+    expected_target = release_line(baseline_version)
+    if transitions[-1][1] != expected_target:
+        return (
+            "latest upgrade exercise must end at the workspace release-line anchor "
+            f"v{expected_target[0]}.{expected_target[1]}.{expected_target[2]}"
+        )
+    return None
+
+
+def check_release_line_selftests() -> None:
+    v0_49 = (0, 49, 0)
+    v0_50 = (0, 50, 0)
+    v0_51 = (0, 51, 0)
+    v0_52 = (0, 52, 0)
+    v1_0 = (1, 0, 0)
+    cases = [
+        ("patch baseline", [(v0_50, v0_51)], (0, 51, 1), True),
+        (
+            "major baseline",
+            [(v0_50, v0_51), (v0_51, v1_0)],
+            (1, 0, 0),
+            True,
+        ),
+        (
+            "major patch baseline",
+            [(v0_50, v0_51), (v0_51, v1_0)],
+            (1, 0, 1),
+            True,
+        ),
+        ("lone major transition", [(v0_50, v1_0)], (1, 0, 0), False),
+        ("nonzero exercise patch", [(v0_50, (0, 51, 1))], (0, 51, 1), False),
+        ("skipped minor", [(v0_49, v0_51)], (0, 51, 0), False),
+        (
+            "unordered chain",
+            [(v0_51, v0_52), (v0_50, v0_51)],
+            (0, 51, 0),
+            False,
+        ),
+        (
+            "duplicate target",
+            [(v0_50, v0_51), (v0_50, v0_51)],
+            (0, 51, 0),
+            False,
+        ),
+        (
+            "disconnected chain",
+            [(v0_49, v0_50), (v0_51, v0_52)],
+            (0, 52, 0),
+            False,
+        ),
+        (
+            "rewritten history origin",
+            [(v0_49, v0_50), (v0_50, v1_0)],
+            (1, 0, 0),
+            False,
+        ),
+        ("stale target", [(v0_50, v0_51)], (0, 52, 1), False),
+    ]
+    for label, transitions, baseline_version, expected_valid in cases:
+        valid = release_line_chain_error(transitions, baseline_version) is None
+        if valid != expected_valid:
+            fail(f"internal release-line regression self-test failed: {label}")
+
+
 def check_upgrade_exercises(inventory: dict) -> None:
     baseline, baseline_version = workspace_release()
     if inventory.get("baseline_release") != baseline:
@@ -374,28 +478,14 @@ def check_upgrade_exercises(inventory: dict) -> None:
     exercises = inventory["upgrade_exercises"]
     if not exercises:
         fail("at least one consecutive-release upgrade exercise is required")
-    exercise_versions: list[tuple[int, int, int]] = []
+    transitions: list[ReleaseTransition] = []
     validation_tests = [exercise["validation_test"] for exercise in exercises]
     if len(validation_tests) != len(set(validation_tests)):
         fail("upgrade exercises must use unique validation_test ids")
     for exercise in exercises:
-        from_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", exercise["from_release"])
-        to_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", exercise["to_release"])
-        if not from_match or not to_match:
-            fail("upgrade exercise releases must be full vMAJOR.MINOR.PATCH tags")
-        from_version = tuple(map(int, from_match.groups()))
-        to_version = tuple(map(int, to_match.groups()))
-        if not (
-            to_version[0] == from_version[0]
-            and to_version[1] == from_version[1] + 1
-            and from_version[2] == 0
-            and to_version[2] == 0
-        ):
-            fail(
-                f"upgrade exercise is not between consecutive minor releases: "
-                f"{exercise['from_release']} -> {exercise['to_release']}"
-            )
-        exercise_versions.append(to_version)
+        from_version = parse_release_tag(exercise["from_release"])
+        to_version = parse_release_tag(exercise["to_release"])
+        transitions.append((from_version, to_version))
         if exercise.get("result") not in {
             "accepted_without_config_migration",
             "accepted_with_documented_migration",
@@ -488,19 +578,8 @@ def check_upgrade_exercises(inventory: dict) -> None:
                 f"the immutable fixture directory"
             )
 
-    if exercise_versions != sorted(exercise_versions) or len(exercise_versions) != len(
-        set(exercise_versions)
-    ):
-        fail("upgrade exercises must be ordered by unique target release")
-    latest = exercises[-1]
-    expected_previous = (baseline_version[0], baseline_version[1] - 1, 0)
-    latest_from = tuple(
-        map(int, re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", latest["from_release"]).groups())
-    )
-    if latest["to_release"] != baseline or latest_from != expected_previous:
-        fail(
-            f"latest upgrade exercise must cover the immediately previous minor through {baseline}"
-        )
+    if error := release_line_chain_error(transitions, baseline_version):
+        fail(error)
 
 
 def check_json_type_spec(type_spec, label: str) -> None:
@@ -698,6 +777,7 @@ def check_policy(inventory: dict) -> None:
 
 
 def main() -> None:
+    check_release_line_selftests()
     inventory = load_json(INVENTORY_PATH)
     if inventory.get("schema_version") != 1 or inventory.get("contract") != "rustbgpd-rs-rr-v1":
         fail("unexpected inventory schema or contract id")
