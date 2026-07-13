@@ -89,6 +89,26 @@ pub(super) struct GroupKey {
     llgr_families: Vec<(u16, u8)>,
 }
 
+impl GroupKey {
+    /// Whether two groups differ only by the effective export-chain content.
+    fn same_staging_profile_except_chain(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.chain = None;
+        right.chain = None;
+        left == right
+    }
+
+    /// PR-1's deliberately narrow transition shape: unicast only, with no
+    /// RTC/VPN participation hidden in an otherwise groupable key.
+    fn is_unicast_only(&self) -> bool {
+        (self.sendable_ipv4_unicast || self.sendable_ipv6_unicast)
+            && !self.sendable_vpnv4
+            && !self.sendable_vpnv6
+            && !self.rtc_negotiated
+    }
+}
+
 /// Where a registered peer stands in the registry: grouped under a
 /// stable group id, or ungrouped with the v1 disqualifier that put it
 /// on the per-peer fallback path.
@@ -169,6 +189,10 @@ impl UpdateGroupRegistry {
     pub(super) fn membership(&self, peer: IpAddr) -> Option<&GroupMembership> {
         self.members.get(&peer)
     }
+
+    fn group_key(&self, id: usize) -> Option<&GroupKey> {
+        self.groups.get(id)
+    }
 }
 
 /// One entry of a shared group staging pass: the new staged route (or a
@@ -197,6 +221,19 @@ pub(in crate::manager) type SharedUnicastPayload = (
     std::sync::Arc<[Route]>,
     std::sync::Arc<[Option<NextHopAction>]>,
 );
+
+/// Immutable old-to-new inventory for the strict clean policy-transition
+/// path. The route shells and aligned next-hop decisions are materialized once
+/// for the whole cohort; transport excludes each target's own source.
+pub(in crate::manager) struct CleanPolicyTransitionInventory {
+    pub(in crate::manager) announce: std::sync::Arc<[Route]>,
+    pub(in crate::manager) next_hop_override: std::sync::Arc<[Option<NextHopAction>]>,
+    /// Destination-group permit verdicts, aggregated once for counter replay.
+    pub(in crate::manager) permit_totals: HashMap<Option<String>, u64>,
+    /// The subset of each aggregate sourced by one peer. Split-horizon
+    /// excludes these verdicts from that peer's counter replay.
+    pub(in crate::manager) permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>>,
+}
 
 /// Result of one shared staging pass over a group: the deltas (already
 /// committed to the group table), the accumulated export-policy
@@ -958,6 +995,89 @@ impl GroupRibOut {
 }
 
 impl RibManager {
+    /// Build the narrow immutable transition inventory. Any withdrawal,
+    /// source flip, denial residue, dirty state, or VPN participation rejects
+    /// the optimization before a member is moved or an envelope is emitted.
+    pub(in crate::manager) fn clean_policy_transition_inventory(
+        &self,
+        source: usize,
+        destination: usize,
+    ) -> Option<CleanPolicyTransitionInventory> {
+        let old = self.group_ribs.get(&source)?;
+        let new = self.group_ribs.get(&destination)?;
+        let clean = |group: &GroupRibOut| {
+            group.dirty_members.is_empty()
+                && group.tombstones.is_empty()
+                && group.vpn_tombstones.is_empty()
+                && group.table.vpn_len() == 0
+                && group.policy_filtered.is_empty()
+                && group.vpn_policy_denied.is_empty()
+                && group.otc_blocked.is_empty()
+        };
+        if !clean(old) || !clean(new) || old.table.len() != new.table.len() {
+            return None;
+        }
+
+        let mut announce = Vec::new();
+        let mut next_hop_override = Vec::new();
+        let mut permit_totals: HashMap<Option<String>, u64> = HashMap::new();
+        let mut permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>> = HashMap::new();
+        for route in new.table.iter() {
+            let key = (route.prefix, route.path_id);
+            let prior = old.table.get(&route.prefix, route.path_id)?;
+            // A policy edit cannot safely reuse one member-source exclusion
+            // if it changes the selected source identity. Keep that matrix on
+            // the authoritative regroup path.
+            if prior.peer != route.peer {
+                return None;
+            }
+            let next_hop = new.nh_override(key);
+            if !routes_equal(prior, route) || old.nh_override(key) != next_hop {
+                announce.push(route.clone());
+                next_hop_override.push(next_hop);
+            }
+
+            let label = new.staged_labels.get(&key).cloned().unwrap_or(None);
+            *permit_totals.entry(label.clone()).or_default() += 1;
+            *permit_by_source
+                .entry(route.peer)
+                .or_default()
+                .entry(label)
+                .or_default() += 1;
+        }
+
+        Some(CleanPolicyTransitionInventory {
+            announce: announce.into(),
+            next_hop_override: next_hop_override.into(),
+            permit_totals,
+            permit_by_source,
+        })
+    }
+
+    /// Apply the inventory's pre-aggregated permit counts to one member after
+    /// its writer slot has been reserved. This preserves the existing grouped
+    /// split-horizon counter semantics without another full-table walk.
+    pub(in crate::manager) fn apply_clean_policy_transition_counters(
+        &mut self,
+        peer: IpAddr,
+        inventory: &CleanPolicyTransitionInventory,
+    ) {
+        let own = inventory.permit_by_source.get(&peer);
+        let rows = inventory
+            .permit_totals
+            .iter()
+            .filter_map(|(label, total)| {
+                let count = total.saturating_sub(
+                    own.and_then(|counts| counts.get(label))
+                        .copied()
+                        .unwrap_or(0),
+                );
+                (count > 0).then_some((label.clone(), PolicyAction::Permit, count))
+            })
+            .collect::<Vec<_>>();
+        self.bump_export_counters(peer, &rows);
+    }
+
     /// The group id a registered peer is a member of, if any.
     pub(in crate::manager) fn grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
         match self.update_groups.members.get(&peer) {
@@ -2156,6 +2276,18 @@ impl RibManager {
     /// The fingerprint itself: disqualifiers first (design §1), then
     /// the group key from RIB-staging inputs.
     fn compute_update_group_membership(&mut self, peer: IpAddr) -> GroupMembership {
+        let chain = self.export_policy_for(peer).cloned();
+        self.compute_update_group_membership_for_policy(peer, chain.as_ref())
+    }
+
+    /// Classify a prospective policy without changing the peer's installed
+    /// policy or runtime membership. Registry interning is append-only and
+    /// observational; no group table or wire state is touched here.
+    fn compute_update_group_membership_for_policy(
+        &mut self,
+        peer: IpAddr,
+        chain: Option<&PolicyChain>,
+    ) -> GroupMembership {
         // Differential-oracle hook: force every peer onto the per-peer
         // fallback path so identical scenarios can be compared grouped
         // vs ungrouped. Reuses the policy-peer-context reason label.
@@ -2172,10 +2304,9 @@ impl RibManager {
             .get(&peer)
             .and_then(|sessions| sessions.last())
             .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-        let chain = self.export_policy_for(peer).cloned();
         let input = self.update_group_classifier_input(
             peer,
-            chain.as_ref(),
+            chain,
             orf_negotiated || self.peer_orf_filters.contains_key(&peer),
         );
         let fingerprint = match classify_update_group(input) {
@@ -2191,9 +2322,7 @@ impl RibManager {
 
         // Clone released before the &mut intern below; chains are small
         // and this runs at config/session-lifecycle frequency only.
-        let chain_idx = chain
-            .as_ref()
-            .map(|chain| self.update_groups.intern_chain(chain));
+        let chain_idx = chain.map(|chain| self.update_groups.intern_chain(chain));
         let key = GroupKey {
             chain: chain_idx,
             target_is_ebgp: fingerprint.target_is_ebgp,
@@ -2207,6 +2336,90 @@ impl RibManager {
             llgr_families: fingerprint.llgr_families,
         };
         GroupMembership::Grouped(self.update_groups.group_for(key))
+    }
+
+    /// Preflight the prospective group id for a clean unicast-only policy
+    /// transition and prove that only the chain dimension changes.
+    pub(in crate::manager) fn clean_policy_transition_destination(
+        &mut self,
+        peer: IpAddr,
+        policy: Option<&PolicyChain>,
+    ) -> Option<(usize, usize)> {
+        let GroupMembership::Grouped(source) = self.update_groups.members.get(&peer)? else {
+            return None;
+        };
+        let source = *source;
+        let GroupMembership::Grouped(destination) =
+            self.compute_update_group_membership_for_policy(peer, policy)
+        else {
+            return None;
+        };
+        let source_key = self.update_groups.group_key(source)?;
+        let destination_key = self.update_groups.group_key(destination)?;
+        (source != destination
+            && source_key.is_unicast_only()
+            && destination_key.is_unicast_only()
+            && source_key.same_staging_profile_except_chain(destination_key))
+        .then_some((source, destination))
+    }
+
+    /// Ensure a prospective destination group table exists without adding a
+    /// member. This lets the batch path compare immutable old/new inventories
+    /// before its first membership mutation or emission.
+    pub(in crate::manager) fn ensure_policy_transition_group(
+        &mut self,
+        gid: usize,
+        peer: IpAddr,
+        export_policy: Option<&PolicyChain>,
+    ) {
+        if self.group_ribs.contains_key(&gid) {
+            return;
+        }
+        let group = GroupRibOut::new(
+            export_policy.map(PolicyChain::share),
+            self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
+            self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            self.peer_local_roles.get(&peer).copied().flatten(),
+            self.peer_sendable_families
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default(),
+            self.peer_advertised_llgr_families
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default(),
+            self.loc_rib.len(),
+        );
+        self.group_ribs.insert(gid, group);
+        let prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|route| route.prefix).collect();
+        let mut memo = super::distribution::ExportMemo::default();
+        let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+    }
+
+    /// Commit a preflighted clean transition after every writer slot and exact
+    /// snapshot has been validated. No regroup baseline is needed because the
+    /// shared transition diff is already the authoritative old-to-new wire
+    /// delta accepted by every target writer.
+    pub(in crate::manager) fn commit_clean_policy_transition_member(
+        &mut self,
+        peer: IpAddr,
+        source: usize,
+        destination: usize,
+        export_policy: Option<PolicyChain>,
+    ) {
+        self.peer_export_policies.insert(peer, export_policy);
+        self.leave_group(source, peer);
+        self.update_groups
+            .members
+            .insert(peer, GroupMembership::Grouped(destination));
+        let filter = self.member_rt_filter(peer);
+        if let Some(group) = self.group_ribs.get_mut(&destination) {
+            group.members.insert(peer);
+            group.recompute_vpn_member_counts(peer, filter.as_ref());
+        }
+        self.metrics.record_update_group_regroup();
+        self.refresh_update_group_gauges();
+        self.refresh_group_residue_gauge();
     }
 
     fn update_group_classifier_input(

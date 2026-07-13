@@ -2,11 +2,130 @@
 //! labels, gauges, ungrouped reasons, and — the risk-3 property — key
 //! stability under a content-identical export-policy reinstall.
 
+use std::any::Any;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
 
 use super::*;
+
+struct CohortExactEncoder {
+    owner: u64,
+    profile: u64,
+    max_len: usize,
+    generation: AtomicUsize,
+    advance_generation: bool,
+    probes: Arc<AtomicUsize>,
+    reuses: Arc<AtomicUsize>,
+}
+
+struct CohortExactSnapshot {
+    owner: u64,
+    profile: u64,
+    max_len: usize,
+    generation: u64,
+    probes: Arc<AtomicUsize>,
+    reuses: Arc<AtomicUsize>,
+}
+
+impl crate::update::ExactExportSnapshot for CohortExactSnapshot {
+    fn owner_id(&self) -> u64 {
+        self.owner
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn probe_announcement(
+        &self,
+        candidate: crate::update::ExactExportCandidate<'_>,
+    ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+        self.probes.fetch_add(1, Ordering::Relaxed);
+        let encoded_len = match candidate {
+            crate::update::ExactExportCandidate::Unicast { route, .. }
+                if route.attributes.iter().any(|attribute| {
+                    matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+                }) =>
+            {
+                256
+            }
+            _ => 64,
+        };
+        if encoded_len > self.max_len {
+            Err(crate::update::ExactExportError::new(
+                crate::update::ExactExportErrorCode::MessageTooLong,
+                "synthetic cohort ceiling",
+            ))
+        } else {
+            Ok(crate::update::ExactExportResult {
+                encoded_len,
+                max_len: self.max_len,
+                generation: self.generation,
+            })
+        }
+    }
+
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn crate::update::ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>>
+    {
+        let source = source.as_any().downcast_ref::<Self>()?;
+        if source.profile != self.profile {
+            return None;
+        }
+        self.reuses.fetch_add(1, Ordering::Relaxed);
+        Some(
+            encoded_lengths
+                .iter()
+                .map(|&encoded_len| {
+                    if encoded_len > self.max_len {
+                        Err(crate::update::ExactExportError::new(
+                            crate::update::ExactExportErrorCode::MessageTooLong,
+                            "synthetic reused cohort ceiling",
+                        ))
+                    } else {
+                        Ok(crate::update::ExactExportResult {
+                            encoded_len,
+                            max_len: self.max_len,
+                            generation: self.generation,
+                        })
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl crate::update::ExactExportEncoder for CohortExactEncoder {
+    fn owner_id(&self) -> u64 {
+        self.owner
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        let generation = if self.advance_generation {
+            u64::try_from(self.generation.fetch_add(1, Ordering::Relaxed) + 1).unwrap()
+        } else {
+            1
+        };
+        Arc::new(CohortExactSnapshot {
+            owner: self.owner,
+            profile: self.profile,
+            max_len: self.max_len,
+            generation,
+            probes: Arc::clone(&self.probes),
+            reuses: Arc::clone(&self.reuses),
+        })
+    }
+}
 
 /// A minimal deny-one-prefix statement (everything else unset).
 fn deny_statement(prefix: Ipv4Prefix) -> PolicyStatement {
@@ -39,6 +158,17 @@ fn deny_chain(prefix: Ipv4Prefix) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![deny_statement(prefix)],
         default_action: PolicyAction::Permit,
+    }])
+}
+
+fn community_chain(community: u32) -> PolicyChain {
+    let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    statement.prefix = None;
+    statement.action = PolicyAction::Permit;
+    statement.modifications.communities_add.push(community);
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
     }])
 }
 
@@ -97,7 +227,15 @@ async fn peer_up(
     tx: &mpsc::Sender<RibUpdate>,
     spec: PeerUpSpec,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
-    let (out_tx, mut out_rx) = mpsc::channel(64);
+    peer_up_with_capacity(tx, spec, 64).await
+}
+
+async fn peer_up_with_capacity(
+    tx: &mpsc::Sender<RibUpdate>,
+    spec: PeerUpSpec,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(capacity);
     let add_path_send_families = if spec.add_path_send_max > 0 {
         ipv4_sendable()
     } else {
@@ -126,6 +264,21 @@ async fn peer_up(
     out_rx
 }
 
+async fn peer_up_with_cohort_encoder(
+    tx: &mpsc::Sender<RibUpdate>,
+    spec: PeerUpSpec,
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerExportEncoder {
+        peer: spec.peer,
+        session_id: 0,
+        encoder,
+    })
+    .await
+    .unwrap();
+    peer_up(tx, spec).await
+}
+
 async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup {
@@ -149,6 +302,129 @@ async fn query_peer_outbound_state(
     .await
     .unwrap();
     reply_rx.await.unwrap()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the oracle fixture preserves full session, route, and wire-view setup"
+)]
+async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<String>> {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = force_ungrouped;
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 25, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 25, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 23,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let third_source = Ipv4Addr::new(192, 0, 2, 14);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(third_source),
+        announced: vec![
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24),
+                match peers[0] {
+                    IpAddr::V4(value) => value,
+                    IpAddr::V6(_) => unreachable!(),
+                },
+            ),
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24),
+                match peers[1] {
+                    IpAddr::V4(value) => value,
+                    IpAddr::V6(_) => unreachable!(),
+                },
+            ),
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24),
+                third_source,
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 2);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+
+    let mut folded = Vec::new();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert!(update.withdraw.is_empty());
+        let mut routes = update
+            .announce
+            .iter()
+            .zip(update.next_hop_override.iter())
+            .filter(|(route, _)| update.announce_source_exclusion != Some(route.peer))
+            .map(|(route, next_hop)| {
+                format!(
+                    "{:?}|{}|{:?}|{:?}|{:?}",
+                    route.prefix, route.path_id, route.peer, route.attributes, next_hop
+                )
+            })
+            .collect::<Vec<_>>();
+        routes.sort_unstable();
+        folded.push(routes);
+    }
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(
+        stats_response.await.unwrap().0,
+        usize::from(!force_ungrouped)
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+    folded
 }
 
 fn regroups_total(metrics: &BgpMetrics) -> f64 {
@@ -542,6 +818,530 @@ async fn content_identical_policy_replace_is_key_stable() {
         1.0,
         "bgp_update_group_fallback_peers",
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scaling regression keeps every cohort counter assertion in one fixture"
+)]
+async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
+    const MEMBER_COUNT: usize = 8;
+    const ROUTE_COUNT: usize = 32;
+
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(128);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut peers = Vec::new();
+    let mut receivers = Vec::new();
+
+    for index in 0..MEMBER_COUNT {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 20, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 7,
+                    max_len: if index % 2 == 0 { 4_096 } else { 65_535 },
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+
+    let source = Ipv4Addr::new(192, 0, 2, 9);
+    let announced = (0..ROUTE_COUNT)
+        .map(|index| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, u8::try_from(index).unwrap(), 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        let initial = receiver.recv().await.unwrap();
+        assert_eq!(initial.announce.len(), ROUTE_COUNT);
+    }
+    probes.store(0, Ordering::Relaxed);
+    reuses.store(0, Ordering::Relaxed);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+
+    let mut updates = Vec::new();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.announce.len(), ROUTE_COUNT);
+        updates.push(update);
+    }
+    for update in &updates[1..] {
+        assert!(Arc::ptr_eq(&updates[0].announce, &update.announce));
+        assert!(Arc::ptr_eq(
+            &updates[0].next_hop_override,
+            &update.next_hop_override
+        ));
+    }
+    assert_eq!(
+        probes.load(Ordering::Relaxed),
+        ROUTE_COUNT,
+        "full exact probes scale with routes times compatible wire profiles"
+    );
+    assert_eq!(reuses.load(Ordering::Relaxed), MEMBER_COUNT - 1);
+
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    let (plans, full_probes, materialized, max_slice_ns) = stats_response.await.unwrap();
+    assert_eq!(plans, 1);
+    assert_eq!(full_probes, ROUTE_COUNT);
+    assert_eq!(materialized, ROUTE_COUNT);
+    assert!(max_slice_ns > 0);
+    for peer in peers {
+        assert_eq!(query_update_group(&tx, peer).await, "group:1");
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn clean_policy_transition_matches_force_ungrouped_member_views() {
+    let shared = run_clean_transition_equivalence(false).await;
+    let authoritative = run_clean_transition_equivalence(true).await;
+    assert_eq!(shared, authoritative);
+    assert!(shared.iter().all(|routes| routes.len() == 2));
+}
+
+#[tokio::test]
+async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejection() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 21, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 21, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 11,
+                    max_len: if index == 0 { 4_096 } else { 128 },
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        announced: vec![crate::test_support::make_route(
+            prefix,
+            Ipv4Addr::new(192, 0, 2, 10),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    probes.store(0, Ordering::Relaxed);
+    reuses.store(0, Ordering::Relaxed);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+
+    let accepted = receivers[0].recv().await.unwrap();
+    assert_eq!(accepted.announce.len(), 1);
+    assert!(accepted.withdraw.is_empty());
+    let rejected = receivers[1].recv().await.unwrap();
+    assert!(rejected.announce.is_empty());
+    assert_eq!(rejected.withdraw, vec![(Prefix::V4(prefix), 0)]);
+
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(stats_response.await.unwrap().0, 0);
+    assert!(
+        reuses.load(Ordering::Relaxed) >= 1,
+        "the rejecting target must reapply its own ceiling to a proven wire-cohort length"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 22, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 22, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        if index == 1 {
+            spec.add_path_send_max = 2;
+        }
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 13,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24),
+            Ipv4Addr::new(192, 0, 2, 11),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert!(update.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+        }));
+    }
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(stats_response.await.unwrap().0, 0);
+    assert!(
+        query_update_group(&tx, peers[0])
+            .await
+            .starts_with("group:")
+    );
+    assert_eq!(query_update_group(&tx, peers[1]).await, "add_path_send");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the saturation regression verifies enqueue, dirty carry, and timer healing together"
+)]
+async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplicates() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 23, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 23, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        tx.send(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 17,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        })
+        .await
+        .unwrap();
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up_with_capacity(&tx, spec, 1).await);
+    }
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 12)),
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24),
+            Ipv4Addr::new(192, 0, 2, 12),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let first_old = receivers[0].recv().await.unwrap();
+    assert_eq!(first_old.announce.len(), 1);
+    // Leave the second member's old-policy announcement queued so only its
+    // writer is saturated when the cohort command arrives.
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+
+    let first_new = receivers[0].recv().await.unwrap();
+    assert!(first_new.announce[0].attributes.iter().any(|attribute| {
+        matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+    }));
+    let second_old = receivers[1].recv().await.unwrap();
+    assert!(second_old.announce[0].attributes.iter().any(|attribute| {
+        matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0001))
+    }));
+
+    let (health_reply, health_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth {
+        reply: health_reply,
+    })
+    .await
+    .unwrap();
+    let (dirty, _, group_dirty, _, baseline, _) = health_response.await.unwrap();
+    assert_eq!((dirty, group_dirty, baseline), (1, 1, 1));
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(stats_response.await.unwrap().0, 0);
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let second_new = receivers[1].recv().await.unwrap();
+    assert!(second_new.announce[0].attributes.iter().any(|attribute| {
+        matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+    }));
+    assert!(
+        receivers[0].try_recv().is_err(),
+        "the accepted member must not be replayed"
+    );
+
+    let (health_reply, health_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth {
+        reply: health_reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(health_response.await.unwrap(), (0, 0, 0, 0, 0, 0));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn clean_policy_transition_generation_change_rejects_stale_plan() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 24, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 24, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 19,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: true,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13)),
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
+            Ipv4Addr::new(192, 0, 2, 13),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert!(update.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
+        }));
+    }
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(stats_response.await.unwrap().0, 0);
 
     drop(tx);
     handle.await.unwrap();

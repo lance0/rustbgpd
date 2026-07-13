@@ -7,7 +7,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{PeerExportPolicyReplacement, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -189,6 +189,9 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        if let Some(result) = self.try_apply_export_only_policy_cohort(&targets).await {
+            return result;
+        }
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
@@ -241,6 +244,182 @@ impl PeerManager {
             .into_iter()
             .map(|captured| captured.policy)
             .collect())
+    }
+
+    /// Fast path for the dominant reload shape: two or more Established peers
+    /// keep identical import policy and move only their export chain. Session
+    /// hot-apply still precedes the RIB commit, but one batched RIB command lets
+    /// equivalent clean update-group members share transition work.
+    ///
+    /// Returning `None` means the whole target set is ineligible and the
+    /// caller must use the existing per-peer transaction unchanged. Returning
+    /// `Some` means this method owns rollback and has preserved the same prior
+    /// token contract as the ordinary path.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cohort transaction keeps session apply, RIB commit, and rollback ownership together"
+    )]
+    async fn try_apply_export_only_policy_cohort(
+        &mut self,
+        targets: &[ResolvedPeerPolicy],
+    ) -> Option<Result<Vec<ResolvedPeerPolicy>, String>> {
+        if targets.len() < 2 {
+            return None;
+        }
+        let mut peer_keys = Vec::with_capacity(targets.len());
+        let mut seen = BTreeSet::new();
+        for target in targets {
+            let peer_key = PeerKey::new(target.address, target.interface.clone());
+            if !seen.insert(peer_key.clone()) {
+                return None;
+            }
+            let managed = self.peers.get(&peer_key)?;
+            if managed.import_policy != target.import_policy
+                || managed.export_policy == target.export_policy
+                || managed.pending_refresh
+                || managed.pending_export_apply
+            {
+                return None;
+            }
+            peer_keys.push(peer_key);
+        }
+
+        // Establishment is part of the fast-path preflight. The ordinary path
+        // remains authoritative for reconnecting or query-stalled sessions.
+        for peer_key in &peer_keys {
+            let managed = self
+                .peers
+                .get(peer_key)
+                .expect("cohort peer existed during local preflight");
+            let established = managed
+                .handle
+                .query_state_timeout(PEER_QUERY_TIMEOUT)
+                .await
+                .is_some_and(|state| state.fsm_state == SessionState::Established);
+            if !established {
+                return None;
+            }
+        }
+
+        let mut captured = Vec::with_capacity(targets.len());
+        for (target, peer_key) in targets.iter().zip(&peer_keys) {
+            let prior = {
+                let managed = self
+                    .peers
+                    .get(peer_key)
+                    .expect("cohort peer existed after establishment preflight");
+                CapturedResolvedPolicy {
+                    policy: ResolvedPeerPolicy {
+                        address: target.address,
+                        interface: target.interface.clone(),
+                        import_policy: managed.import_policy.clone(),
+                        export_policy: managed.export_policy.clone(),
+                    },
+                    pending_refresh: false,
+                    pending_export_apply: false,
+                    forward_completed: false,
+                }
+            };
+            let apply_result = self
+                .peers
+                .get(peer_key)
+                .expect("cohort peer existed before export hot-apply")
+                .handle
+                .update_export_policy_timeout(
+                    target.export_policy.clone(),
+                    PEER_POLICY_UPDATE_TIMEOUT,
+                )
+                .await;
+            if let Err(error) = apply_result {
+                // A failed session command is not proof that the session kept
+                // its prior chain (the reply may fail after a partial local
+                // apply). Reassert the failing peer's prior chain first, then
+                // unwind the already-acknowledged peers newest-first.
+                let failing_restore = self
+                    .peers
+                    .get(peer_key)
+                    .expect("cohort peer existed while restoring failed export hot-apply")
+                    .handle
+                    .update_export_policy_timeout(
+                        prior.policy.export_policy.clone(),
+                        PEER_POLICY_UPDATE_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|restore_error| {
+                        format!("{} session restore failed: {restore_error}", target.address)
+                    });
+                let prior_restore = self.restore_resolved_policies(captured).await;
+                let restore_error = match (failing_restore, prior_restore) {
+                    (Ok(()), Ok(())) => None,
+                    (Err(error), Ok(())) | (Ok(()), Err(error)) => Some(error),
+                    (Err(failing_error), Err(prior_error)) => {
+                        Some(format!("{failing_error}; {prior_error}"))
+                    }
+                };
+                return Some(Err(match restore_error {
+                    None => format!(
+                        "failed to apply resolved policy to {}: export: {error}; already-applied peers restored",
+                        target.address
+                    ),
+                    Some(restore_error) => format!(
+                        "failed to apply resolved policy to {}: export: {error}; restoring already-applied peers also failed: {restore_error}",
+                        target.address
+                    ),
+                }));
+            }
+            self.peers
+                .get_mut(peer_key)
+                .expect("cohort peer existed after export hot-apply")
+                .export_policy
+                .clone_from(&target.export_policy);
+            captured.push(prior);
+        }
+
+        let replacements = targets
+            .iter()
+            .map(|target| PeerExportPolicyReplacement {
+                peer: target.address,
+                export_policy: target.export_policy.clone(),
+            })
+            .collect();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let send_result = self
+            .rib_tx
+            .send(RibUpdate::ReplacePeerExportPolicies {
+                replacements,
+                reply: reply_tx,
+            })
+            .await;
+        let rib_result = match send_result {
+            Err(_) => Err("RIB manager unavailable".to_string()),
+            Ok(()) => match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+                Err(_) => Err(format!(
+                    "RIB manager did not reply within {:?} while updating export policy cohort",
+                    super::RIB_REPLY_TIMEOUT
+                )),
+                Ok(Err(_)) => Err("RIB manager dropped cohort reply".to_string()),
+                Ok(Ok(result)) => result,
+            },
+        };
+        if let Err(error) = rib_result {
+            let rollback = self.restore_resolved_policies(captured).await;
+            return Some(Err(match rollback {
+                Ok(()) => format!(
+                    "failed to update export policy cohort: {error}; already-applied peers restored"
+                ),
+                Err(restore_error) => format!(
+                    "failed to update export policy cohort: {error}; restoring already-applied peers also failed: {restore_error}"
+                ),
+            }));
+        }
+
+        for captured in &mut captured {
+            captured.forward_completed = true;
+        }
+        Some(Ok(captured
+            .into_iter()
+            .map(|captured| captured.policy)
+            .collect()))
     }
 
     /// Apply a live-impact transaction that may include static neighbors and

@@ -622,6 +622,19 @@ pub trait ExactExportEncoder: Send + Sync {
 /// the RFC 8671 BMP stat type 15/17 source.
 pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 
+/// One peer's export-policy replacement inside an atomic RIB batch.
+///
+/// The batch command is an optimization hint, not a weaker contract: the RIB
+/// may use a shared clean-group transition only after proving every member is
+/// compatible, and otherwise runs the authoritative per-peer path.
+#[derive(Clone)]
+pub struct PeerExportPolicyReplacement {
+    /// The target peer.
+    pub peer: IpAddr,
+    /// New effective export policy (`None` = permit-all/global fallback resolved already).
+    pub export_policy: Option<PolicyChain>,
+}
+
 /// Routes to be sent outbound to a peer.
 #[derive(Default)]
 pub struct OutboundRouteUpdate {
@@ -629,6 +642,11 @@ pub struct OutboundRouteUpdate {
     /// this envelope. Transport rejects an envelope whose snapshot is absent
     /// or belongs to another encoder implementation.
     pub exact_export_snapshot: Option<Arc<dyn ExactExportSnapshot>>,
+    /// Optional source peer omitted from the shared unicast announce view.
+    /// Set only by a preflighted clean group-transition envelope; ordinary
+    /// updates materialize their already-filtered member view and leave this
+    /// `None`.
+    pub announce_source_exclusion: Option<IpAddr>,
     /// Routes to announce to this peer. `Arc`-shared so an update-group
     /// fanout enqueues ONE staged announce vector to every in-sync
     /// member instead of cloning the `Route` shells per member
@@ -1521,6 +1539,14 @@ pub enum RibUpdate {
         /// residue, respectively.
         reply: oneshot::Sender<(usize, usize, usize, usize, usize, usize)>,
     },
+    /// TEST ONLY: evidence that the clean policy transition scales with plans
+    /// and compatible wire cohorts rather than members.
+    #[cfg(test)]
+    TestQueryPolicyTransitionStats {
+        /// Plan builds, full probes, route-shell materializations, max actor
+        /// slice in nanoseconds.
+        reply: oneshot::Sender<(usize, usize, usize, u128)>,
+    },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters
     /// accumulate since a chain instance was installed and reset when
@@ -1537,6 +1563,17 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// New effective export policy (`None` = permit-all/global fallback resolved already).
         export_policy: Option<PolicyChain>,
+        /// Response channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Replace a cohort of peer export policies in one RIB actor turn.
+    ///
+    /// Clean, equivalent grouped-to-grouped unicast members may share one
+    /// transition inventory and exact-probe plan. Every unsupported or
+    /// ambiguous batch falls back wholesale before its first emission.
+    ReplacePeerExportPolicies {
+        /// Replacements in caller transaction order.
+        replacements: Vec<PeerExportPolicyReplacement>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },

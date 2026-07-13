@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
@@ -25,8 +26,11 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::Route;
 use crate::update::{
-    ExactExportEncoder, OutboundRouteUpdate, RoutePage, RouteQueryKey, RouteQueryScope,
+    ExactExportEncoder, OutboundRouteUpdate, PeerExportPolicyReplacement, RoutePage, RouteQueryKey,
+    RouteQueryScope,
 };
+
+static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
 
 impl RibManager {
     /// Synthetic peer address used by [`Self::bench_register_peers`].
@@ -136,6 +140,83 @@ impl RibManager {
     /// no-Add-Path peers, best-changed and affected are the same set.
     pub fn bench_distribute(&mut self, changed: &HashSet<Prefix>) {
         self.distribute_changes(changed, changed);
+    }
+
+    /// Apply one export-policy replacement to every synthetic peer through
+    /// the shared clean-transition seam. Returns whether the fast path was
+    /// selected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fast path falls back and any of the first `n_peers`
+    /// synthetic peers was not registered by the benchmark fixture.
+    pub fn bench_replace_export_policy_cohort(
+        &mut self,
+        n_peers: usize,
+        export_policy: &PolicyChain,
+    ) -> bool {
+        self.policy_transition_stats = super::PolicyTransitionStats::default();
+        let replacements = (0..n_peers)
+            .map(|index| PeerExportPolicyReplacement {
+                peer: Self::bench_peer_address(index),
+                export_policy: Some(export_policy.clone()),
+            })
+            .collect::<Vec<_>>();
+        let fast = self.try_clean_group_policy_transition(&replacements);
+        if !fast {
+            for replacement in replacements {
+                self.replace_peer_export_policy_synchronously(
+                    replacement.peer,
+                    replacement.export_policy,
+                )
+                .expect("synthetic peer remains registered");
+            }
+        }
+        if std::env::var_os("RUSTBGPD_POLICY_TRANSITION_RECEIPT").is_some()
+            && !POLICY_TRANSITION_RECEIPT_PRINTED.swap(true, Ordering::Relaxed)
+        {
+            let (plans, probes, materialized, max_slice) = self.bench_policy_transition_receipt();
+            eprintln!(
+                "policy_transition_receipt peers={n_peers} fast={fast} plans={plans} \
+                 full_exact_probes={probes} route_shell_materializations={materialized} \
+                 max_actor_slice_ns={}",
+                max_slice.as_nanos()
+            );
+        }
+        fast
+    }
+
+    /// Authoritative old path for A/B policy-regroup measurements.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the first `n_peers` synthetic peers was not registered
+    /// by the benchmark fixture.
+    pub fn bench_replace_export_policy_per_peer(
+        &mut self,
+        n_peers: usize,
+        export_policy: &PolicyChain,
+    ) {
+        for index in 0..n_peers {
+            self.replace_peer_export_policy_synchronously(
+                Self::bench_peer_address(index),
+                Some(export_policy.clone()),
+            )
+            .expect("synthetic peer remains registered");
+        }
+    }
+
+    /// `(plan builds, full probes, route-shell materializations, max actor
+    /// slice)` from the most recent shared transition.
+    #[must_use]
+    pub fn bench_policy_transition_receipt(&self) -> (usize, usize, usize, std::time::Duration) {
+        let stats = self.policy_transition_stats;
+        (
+            stats.plan_builds,
+            stats.full_exact_probes,
+            stats.route_shell_materializations,
+            stats.max_actor_slice,
+        )
     }
 
     /// Drive the production paged-query handler synchronously and return its
