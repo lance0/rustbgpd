@@ -114,7 +114,8 @@ Required. Defines the local BGP speaker identity.
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
-| `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
+| `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB ownership receipt, and gRPC socket) |
+| `warm_cache_checkpoint_on_shutdown` | bool | no | `false`             | Publish a bounded daemon-private routing checkpoint during coordinated shutdown. **Restart-required.** Publication only; startup does not restore routes. |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
@@ -129,6 +130,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
+warm_cache_checkpoint_on_shutdown = false
 honor_graceful_shutdown = true
 honor_blackhole = true
 install_blackhole_discard = false
@@ -138,6 +140,21 @@ allow_blackhole_broad_prefixes = false
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
 non-root deployments, override the default to a mounted writable path (for
 example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
+
+`warm_cache_checkpoint_on_shutdown` is an opt-in, restart-required publication
+step. During a coordinated shutdown, rustbgpd has up to 30 seconds to capture
+eligible established static peers' pre-policy Adj-RIB-In views and atomically
+publish a content-addressed MRT artifact plus `manifest.json` under
+`<runtime_state_dir>/warm-bundle-v1`. The bundle is capped at 512 MiB, binds
+the exact effective configuration, resolved import policies, live peer/family
+identity, and restart-marker generation, and is readable only through the
+daemon-private runtime-state directory. If capture or publication fails, the
+daemon falls back to the existing marker-v1 Graceful Restart behavior.
+
+This option does **not** make startup restore routes: no cached route is loaded,
+selected, installed, or advertised. A successful checkpoint only causes the GR
+restart marker to carry the matching generation (marker v2); the current boot
+path still rebuilds all routing state from peers.
 
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
@@ -1004,8 +1021,9 @@ Graceful Restart is enabled by default. rustbgpd implements:
   rustbgpd can temporarily advertise `restart_state = true` to static peers
   restored from config, using a marker file under `runtime_state_dir`.
   This helps peers retain our routes while we reconnect, but
-  `forwarding_preserved` remains false because rustbgpd does not persist
-  route/FIB ownership across restart or verify that forwarding state survived.
+  `forwarding_preserved` remains false because rustbgpd does not restore routing
+  state or verify that forwarding state survived. The optional shutdown warm
+  checkpoint is publication-only and does not change that claim.
   ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
   as foreign rather than adopted.
 
@@ -1029,8 +1047,9 @@ graceful_restart = false
 
 **Implementation note:** restarting-speaker mode is deliberately honest. The
 daemon may advertise `R=1` after a planned restart, but it does not claim
-forwarding-state preservation (`forwarding_preserved = false`) and does not
-yet persist route state across restarts. During that marker-backed startup it
+forwarding-state preservation (`forwarding_preserved = false`) and never
+restores route state from the optional shutdown checkpoint. During that
+marker-backed startup it
 freezes the effective static GR peer/family roster and defers each family's
 route selection plus initial table/EoR until all eligible current sessions
 send EoR or the remaining marker window expires. `gr_restart_time` therefore

@@ -611,12 +611,15 @@ Everything in `runtime_state_dir` (default `/var/lib/rustbgpd`):
 | File | Purpose | Survives restart |
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
+| `warm-bundle-v1/` | Optional owner-private shutdown checkpoint (`manifest.json` plus a content-addressed MRT artifact). Published only when `warm_cache_checkpoint_on_shutdown = true`; not restored on startup. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 
-Routing state — Adj-RIB-In, Loc-RIB, Adj-RIB-Out, policy evaluation —
-is **not persisted**. It rebuilds from peer routes after restart (with
-GR, the data path stays up while the rebuild happens).
+Routing state is **not restored**. The optional shutdown checkpoint contains
+only eligible pre-policy Adj-RIB-In views for future use; Loc-RIB,
+Adj-RIB-Out, and policy evaluation state are not checkpointed, and the current
+startup path loads none of it. Routing state rebuilds from peer routes after
+restart (with GR, the data path stays up while the rebuild happens).
 
 The config file itself is mutable across runs: neighbor add/delete
 operations via gRPC persist back to the config file (see

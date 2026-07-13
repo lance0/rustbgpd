@@ -1018,6 +1018,11 @@
           "description": "Telemetry and control-plane listeners (Prometheus, gRPC,\nlooking glass) plus logging format.",
           "$ref": "#/$defs/TelemetryConfig"
         },
+        "warm_cache_checkpoint_on_shutdown": {
+          "description": "Publish one durable, daemon-private MRT warm-cache checkpoint during\ncoordinated shutdown. Off by default. This tranche only publishes the\ncheckpoint and a generation-bound restart marker; boot never loads or\nserves routes from the cache.\n\nThe checkpoint directory is fixed at\n`<runtime_state_dir>/warm-bundle-v1`. The setting is read at startup;\nchanging it requires a daemon restart.",
+          "type": "boolean",
+          "default": false
+        },
         "worker_threads": {
           "description": "Number of tokio runtime worker threads. Unset (the default) caps to\n`min(available CPU parallelism, 8)`: spawning one worker per core on a\nhigh-core-count host over-provisions the async runtime (each worker\nreserves a stack and a scheduler slot) for what is an I/O-bound daemon,\nnot a CPU-bound one. Capping reduces virtual-address reservation and\nscheduler footprint — same-host benchmarks showed it to be RSS-neutral,\nso this is runtime right-sizing, not a memory optimization. A value of `0` is\ntreated as unset. The `RUSTBGPD_WORKER_THREADS` environment variable\noverrides this field. **Restart-required:** the runtime is built once at\nstartup, so a change only takes effect on the next restart, not on SIGHUP.",
           "type": [

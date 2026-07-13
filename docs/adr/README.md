@@ -112,6 +112,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0101](0101-route-server-profile.md) | IXP route-server profile — per-client best-path (RFC 7947 §2.3.2) | Accepted | 2026-07-03 |
 | [0102](0102-evpn-origination-acknowledgement.md) | EVPN origination acknowledgement-awareness (Type 1/2/4) | Accepted | 2026-07-09 |
 | [0103](0103-rpol-execution-model.md) | rpol execution model, purity contract, and evaluation budgets | Accepted | 2026-07-09 |
+| [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 |
 
 ## Template
 

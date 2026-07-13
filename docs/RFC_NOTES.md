@@ -444,6 +444,12 @@ arrive from every eligible waiter or the marker-bounded selection timer
 expires. Peer Restart State and absent GR families exclude that peer/family;
 superseded-session EoRs are rejected.
 
+When `warm_cache_checkpoint_on_shutdown = true`, a successful bounded
+checkpoint publication binds its generation into marker v2 (ADR-0104). A
+publication failure retains the marker-v1 path. This does not extend RFC 4724
+semantics: startup never restores or advertises cached routes, and
+`forwarding_preserved` remains false.
+
 ### §4.2 — Procedures for the Receiving Speaker
 
 **GR trigger:** On `SessionDown`, GR is entered when the peer previously
@@ -525,9 +531,10 @@ should not keep stale routes for days.
 
 ### Receiving Speaker Only
 
-Full restarting speaker mode with forwarding-state preservation requires
-FIB integration. Minimal honest mode (R=1 without forwarding claims) is
-implemented per ADR-0040.
+Full restarting speaker mode with forwarding-state preservation requires a
+verified restore/adoption design. Minimal honest mode (R=1 without forwarding
+claims) is implemented per ADR-0040; ADR-0104's publication-only checkpoint
+does not change that boundary.
 
 ---
 

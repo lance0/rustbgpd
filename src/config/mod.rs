@@ -652,9 +652,9 @@ impl Config {
 
     /// Fixed daemon-private directory for shutdown warm-checkpoint bundles.
     ///
-    /// Tranche 2 deliberately has no configurable path: one path rooted in
-    /// `runtime_state_dir` keeps ownership, deployment, and marker binding
-    /// unambiguous. No boot-side restore exists yet.
+    /// Checkpoint publication deliberately has no configurable path: one path
+    /// rooted in `runtime_state_dir` keeps ownership, deployment, and marker
+    /// binding unambiguous. No boot-side restore exists yet.
     #[must_use]
     #[allow(
         dead_code,

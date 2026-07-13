@@ -160,8 +160,8 @@ struct GrRestartMarker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidGrRestartMarker {
     expires_at: SystemTime,
-    /// Present only for durable marker v2. Tranche 2 records this binding but
-    /// deliberately has no boot-side cache load or route-serving behavior.
+    /// Present only for durable marker v2. Checkpoint publication records this
+    /// binding, but startup has no cache load or route-serving behavior.
     checkpoint_generation: Option<String>,
     /// SHA-256 of the exact bounded bytes read from the pinned marker entry.
     /// `None` only for values validated directly in unit tests before storage.

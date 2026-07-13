@@ -35,7 +35,7 @@ those.
 | BGP core (RFC 4271 FSM, 4-byte ASN, capabilities, collision detection) | Shipped | All 6 states, property-tested |
 | Address families: IPv4/IPv6 unicast (MP-BGP, RFC 4760) | Shipped | Dual-stack, FRR-interop validated |
 | Extensions: Add-Path (7911), Extended Messages (8654), Extended Nexthop (8950) | Partial | Extended Message send/receive directionality and per-type size-limit correction shipped |
-| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; LLGR reconnect/consecutive-reset/per-AFI/SAFI timer corrections shipped; interop re-proof queued |
+| Graceful Restart (4724) + LLGR (9494) + Notification GR (8538) | Partial | GR helper + minimal restarting speaker shipped; optional bounded shutdown checkpoint publication shipped without boot restore/adoption; LLGR reconnect/consecutive-reset/per-AFI/SAFI timer corrections shipped; interop re-proof queued |
 | Route Refresh (2918) + Enhanced Route Refresh (7313) | Shipped | |
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
