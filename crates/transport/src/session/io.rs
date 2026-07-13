@@ -259,6 +259,13 @@ impl PeerSession {
             peer = %self.peer_label,
             "outbound writer channel saturated — sending Cease/Out-of-Resources and tearing down"
         );
+        self.trigger_outbound_out_of_resources_teardown();
+    }
+
+    /// Emit Cease/8 and hard-close the writer without assigning a cause.
+    /// Callers must log their own truthful cause before entering this common
+    /// primitive (writer saturation, exact-snapshot invariant breach, etc.).
+    pub(super) fn trigger_outbound_out_of_resources_teardown(&mut self) {
         let notif = rustbgpd_wire::NotificationMessage::new(
             NotificationCode::Cease,
             cease_subcode::OUT_OF_RESOURCES,

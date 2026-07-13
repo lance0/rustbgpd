@@ -458,6 +458,7 @@ impl RibManager {
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }
         }
+        self.prune_exact_export_rejections();
     }
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -1125,7 +1126,28 @@ impl RibManager {
         }
 
         if self.outbound_peers.contains_key(&peer) {
-            if !self.try_send_and_commit_outbound_update(
+            let mut group_prior = HashSet::new();
+            if member_of.is_some()
+                && let Some(routes) = self.grouped_advertised_routes(peer)
+            {
+                group_prior.extend(routes.into_iter().map(|route| {
+                    crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
+                }));
+            }
+            if let Some(gid) = vpn_member_of
+                && let Some(group) = self.group_ribs.get(&gid)
+            {
+                let filter = self.member_rt_filter(peer);
+                let rejected = self.peer_unexportable.get(&peer);
+                group_prior.extend(group.table.iter_vpn().filter_map(|route| {
+                    let key = crate::update::ExactExportKey::Vpn(route.key());
+                    (route.peer != peer
+                        && crate::manager::update_groups::rt_passes(filter.as_ref(), route)
+                        && !rejected.is_some_and(|keys| keys.contains(&key)))
+                    .then_some(key)
+                }));
+            }
+            if !self.try_send_and_commit_outbound_update_with_group_prior(
                 peer,
                 nh_override_flags.into(),
                 announce.into(),
@@ -1147,6 +1169,8 @@ impl RibManager {
                 labeled_withdraw,
                 rtc_announce,
                 rtc_withdraw,
+                group_prior,
+                None,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());

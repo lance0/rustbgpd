@@ -678,6 +678,7 @@ impl RibManager {
         if !llgr_retention_remains {
             self.release_peer_state_if_departed(peer);
         }
+        self.prune_exact_export_rejections();
     }
 
     /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline has expired,
@@ -694,6 +695,7 @@ impl RibManager {
         for (peer, families) in expired {
             self.sweep_llgr_stale(peer, &families);
         }
+        self.prune_exact_export_rejections();
     }
 
     /// Sweep LLGR-stale routes for the given families of a peer whose LLGR
@@ -818,6 +820,8 @@ impl RibManager {
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
 
+        self.prune_exact_export_rejections();
+
         // Terminal only when no family retains an LLGR deadline: other
         // families with longer stale times keep their retention (and the
         // peer's config, needed for a later re-promotion) alive.
@@ -898,5 +902,6 @@ impl RibManager {
         for (peer, afi, safi) in expired {
             self.finish_route_refresh(peer, afi, safi, true);
         }
+        self.prune_exact_export_rejections();
     }
 }

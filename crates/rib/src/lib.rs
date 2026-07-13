@@ -63,12 +63,13 @@ pub use route::{
     VpnRibRouteKey,
 };
 pub use update::{
-    AdjRibOutCounts, BestPathCandidate, EffectiveDistributionMode, ExplainAdvertisedRoute,
-    ExplainBestPath, ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OrrExplainCandidate, OutboundRouteUpdate,
-    PeerOutboundState, PlannedGroupability, RibCommandError, RibUpdate, RoutePage,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupClassification,
-    UpdateGroupClassifierInput, UpdateGroupFamilyImpact, UpdateGroupFingerprint,
-    UpdateGroupImpactPlan, UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot,
-    classify_update_group, route_query_key,
+    AdjRibOutCounts, BestPathCandidate, EffectiveDistributionMode, ExactExportCandidate,
+    ExactExportEncoder, ExactExportError, ExactExportErrorCode, ExactExportKey, ExactExportResult,
+    ExactExportSnapshot, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
+    ExportGateStep, ExportGateVerdict, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
+    OrrExplainCandidate, OutboundRouteUpdate, PeerOutboundState, PlannedGroupability,
+    RibCommandError, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupFamilyImpact,
+    UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
+    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group, route_query_key,
 };

@@ -47,7 +47,7 @@ Compact M36-M83 index (details and assertions stay in
 | 1000-peer RR scale receipt | Documented same-host measurement | Real `RibManager` + 1000 real transport sessions over loopback: 100k-route cold convergence, policy-on, mixed-fleet, and churn tables with the profile-to-fix storyline are in [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md). |
 | RIB operations Criterion suite | Documented A/B methodology | Current `main` medians and cumulative deltas are in [`BENCHMARKS.md`](BENCHMARKS.md#rib-operations). |
 | End-to-end bgperf2 | Documented cross-stack comparison | Same-host rustbgpd/BIRD/GoBGP convergence, CPU, and RSS results are in [`BENCHMARKS.md`](BENCHMARKS.md#end-to-end-system-benchmarks). |
-| Distribution fanout | Documented baseline | Measures the real `RibManager::distribute_changes` fanout path and policy-chain overhead. |
+| Distribution fanout | Pinned multi-campaign receipt | Real per-session exact-probe baseline vs prepared-attribute memo (18%..32% gains), followed by bounded wire-equivalent update-group probe reuse (58%..64% faster at 256 peers vs pre-cache; 78%..82% of excess over the permissive control recovered). The 64-route first-advertise shape, full confidence intervals, reproduction commands, correctness fences, and CSV are in [`perf/exact-export-fanout-2026-07.md`](perf/exact-export-fanout-2026-07.md). |
 | High-N RIB structural memory | Repeatable harness | `bench/compare-rib-memory.sh` emits CSV plus Markdown receipts for 100k/500k/900k shapes under the shared bench/soak host mutex. |
 | EVPN M33 load | In-tree scale gate | `bench/evpn-load` covers 50k reflected Type 2 routes with 60 seconds of 1k-rps churn. |
 

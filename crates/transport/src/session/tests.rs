@@ -588,11 +588,16 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerExportContext { .. }
     ));
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerExportEncoder { .. }
+    ));
     rib_rx.recv().await.unwrap()
 }
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
+        exact_export_snapshot: None,
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -643,6 +648,7 @@ async fn outbound_update_emits_rib_out_bmp_route_monitoring() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.announce = vec![make_route(100)].into();
     update.next_hop_override = vec![None].into();
     session.send_route_update(update);
@@ -668,6 +674,7 @@ async fn outbound_withdraw_and_eor_emit_rib_out_bmp() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.withdraw = vec![(
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         0,
@@ -698,6 +705,7 @@ async fn rib_out_tap_default_off_and_skips_non_update_messages() {
     session.negotiated = Some(negotiated);
     // Default: bmp_rib_out is false — outbound UPDATE not tapped.
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.announce = vec![make_route(100)].into();
     update.next_hop_override = vec![None].into();
     session.send_route_update(update);
@@ -734,6 +742,7 @@ async fn outbound_vpn_update_emits_rib_out_bmp_byte_exact() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.vpn_announce = vec![make_vpn_rib_route(4093)];
     session.send_route_update(update);
     let wire = read_single_raw_bgp_message(&mut server).await;
@@ -783,6 +792,7 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
         is_llgr_stale: false,
     };
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.evpn_announce = vec![evpn_route];
     session.send_route_update(update);
     let wire = read_single_raw_bgp_message(&mut server).await;
@@ -810,6 +820,7 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
     // 17th tapped UPDATE hits Full and must count a source drop.
     for _ in 0..17 {
         let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
         update.announce = vec![make_route(100)].into();
         update.next_hop_override = vec![None].into();
         session.send_route_update(update);
@@ -868,6 +879,7 @@ async fn writer_saturation_orders_bmp_peer_down_after_last_mirrored_update() {
     session.writer_bulk_tx = Some(bulk_tx);
     for lp in [100, 200] {
         let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
         update.announce = vec![make_route(lp)].into();
         update.next_hop_override = vec![None].into();
         session.send_route_update(update);
@@ -921,6 +933,7 @@ async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
     // but its RouteMonitoring is dropped → divergence latched.
     for _ in 0..17 {
         let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
         update.announce = vec![make_route(100)].into();
         update.next_hop_override = vec![None].into();
         session.send_route_update(update);
@@ -932,6 +945,7 @@ async fn bmp_channel_full_after_wire_send_forces_peer_state_reset() {
     // Next emission repairs the stream first: PeerDown, PeerUp, then
     // the new RouteMonitoring — in that order, on the same channel.
     let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
     update.announce = vec![make_route(300)].into();
     update.next_hop_override = vec![None].into();
     session.send_route_update(update);
@@ -1660,6 +1674,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         ..route1.clone()
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route1, route2].into(),
         withdraw: vec![],
@@ -1700,6 +1715,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -1737,6 +1753,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.next_hop, route.next_hop);
     assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -1793,6 +1810,7 @@ async fn oversized_bgpls_output_tears_down_session() {
     )
     .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -1832,7 +1850,7 @@ async fn oversized_bgpls_output_tears_down_session() {
         .expect("writer join should not panic");
     assert!(
         matches!(result, Err(super::writer::WriterExit::TornDown)),
-        "oversize output routes through the saturation hard close, got: {result:?}"
+        "oversize output routes through the out-of-resources hard close, got: {result:?}"
     );
 }
 fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
@@ -1907,6 +1925,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
     let route = make_labeled_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -1954,6 +1973,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         "MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2041,6 +2061,7 @@ async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2128,6 +2149,7 @@ async fn send_route_update_reflects_vpnv6_link_local_next_hop() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2193,6 +2215,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
     route.path_id = 2;
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2235,6 +2258,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
         "announcement must carry the outbound path ID"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2428,6 +2452,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     let route = make_vpn_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2475,6 +2500,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         "RD + MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2542,6 +2568,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
     route.path_id = 2;
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2584,6 +2611,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
         "announcement must carry the outbound path ID"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2849,6 +2877,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2907,6 +2936,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         "local default must be emitted with the session-local address, got {seen_next_hops:?}"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -2996,6 +3026,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: None,
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -3037,6 +3068,77 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
          refreshed, got {refreshed:?}"
     );
 }
+
+struct ForeignExactExportSnapshot;
+
+impl rustbgpd_rib::ExactExportSnapshot for ForeignExactExportSnapshot {
+    fn owner_id(&self) -> u64 {
+        u64::MAX
+    }
+
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: rustbgpd_rib::ExactExportCandidate<'_>,
+    ) -> Result<rustbgpd_rib::ExactExportResult, rustbgpd_rib::ExactExportError> {
+        Err(rustbgpd_rib::ExactExportError::new(
+            rustbgpd_rib::ExactExportErrorCode::Encoding,
+            "foreign test snapshot",
+        ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A route-bearing envelope is valid only when the RIB attaches the concrete
+/// snapshot used by precommit. Missing snapshots, foreign concrete types, and
+/// same-type snapshots owned by another session are invariant breaches, so all
+/// take the established Cease/8 teardown path rather than letting logical
+/// Adj-RIB-Out get ahead of the wire.
+#[tokio::test]
+async fn route_bearing_envelope_without_own_session_snapshot_fails_closed() {
+    use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+
+    let (other_session, _other_rib_rx) = make_test_session_with_rib(65001, 65002);
+    let cases: Vec<(&str, Option<Arc<dyn rustbgpd_rib::ExactExportSnapshot>>)> = vec![
+        ("missing", None),
+        (
+            "foreign concrete type",
+            Some(Arc::new(ForeignExactExportSnapshot)),
+        ),
+        (
+            "same concrete type from another session",
+            Some(other_session.publish_export_profile()),
+        ),
+    ];
+    for (name, snapshot) in cases {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = snapshot;
+        update.announce = vec![make_route(100)].into();
+        update.next_hop_override = vec![None].into();
+
+        session.send_route_update(update);
+
+        let Message::Notification(notification) = read_single_bgp_message(&mut server).await else {
+            panic!("{name}: expected Cease notification");
+        };
+        assert_eq!(notification.code, NotificationCode::Cease);
+        assert_eq!(notification.subcode, cease_subcode::OUT_OF_RESOURCES);
+        assert!(session.read_half.is_none(), "{name}: read half must close");
+        assert!(
+            session.writer_bulk_tx.is_none(),
+            "{name}: bulk sender must close"
+        );
+    }
+}
 /// Without the negotiated Route Refresh capability the request is
 /// skipped (warned, not sent) — the rest of the update still goes out.
 #[tokio::test]
@@ -3051,6 +3153,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![].into(),
         withdraw: vec![],
@@ -3121,6 +3224,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         ..route1.clone()
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route1, route2].into(),
         withdraw: vec![],
@@ -3221,6 +3325,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
     let routes: Vec<Route> = (0..count).map(route).collect();
     let sent_before = session.updates_sent;
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: routes.into(),
         next_hop_override: vec![None; count as usize].into(),
@@ -3302,6 +3407,7 @@ async fn send_route_update_splits_oversized_ipv4_withdrawals_across_updates() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         withdraw,
         ..empty_outbound_update()
@@ -3389,6 +3495,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: routes.into(),
         next_hop_override: vec![None; count as usize].into(),
@@ -3455,6 +3562,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_unreach_across_updates() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         withdraw,
         ..empty_outbound_update()
@@ -3553,6 +3661,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: routes.clone().into(),
         next_hop_override: vec![None; count as usize].into(),
@@ -3590,6 +3699,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     assert_eq!(announced.len(), count as usize);
 
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         withdraw: (0..count).map(|i| (Prefix::V6(prefix(i)), 0)).collect(),
         ..empty_outbound_update()
@@ -3625,6 +3735,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
 
     session.negotiated.as_mut().unwrap().peer_extended_message = true;
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: routes.into(),
         next_hop_override: vec![None; count as usize].into(),
@@ -3672,6 +3783,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     );
 
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         withdraw: (0..count).map(|i| (Prefix::V6(prefix(i)), 0)).collect(),
         ..empty_outbound_update()
@@ -3777,6 +3889,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         announce: routes.into(),
         next_hop_override: vec![None; count as usize].into(),
         ..empty_outbound_update()
@@ -3878,6 +3991,7 @@ async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         flowspec_announce: routes,
         ..empty_outbound_update()
     });
@@ -3956,6 +4070,7 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         flowspec_announce: vec![route(Afi::Ipv4), route(Afi::Ipv6)],
         ..empty_outbound_update()
@@ -3978,6 +4093,7 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
     }
 
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         flowspec_withdraw: vec![
             rustbgpd_rib::FlowSpecKey {
@@ -4060,6 +4176,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         flowspec_announce: routes.clone(),
         ..empty_outbound_update()
@@ -4094,6 +4211,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
     assert_eq!(announced.len(), (count * 2) as usize);
 
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         flowspec_withdraw: routes.iter().map(FlowSpecRoute::selection_key).collect(),
         ..empty_outbound_update()
@@ -4129,6 +4247,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
 
     session.negotiated.as_mut().unwrap().peer_extended_message = true;
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         flowspec_announce: routes,
         ..empty_outbound_update()
@@ -4171,6 +4290,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let override_nh =
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
     session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route].into(),
         withdraw: vec![],
@@ -5494,6 +5614,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     session.negotiated = Some(negotiated);
     let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -5566,6 +5687,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![make_route(100)].into(),
         withdraw: vec![],
@@ -5622,6 +5744,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     route.next_hop = IpAddr::V6(remote_ll);
     route.link_local_next_hop = Some(remote_ll);
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route].into(),
         withdraw: vec![],
@@ -5678,6 +5801,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route].into(),
         withdraw: vec![],
@@ -5729,6 +5853,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         .clone_from(&negotiated.negotiated_families);
     session.negotiated = Some(negotiated);
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![make_route(100)].into(),
         withdraw: vec![],
@@ -5772,6 +5897,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     session.negotiated = Some(negotiated);
     let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![Route {
             prefix: Prefix::V6(Ipv6Prefix::new(v6_nh, 64)),
@@ -5848,6 +5974,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let mut route = make_v6_unicast_route(remote_global);
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![route].into(),
         withdraw: vec![],
@@ -5904,6 +6031,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     session.negotiated = Some(negotiated);
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
         otc_blocked: vec![],
         announce: vec![make_v6_unicast_route(route_next_hop)].into(),
         withdraw: vec![],
@@ -8649,6 +8777,8 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
         _ => panic!("expected RIB PeerUp after establishment"),
     }
     let outbound_tx = session.outbound_tx.clone();
+    let exact_export_snapshot: Arc<dyn rustbgpd_rib::ExactExportSnapshot> =
+        session.publish_export_profile();
     let session_task = tokio::spawn(async move { session.run().await });
     // Slow reader: trickles just enough that the writer stays wedged
     // while the flood fills the bulk queue, but keeps draining so the
@@ -8675,6 +8805,7 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     let flood_total = 3 * OUTBOUND_BUFFER;
     for _ in 0..flood_total {
         let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(Arc::clone(&exact_export_snapshot));
         update.announce = vec![make_route(100)].into();
         update.next_hop_override = vec![None].into();
         if outbound_tx.send(update).await.is_err() {
@@ -9663,13 +9794,14 @@ async fn exact_export_probe_matches_real_writer_for_every_family_and_limit() {
                 session: &mut PeerSession,
                 server: &mut TcpStream,
                 probe: super::export::ExactExportProbe,
-                update: OutboundRouteUpdate,
+                mut update: OutboundRouteUpdate,
                 generation: u64,
             ) {
                 assert_eq!(probe.generation, generation);
                 let expected = rustbgpd_wire::encode_message(&Message::Update(probe.message))
                     .unwrap()
                     .to_vec();
+                update.exact_export_snapshot = Some(session.export_encoder.snapshot());
                 session.send_route_update(update);
                 let actual = read_single_raw_bgp_message(server).await;
                 assert_eq!(actual, expected);

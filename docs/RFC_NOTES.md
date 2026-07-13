@@ -113,6 +113,19 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   single announcement or withdrawal that still cannot fit invokes the
   Cease/8 outbound-saturation teardown, preventing a live session from
   retaining logical Adj-RIB-Out state that never reached the wire.
+- Before any announcement enters Adj-RIB-Out, the RIB probes its exact
+  one-route wire form through an immutable snapshot of that session's live
+  encoder and negotiated 4096/65535-byte ceiling. This post-policy check covers
+  unicast, FlowSpec, EVPN, BGP-LS, VPN, labeled-unicast, and RT-Constrain. A
+  failure is rejected before commit; if the identity was previously
+  advertised, the same transition emits its withdrawal. Grouped peers keep a
+  sparse per-member rejection overlay, so peers with different negotiated
+  ceilings retain exact individual advertised views while sharing the staged
+  group table. Recompute/resync retries rejected routes, and a source
+  withdrawal retires the rejection without a redundant wire withdrawal.
+  Transport's Cease/8 path remains the final defense if a route-bearing
+  envelope lacks the matching snapshot or a live encoder still finds an
+  impossible single-route UPDATE.
 - FlowSpec identity is `(AFI, rule)` throughout Adj-RIB-In, Loc-RIB,
   Adj-RIB-Out, recompute, distribution, and withdrawal. AFI is never inferred
   from an optional destination-prefix component: legal destination-less IPv4

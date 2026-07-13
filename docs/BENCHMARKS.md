@@ -14,9 +14,9 @@ benchmarked build (earlier releases shipped a CI-profile, glibc-malloc
 build).
 
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
-current-main reconfirmation, distribution-fanout baseline, and memory
-attribution correction: 2026-06-02; structured high-N RIB memory profile:
-2026-06-08.
+current-main reconfirmation and memory attribution correction: 2026-06-02;
+structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
+distribution fanout A/B and update-group recovery: 2026-07-12.
 
 | Field | Value |
 |-------|-------|
@@ -132,6 +132,9 @@ cargo bench --features bench-internals --bench fib_projection
 # Inbound UPDATE attribute-clone churn (requires bench-internals)
 cargo bench -p rustbgpd-transport --features bench-internals --bench inbound_attrs
 
+# Manager fanout with the authoritative exact export probe
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
+
 # RPKI origin-validation microbench (RFC 6811)
 cargo bench -p rustbgpd-rpki --bench validate
 
@@ -174,6 +177,14 @@ sudo cpupower frequency-set -g performance
 The script records the observed governor, CPU model, kernel, rustc version,
 commit SHAs, logs, and raw Criterion artifact path. Treat unpinned runs as
 directional only.
+
+When a pull request claims a durable performance gain, check in a receipt under
+`docs/perf/` with the exact refs, environment, command, sampling parameters,
+confidence bounds, and correctness fence. Also check in a compact
+machine-readable CSV or JSON summary and index the receipt from
+[`RECEIPTS.md`](RECEIPTS.md). A PR description or raw files left only under
+`target/criterion/` are useful review evidence, but they are not a durable
+project receipt.
 
 ## Manual CI Workflow
 
@@ -417,37 +428,63 @@ not reachable in a normal build). Each measured pass is a *first* advertise
 (empty Adj-RIB-Out, so the equality-suppression fast path never fires) — the
 conservative upper bound on per-peer cost.
 
-Run it with:
+The benchmark now belongs to the transport crate so it can install a distinct
+authoritative `SessionExportEncoder` for every synthetic peer without creating
+a RIB-to-transport dependency cycle. Run it with:
 
 ```bash
-cargo bench -p rustbgpd-rib --features bench-internals --bench fanout
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
-| Peers (N) | No export policy | With export policy | Per (peer × prefix) |
-|-----------|------------------|--------------------|---------------------|
-| 1   | 12.4 µs | 14.8 µs | ~194 / ~231 ns |
-| 8   | 93.2 µs | 110 µs  | ~182 / ~215 ns |
-| 64  | 719 µs  | 847 µs  | ~176 / ~207 ns |
-| 256 | 2.92 ms | 3.46 ms | ~178 / ~211 ns |
+The July 2026 receipt compares the first real-probe baseline against ordered
+batch probing with the live prepared-attribute memo key:
 
-Fanout is cleanly **O(peers × changed prefixes)** — the per-advertisement cost
-holds at **~178 ns** across the whole range. The representative export chain
-(an eight-statement scalar-guard chain — seven `LOCAL_PREF`-range misses then a
-catch-all permit, so every route is evaluated against all eight) adds a flat
-**~18%** (~33 ns/advertisement) — real but *not* dominant: the fanout machinery
-(Loc-RIB lookup, route clone, Adj-RIB-Out insert, `OutboundRouteUpdate` build,
-channel send) is the other ~84%. Export-policy eval only dominates for *heavy*
-chains (AS_PATH regex / large-community scans), not the cheap scalar-guard
-filter measured here.
+| Peers | No policy baseline → memo | Change | Policy baseline → memo | Change |
+|-------|---------------------------|--------|------------------------|--------|
+| 1 | 45.970 → 35.488 µs | -22.3% | 49.477 → 39.558 µs | -20.3% |
+| 8 | 252.770 → 173.382 µs | -31.7% | 256.996 → 181.819 µs | -29.3% |
+| 64 | 1.920 → 1.328 ms | -30.5% | 1.919 → 1.326 ms | -30.9% |
+| 256 | 7.795 → 5.283 ms | -31.3% | 7.778 → 6.407 ms | -18.3% |
 
-For sizing: a route server with 256 clients absorbing a 64-prefix churn burst
-spends ~3 ms of single-threaded fanout; a full-table resync (≈100 k prefixes ×
-256 peers) extrapolates to ~4.5 s. Reducing that is a per-advertisement-cost or
-coalescing problem, not a parallelism one — distribution is single-task by design
-(`RibManager` owns all RIB state in one tokio task). These are a
-same-host (7970X) quick criterion run (reduced sampling); a pinned re-measure is
-deferred to the next quiet-runner pass, and any future fanout optimization is
-gated on this baseline.
+All Criterion mean-change 95% confidence intervals are entirely below zero.
+
+That memo still left the exact probe scaling per peer. A second pinned campaign
+compares current `main`'s permissive benchmark, the pre-cache real-probe head,
+and successful-length reuse across provably wire-equivalent members of the one
+update group exercised by this benchmark:
+
+| Peers | No policy: `main` / pre-cache / optimized | Optimized vs pre-cache | Policy: `main` / pre-cache / optimized | Optimized vs pre-cache |
+|-------|--------------------------------------------|------------------------|-----------------------------------------|------------------------|
+| 1 | 21.148 / 36.395 / 35.908 µs | -1.84% | 24.494 / 40.012 / 39.993 µs | -0.98% |
+| 8 | 56.415 / 180.416 / 94.704 µs | -47.33% | 62.745 / 183.181 / 102.689 µs | -43.99% |
+| 64 | 318.064 µs / 1.382 ms / 543.301 µs | -60.98% | 356.086 µs / 1.369 ms / 584.361 µs | -57.50% |
+| 256 | 1.251 / 5.886 / 2.068 ms | -64.28% | 1.372 / 5.341 / 2.234 ms | -58.31% |
+
+At 256 peers this reduces the overhead relative to the permissive control from
+4.706x to 1.653x without policy (82.37% of the excess recovered), and from
+3.893x to 1.629x with policy (78.28% recovered). This is one update group's
+64-route IPv4 first-advertise burst, not a resync or full-table measurement.
+
+The reuse cache lives for one distribution pass, requires the same group and
+pointer-identical shared unicast payload slices, and retains at most eight
+wire-equivalence cohorts per group. Transport proves equivalence by full
+normalized session-profile equality excluding only owner, generation, and the
+message ceiling; the target re-applies its own ceiling and generation. Only
+cardinality-correct all-success batches are retained. Default-refusing
+snapshots, non-shared/resync/exception payloads, and mixed-family envelopes
+remain on the ordinary exact-probe path.
+
+The full environments, commands, commit IDs, confidence intervals, correctness
+fences, and checked-in CSV for both campaigns are in the
+[`exact-export fanout receipt`](perf/exact-export-fanout-2026-07.md).
+
+The previous 2026-06 numbers used a permissive benchmark stub and did not time
+the exact export probe; they are superseded rather than a valid A/B baseline.
+The first optimization still built one exact `UpdateMessage` per candidate and
+only shared prepared attributes. The cohort optimization builds one exact
+message per shared route and compatible cohort, then rechecks the encoded
+length against each target's ceiling. It preserves the exact correctness gate,
+but must not be described as performing a full exact encode per peer.
 
 ### Bulk Initial Load
 

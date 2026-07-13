@@ -13,9 +13,16 @@
 //! per-peer export-policy share. Each measured pass is a *first* advertise
 //! (Adj-RIB-Out starts empty, so the Adj-RIB-Out equality suppression never
 //! short-circuits) — the conservative upper bound on per-peer cost.
+//! All peers occupy one update group and ordinary members share the same
+//! unicast route/next-hop payload Arcs. The exact-export path may therefore
+//! encode each route once per compatible wire-profile cohort and reapply each
+//! target's negotiated ceiling; it does not perform a full exact encode per
+//! peer. This is not a resync or full-table convergence benchmark.
 //!
 //! Gated behind `bench-internals`; run with:
-//!   cargo bench -p rustbgpd-rib --features bench-internals --bench fanout
+//!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
+//!
+//! Pinned A/B receipt: `docs/perf/exact-export-fanout-2026-07.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -29,6 +36,7 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_transport::fanout_bench_export_encoder;
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
 };
@@ -153,7 +161,13 @@ fn build(n_peers: usize, export_policy: Option<PolicyChain>) -> FanoutState {
     // Register peers first (Loc-RIB empty → the initial-table dump only emits an
     // EoR marker, which the driver drains → channels start empty), then seed the
     // table to fan out.
-    let receivers = mgr.bench_register_peers(n_peers, export_policy.as_ref(), true, CHANNEL_CAP);
+    let receivers = mgr.bench_register_peers(
+        n_peers,
+        export_policy.as_ref(),
+        true,
+        CHANNEL_CAP,
+        fanout_bench_export_encoder,
+    );
     mgr.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
     let changed: HashSet<Prefix> = prefixes.into_iter().collect();
     (mgr, receivers, changed)

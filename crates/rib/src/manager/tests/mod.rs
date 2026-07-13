@@ -928,6 +928,7 @@ mod events_metrics;
 mod evpn;
 mod explain_mrt;
 mod export_explain;
+mod exportability;
 mod flowspec;
 mod gr_llgr;
 mod incremental_best;

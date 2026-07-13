@@ -75,7 +75,7 @@ pub(crate) struct PeerSession {
     ///
     /// **Lifecycle invariants** (subtle — these three groups are
     /// distinct, see `close_tcp` / `handle_tcp_disconnect` /
-    /// `trigger_outbound_saturation_teardown`):
+    /// `trigger_outbound_out_of_resources_teardown`):
     ///
     /// - **At connect**: `read_half`, both writer senders, and
     ///   `writer_join` are all set together.
@@ -108,11 +108,11 @@ pub(crate) struct PeerSession {
     /// teardown) also stops the cadence.
     writer_keepalive_tx: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
     /// Hard-teardown signal for the writer task. Signalled (before the
-    /// senders are dropped) by `trigger_outbound_saturation_teardown`
-    /// only: the writer discards its bulk backlog so the `Cease/8` is
-    /// the final frame on the wire, then exits `WriterExit::TornDown`,
-    /// which the writer-exit arm maps to `TcpConnectionFails`. Ordinary
-    /// close paths drop it unsignalled (drain semantics preserved).
+    /// senders are dropped) by the Cease/Out-of-Resources teardown path:
+    /// the writer discards its bulk backlog so the `Cease/8` is the final
+    /// frame on the wire, then exits `WriterExit::TornDown`, which the
+    /// writer-exit arm maps to `TcpConnectionFails`. Ordinary close paths
+    /// drop it unsignalled (drain semantics preserved).
     writer_teardown_tx: Option<watch::Sender<bool>>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687
@@ -165,7 +165,7 @@ pub(crate) struct PeerSession {
     export_policy: Option<PolicyChain>,
     /// Authoritative immutable snapshot owner for outbound wire encoding.
     /// Each RIB envelope captures one snapshot before any preparation/build.
-    export_encoder: SessionExportEncoder,
+    export_encoder: Arc<SessionExportEncoder>,
     /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
     /// outbound update gets `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`)
     /// added to its Communities attribute (creating one if absent).
@@ -554,11 +554,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
-        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+        let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             None,
             advertise_graceful_shutdown,
-        ));
+        )));
         Self {
             config,
             fsm,
@@ -665,11 +665,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
-        let export_encoder = SessionExportEncoder::new(SessionExportProfile::initial(
+        let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             stream.local_addr().ok().map(|addr| addr.ip()),
             advertise_graceful_shutdown,
-        ));
+        )));
         // Split the inbound stream and spawn the writer immediately —
         // we're in async context here (inside `tokio::spawn` from
         // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside

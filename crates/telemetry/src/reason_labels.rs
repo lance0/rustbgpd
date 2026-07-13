@@ -125,9 +125,43 @@ impl std::fmt::Display for RrLoopReason {
     }
 }
 
+/// Exact outbound encoder rejection reasons shared by metrics and RIB logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExactExportReason {
+    Encoding,
+    MissingIpv6NextHop,
+    Ipv4RequiresExtendedNextHop,
+    MessageTooLong,
+}
+
+impl ExactExportReason {
+    pub const ALL: [Self; 4] = [
+        Self::Encoding,
+        Self::MissingIpv6NextHop,
+        Self::Ipv4RequiresExtendedNextHop,
+        Self::MessageTooLong,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Encoding => "encoding",
+            Self::MissingIpv6NextHop => "missing_ipv6_next_hop",
+            Self::Ipv4RequiresExtendedNextHop => "ipv4_requires_extended_next_hop",
+            Self::MessageTooLong => "message_too_long",
+        }
+    }
+}
+
+impl std::fmt::Display for ExactExportReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OtcBlockReason, RrLoopReason};
+    use super::{ExactExportReason, OtcBlockReason, RrLoopReason};
 
     fn assert_snake_case(label: &str) {
         assert!(!label.is_empty(), "reason label must not be empty");
@@ -161,6 +195,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_export_reasons_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for reason in ExactExportReason::ALL {
+            assert_snake_case(reason.as_str());
+            assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
     /// Pins the exact strings: these are operator-facing stable
     /// identifiers (alert expressions key on them). Renaming one is a
     /// breaking observability change — if this test fails, the rename
@@ -180,5 +223,15 @@ mod tests {
         );
         let rr: Vec<&str> = RrLoopReason::ALL.iter().map(|r| r.as_str()).collect();
         assert_eq!(rr, ["originator_id", "cluster_list"]);
+        let exact: Vec<&str> = ExactExportReason::ALL.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            exact,
+            [
+                "encoding",
+                "missing_ipv6_next_hop",
+                "ipv4_requires_extended_next_hop",
+                "message_too_long",
+            ]
+        );
     }
 }

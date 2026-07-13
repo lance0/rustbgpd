@@ -25,7 +25,10 @@ use rustbgpd_policy::{
 };
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::route::{Route, RouteOrigin};
-use rustbgpd_rib::update::RibUpdate;
+use rustbgpd_rib::update::{
+    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportResult,
+    ExactExportSnapshot, RibUpdate,
+};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
@@ -66,6 +69,43 @@ static ALLOC: TrackingAllocator = TrackingAllocator {
     live: AtomicUsize::new(0),
     total_allocs: AtomicUsize::new(0),
 };
+
+struct PermissiveExactExport;
+
+impl ExactExportSnapshot for PermissiveExactExport {
+    fn owner_id(&self) -> u64 {
+        1
+    }
+
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        Ok(ExactExportResult {
+            encoded_len: 0,
+            max_len: usize::MAX,
+            generation: 0,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl ExactExportEncoder for PermissiveExactExport {
+    fn owner_id(&self) -> u64 {
+        1
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
+        Arc::new(Self)
+    }
+}
 
 /// Tagging export chain in the shape of the profile's M80 fixture:
 /// AS_PATH regex guard + med-set + community-add, so modifications are
@@ -157,11 +197,20 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         let mut receivers = Vec::with_capacity(n_peers);
         for i in 0..n_peers {
             let [_, b1, b2, b3] = (i as u32).to_be_bytes();
+            let peer = IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3.wrapping_add(1)));
+            let session_id = 1 + i as u64;
             let (out_tx, out_rx) = mpsc::channel(n_prefixes as usize + 64);
+            tx.send(RibUpdate::SetPeerExportEncoder {
+                peer,
+                session_id,
+                encoder: Arc::new(PermissiveExactExport),
+            })
+            .await
+            .unwrap();
             tx.send(RibUpdate::PeerUp {
                 per_client_best: false,
-                session_id: 1 + i as u64,
-                peer: IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3.wrapping_add(1))),
+                session_id,
+                peer,
                 peer_asn: 64_512,
                 peer_router_id: Ipv4Addr::new(192, 0, 2, 200),
                 outbound_tx: out_tx,

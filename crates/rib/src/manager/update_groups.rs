@@ -42,7 +42,7 @@ use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::{
-    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupPeerSnapshot,
+    ExactExportKey, UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupPeerSnapshot,
     UpdateGroupSnapshot, classify_update_group,
 };
 use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
@@ -887,10 +887,17 @@ impl GroupRibOut {
 
     /// Snapshot of `member`'s advertised unicast view (table minus
     /// own-sourced) — the baseline for a regroup's one-shot diff.
-    fn member_view_snapshot(&self, member: IpAddr) -> FxHashMap<(Prefix, u32), Route> {
+    fn member_view_snapshot(
+        &self,
+        member: IpAddr,
+        rejected: &HashSet<ExactExportKey>,
+    ) -> FxHashMap<(Prefix, u32), Route> {
         self.table
             .iter()
-            .filter(|route| route.peer != member)
+            .filter(|route| {
+                route.peer != member
+                    && !rejected.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+            })
             .map(|route| ((route.prefix, route.path_id), route.clone()))
             .collect()
     }
@@ -903,10 +910,15 @@ impl GroupRibOut {
         &self,
         member: IpAddr,
         filter: Option<&RtcMembership>,
+        rejected: &HashSet<ExactExportKey>,
     ) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
         self.table
             .iter_vpn()
-            .filter(|route| route.peer != member && rt_passes(filter, route))
+            .filter(|route| {
+                route.peer != member
+                    && rt_passes(filter, route)
+                    && !rejected.contains(&ExactExportKey::Vpn(route.key()))
+            })
             .map(|route| (route.nlri.key(), route.clone()))
             .collect()
     }
@@ -1753,11 +1765,17 @@ impl RibManager {
     /// table minus own-sourced); `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_routes(&self, peer: IpAddr) -> Option<Vec<Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        let rejected = self.peer_unexportable.get(&peer);
         Some(
             group
                 .table
                 .iter()
-                .filter(|route| route.peer != peer)
+                .filter(|route| {
+                    route.peer != peer
+                        && !rejected.is_some_and(|keys| {
+                            keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                        })
+                })
                 .cloned()
                 .collect(),
         )
@@ -1766,9 +1784,88 @@ impl RibManager {
     /// Synthesized advertised-route count for a grouped peer; `None`
     /// for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_count(&self, peer: IpAddr) -> Option<usize> {
-        self.group_ribs
-            .get(&self.grouped_member_of(peer)?)
-            .map(|group| group.advertised_count_for(peer))
+        let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
+            keys.iter()
+                .filter(|key| match key {
+                    ExactExportKey::Unicast(prefix, path_id) => group
+                        .table
+                        .get(prefix, *path_id)
+                        .is_some_and(|route| route.peer != peer),
+                    _ => false,
+                })
+                .count()
+        });
+        Some(group.advertised_count_for(peer).saturating_sub(rejected))
+    }
+
+    /// Synthesized VPN count for a grouped member after applying its sparse
+    /// exact-export rejection overlay. The group table and RTC membership
+    /// counters remain shared truths; only this member-local projection is
+    /// reduced.
+    pub(in crate::manager) fn grouped_vpn_advertised_count(&self, peer: IpAddr) -> Option<usize> {
+        let gid = self.vpn_grouped_member_of(peer)?;
+        let group = self.group_ribs.get(&gid)?;
+        let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
+        let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
+            keys.iter()
+                .filter(|key| match key {
+                    ExactExportKey::Vpn(key) => group.table.get_vpn(key).is_some_and(|route| {
+                        route.peer != peer && rt_passes(filter.as_ref(), route)
+                    }),
+                    _ => false,
+                })
+                .count()
+        });
+        Some(
+            group
+                .vpn_advertised_count_for(peer)
+                .saturating_sub(rejected),
+        )
+    }
+
+    /// Per-family grouped advertised counts after subtracting the member's
+    /// sparse exact-export rejection overlay. Used by BMP stat 17 and the
+    /// public count query so neither reports the shared group table as wire
+    /// truth for a classic-message peer that rejected an oversized route.
+    pub(in crate::manager) fn grouped_family_counts(
+        &self,
+        peer: IpAddr,
+    ) -> Option<Vec<((Afi, Safi), u64)>> {
+        let gid = self.grouped_member_of(peer)?;
+        let group = self.group_ribs.get(&gid)?;
+        let mut counts = group.family_counts_for(peer);
+        let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
+        if let Some(rejected) = self.peer_unexportable.get(&peer) {
+            for key in rejected {
+                let family = match key {
+                    ExactExportKey::Unicast(prefix, path_id)
+                        if group
+                            .table
+                            .get(prefix, *path_id)
+                            .is_some_and(|route| route.peer != peer) =>
+                    {
+                        Some(super::helpers::prefix_family(prefix))
+                    }
+                    ExactExportKey::Vpn(key)
+                        if group.table.get_vpn(key).is_some_and(|route| {
+                            route.peer != peer && rt_passes(filter.as_ref(), route)
+                        }) =>
+                    {
+                        Some(key.afi_safi())
+                    }
+                    _ => None,
+                };
+                let Some(family) = family else {
+                    continue;
+                };
+                if let Some((_, count)) = counts.iter_mut().find(|(entry, _)| *entry == family) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        counts.retain(|(_, count)| *count != 0);
+        Some(counts)
     }
 
     /// Compute (or recompute) a registered peer's update-group
@@ -1822,12 +1919,17 @@ impl RibManager {
             // The member's Φ at snapshot time (a regroup never changes
             // Φ — it is keyed by peer, not group).
             let rt_filter = self.member_rt_filter(peer);
+            let rejected = self
+                .peer_unexportable
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             let baseline: Option<RegroupBaseline> = match prev_gid {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
                     let base = group.map(|g| RegroupBaseline {
-                        unicast: g.member_view_snapshot(peer),
-                        vpn: g.member_vpn_view_snapshot(peer, rt_filter.as_ref()),
+                        unicast: g.member_view_snapshot(peer, &rejected),
+                        vpn: g.member_vpn_view_snapshot(peer, rt_filter.as_ref(), &rejected),
                     });
                     // A member that leaves while dirty may have missed
                     // withdrawals; carry the group tombstones along as
@@ -2838,7 +2940,7 @@ mod tests {
                 ((Afi::Ipv4, Safi::MplsVpn), 1)
             ]
         );
-        let view = group.member_vpn_view_snapshot(MEMBER, None);
+        let view = group.member_vpn_view_snapshot(MEMBER, None, &HashSet::new());
         assert_eq!(view.len(), 1);
         assert!(view.contains_key(&vpn_key(1)));
 
@@ -3050,7 +3152,7 @@ mod tests {
         );
 
         // Snapshot under Φ = the true advertised set.
-        let view = group.member_vpn_view_snapshot(MEMBER, Some(&phi1));
+        let view = group.member_vpn_view_snapshot(MEMBER, Some(&phi1), &HashSet::new());
         assert_eq!(view.len(), 1);
         assert!(view.contains_key(&in_phi.nlri.key()));
 
@@ -3083,7 +3185,7 @@ mod tests {
             group.family_counts_for(MEMBER),
             vec![((Afi::Ipv4, Safi::Unicast), 1)]
         );
-        let view = group.member_view_snapshot(MEMBER);
+        let view = group.member_view_snapshot(MEMBER, &HashSet::new());
         assert_eq!(view.len(), 1);
         assert!(view.contains_key(&(k1, 0)));
 

@@ -12,6 +12,9 @@ Brief description of what this PR does and why.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
 - [ ] `cargo fmt --check` clean
 - [ ] Relevant interop test run (if protocol/transport change)
+- [ ] Performance-affecting changes have a pinned A/B receipt plus a
+      machine-readable summary indexed from `docs/RECEIPTS.md`, or this item is
+      intentionally not applicable
 
 ## Docs / release notes
 

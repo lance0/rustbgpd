@@ -452,6 +452,19 @@ impl PeerSession {
                         })
                         .await;
 
+                    // Fence the exact encoder to this transport generation
+                    // before `PeerUp` synchronously builds the initial
+                    // Adj-RIB-Out. Every resulting envelope must carry a
+                    // snapshot captured from this owner.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerExportEncoder {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            encoder: self.export_encoder.clone(),
+                        })
+                        .await;
+
                     // Register with RIB manager for outbound updates
                     let _ = self
                         .rib_tx

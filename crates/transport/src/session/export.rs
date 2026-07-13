@@ -13,9 +13,15 @@ use super::{
     RtcRibRouteKey, Safi, TransportConfig, UpdateMessage, VpnRibRoute, VpnRibRouteKey,
     is_ipv6_link_local, is_private_asn,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use rustbgpd_rib::{
+    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
+    ExactExportResult, ExactExportSnapshot,
+};
 use rustbgpd_wire::EncodeError;
+use rustc_hash::FxHashMap;
 
 /// Immutable inputs that determine one established session's outbound wire
 /// representation. A complete replacement is published for runtime changes;
@@ -26,6 +32,7 @@ use rustbgpd_wire::EncodeError;
 )]
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SessionExportProfile {
+    owner_id: u64,
     generation: u64,
     local_asn: u32,
     local_router_id: Ipv4Addr,
@@ -49,6 +56,7 @@ impl std::fmt::Debug for SessionExportProfile {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SessionExportProfile")
+            .field("owner_id", &self.owner_id)
             .field("generation", &self.generation)
             .field("local_asn", &self.local_asn)
             .field("local_router_id", &self.local_router_id)
@@ -77,6 +85,23 @@ impl std::fmt::Debug for SessionExportProfile {
 }
 
 impl SessionExportProfile {
+    /// Whether two profiles produce identical bytes for the same candidate.
+    ///
+    /// Snapshot identity, generation, and the negotiated message ceiling do
+    /// not affect the bytes. Cloning and normalizing those fields before using
+    /// the derived full-struct equality keeps newly-added wire inputs in this
+    /// proof by default instead of requiring a parallel allow-list.
+    fn has_same_wire_encoding(&self, other: &Self) -> bool {
+        let mut this = self.clone();
+        let mut other = other.clone();
+        for profile in [&mut this, &mut other] {
+            profile.owner_id = 0;
+            profile.generation = 0;
+            profile.extended_messages = false;
+        }
+        this == other
+    }
+
     pub(super) fn capture(session: &PeerSession) -> Self {
         let local_addr = session
             .read_half
@@ -87,6 +112,7 @@ impl SessionExportProfile {
             && session.config.peer_interface.is_some()
             && session.config.peer_scope_id.is_some();
         Self {
+            owner_id: 0,
             generation: 0,
             local_asn: session.config.peer.local_asn,
             local_router_id: session.config.peer.local_router_id,
@@ -154,6 +180,7 @@ impl SessionExportProfile {
     ) -> Self {
         let peer_ip = config.remote_addr.ip();
         Self {
+            owner_id: 0,
             generation: 0,
             local_asn: config.peer.local_asn,
             local_router_id: config.peer.local_router_id,
@@ -754,6 +781,48 @@ impl SessionExportProfile {
         }
     }
 
+    fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
+        match origin {
+            rustbgpd_rib::RouteOrigin::Ebgp => 0,
+            rustbgpd_rib::RouteOrigin::Ibgp => 1,
+            rustbgpd_rib::RouteOrigin::Local => 2,
+        }
+    }
+
+    fn prepared_attr_cache_key(
+        &self,
+        route: &Route,
+        local_ipv4: Ipv4Addr,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> PreparedAttrCacheKey {
+        PreparedAttrCacheKey {
+            attrs_ptr: Arc::as_ptr(&route.attributes) as usize,
+            is_ipv4: matches!(route.prefix, Prefix::V4(_)),
+            route_next_hop: route.next_hop,
+            origin_type: Self::route_origin_key(route.origin_type),
+            peer_router_id: route.peer_router_id,
+            is_ebgp: self.is_ebgp(),
+            local_ipv4,
+            next_hop_override: next_hop_override.into(),
+        }
+    }
+
+    /// Return the prepared attributes for one unicast route, memoized by every
+    /// route/profile input that changes attribute construction. Both live
+    /// envelope encoding and exact precommit probes use this implementation.
+    pub(super) fn prepared_unicast_attributes_cached<'a>(
+        &self,
+        cache: &'a mut PreparedAttrCache,
+        route: &Route,
+        local_ipv4: Ipv4Addr,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> &'a PreparedUnicastAttributes {
+        let key = self.prepared_attr_cache_key(route, local_ipv4, next_hop_override);
+        cache.entry(key).or_insert_with(|| {
+            self.prepare_unicast_attribute_bundle(route, local_ipv4, next_hop_override)
+        })
+    }
+
     pub(super) fn finish_unicast_candidate(
         &self,
         route: &Route,
@@ -835,6 +904,37 @@ impl SessionExportProfile {
         }
     }
 
+    fn probe_prepared_unicast_announcement(
+        &self,
+        route: &Route,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+        attrs: PreparedUnicastAttributes,
+    ) -> Result<ExactExportProbe, ExportProbeError> {
+        match self.finish_unicast_candidate(route, next_hop_override, attrs)? {
+            PreparedUnicastCandidate::Ipv4Body { attrs, entry } => self
+                .probe_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
+                .map_err(Into::into),
+            PreparedUnicastCandidate::Mp {
+                afi,
+                next_hop,
+                link_local_next_hop,
+                attrs,
+                entry,
+                ipv4_mode,
+            } => self
+                .probe_mp_reach(
+                    afi,
+                    Safi::Unicast,
+                    next_hop,
+                    link_local_next_hop,
+                    &attrs,
+                    ReachNlri::Unicast(std::slice::from_ref(&entry)),
+                    ipv4_mode,
+                )
+                .map_err(Into::into),
+        }
+    }
+
     #[allow(
         dead_code,
         clippy::too_many_lines,
@@ -848,29 +948,14 @@ impl SessionExportProfile {
             ExportCandidate::Unicast {
                 route,
                 next_hop_override,
-            } => match self.prepare_unicast_candidate(route, next_hop_override)? {
-                PreparedUnicastCandidate::Ipv4Body { attrs, entry } => self
-                    .probe_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
-                    .map_err(Into::into),
-                PreparedUnicastCandidate::Mp {
-                    afi,
-                    next_hop,
-                    link_local_next_hop,
-                    attrs,
-                    entry,
-                    ipv4_mode,
-                } => self
-                    .probe_mp_reach(
-                        afi,
-                        Safi::Unicast,
-                        next_hop,
-                        link_local_next_hop,
-                        &attrs,
-                        ReachNlri::Unicast(std::slice::from_ref(&entry)),
-                        ipv4_mode,
-                    )
-                    .map_err(Into::into),
-            },
+            } => {
+                let attrs = self.prepare_unicast_attribute_bundle(
+                    route,
+                    self.local_ipv4(),
+                    next_hop_override,
+                );
+                self.probe_prepared_unicast_announcement(route, next_hop_override, attrs)
+            }
             ExportCandidate::FlowSpec(route) => {
                 let prepared = self.prepare_flowspec_candidate(route);
                 self.probe_mp_reach(
@@ -1307,6 +1392,37 @@ pub(super) struct PreparedUnicastAttributes {
     pub(super) without_next_hop: Arc<Vec<PathAttribute>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NextHopOverrideKey {
+    None,
+    Self_,
+    Specific(IpAddr),
+}
+
+impl From<Option<&rustbgpd_policy::NextHopAction>> for NextHopOverrideKey {
+    fn from(value: Option<&rustbgpd_policy::NextHopAction>) -> Self {
+        match value {
+            None => Self::None,
+            Some(rustbgpd_policy::NextHopAction::Self_) => Self::Self_,
+            Some(rustbgpd_policy::NextHopAction::Specific(addr)) => Self::Specific(*addr),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct PreparedAttrCacheKey {
+    attrs_ptr: usize,
+    is_ipv4: bool,
+    route_next_hop: IpAddr,
+    origin_type: u8,
+    peer_router_id: Ipv4Addr,
+    is_ebgp: bool,
+    local_ipv4: Ipv4Addr,
+    next_hop_override: NextHopOverrideKey,
+}
+
+pub(super) type PreparedAttrCache = FxHashMap<PreparedAttrCacheKey, PreparedUnicastAttributes>;
+
 pub(super) struct PreparedMpCandidate<T> {
     pub(super) afi: Afi,
     pub(super) safi: Safi,
@@ -1552,12 +1668,161 @@ impl UnreachNlri<'_> {
 
 /// Replaceable owner of immutable export-profile snapshots.
 pub(crate) struct SessionExportEncoder {
+    owner_id: u64,
     current: RwLock<Arc<SessionExportProfile>>,
 }
 
+static NEXT_EXPORT_ENCODER_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ExactExportEncoder for SessionExportEncoder {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
+        SessionExportEncoder::snapshot(self)
+    }
+}
+
+fn exact_export_result(
+    probe: Result<ExactExportProbe, ExportProbeError>,
+) -> Result<ExactExportResult, ExactExportError> {
+    let probe = probe.map_err(|error| {
+        let code = match &error {
+            ExportProbeError::Encode(_) => ExactExportErrorCode::Encoding,
+            ExportProbeError::MissingIpv6NextHop => ExactExportErrorCode::MissingIpv6NextHop,
+            ExportProbeError::Ipv4RequiresExtendedNextHop => {
+                ExactExportErrorCode::Ipv4RequiresExtendedNextHop
+            }
+        };
+        ExactExportError::new(code, error)
+    })?;
+    if probe.encoded_len > probe.max_len {
+        return Err(ExactExportError::new(
+            ExactExportErrorCode::MessageTooLong,
+            format_args!(
+                "encoded UPDATE is {} bytes; negotiated maximum is {} bytes",
+                probe.encoded_len, probe.max_len
+            ),
+        ));
+    }
+    Ok(ExactExportResult {
+        encoded_len: probe.encoded_len,
+        max_len: probe.max_len,
+        generation: probe.generation,
+    })
+}
+
+impl ExactExportSnapshot for SessionExportProfile {
+    fn owner_id(&self) -> u64 {
+        self.owner_id
+    }
+
+    fn generation(&self) -> u64 {
+        SessionExportProfile::generation(self)
+    }
+
+    fn probe_announcement(
+        &self,
+        candidate: ExactExportCandidate<'_>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        let candidate = match candidate {
+            ExactExportCandidate::Unicast {
+                route,
+                next_hop_override,
+            } => ExportCandidate::Unicast {
+                route,
+                next_hop_override,
+            },
+            ExactExportCandidate::FlowSpec(route) => ExportCandidate::FlowSpec(route),
+            ExactExportCandidate::Evpn(route) => ExportCandidate::Evpn(route),
+            ExactExportCandidate::BgpLs(route) => ExportCandidate::BgpLs(route),
+            ExactExportCandidate::Vpn(route) => ExportCandidate::Vpn(route),
+            ExactExportCandidate::Labeled(route) => ExportCandidate::Labeled(route),
+            ExactExportCandidate::Rtc(route) => ExportCandidate::Rtc(route),
+        };
+        exact_export_result(SessionExportProfile::probe_announcement(self, candidate))
+    }
+
+    fn probe_announcements(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        let mut prepared_attr_cache = PreparedAttrCache::default();
+        let local_ipv4 = self.local_ipv4();
+        candidates
+            .iter()
+            .copied()
+            .map(|candidate| match candidate {
+                ExactExportCandidate::Unicast {
+                    route,
+                    next_hop_override,
+                } => {
+                    let attrs = self
+                        .prepared_unicast_attributes_cached(
+                            &mut prepared_attr_cache,
+                            route,
+                            local_ipv4,
+                            next_hop_override,
+                        )
+                        .clone();
+                    exact_export_result(self.probe_prepared_unicast_announcement(
+                        route,
+                        next_hop_override,
+                        attrs,
+                    ))
+                }
+                _ => <Self as ExactExportSnapshot>::probe_announcement(self, candidate),
+            })
+            .collect()
+    }
+
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        let source = source.as_any().downcast_ref::<Self>()?;
+        if !self.has_same_wire_encoding(source) {
+            return None;
+        }
+
+        let max_len = self.max_message_len();
+        Some(
+            encoded_lengths
+                .iter()
+                .copied()
+                .map(|encoded_len| {
+                    if encoded_len > max_len {
+                        Err(ExactExportError::new(
+                            ExactExportErrorCode::MessageTooLong,
+                            format_args!(
+                                "encoded UPDATE is {encoded_len} bytes; negotiated maximum is {max_len} bytes"
+                            ),
+                        ))
+                    } else {
+                        Ok(ExactExportResult {
+                            encoded_len,
+                            max_len,
+                            generation: self.generation,
+                        })
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 impl SessionExportEncoder {
-    pub(super) fn new(profile: SessionExportProfile) -> Self {
+    pub(super) fn new(mut profile: SessionExportProfile) -> Self {
+        let owner_id = NEXT_EXPORT_ENCODER_ID.fetch_add(1, Ordering::Relaxed);
+        profile.owner_id = owner_id;
         Self {
+            owner_id,
             current: RwLock::new(Arc::new(profile)),
         }
     }
@@ -1567,6 +1832,7 @@ impl SessionExportEncoder {
             .current
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        profile.owner_id = self.owner_id;
         profile.generation = current.generation();
         if **current == profile {
             return Arc::clone(&current);
@@ -1585,6 +1851,35 @@ impl SessionExportEncoder {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
     }
+}
+
+/// Build the authoritative exact-export encoder used by the manager fanout
+/// microbench. Each call returns a distinct session owner with the fixed
+/// established iBGP/RR profile modelled by that benchmark.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    Arc::new(SessionExportEncoder::new(SessionExportProfile {
+        owner_id: 0,
+        generation: 0,
+        local_asn: 64_512,
+        local_router_id: Ipv4Addr::new(10, 255, 255, 255),
+        local_role: None,
+        route_server_client: false,
+        remove_private_as: RemovePrivateAs::Disabled,
+        cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
+        configured_local_ipv6_nexthop: None,
+        peer_asn: Some(64_512),
+        four_octet_as: true,
+        extended_messages: false,
+        extended_nexthop_ipv4: false,
+        add_path_send_families: Arc::from(Vec::new()),
+        peer_llgr_families: Arc::from(Vec::new()),
+        local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
+        scoped_link_local_peer: false,
+        advertise_graceful_shutdown: false,
+    }))
 }
 
 impl PeerSession {
@@ -1794,6 +2089,293 @@ mod tests {
             "new Add-Path profile changes wire bytes"
         );
         assert!(Arc::ptr_eq(&new, &encoder.snapshot()));
+    }
+
+    #[test]
+    fn object_safe_exact_export_bridge_preserves_identity_and_generation() {
+        let config = config_with_auth_secret("not-retained");
+        let encoder: Arc<dyn ExactExportEncoder> = Arc::new(SessionExportEncoder::new(
+            SessionExportProfile::initial(&config, None, false),
+        ));
+        let snapshot = encoder.snapshot();
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 7,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        };
+        let candidate = ExactExportCandidate::Unicast {
+            route: &route,
+            next_hop_override: None,
+        };
+
+        assert_eq!(
+            candidate.key(),
+            rustbgpd_rib::ExactExportKey::Unicast(route.prefix, route.path_id)
+        );
+        let result = snapshot.probe_announcement(candidate).unwrap();
+        assert_eq!(result.generation, snapshot.generation());
+        assert!(result.encoded_len <= result.max_len);
+        assert!(snapshot.as_any().is::<SessionExportProfile>());
+    }
+
+    #[test]
+    fn successful_exact_probe_reuse_reowns_identity_generation_and_ceiling() {
+        let config = config_with_auth_secret("not-retained");
+        let mut source = SessionExportProfile::initial(&config, None, false);
+        source.owner_id = 11;
+        source.generation = 3;
+        let mut target = source.clone();
+        target.owner_id = 29;
+        target.generation = 17;
+
+        let reused = target
+            .reuse_successful_probes(&source, &[1_234, 2_345])
+            .expect("identity-only differences preserve wire equivalence");
+
+        assert_eq!(
+            reused,
+            vec![
+                Ok(ExactExportResult {
+                    encoded_len: 1_234,
+                    max_len: usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                    generation: 17,
+                }),
+                Ok(ExactExportResult {
+                    encoded_len: 2_345,
+                    max_len: usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                    generation: 17,
+                }),
+            ],
+            "batch order and cardinality are preserved with target-owned metadata"
+        );
+    }
+
+    #[test]
+    fn successful_extended_probe_reuse_reapplies_smaller_target_ceiling() {
+        let config = config_with_auth_secret("not-retained");
+        let mut source = SessionExportProfile::initial(&config, None, false);
+        source.extended_messages = true;
+        source.owner_id = 11;
+        source.generation = 3;
+        let mut target = source.clone();
+        target.extended_messages = false;
+        target.owner_id = 29;
+        target.generation = 17;
+        let encoded_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN) + 1;
+
+        let error = target
+            .reuse_successful_probes(&source, &[encoded_len])
+            .expect("the message ceiling does not affect encoded bytes")
+            .pop()
+            .expect("one source length produces one target result")
+            .expect_err("the successful 64K probe must be rejected by a 4K target");
+
+        assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
+        assert!(error.detail().contains(&encoded_len.to_string()));
+        assert!(
+            error
+                .detail()
+                .contains(&rustbgpd_wire::MAX_MESSAGE_LEN.to_string())
+        );
+    }
+
+    #[test]
+    fn failed_source_probe_exposes_no_reusable_encoded_length() {
+        let config = config_with_auth_secret("not-retained");
+        let source = SessionExportProfile::initial(&config, None, false);
+        let mut target = source.clone();
+        target.extended_messages = true;
+        let source_result: Result<ExactExportResult, ExactExportError> =
+            Err(ExactExportError::new(
+                ExactExportErrorCode::MessageTooLong,
+                "source 4K ceiling rejected the candidate",
+            ));
+
+        let reused = source_result.ok().and_then(|successful| {
+            target.reuse_successful_probes(&source, &[successful.encoded_len])
+        });
+
+        assert!(
+            reused.is_none(),
+            "a failed source probe has no successful length to cache or reuse"
+        );
+    }
+
+    #[test]
+    fn successful_exact_probe_reuse_refuses_wire_profile_differences() {
+        type ProfileMutation = fn(&mut SessionExportProfile);
+
+        let config = config_with_auth_secret("not-retained");
+        let target = SessionExportProfile::initial(&config, None, false);
+        let cases: [(&str, ProfileMutation); 8] = [
+            ("local ASN", |profile| profile.local_asn += 1),
+            ("router ID", |profile| {
+                profile.local_router_id = Ipv4Addr::new(192, 0, 2, 99);
+            }),
+            ("route-server mode", |profile| {
+                profile.route_server_client = !profile.route_server_client;
+            }),
+            ("four-octet ASN encoding", |profile| {
+                profile.four_octet_as = !profile.four_octet_as;
+            }),
+            ("extended next hop", |profile| {
+                profile.extended_nexthop_ipv4 = !profile.extended_nexthop_ipv4;
+            }),
+            ("Add-Path", |profile| {
+                profile.add_path_send_families = Arc::from(vec![(Afi::Ipv4, Safi::Unicast)]);
+            }),
+            ("local address", |profile| {
+                profile.local_addr = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)));
+            }),
+            ("graceful shutdown", |profile| {
+                profile.advertise_graceful_shutdown = !profile.advertise_graceful_shutdown;
+            }),
+        ];
+
+        for (name, mutate) in cases {
+            let mut source = target.clone();
+            mutate(&mut source);
+            assert!(
+                target.reuse_successful_probes(&source, &[1_234]).is_none(),
+                "must not reuse across a {name} difference"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one cache-key matrix keeps scalar equivalence and every memo dimension together"
+    )]
+    fn batched_exact_probe_matches_scalar_and_memoizes_only_complete_attr_keys() {
+        let config = config_with_auth_secret("not-retained");
+        let profile = SessionExportProfile::initial(&config, None, false);
+        let shared_attributes = Arc::new(vec![
+            PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            PathAttribute::LocalPref(100),
+        ]);
+        let routes = (0..64)
+            .map(|index| Route {
+                prefix: Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(203, 0, u8::try_from(index).unwrap(), 0),
+                    24,
+                )),
+                next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                link_local_next_hop: None,
+                next_hop_scope: None,
+                peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                attributes: Arc::clone(&shared_attributes),
+                received_at: std::time::Instant::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            })
+            .collect::<Vec<_>>();
+        let candidates = routes
+            .iter()
+            .map(|route| ExactExportCandidate::Unicast {
+                route,
+                next_hop_override: None,
+            })
+            .collect::<Vec<_>>();
+
+        let scalar = candidates
+            .iter()
+            .copied()
+            .map(|candidate| {
+                <SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+                    &profile, candidate,
+                )
+            })
+            .collect::<Vec<_>>();
+        let batched = profile.probe_announcements(&candidates);
+        assert_eq!(batched, scalar, "batch must preserve scalar result order");
+
+        let mut cache = PreparedAttrCache::default();
+        let local_ipv4 = profile.local_ipv4();
+        for route in &routes {
+            profile.prepared_unicast_attributes_cached(&mut cache, route, local_ipv4, None);
+        }
+        assert_eq!(
+            cache.len(),
+            1,
+            "shared complete keys prepare attributes once"
+        );
+
+        let mut different_next_hop = routes[0].clone();
+        different_next_hop.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
+        profile.prepared_unicast_attributes_cached(
+            &mut cache,
+            &different_next_hop,
+            local_ipv4,
+            None,
+        );
+        assert_eq!(cache.len(), 2, "route next hop is part of the cache key");
+
+        profile.prepared_unicast_attributes_cached(
+            &mut cache,
+            &routes[0],
+            local_ipv4,
+            Some(&rustbgpd_policy::NextHopAction::Self_),
+        );
+        assert_eq!(cache.len(), 3, "next-hop action is part of the cache key");
+
+        let mut different_afi = routes[0].clone();
+        different_afi.prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            64,
+        ));
+        profile.prepared_unicast_attributes_cached(&mut cache, &different_afi, local_ipv4, None);
+        assert_eq!(cache.len(), 4, "address family is part of the cache key");
+
+        let mut different_origin = routes[0].clone();
+        different_origin.origin_type = rustbgpd_rib::RouteOrigin::Ebgp;
+        profile.prepared_unicast_attributes_cached(&mut cache, &different_origin, local_ipv4, None);
+        assert_eq!(cache.len(), 5, "route origin is part of the cache key");
+
+        let mut different_router_id = routes[0].clone();
+        different_router_id.peer_router_id = Ipv4Addr::new(192, 0, 2, 99);
+        profile.prepared_unicast_attributes_cached(
+            &mut cache,
+            &different_router_id,
+            local_ipv4,
+            None,
+        );
+        assert_eq!(cache.len(), 6, "peer router ID is part of the cache key");
+
+        for (expected_len, address) in [
+            (7, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 100))),
+            (8, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 101))),
+        ] {
+            profile.prepared_unicast_attributes_cached(
+                &mut cache,
+                &routes[0],
+                local_ipv4,
+                Some(&rustbgpd_policy::NextHopAction::Specific(address)),
+            );
+            assert_eq!(
+                cache.len(),
+                expected_len,
+                "specific next-hop address is part of the cache key"
+            );
+        }
     }
 
     fn encoded(message: UpdateMessage) -> Vec<u8> {

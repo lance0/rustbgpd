@@ -790,7 +790,28 @@ impl RibManager {
                 if let Some(group) = self.group_ribs.get_mut(&gid) {
                     group.apply_vpn_member_count_delta(peer, count_delta);
                 }
-                if !self.try_send_and_commit_outbound_update(
+                let rejected = self.peer_unexportable.get(&peer);
+                let group_prior = stage
+                    .deltas
+                    .iter()
+                    .filter_map(|delta| {
+                        let key = crate::route::VpnRibRouteKey {
+                            nlri_key: delta.key,
+                            path_id: 0,
+                        };
+                        (delta.old.as_ref().is_some_and(|old| {
+                            old.peer != peer
+                                && crate::manager::update_groups::rt_passes(
+                                    member_filter.as_ref(),
+                                    old,
+                                )
+                        }) && !rejected.is_some_and(|keys| {
+                            keys.contains(&crate::update::ExactExportKey::Vpn(key.clone()))
+                        }))
+                        .then_some(crate::update::ExactExportKey::Vpn(key))
+                    })
+                    .collect();
+                if !self.try_send_and_commit_outbound_update_with_group_prior(
                     peer,
                     vec![].into(),
                     vec![].into(),
@@ -809,6 +830,8 @@ impl RibManager {
                     vec![],
                     vec![],
                     vec![],
+                    group_prior,
+                    None,
                 ) {
                     warn!(%peer, "outbound channel full — VPN update deferred");
                     self.mark_outbound_dirty(peer);

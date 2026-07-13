@@ -143,6 +143,7 @@ pub struct BgpMetrics {
     update_group_residue_entries: IntGauge,
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
+    exact_export_rejections: IntCounterVec,
     blackhole_discard_installed: IntCounter,
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_adopted: IntCounter,
@@ -683,6 +684,15 @@ impl BgpMetrics {
             "Distinct update-group fingerprint keys created since process \
              start. Append-only for the process lifetime: an emptied group \
              keeps its slot so a recurring key reuses its stable id.",
+        )
+        .expect("valid metric definition");
+
+        let exact_export_rejections = IntCounterVec::new(
+            Opts::new(
+                "bgp_exact_export_rejections_total",
+                "Post-policy route announcements rejected before Adj-RIB-Out commit because their exact one-route wire form is not exportable, by peer, negotiated AFI/SAFI family, and bounded reason.",
+            ),
+            &["peer", "family", "reason"],
         )
         .expect("valid metric definition");
 
@@ -1493,6 +1503,9 @@ impl BgpMetrics {
             .register(Box::new(update_group_keys.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(exact_export_rejections.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(blackhole_discard_installed.clone()))
             .expect("metric not already registered");
         registry
@@ -1783,6 +1796,7 @@ impl BgpMetrics {
             update_group_residue_entries,
             update_group_interned_chains,
             update_group_keys,
+            exact_export_rejections,
             blackhole_discard_installed,
             blackhole_discard_withdrawn,
             blackhole_discard_adopted,
@@ -1913,6 +1927,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.hold_timer_rearmed_pending_input, peer);
         Self::reap_peer_series_from_vec(&self.send_hold_expirations, peer);
+        Self::reap_peer_series_from_vec(&self.exact_export_rejections, peer);
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.bgpls_nlri_discarded, peer);
@@ -2331,6 +2346,38 @@ impl BgpMetrics {
     /// (append-only for the process lifetime).
     pub fn set_update_group_keys(&self, count: i64) {
         self.update_group_keys.set(count);
+    }
+
+    /// Record a route rejected by the session's exact one-route export
+    /// probe before the RIB commits it to Adj-RIB-Out.
+    ///
+    /// `family` uses the daemon's bounded OpenConfig-style AFI/SAFI labels;
+    /// `reason` is the canonical typed exact-export vocabulary.
+    pub fn record_exact_export_rejection(
+        &self,
+        peer: &str,
+        family: &str,
+        reason: crate::reason_labels::ExactExportReason,
+    ) {
+        let family = match family {
+            "ipv4_unicast"
+            | "ipv6_unicast"
+            | "ipv4_flowspec"
+            | "ipv6_flowspec"
+            | "l2vpn_evpn"
+            | "bgpls"
+            | "bgpls_vpn"
+            | "l3vpn_ipv4_unicast"
+            | "l3vpn_ipv6_unicast"
+            | "ipv4_labeled_unicast"
+            | "ipv6_labeled_unicast"
+            | "rtc" => family,
+            _ => "unknown",
+        };
+        let reason = reason.as_str();
+        self.exact_export_rejections
+            .with_label_values(&[peer, family, reason])
+            .inc();
     }
 
     /// Record a `PeerUp` that replaced a still-registered outbound sender
@@ -3416,6 +3463,46 @@ mod tests {
 
         let flaps = m.session_flaps.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(flaps, 1);
+    }
+
+    #[test]
+    fn exact_export_rejections_use_bounded_labels_and_are_peer_reaped() {
+        use crate::reason_labels::ExactExportReason;
+
+        let m = BgpMetrics::new();
+        m.record_exact_export_rejection(
+            "10.0.0.1",
+            "ipv4_unicast",
+            ExactExportReason::MessageTooLong,
+        );
+        m.record_exact_export_rejection(
+            "10.0.0.1",
+            "ipv4_unicast",
+            ExactExportReason::MessageTooLong,
+        );
+        m.record_exact_export_rejection("10.0.0.1", "invented-family", ExactExportReason::Encoding);
+        m.record_exact_export_rejection("10.0.0.2", "l2vpn_evpn", ExactExportReason::Encoding);
+
+        assert_eq!(
+            m.exact_export_rejections
+                .with_label_values(&["10.0.0.1", "ipv4_unicast", "message_too_long"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.exact_export_rejections
+                .with_label_values(&["10.0.0.1", "unknown", "encoding"])
+                .get(),
+            1,
+            "unexpected family values must collapse instead of growing cardinality"
+        );
+
+        m.reap_peer_series("10.0.0.1");
+        let text = gather_text(&m);
+        assert!(!text.contains("peer=\"10.0.0.1\""));
+        assert!(text.contains(
+            "bgp_exact_export_rejections_total{family=\"l2vpn_evpn\",peer=\"10.0.0.2\",reason=\"encoding\"} 1"
+        ));
     }
 
     #[test]
@@ -4509,6 +4596,11 @@ mod tests {
         m.record_inbound_rib_backpressure(peer);
         m.record_hold_timer_rearmed_pending_input(peer);
         m.record_send_hold_expiration(peer);
+        m.record_exact_export_rejection(
+            peer,
+            "ipv4_unicast",
+            crate::reason_labels::ExactExportReason::MessageTooLong,
+        );
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
         m.record_rib_stale_session_message_ignored(peer, "routes");
@@ -4559,8 +4651,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 33 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 34);
+        // 34 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 35);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -4570,7 +4662,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 34);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 35);
     }
 
     #[test]
