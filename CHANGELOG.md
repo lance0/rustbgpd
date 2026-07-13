@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **TCP-AO supports fail-closed add-only live rotation.** SIGHUP can append
+  non-preferred successor MKTs to unchanged static-neighbor and direct
+  dynamic-prefix owners. One immutable generation is globally preflighted,
+  installed idempotently on the listener and every managed protected session,
+  verified against complete kernel inventories, and fenced across passive
+  accepts. Neighbor API/CLI/JSON expose secret-free desired/applied generation,
+  phase, and actionable failure state. A partial failure preserves old
+  selectable keys and is safe to retry; selection, deprecation, deletion,
+  edits/reordering, and protected-owner CRUD remain restart-required. (LAN-16,
+  #159)
+
 - **TCP-AO accepts ordered startup keyrings.** Static neighbors and direct
   dynamic-prefix selectors may configure one to 256 MKTs. The existing
   singleton table remains accepted and serializes unchanged; multiple keys use
@@ -25,8 +36,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   owners require directionally disjoint SendID and RecvID sets;
   TCP-AO/plaintext and TCP-AO/MD5 overlaps remain invalid. Listener inventories
   are capped at 4,096 MKTs per address family so inspection cannot truncate a
-  valid configuration. Keyring changes, including reordering, remain
-  restart-required; live rotation remains tracked in LAN-16 / #159. (LAN-389)
+  valid configuration. Add-only non-preferred successors can be installed on
+  SIGHUP; selection, deprecation, deletion, and reordering remain
+  restart-required. (LAN-389)
 
 - **Narrow v1 route-server / route-reflector compatibility contract.** A
   machine-checked inventory now pins only the proven IPv4/IPv6 unicast RS/RR
@@ -96,9 +108,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the BGP listener enters `listen(2)` without enabling listener-wide
   `ao_required`. Configuration rejects overlapping dynamic/static authentication
   boundaries and inherited MD5; protected accepts fail closed unless
-  `TCP_AO_INFO` confirms the expected key IDs and clean authentication counters. SIGHUP pins
-  protected range/key edits to the startup snapshot, and runtime CRUD rejects
-  protected ranges and overlaps. Runtime rotation remains deferred. (#158)
+  `TCP_AO_INFO` confirms the expected key IDs and clean authentication counters.
+  SIGHUP can append non-preferred successor MKTs to an unchanged range owner;
+  other protected range/key edits remain pinned, and runtime CRUD rejects
+  protected ranges and overlaps. (#158)
 
 ### Fixed
 

@@ -272,6 +272,12 @@ pub(crate) struct PeerSession {
     /// inspection failure never clears this bit, so a protected accepted
     /// session keeps retrying read-only inspection on later queries.
     tcp_ao_protected: bool,
+    /// Generation of the immutable TCP-AO inventory applied to this session.
+    tcp_ao_generation: crate::TcpAoRotationGeneration,
+    /// True only while the currently owned stream came from the shared
+    /// listener. After disconnect, a reconnect is active-open and uses the
+    /// exact static owner instead of the listener covering-owner union.
+    tcp_ao_stream_was_accepted: bool,
     /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
     /// RFC 8538: only preserves routes when Notification GR was negotiated.
     notification_teardown: bool,
@@ -536,6 +542,7 @@ impl PeerSession {
         )
     }
 
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "session constructor owns the transport dependency boundary explicitly"
@@ -554,6 +561,44 @@ impl PeerSession {
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
+    ) -> Self {
+        Self::new_at_tcp_ao_generation(
+            config,
+            metrics,
+            commands,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            crate::TcpAoRotationGeneration::STARTUP,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "session constructor owns the transport dependency boundary explicitly"
+    )]
+    pub(crate) fn new_at_tcp_ao_generation(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        commands: mpsc::Receiver<PeerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -633,6 +678,8 @@ impl PeerSession {
             tcp_ao_info: None,
             tcp_ao_key_metadata,
             tcp_ao_protected,
+            tcp_ao_generation,
+            tcp_ao_stream_was_accepted: false,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -665,6 +712,7 @@ impl PeerSession {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+        tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -673,6 +721,7 @@ impl PeerSession {
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
         let tcp_ao_protected = config.tcp_ao.is_some() || tcp_ao_info.is_some();
+        let tcp_ao_stream_was_accepted = tcp_ao_info.is_some();
         let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, tcp_ao_info.as_ref());
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
@@ -756,6 +805,8 @@ impl PeerSession {
             tcp_ao_info,
             tcp_ao_key_metadata,
             tcp_ao_protected,
+            tcp_ao_generation,
+            tcp_ao_stream_was_accepted,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -1224,6 +1275,8 @@ impl PeerSession {
                             );
                             self.read_half = Some(rh);
                             self.tcp_ao_info = tcp_ao_info;
+                            self.tcp_ao_key_metadata = tcp_ao_key_metadata(&self.config, None);
+                            self.tcp_ao_stream_was_accepted = false;
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);

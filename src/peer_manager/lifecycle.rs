@@ -190,7 +190,7 @@ impl PeerManager {
         let max_prefixes = transport.max_prefixes;
 
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_with_event_sink_and_identity_and_lifecycle(
+        let handle = PeerHandle::spawn_at_tcp_ao_generation(
             transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -204,6 +204,7 @@ impl PeerManager {
             false,
             SessionIdentity::primary(session_id),
             self.transport_event_sink.clone(),
+            self.tcp_ao_generation,
         );
 
         // ADR-0067 step 4b — strict BFD: create/store the peer but withhold BGP
@@ -244,6 +245,12 @@ impl PeerManager {
                 pending_inbound: None,
                 is_dynamic: false,
                 tcp_ao_protected,
+                tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
+                    desired: self.tcp_ao_generation,
+                    applied: self.tcp_ao_generation,
+                    phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+                    last_error: None,
+                },
                 accepted_dynamic_range: None,
                 pending_refresh: false,
                 pending_export_apply: false,

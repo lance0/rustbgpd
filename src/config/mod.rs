@@ -1997,6 +1997,10 @@ pub enum ConfigFieldImpact {
 /// - `peer_group`: a reassignment changes the peer's effective inherited
 ///   config, so both SIGHUP reconcile and the transaction session-reshape
 ///   executor rebuild the session.
+/// - `tcp_ao`: the field-only transaction/diff classifier remains
+///   `RestartRequired`. Only the SIGHUP coordinator can prove that a complete
+///   candidate is the narrow add-only generation shape and apply it across the
+///   listener plus every managed session.
 fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)> {
     Some(match field {
         "description"
@@ -2224,9 +2228,11 @@ pub fn neighbor_change_hot_applicable(old: &Neighbor, new: &Neighbor) -> bool {
 ///
 /// Two neighbors with the same address but different runtime-affecting
 /// configuration are reported in `changed`. TCP-AO edits are deliberately
-/// excluded here because they are startup-listener key material: `diff_config`
-/// reports them through `neighbor_tcp_ao_changed`, and SIGHUP pins them until
-/// daemon restart rather than hot-reconciling a peer with stale listener MKTs.
+/// excluded here because they require listener/session-wide coordination:
+/// `diff_config` reports them through `neighbor_tcp_ao_changed`, while the
+/// reload coordinator either commits a strict add-only generation or pins the
+/// unsupported edit rather than rebuilding one peer against stale listener
+/// MKTs.
 pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
     let key = |n: &Neighbor| (n.address.clone(), n.interface.clone());
     let old_map: std::collections::HashMap<(String, Option<String>), &Neighbor> =

@@ -323,6 +323,7 @@ impl PeerSession {
         self.writer_teardown_tx = None;
         self.read_buf.clear();
         self.tcp_ao_info = None;
+        self.tcp_ao_stream_was_accepted = false;
         self.clear_bmp_stream_repair();
     }
 
@@ -340,6 +341,7 @@ impl PeerSession {
         self.writer_teardown_tx = None;
         self.read_buf.clear();
         self.tcp_ao_info = None;
+        self.tcp_ao_stream_was_accepted = false;
         self.clear_bmp_stream_repair();
     }
 

@@ -5,6 +5,13 @@ use super::{
 };
 use crate::handle::PeerCommandError;
 
+struct TcpAoSessionAddOnlyPlan {
+    connected_peer: std::net::IpAddr,
+    connected_prefix: u8,
+    owners: Vec<crate::TcpAoRotationOwner>,
+    desired_metadata: Vec<super::TcpAoKeyMetadata>,
+}
+
 fn sorted_family_limits<T>(
     limits: impl Iterator<Item = ((Afi, Safi), T)>,
 ) -> Vec<((Afi, Safi), T)> {
@@ -14,6 +21,224 @@ fn sorted_family_limits<T>(
 }
 
 impl PeerSession {
+    fn prepare_tcp_ao_add_only(
+        &self,
+        desired: &crate::TcpAoSessionGeneration,
+    ) -> Result<Option<TcpAoSessionAddOnlyPlan>, PeerCommandError> {
+        if desired.generation == self.tcp_ao_generation {
+            return Ok(None);
+        }
+        if self.tcp_ao_generation.next() != Some(desired.generation) {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO session generation is not the immediate applied successor".to_string(),
+            ));
+        }
+        if !self.tcp_ao_protected {
+            return Err(PeerCommandError::CommandFailed(
+                "refusing TCP-AO generation on an unprotected session".to_string(),
+            ));
+        }
+        if self.connect_task.is_some() {
+            // The task owns a clone of the pre-generation TransportConfig and
+            // may already have installed that exact keyring on its socket. Do
+            // not advance metadata/config underneath it: let the attempt
+            // finish, then retry the same immutable generation against the
+            // resulting socket (or the next disconnected attempt).
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO generation cannot advance while an older-inventory connect attempt is in flight; retry the generation"
+                    .to_string(),
+            ));
+        }
+        if !self.tcp_ao_stream_was_accepted {
+            let target = desired.active_keyring.as_ref().ok_or_else(|| {
+                PeerCommandError::CommandFailed(
+                    "protected active-open session is missing its desired TCP-AO keyring"
+                        .to_string(),
+                )
+            })?;
+            let current = self.config.tcp_ao.as_ref().ok_or_else(|| {
+                PeerCommandError::CommandFailed(
+                    "protected active-open session lacks its current TCP-AO keyring".to_string(),
+                )
+            })?;
+            if !target.0.starts_with(&current.0) || target.selected() != current.selected() {
+                return Err(PeerCommandError::CommandFailed(
+                    "TCP-AO active-open generation is not an add-only keyring successor"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let connected_peer = self.config.remote_addr.ip();
+        let connected_prefix = if connected_peer.is_ipv4() { 32 } else { 128 };
+        let owners = if self.tcp_ao_stream_was_accepted {
+            desired.accepted_owners.to_vec()
+        } else {
+            desired
+                .active_keyring
+                .as_ref()
+                .map(|keyring| {
+                    vec![crate::TcpAoRotationOwner {
+                        peer: connected_peer,
+                        prefix_len: connected_prefix,
+                        keyring: keyring.clone(),
+                    }]
+                })
+                .unwrap_or_default()
+        };
+        let desired_metadata = owners
+            .iter()
+            .flat_map(|owner| {
+                owner.keyring.iter().map(|key| super::TcpAoKeyMetadata {
+                    peer: owner.peer,
+                    prefix_len: owner.prefix_len,
+                    send_id: key.send_id,
+                    recv_id: key.recv_id,
+                    algorithm: key.algorithm,
+                    preferred: key.preferred,
+                    deprecated: key.deprecated,
+                })
+            })
+            .collect::<Vec<_>>();
+        if desired_metadata.len() > crate::TCP_AO_MAX_INSPECT_KEYS {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO session generation exceeds inspection capacity".to_string(),
+            ));
+        }
+        let metadata_contains = |candidate: &super::TcpAoKeyMetadata| {
+            desired_metadata.iter().any(|desired| {
+                desired.peer == candidate.peer
+                    && desired.prefix_len == candidate.prefix_len
+                    && desired.send_id == candidate.send_id
+                    && desired.recv_id == candidate.recv_id
+                    && desired.algorithm == candidate.algorithm
+            })
+        };
+        if self.read_half.is_some()
+            && self
+                .tcp_ao_key_metadata
+                .iter()
+                .any(|current| !metadata_contains(current))
+        {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO add-only generation would remove or redefine an installed MKT".to_string(),
+            ));
+        }
+
+        Ok(Some(TcpAoSessionAddOnlyPlan {
+            connected_peer,
+            connected_prefix,
+            owners,
+            desired_metadata,
+        }))
+    }
+
+    pub(super) fn apply_tcp_ao_add_only(
+        &mut self,
+        desired: crate::TcpAoSessionGeneration,
+    ) -> Result<(), PeerCommandError> {
+        let Some(plan) = self.prepare_tcp_ao_add_only(&desired)? else {
+            return Ok(());
+        };
+        let TcpAoSessionAddOnlyPlan {
+            connected_peer,
+            connected_prefix,
+            owners,
+            desired_metadata,
+        } = plan;
+
+        if let Some(stream) = self.read_half.as_ref() {
+            let before = crate::socket_opts::get_tcp_ao_info(stream.as_ref()).map_err(|error| {
+                PeerCommandError::CommandFailed(format!(
+                    "failed to inspect TCP-AO session before generation apply: {error}"
+                ))
+            })?;
+            for owner in &owners {
+                for key in &owner.keyring {
+                    let already_owned = self.tcp_ao_key_metadata.iter().any(|current| {
+                        current.peer == owner.peer
+                            && current.prefix_len == owner.prefix_len
+                            && current.send_id == key.send_id
+                            && current.recv_id == key.recv_id
+                            && current.algorithm == key.algorithm
+                    });
+                    if already_owned {
+                        continue;
+                    }
+                    crate::socket_opts::add_tcp_ao_config_idempotent(
+                        stream.as_ref(),
+                        owner.peer,
+                        owner.prefix_len,
+                        Some(connected_peer),
+                        key,
+                    )
+                    .map_err(|error| {
+                        PeerCommandError::CommandFailed(format!(
+                            "failed to add TCP-AO session key send_id={} recv_id={} algorithm={}: {error}",
+                            key.send_id,
+                            key.recv_id,
+                            key.algorithm.linux_name()
+                        ))
+                    })?;
+                }
+            }
+
+            let snapshot =
+                crate::socket_opts::get_tcp_ao_info(stream.as_ref()).map_err(|error| {
+                    PeerCommandError::CommandFailed(format!(
+                        "failed to verify TCP-AO session generation: {error}"
+                    ))
+                })?;
+            let state_matches_metadata =
+                |state: &crate::TcpAoKeyState, metadata: &super::TcpAoKeyMetadata| {
+                    let selector_matches = (state.peer == metadata.peer
+                        && state.prefix_len == metadata.prefix_len)
+                        || (state.peer == connected_peer && state.prefix_len == connected_prefix);
+                    selector_matches
+                        && state.send_id == metadata.send_id
+                        && state.recv_id == metadata.recv_id
+                        && state.algorithm == metadata.algorithm
+                };
+            let snapshot_matches = snapshot.keys.len() == desired_metadata.len()
+                && snapshot.keys.iter().all(|state| {
+                    desired_metadata
+                        .iter()
+                        .filter(|metadata| state_matches_metadata(state, metadata))
+                        .count()
+                        == 1
+                })
+                && desired_metadata.iter().all(|metadata| {
+                    snapshot
+                        .keys
+                        .iter()
+                        .filter(|state| state_matches_metadata(state, metadata))
+                        .count()
+                        == 1
+                });
+            if !snapshot_matches {
+                return Err(PeerCommandError::CommandFailed(
+                    "TCP-AO session inventory did not converge to the complete desired owner union"
+                        .to_string(),
+                ));
+            }
+            if snapshot.has_current_key != before.has_current_key
+                || snapshot.current_key != before.current_key
+                || snapshot.has_rnext_key != before.has_rnext_key
+                || snapshot.rnext_key != before.rnext_key
+            {
+                return Err(PeerCommandError::CommandFailed(
+                    "TCP-AO add-only generation changed Current/RNext selection".to_string(),
+                ));
+            }
+            self.tcp_ao_info = Some(snapshot);
+            self.tcp_ao_key_metadata = desired_metadata;
+        }
+
+        self.config.tcp_ao = desired.active_keyring;
+        self.tcp_ao_generation = desired.generation;
+        Ok(())
+    }
+
     fn refresh_tcp_ao_info(&mut self) {
         self.refresh_tcp_ao_info_with(crate::socket_opts::get_tcp_ao_info);
     }
@@ -302,6 +527,20 @@ impl PeerSession {
                 self.publish_export_profile();
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
                 let _ = reply.send(Ok(()));
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ApplyTcpAoAddOnly { desired, reply } => {
+                let generation = desired.generation.as_u64();
+                let result = self.apply_tcp_ao_add_only(desired);
+                if result.is_ok() {
+                    info!(peer = %self.peer_label, generation, "applied TCP-AO add-only generation");
+                }
+                let _ = reply.send(result);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::PreflightTcpAoAddOnly { desired, reply } => {
+                let result = self.prepare_tcp_ao_add_only(&desired).map(|_| ());
+                let _ = reply.send(result);
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateGracefulShutdown { enabled, reply } => {

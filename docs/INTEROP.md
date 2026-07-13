@@ -267,7 +267,8 @@ preferred key, imports `203.0.113.43/32`, selects Current `2` / RNext `12`, and
 reports exactly two redacted MKT rows. It then restarts BIRD with the preferred
 key's secret mismatched and asserts the route withdraws and the session remains
 down. This covers restart-coordinated keyring selection and fail-closed
-inventory reconciliation, not live key rotation.
+inventory reconciliation. It does not yet exercise SIGHUP add-only successor
+installation or the still-deferred live selection/deletion phases.
 
 ### Network Layouts
 

@@ -89,8 +89,8 @@ message GlobalState {
   string router_id = 2;
   uint32 listen_port = 3;
   // Read-only kernel/runtime capability probe for TCP-AO support (RFC 5925).
-  // TCP-AO keyrings are configured through TOML and applied to Linux startup
-  // sockets; this field reports whether the host supports that configuration.
+  // TCP-AO keyrings are configured through TOML and applied to Linux sockets;
+  // this field reports whether the host supports that configuration.
   TcpAoSupport tcp_ao_support = 4;
   // Human-readable probe detail, populated when tcp_ao_support is
   // TCP_AO_SUPPORT_UNSUPPORTED or TCP_AO_SUPPORT_PROBE_FAILED.
@@ -476,6 +476,14 @@ message NeighborState {
   EffectiveDistributionMode effective_distribution_mode = 30;
   // Process-start RFC 4724 selection-deferral state. Empty on cold starts.
   repeated SelectionDeferralFamilyState selection_deferral = 31;
+  // Immutable TCP-AO inventory generation requested by the reload
+  // coordinator and the generation fully applied to this peer session.
+  uint64 tcp_ao_desired_generation = 32;
+  uint64 tcp_ao_applied_generation = 33;
+  // Stable values: idle, add_only, add_only_failed.
+  string tcp_ao_rotation_phase = 34;
+  // Secret-free actionable add failure. Empty when the phase is healthy.
+  string tcp_ao_rotation_error = 35;
 }
 
 message SelectionDeferralFamilyState {

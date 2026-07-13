@@ -577,6 +577,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_health: tcp_ao_health.into(),
         effective_distribution_mode: proto::EffectiveDistributionMode::Unknown.into(),
         selection_deferral: Vec::new(),
+        tcp_ao_desired_generation: info.tcp_ao_rotation.desired.as_u64(),
+        tcp_ao_applied_generation: info.tcp_ao_rotation.applied.as_u64(),
+        tcp_ao_rotation_phase: info.tcp_ao_rotation.phase.as_str().to_string(),
+        tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
     }
 }
 

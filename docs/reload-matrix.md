@@ -96,7 +96,7 @@ reload).
 | `send_hold_time` | live (effective next session) | RFC 9687 send hold timer. The per-peer writer task captures the value when its TCP connection is established, so a new value (including 0 = disable) guards the next session; the existing session keeps the old timer. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
-| `tcp_ao` | restart-required | Pinned by `pin_tcp_ao_startup_only_runtime`. RFC 5925 keyrings are installed only when the socket is created (active-open) or when the passive listener boots. Adding, removing, editing, or reordering keys requires a daemon restart. Logged at `ERROR` during reload. Live rotation remains LAN-16 / #159. |
+| `tcp_ao` | live (add-only generation) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs when owner identity, existing key order/material, and selection are unchanged. The listener and managed protected sessions are preflighted, verified, and generation-fenced. Selection, deprecation, deletion, edits/reordering, or owner changes remain pinned and are logged at `ERROR`. Runtime config transactions and their field-only impact report remain conservatively restart-required because they do not run the SIGHUP generation coordinator. |
 | `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
 | `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
 | `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
@@ -127,7 +127,7 @@ Peer-group fields mirror `[[neighbors]]` minus the identity triple
 (`address`, `interface`, `remote_asn`) and TCP-AO. Inheritance is resolved at
 each reconcile. Neighbor-level policy fields override inherited peer-group
 policy fields. TCP-AO is never inherited: static neighbors and dynamic ranges
-configure their startup keyring directly.
+configure their keyring directly.
 
 | Field | Class | Notes |
 |---|---|---|
@@ -173,11 +173,11 @@ started with `--config`. Runtime CRUD and SIGHUP reload share a coordinator
 lock, held through the persistence acknowledgement, so reload sees either the
 pre-mutation TOML or the committed post-mutation TOML.
 
-The exception is direct `tcp_ao` on a dynamic range. Prefix keyrings are
-installed before the listener enters `listen(2)`, so adding, removing, moving,
-editing, or reordering a protected range's keys is restart-required and remains
-pinned to the startup snapshot. Disjoint unprotected range edits can still
-reload normally.
+The exception is direct `tcp_ao` on a dynamic range. SIGHUP can append
+non-preferred successor MKTs to an unchanged protected prefix owner. Adding,
+removing, moving, selecting, deprecating, editing, or reordering protected
+owners/keys remains restart-required and pinned. Disjoint unprotected range
+edits can still reload normally.
 
 | Field | Class | Notes |
 |---|---|---|
@@ -185,7 +185,7 @@ reload normally.
 | `peer_group` | reload-applied | Inheritance resolves when a passive session promotes to a managed peer. |
 | `remote_asn` | reload-applied | Validated against the OPEN's `my_as` at promotion. |
 | `description` | reload-applied | Metadata. |
-| `tcp_ao` | restart-required | Direct prefix keyring installed before listen; protected range/auth/key-order edits are pinned until restart. |
+| `tcp_ao` | live (add-only generation) / otherwise restart-required | Append-only non-preferred successor MKTs are installed on SIGHUP. Protected owner/auth/selection/deprecation/deletion/key-order edits are pinned until restart. Runtime CRUD/transactions remain restart-required. |
 
 ## `[global]`
 

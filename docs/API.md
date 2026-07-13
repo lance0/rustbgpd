@@ -249,7 +249,8 @@ If a `tcp_ao` key is configured on a host where the primitive fails,
 listener setup aborts startup, and active-open setup rejects that connect
 attempt without falling back to unauthenticated TCP. Dynamic-range keys are
 config-file-only: runtime range CRUD rejects protected ranges and overlaps.
-Runtime key rotation is not exposed.
+SIGHUP can append a non-preferred successor generation; selection,
+deprecation, deletion, and protected-owner CRUD are not exposed.
 
 `NeighborState.authentication` reports the effective protected transport as
 `PLAINTEXT`, `MD5`, or `TCP_AO`. For direct dynamic-prefix TCP-AO sessions,
@@ -277,6 +278,13 @@ neither active key is deprecated, and no error counters, and `DEGRADED` when
 either key-validity flag is absent, an active key is deprecated, or any bad,
 key-not-found, unsigned-required, or dropped-ICMP counter is non-zero. An
 inconsistent INFO/inventory pair is never published as degraded state.
+
+For TCP-AO peers, `NeighborState.tcp_ao_desired_generation`,
+`tcp_ao_applied_generation`, `tcp_ao_rotation_phase`, and
+`tcp_ao_rotation_error` expose the secret-free add-only rollout state. A phase
+of `add_only_failed` retains the prior selectable keys and is retryable with
+another SIGHUP; newly accepted protected sockets are generation-fenced until
+the listener and all managed sessions converge.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is

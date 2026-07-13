@@ -313,6 +313,19 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// Install the add-only portion of one immutable TCP-AO generation on the
+    /// currently owned connected socket, then advance future active-open
+    /// configuration. Current/RNext and existing MKTs are untouched.
+    ApplyTcpAoAddOnly {
+        desired: crate::TcpAoSessionGeneration,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Validate a desired add-only generation against this session's current
+    /// immutable owner inventory without mutating its socket or configuration.
+    PreflightTcpAoAddOnly {
+        desired: crate::TcpAoSessionGeneration,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
     /// RFC 8326 graceful-shutdown initiator: toggle attaching the
     /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
     /// session. Receiver behavior on the *other* side of the session
@@ -639,6 +652,48 @@ impl PeerHandle {
         session_identity: SessionIdentity,
         event_sink: Option<Arc<dyn TransportEventSink>>,
     ) -> Self {
+        Self::spawn_at_tcp_ao_generation(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            event_sink,
+            crate::TcpAoRotationGeneration::STARTUP,
+        )
+    }
+
+    /// Spawn an active-open session at the peer manager's already-applied
+    /// TCP-AO inventory generation. Recreated peers must not fall back to the
+    /// startup generation after a successful live rotation.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
+    pub fn spawn_at_tcp_ao_generation(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        event_sink: Option<Arc<dyn TransportEventSink>>,
+        tcp_ao_generation: crate::TcpAoRotationGeneration,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -646,7 +701,7 @@ impl PeerHandle {
         let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
         let task = tokio::spawn(
             async move {
-                let mut session = PeerSession::new_with_identity_and_lifecycle(
+                let mut session = PeerSession::new_at_tcp_ao_generation(
                     config,
                     metrics,
                     rx,
@@ -660,6 +715,7 @@ impl PeerHandle {
                     validation_rx,
                     advertise_graceful_shutdown,
                     session_identity,
+                    tcp_ao_generation,
                 );
                 if let Some(sink) = event_sink {
                     session.set_event_sink(sink);
@@ -812,6 +868,51 @@ impl PeerHandle {
         event_sink: Option<Arc<dyn TransportEventSink>>,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     ) -> Self {
+        Self::spawn_inbound_at_tcp_ao_generation(
+            config,
+            metrics,
+            rib_tx,
+            import_policy,
+            export_policy,
+            stream,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            event_sink,
+            tcp_ao_info,
+            crate::TcpAoRotationGeneration::STARTUP,
+        )
+    }
+
+    /// Inbound spawn fenced to the immutable listener generation that
+    /// reconciled the accepted child.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "spawn wrappers mirror session wiring dependencies; replacing them is API churn"
+    )]
+    pub fn spawn_inbound_at_tcp_ao_generation(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        stream: TcpStream,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        event_sink: Option<Arc<dyn TransportEventSink>>,
+        tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+        tcp_ao_generation: crate::TcpAoRotationGeneration,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
@@ -835,6 +936,7 @@ impl PeerHandle {
                     advertise_graceful_shutdown,
                     session_identity,
                     tcp_ao_info,
+                    tcp_ao_generation,
                 );
                 if let Some(sink) = event_sink {
                     session.set_event_sink(sink);
@@ -1356,6 +1458,40 @@ impl PeerHandle {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
                 operation: "update_runtime_config",
+                deadline,
+            }),
+        }
+    }
+
+    /// Bounded add-only TCP-AO generation apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, rejects the candidate
+    /// generation, fails to install or verify an MKT, drops its reply, or does
+    /// not acknowledge inside `deadline`.
+    pub async fn apply_tcp_ao_add_only_timeout(
+        &self,
+        desired: crate::TcpAoSessionGeneration,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::ApplyTcpAoAddOnly {
+                    desired,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "apply_tcp_ao_add_only",
                 deadline,
             }),
         }

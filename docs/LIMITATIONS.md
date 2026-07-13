@@ -67,9 +67,10 @@ full gate ladder.
 
 ## Transport and session features
 
-- TCP-AO supports ordered static-neighbor and direct dynamic-prefix startup
-  keyrings on Linux. Keyring edits and reordering require a daemon restart;
-  live key rotation remains follow-up work (LAN-16 / #159).
+- TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings on
+  Linux, plus add-only non-preferred successor installation on SIGHUP. Live
+  selection, deprecation, deletion, edits/reordering, and protected-owner CRUD
+  require a daemon restart.
 - TCP MD5 and GTSM are supported.
 - BFD supports IPv4/IPv6 global-address single-hop asynchronous sessions for
   static neighbors. Multihop, echo, demand mode, authentication,

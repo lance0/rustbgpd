@@ -72,10 +72,7 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
     sig.tcpm_keylen = key_bytes.len() as u16;
     sig.tcpm_key[..key_bytes.len()].copy_from_slice(key_bytes);
 
-    let fd = {
-        use std::os::unix::io::AsRawFd;
-        socket.as_raw_fd()
-    };
+    let fd = socket.as_raw_fd();
 
     let ret = unsafe {
         libc::setsockopt(
@@ -497,12 +494,9 @@ pub(crate) enum TcpAoSocketRole {
     clippy::cast_possible_truncation,
     reason = "TCP-AO key installation uses raw Linux socket-option ABI structs"
 )]
-pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<()> {
+pub(crate) fn set_tcp_ao_key(socket: &impl AsRawFd, key: &TcpAoKey<'_>) -> io::Result<()> {
     let add = build_tcp_ao_add(key)?;
-    let fd = {
-        use std::os::unix::io::AsRawFd;
-        socket.as_raw_fd()
-    };
+    let fd = socket.as_raw_fd();
 
     let ret = unsafe {
         libc::setsockopt(
@@ -518,6 +512,123 @@ pub(crate) fn set_tcp_ao_key(socket: &Socket, key: &TcpAoKey<'_>) -> io::Result<
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpAoAddOutcome {
+    Added,
+    AlreadyPresent,
+}
+
+#[cfg(target_os = "linux")]
+fn rotation_record_matches_owner(
+    raw: &TcpAoGetSockOpt,
+    peer: IpAddr,
+    prefix_len: u8,
+    connected_peer: Option<IpAddr>,
+    config: &TcpAoConfig,
+) -> io::Result<bool> {
+    let state = decode_tcp_ao_key_state(raw)?;
+    let connected_prefix = connected_peer.map(|peer| if peer.is_ipv4() { 32 } else { 128 });
+    let selector_matches = (state.peer == peer && state.prefix_len == prefix_len)
+        || connected_peer.is_some_and(|connected| {
+            state.peer == connected && Some(state.prefix_len) == connected_prefix
+        });
+    Ok(selector_matches
+        && state.send_id == config.send_id
+        && state.recv_id == config.recv_id
+        && state.algorithm == config.algorithm
+        && state.vrf_ifindex.is_none()
+        && raw.keyflags == 0)
+}
+
+#[cfg(target_os = "linux")]
+fn matching_rotation_core(
+    keys: &[TcpAoGetSockOpt],
+    peer: IpAddr,
+    prefix_len: u8,
+    connected_peer: Option<IpAddr>,
+    config: &TcpAoConfig,
+) -> io::Result<Option<TcpAoMktCore>> {
+    let mut matched = None;
+    for raw in keys {
+        if rotation_record_matches_owner(raw, peer, prefix_len, connected_peer, config)? {
+            if matched.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO kernel inventory contains duplicate rotation keys",
+                ));
+            }
+            matched = Some(mkt_core(raw)?);
+        }
+    }
+    Ok(matched)
+}
+
+#[cfg(target_os = "linux")]
+fn normalized_config_core(
+    peer: IpAddr,
+    prefix_len: u8,
+    config: &TcpAoConfig,
+) -> io::Result<TcpAoMktCore> {
+    let domain = if peer.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let scratch = Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    let key = tcp_ao_key_from_config(peer, prefix_len, config, TcpAoSocketRole::Listener);
+    set_tcp_ao_key(&scratch, &key)?;
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(&scratch, entries))?;
+    matching_rotation_core(&keys, peer, prefix_len, None, config)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO kernel did not return the normalized candidate key",
+        )
+    })
+}
+
+/// Install one live-rotation MKT without changing Current/RNext. A retry is
+/// accepted only when the existing kernel-normalized cryptographic identity is
+/// exactly the desired one; an ID collision with different material fails
+/// closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn add_tcp_ao_config_idempotent(
+    socket: &impl AsRawFd,
+    peer: IpAddr,
+    prefix_len: u8,
+    connected_peer: Option<IpAddr>,
+    config: &TcpAoConfig,
+) -> io::Result<TcpAoAddOutcome> {
+    let desired = normalized_config_core(peer, prefix_len, config)?;
+    let before = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    if let Some(existing) =
+        matching_rotation_core(&before, peer, prefix_len, connected_peer, config)?
+    {
+        return if existing == desired {
+            Ok(TcpAoAddOutcome::AlreadyPresent)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO rotation key identity collides with different kernel material",
+            ))
+        };
+    }
+
+    let key = tcp_ao_key_from_config(peer, prefix_len, config, TcpAoSocketRole::Listener);
+    set_tcp_ao_key(socket, &key)?;
+    let after = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    match matching_rotation_core(&after, peer, prefix_len, connected_peer, config)? {
+        Some(installed) if installed == desired => Ok(TcpAoAddOutcome::Added),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO rotation add produced different kernel material",
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO rotation add was not observable in kernel inventory",
+        )),
     }
 }
 
@@ -1010,6 +1121,28 @@ pub(crate) fn capture_tcp_ao_owned_receipt(
     owned_receipt_from_raw_inventory(&keys, owners)
 }
 
+/// Capture a complete listener-generation receipt. Unlike accepted-child
+/// reconciliation (which asks for the covering-owner subset), generation
+/// commit owns every listener MKT and therefore rejects any foreign record.
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_tcp_ao_complete_owned_receipt(
+    socket: &impl AsRawFd,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    let expected = owners
+        .iter()
+        .map(|owner| owner.keyring.0.len())
+        .sum::<usize>();
+    if keys.len() != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO listener inventory contains keys outside the desired generation",
+        ));
+    }
+    owned_receipt_from_raw_inventory(&keys, owners)
+}
+
 #[cfg(target_os = "linux")]
 fn target_record_matches_receipt_entry(
     state: &TcpAoKeyState,
@@ -1194,6 +1327,20 @@ pub(crate) fn capture_tcp_ao_owned_receipt<T>(
 }
 
 #[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_tcp_ao_complete_owned_receipt<T>(
+    _socket: &T,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    for owner in owners {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn get_tcp_ao_info_for_receipt<T>(
     _socket: &T,
     _receipt: &TcpAoMktReceipt,
@@ -1210,6 +1357,20 @@ pub(crate) fn set_tcp_ao_rnext<T>(_socket: &T, _recv_id: u8) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO RNext selection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn add_tcp_ao_config_idempotent<T>(
+    _socket: &T,
+    _peer: std::net::IpAddr,
+    _prefix_len: u8,
+    _connected_peer: Option<std::net::IpAddr>,
+    _config: &crate::config::TcpAoConfig,
+) -> io::Result<TcpAoAddOutcome> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO live rotation is only supported on Linux",
     ))
 }
 

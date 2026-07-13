@@ -202,10 +202,10 @@ listener-wide `ao_required` bit. Protected accepted sockets are discarded
 unless `TCP_AO_INFO` and `TCP_AO_GET_KEYS` confirm valid selection state, clean
 authentication counters, and the complete configured keyring. Kernel-returned
 MKT material is compared only inside zeroizing transport-local buffers and is
-never logged or exported. Protected-range reload and runtime CRUD remain
-restart-gated. Neighbor API/CLI queries refresh read-only TCP-AO KeyIDs,
+never logged or exported. Protected-owner CRUD and non-additive keyring reloads
+remain restart-gated. Neighbor API/CLI queries refresh read-only TCP-AO KeyIDs,
 redacted MKT inventory, and cumulative verification counters from the live
-connected socket without exposing key material. Startup keyrings are
+connected socket without exposing key material. Ordered keyrings are
 supported. Static exact owners take precedence over dynamic longest-prefix
 matches; accepted sockets must expose the owned union of all covering protected
 selectors, while current and RNext selection must belong to the resolved owner.
@@ -213,8 +213,10 @@ Overlapping TCP-AO owners require directionally disjoint SendID and RecvID sets;
 TCP-AO/plaintext and TCP-AO/MD5 overlaps are rejected. Config validation and
 transport binding enforce the same 4,096-MKT inspection ceiling independently
 for each listener address family, preventing a valid configuration from
-exceeding the fail-closed inspection path. Live rotation without restart
-(LAN-16 / #159) and metrics exposure of per-socket inspection remain deferred.
+exceeding the fail-closed inspection path. SIGHUP can append a globally
+preflighted non-preferred successor generation without changing Current/RNext;
+selection, deprecation, deletion, protected-owner CRUD, and metrics exposure of
+per-socket inspection remain deferred.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
@@ -311,8 +313,8 @@ the roadmap:
   [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails);
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
-- TCP-AO (RFC 5925) live key rotation without restart (LAN-16 / #159) and
-  per-socket metrics for BGP session protection
+- TCP-AO (RFC 5925) live key selection/deprecation/deletion and per-socket
+  metrics for BGP session protection
 
 ## Current gaps
 
@@ -326,9 +328,10 @@ the roadmap:
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics
   to detect or constrain accepted-client abuse in v1.
-- TCP-AO supports ordered static-neighbor and direct dynamic-prefix startup
-  keyrings; keyring edits require restart and live rotation remains follow-up
-  work (LAN-16 / #159).
+- TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings,
+  plus add-only non-preferred successor installation on SIGHUP. Selection,
+  deprecation, deletion, edits/reordering, and protected-owner CRUD require a
+  restart.
   Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
   Linux with `CONFIG_TCP_AO=y`.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
