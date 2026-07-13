@@ -91,7 +91,7 @@ leaving the repeated table scan for a measured continuation tranche.
 
 | Field | Value |
 |---|---|
-| Host | `lancebox`; cooperating rustbgpd soak/bench work excluded by the shared host lock |
+| Host | `<BENCH_HOST>`; cooperating rustbgpd soak/bench work excluded by the shared host lock |
 | Kernel | Linux `6.17.0-35-generic` x86_64 |
 | CPU | AMD Ryzen Threadripper 7970X 32-Cores, 64 logical CPUs, one NUMA node |
 | Pinned core | `5` |
