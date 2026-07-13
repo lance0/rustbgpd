@@ -1202,6 +1202,7 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)",
 "#;
     let config = parse(toml_str).unwrap();
     let tcp_ao = config.neighbors[0].tcp_ao.as_ref().unwrap();
+    let tcp_ao = &tcp_ao.0[0];
     assert_eq!(tcp_ao.key, "secret");
     assert_eq!(tcp_ao.send_id, 7);
     assert_eq!(tcp_ao.recv_id, 9);
@@ -1212,6 +1213,7 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)",
     let peers = config.to_peer_configs().unwrap();
     assert!(peers[0].0.md5_password.is_none());
     let runtime_tcp_ao = peers[0].0.tcp_ao.as_ref().unwrap();
+    let runtime_tcp_ao = &runtime_tcp_ao.0[0];
     assert_eq!(runtime_tcp_ao.key, "secret");
     assert_eq!(runtime_tcp_ao.send_id, 7);
     assert_eq!(runtime_tcp_ao.recv_id, 9);
@@ -1219,6 +1221,126 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)",
         runtime_tcp_ao.algorithm,
         rustbgpd_transport::TcpAoAlgorithm::HmacSha256
     );
+}
+
+#[test]
+fn tcp_ao_keyring_accepts_legacy_singleton_and_preserves_ordered_multi_key_shape() {
+    #[derive(serde::Deserialize)]
+    struct Holder {
+        tcp_ao: TcpAoKeyringConfig,
+    }
+    let singleton = toml::from_str::<Holder>(
+        r#"[tcp_ao]
+key = "legacy"
+send_id = 7
+recv_id = 9
+algorithm = "hmac(sha256)"
+"#,
+    )
+    .unwrap()
+    .tcp_ao;
+    assert_eq!(singleton.0.len(), 1);
+    assert_eq!(singleton.0[0].key, "legacy");
+    let singleton_value = toml::Value::try_from(&singleton).unwrap();
+    assert!(
+        singleton_value.is_table(),
+        "singleton must serialize as legacy table"
+    );
+
+    let ordered = toml::from_str::<Holder>(
+        r#"tcp_ao = [
+{ key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+{ key = "next", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+    )
+    .unwrap()
+    .tcp_ao;
+    assert_eq!(
+        ordered
+            .0
+            .iter()
+            .map(|key| key.key.as_str())
+            .collect::<Vec<_>>(),
+        ["old", "next"]
+    );
+    let ordered_value = toml::Value::try_from(&ordered).unwrap();
+    assert!(
+        ordered_value.is_array(),
+        "multi-key ring must serialize as an array"
+    );
+}
+
+#[test]
+fn tcp_ao_keyring_validation_rejects_ambiguous_or_unselectable_rings() {
+    let cases = [
+        ("[]", "1..=256"),
+        (
+            r#"[
+{ key = "one", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+{ key = "two", send_id = 1, recv_id = 12, algorithm = "hmac(sha256)" }
+]"#,
+            "duplicate SendID",
+        ),
+        (
+            r#"[
+{ key = "one", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", preferred = true },
+{ key = "two", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+            "at most one key",
+        ),
+        (
+            r#"[
+{ key = "one", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true }
+]"#,
+            "at least one key must not be deprecated",
+        ),
+    ];
+    for (ring, expected) in cases {
+        let source = format!(
+            r#"[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = {ring}
+"#
+        );
+        let error = parse(&source).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn tcp_ao_keyring_order_and_metadata_reach_transport_unchanged() {
+    let config = parse(
+        r#"[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "next", send_id = 2, recv_id = 12, algorithm = "cmac(aes128)", preferred = true }
+]
+"#,
+    )
+    .unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    let ring = peers[0].0.tcp_ao.as_ref().unwrap();
+    assert_eq!(ring.0.len(), 2);
+    assert_eq!((ring.0[0].send_id, ring.0[0].deprecated), (1, true));
+    assert_eq!((ring.0[1].recv_id, ring.0[1].preferred), (12, true));
+    assert_eq!(ring.selected().unwrap().send_id, 2);
 }
 
 #[test]
@@ -4059,14 +4181,17 @@ fn diff_neighbors_no_changes() {
 fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
     let old = vec![test_neighbor("10.0.0.1", 65001)];
     let mut new_neighbor = test_neighbor("10.0.0.1", 65001);
-    new_neighbor.tcp_ao = Some(TcpAoConfig {
-        key: "secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: true,
-        deprecated: false,
-    });
+    new_neighbor.tcp_ao = Some(
+        TcpAoConfig {
+            key: "secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: true,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let diff = super::diff_neighbors(&old, &[new_neighbor]);
     assert!(diff.added.is_empty());
@@ -4125,23 +4250,29 @@ fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
 #[test]
 fn diff_config_flags_tcp_ao_changes_as_restart_required() {
     let mut old = parse(valid_toml()).unwrap();
-    old.neighbors[0].tcp_ao = Some(TcpAoConfig {
-        key: "old-secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: false,
-        deprecated: false,
-    });
+    old.neighbors[0].tcp_ao = Some(
+        TcpAoConfig {
+            key: "old-secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
     let mut new = old.clone();
-    new.neighbors[0].tcp_ao = Some(TcpAoConfig {
-        key: "new-secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: false,
-        deprecated: false,
-    });
+    new.neighbors[0].tcp_ao = Some(
+        TcpAoConfig {
+            key: "new-secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let diff = super::diff_config(&old, &new);
     assert!(diff.neighbor_tcp_ao_changed);
@@ -4278,24 +4409,30 @@ fn diff_config_flags_event_history_as_restart_required() {
 fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
     let mut old = parse(valid_toml()).unwrap();
     old.neighbors[0].hold_time = Some(90);
-    old.neighbors[0].tcp_ao = Some(TcpAoConfig {
-        key: "old-secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: false,
-        deprecated: false,
-    });
+    old.neighbors[0].tcp_ao = Some(
+        TcpAoConfig {
+            key: "old-secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
     let mut new = old.clone();
     new.neighbors[0].hold_time = Some(120);
-    new.neighbors[0].tcp_ao = Some(TcpAoConfig {
-        key: "new-secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: false,
-        deprecated: false,
-    });
+    new.neighbors[0].tcp_ao = Some(
+        TcpAoConfig {
+            key: "new-secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let diff = super::diff_config(&old, &new);
 
@@ -4579,7 +4716,10 @@ tcp_ao = { key = "new-secret", send_id = 2, recv_id = 2, algorithm = "hmac(sha25
         .expect("pinned neighbor restored");
     assert_eq!(neighbor.remote_asn, 65001);
     assert_eq!(
-        neighbor.tcp_ao.as_ref().map(|tcp_ao| tcp_ao.key.as_str()),
+        neighbor
+            .tcp_ao
+            .as_ref()
+            .map(|tcp_ao| tcp_ao.0[0].key.as_str()),
         Some("old-secret")
     );
 }
@@ -4678,14 +4818,17 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         md5_password: None,
         bfd: None,
-        tcp_ao: Some(TcpAoConfig {
-            key: "secret".into(),
-            send_id: 1,
-            recv_id: 1,
-            algorithm: "hmac(sha256)".into(),
-            preferred: false,
-            deprecated: false,
-        }),
+        tcp_ao: Some(
+            TcpAoConfig {
+                key: "secret".into(),
+                send_id: 1,
+                recv_id: 1,
+                algorithm: "hmac(sha256)".into(),
+                preferred: false,
+                deprecated: false,
+            }
+            .into(),
+        ),
         ttl_security: None,
         families: Vec::new(),
         graceful_restart: None,
@@ -4774,14 +4917,17 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         max_prefixes: None,
         md5_password: None,
         bfd: None,
-        tcp_ao: Some(TcpAoConfig {
-            key: "secret".into(),
-            send_id: 1,
-            recv_id: 1,
-            algorithm: "hmac(sha256)".into(),
-            preferred: false,
-            deprecated: false,
-        }),
+        tcp_ao: Some(
+            TcpAoConfig {
+                key: "secret".into(),
+                send_id: 1,
+                recv_id: 1,
+                algorithm: "hmac(sha256)".into(),
+                preferred: false,
+                deprecated: false,
+            }
+            .into(),
+        ),
         ttl_security: None,
         families: Vec::new(),
         graceful_restart: None,
@@ -4852,14 +4998,17 @@ fn describe_neighbor_changes_hides_md5_value() {
 fn describe_neighbor_changes_hides_tcp_ao_key() {
     let old = test_neighbor("10.0.0.1", 65001);
     let mut new = old.clone();
-    new.tcp_ao = Some(TcpAoConfig {
-        key: "secret".into(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: "hmac(sha256)".into(),
-        preferred: true,
-        deprecated: false,
-    });
+    new.tcp_ao = Some(
+        TcpAoConfig {
+            key: "secret".into(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: "hmac(sha256)".into(),
+            preferred: true,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let changes = super::describe_neighbor_changes(&old, &new);
     assert_eq!(changes.len(), 1);
@@ -5463,6 +5612,7 @@ tcp_ao = { key = "dynamic-secret", send_id = 7, recv_id = 9, algorithm = "hmac(s
     ))
     .unwrap();
     let tcp_ao = config.dynamic_neighbors[0].tcp_ao.as_ref().unwrap();
+    let tcp_ao = &tcp_ao.0[0];
     assert_eq!(tcp_ao.send_id, 7);
     assert_eq!(tcp_ao.recv_id, 9);
     let rendered = format!("{tcp_ao:?}");

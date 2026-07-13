@@ -4553,14 +4553,47 @@ hold_time = 90
             "tcp_ao-only edits are restart-required and must not reconcile peers: {tags:?}"
         );
         assert_eq!(
-            returned.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            returned.neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
             "old-secret",
             "runtime snapshot must keep the startup listener/session key"
         );
         assert_eq!(
-            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
             "new-secret",
             "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_tcp_ao_keyring_reordering_and_preserves_desired_order() {
+        let old_ring = r#"tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+  { key = "next", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#;
+        let new_ring = r#"tcp_ao = [
+  { key = "next", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true },
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+]"#;
+        let initial =
+            baseline_toml().replace("hold_time = 90", &format!("hold_time = 90\n{old_ring}"));
+        let new_toml =
+            baseline_toml().replace("hold_time = 90", &format!("hold_time = 90\n{new_ring}"));
+
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        let returned = returned.expect("reload should pin reordered startup keyring");
+        assert!(
+            tags.is_empty(),
+            "reordering must not reach live reconciliation"
+        );
+        let runtime = returned.neighbors[0].tcp_ao.as_ref().unwrap();
+        let desired = returned.desired.neighbors[0].tcp_ao.as_ref().unwrap();
+        assert_eq!(
+            runtime.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            desired.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
+            [2, 1]
         );
     }
 
@@ -4605,7 +4638,7 @@ tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" 
             .iter()
             .find(|range| range.tcp_ao.is_some())
             .unwrap();
-        assert_eq!(protected.tcp_ao.as_ref().unwrap().key, "old");
+        assert_eq!(protected.tcp_ao.as_ref().unwrap().0[0].key, "old");
         assert!(
             candidate
                 .dynamic_neighbors

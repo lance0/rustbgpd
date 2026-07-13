@@ -12,7 +12,7 @@ use rustbgpd_api::peer_types::{
 use crate::config::{
     AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, FibTableConfig,
     NamedPolicyConfig, Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig,
-    TcpAoConfig,
+    TcpAoConfig, TcpAoKeyringConfig,
 };
 
 const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
@@ -52,15 +52,20 @@ fn api_add_path_to_config(add_path: Option<AddPathDefinition>) -> Option<AddPath
     })
 }
 
-fn transport_tcp_ao_to_config(tcp_ao: &rustbgpd_transport::TcpAoConfig) -> TcpAoConfig {
-    TcpAoConfig {
-        key: tcp_ao.key.clone(),
-        send_id: tcp_ao.send_id,
-        recv_id: tcp_ao.recv_id,
-        algorithm: tcp_ao.algorithm.linux_name().to_string(),
-        preferred: tcp_ao.preferred,
-        deprecated: tcp_ao.deprecated,
-    }
+fn transport_tcp_ao_to_config(tcp_ao: &rustbgpd_transport::TcpAoKeyring) -> TcpAoKeyringConfig {
+    TcpAoKeyringConfig(
+        tcp_ao
+            .iter()
+            .map(|key| TcpAoConfig {
+                key: key.key.clone(),
+                send_id: key.send_id,
+                recv_id: key.recv_id,
+                algorithm: key.algorithm.linux_name().to_string(),
+                preferred: key.preferred,
+                deprecated: key.deprecated,
+            })
+            .collect(),
+    )
 }
 
 fn config_add_path_to_api(add_path: Option<&AddPathConfig>) -> Option<AddPathDefinition> {
@@ -844,14 +849,17 @@ remote_asn = 65002
                     send_hold_time: None,
                     max_prefixes: None,
                     md5_password: None,
-                    tcp_ao: Some(rustbgpd_transport::TcpAoConfig {
-                        key: "ao-secret".to_string(),
-                        send_id: 7,
-                        recv_id: 9,
-                        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-                        preferred: true,
-                        deprecated: false,
-                    }),
+                    tcp_ao: Some(
+                        rustbgpd_transport::TcpAoConfig {
+                            key: "ao-secret".to_string(),
+                            send_id: 7,
+                            recv_id: 9,
+                            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                            preferred: true,
+                            deprecated: false,
+                        }
+                        .into(),
+                    ),
                     ttl_security: false,
                     families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
                     graceful_restart: true,
@@ -887,6 +895,7 @@ remote_asn = 65002
             .find(|neighbor| neighbor.address == "10.0.0.3")
             .unwrap();
         let tcp_ao = neighbor.tcp_ao.as_ref().expect("tcp_ao preserved");
+        let tcp_ao = &tcp_ao.0[0];
         assert_eq!(tcp_ao.key, "ao-secret");
         assert_eq!(tcp_ao.send_id, 7);
         assert_eq!(tcp_ao.recv_id, 9);

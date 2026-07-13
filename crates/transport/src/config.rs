@@ -81,6 +81,58 @@ impl fmt::Debug for TcpAoConfig {
     }
 }
 
+/// Ordered TCP-AO startup keyring for one peer or listener selector.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TcpAoKeyring(pub Vec<TcpAoConfig>);
+
+impl TcpAoKeyring {
+    /// Preferred key, or the first declared non-deprecated key.
+    #[must_use]
+    pub fn selected(&self) -> Option<&TcpAoConfig> {
+        self.0
+            .iter()
+            .find(|key| key.preferred)
+            .or_else(|| self.0.iter().find(|key| !key.deprecated))
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, TcpAoConfig> {
+        self.0.iter()
+    }
+
+    /// Selected key first, followed by every remaining key in declaration
+    /// order. This is the fail-closed active-open installation order.
+    #[must_use]
+    pub fn startup_order(&self) -> Vec<&TcpAoConfig> {
+        let Some(selected) = self.selected() else {
+            return Vec::new();
+        };
+        std::iter::once(selected)
+            .chain(self.iter().filter(|key| !std::ptr::eq(*key, selected)))
+            .collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a TcpAoKeyring {
+    type Item = &'a TcpAoConfig;
+    type IntoIter = std::slice::Iter<'a, TcpAoConfig>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl fmt::Debug for TcpAoKeyring {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TcpAoKeyring").field(&self.0).finish()
+    }
+}
+
+impl From<TcpAoConfig> for TcpAoKeyring {
+    fn from(key: TcpAoConfig) -> Self {
+        Self(vec![key])
+    }
+}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
@@ -105,7 +157,7 @@ pub struct TransportConfig {
     /// TCP MD5 authentication password (RFC 2385).
     pub md5_password: Option<String>,
     /// TCP-AO authentication key (RFC 5925).
-    pub tcp_ao: Option<TcpAoConfig>,
+    pub tcp_ao: Option<TcpAoKeyring>,
     /// Enable GTSM / TTL security (RFC 5082).
     pub ttl_security: bool,
     /// Explicit IPv6 next-hop for eBGP advertisements. Used when the TCP
@@ -211,5 +263,33 @@ mod tests {
 
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn tcp_ao_keyring_selection_is_preferred_then_first_nondeprecated() {
+        let key = |send_id, preferred, deprecated| TcpAoConfig {
+            key: format!("secret-{send_id}"),
+            send_id,
+            recv_id: send_id + 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred,
+            deprecated,
+        };
+        let fallback = TcpAoKeyring(vec![
+            key(1, false, true),
+            key(2, false, false),
+            key(3, false, false),
+        ]);
+        assert_eq!(fallback.selected().unwrap().send_id, 2);
+        let preferred = TcpAoKeyring(vec![key(1, false, false), key(2, true, false)]);
+        assert_eq!(preferred.selected().unwrap().send_id, 2);
+        assert_eq!(
+            preferred
+                .startup_order()
+                .iter()
+                .map(|key| key.send_id)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
     }
 }

@@ -1146,14 +1146,17 @@ fn tcp_ao_snapshot(good: u64, bad: u64) -> crate::TcpAoInfoSnapshot {
 
 async fn tcp_ao_query_test_session() -> PeerSession {
     let mut session = make_test_session(65001, 65002);
-    session.config.tcp_ao = Some(crate::TcpAoConfig {
-        key: "test-secret".to_string(),
-        send_id: 7,
-        recv_id: 9,
-        algorithm: crate::TcpAoAlgorithm::HmacSha256,
-        preferred: true,
-        deprecated: false,
-    });
+    session.config.tcp_ao = Some(
+        crate::TcpAoConfig {
+            key: "test-secret".to_string(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        }
+        .into(),
+    );
     // The test mutates config after construction; production constructors
     // seed this durable bit from config before the session starts.
     session.tcp_ao_protected = true;

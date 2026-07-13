@@ -325,20 +325,23 @@ fn tcp_ao_key_metadata(
     config: &TransportConfig,
     initial: Option<&crate::TcpAoInfoSnapshot>,
 ) -> Vec<TcpAoKeyMetadata> {
-    if let Some(key) = config.tcp_ao.as_ref() {
-        return vec![TcpAoKeyMetadata {
-            peer: config.remote_addr.ip(),
-            prefix_len: if config.remote_addr.is_ipv4() {
-                32
-            } else {
-                128
-            },
-            send_id: key.send_id,
-            recv_id: key.recv_id,
-            algorithm: key.algorithm,
-            preferred: key.preferred,
-            deprecated: key.deprecated,
-        }];
+    if let Some(keyring) = config.tcp_ao.as_ref() {
+        return keyring
+            .iter()
+            .map(|key| TcpAoKeyMetadata {
+                peer: config.remote_addr.ip(),
+                prefix_len: if config.remote_addr.is_ipv4() {
+                    32
+                } else {
+                    128
+                },
+                send_id: key.send_id,
+                recv_id: key.recv_id,
+                algorithm: key.algorithm,
+                preferred: key.preferred,
+                deprecated: key.deprecated,
+            })
+            .collect();
     }
     initial
         .into_iter()

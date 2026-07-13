@@ -20,7 +20,8 @@ use rustbgpd_policy::{
     RouteModifications, parse_community_match,
 };
 use rustbgpd_transport::{
-    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TransportConfig,
+    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring,
+    TransportConfig,
 };
 use rustbgpd_wire::{
     Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
@@ -1002,14 +1003,21 @@ impl Config {
             .md5_password
             .clone()
             .or_else(|| group.and_then(|g| g.md5_password.clone()));
-        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| TransportTcpAoConfig {
-            key: tcp_ao.key.clone(),
-            send_id: tcp_ao.send_id,
-            recv_id: tcp_ao.recv_id,
-            algorithm: TcpAoAlgorithm::from_linux_name(&tcp_ao.algorithm)
-                .expect("validated in Config::load"),
-            preferred: tcp_ao.preferred,
-            deprecated: tcp_ao.deprecated,
+        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| {
+            TcpAoKeyring(
+                tcp_ao
+                    .iter()
+                    .map(|key| TransportTcpAoConfig {
+                        key: key.key.clone(),
+                        send_id: key.send_id,
+                        recv_id: key.recv_id,
+                        algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
+                            .expect("validated in Config::load"),
+                        preferred: key.preferred,
+                        deprecated: key.deprecated,
+                    })
+                    .collect(),
+            )
         });
         transport.ttl_security = neighbor
             .ttl_security
@@ -2837,7 +2845,9 @@ impl Config {
                 neighbor.md5_password = Some(REDACTED_SECRET.to_string());
             }
             if let Some(tcp_ao) = &mut neighbor.tcp_ao {
-                tcp_ao.key = REDACTED_SECRET.to_string();
+                for key in &mut tcp_ao.0 {
+                    key.key = REDACTED_SECRET.to_string();
+                }
             }
         }
         for group in effective.peer_groups.values_mut() {
@@ -2847,7 +2857,9 @@ impl Config {
         }
         for range in &mut effective.dynamic_neighbors {
             if let Some(tcp_ao) = &mut range.tcp_ao {
-                tcp_ao.key = REDACTED_SECRET.to_string();
+                for key in &mut tcp_ao.0 {
+                    key.key = REDACTED_SECRET.to_string();
+                }
             }
         }
 
@@ -4371,12 +4383,7 @@ fn protected_dynamic_range_cmp(
         .then_with(|| left.peer_group.cmp(&right.peer_group))
         .then_with(|| left.remote_asn.cmp(&right.remote_asn))
         .then_with(|| left.description.cmp(&right.description))
-        .then_with(|| left_ao.key.cmp(&right_ao.key))
-        .then_with(|| left_ao.send_id.cmp(&right_ao.send_id))
-        .then_with(|| left_ao.recv_id.cmp(&right_ao.recv_id))
-        .then_with(|| left_ao.algorithm.cmp(&right_ao.algorithm))
-        .then_with(|| left_ao.preferred.cmp(&right_ao.preferred))
-        .then_with(|| left_ao.deprecated.cmp(&right_ao.deprecated))
+        .then_with(|| left_ao.cmp(right_ao))
 }
 
 /// Pin dynamic TCP-AO listener state to the startup snapshot while preserving

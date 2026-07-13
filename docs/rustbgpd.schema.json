@@ -462,7 +462,7 @@
           "description": "TCP-AO key installed as a prefix MKT on the passive listener at startup.\nDynamic ranges never inherit authentication from their peer group.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpAoConfig"
+              "$ref": "#/$defs/TcpAoKeyringConfig"
             },
             {
               "type": "null"
@@ -1795,7 +1795,7 @@
           "description": "Static-neighbor TCP-AO (RFC 5925) configuration. Installed on\nstartup active-open sockets and the passive listener when configured.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpAoConfig"
+              "$ref": "#/$defs/TcpAoKeyringConfig"
             },
             {
               "type": "null"
@@ -2460,6 +2460,21 @@
         "send_id",
         "recv_id",
         "algorithm"
+      ]
+    },
+    "TcpAoKeyringConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TcpAoConfig"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TcpAoConfig"
+          },
+          "maxItems": 256,
+          "minItems": 1
+        }
       ]
     },
     "TelemetryConfig": {

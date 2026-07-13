@@ -13,7 +13,7 @@ use super::schema::{
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig, dynamic_prefixes_intersect,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
     is_unicast_nonzero_mac, parse_mac_address,
 };
 
@@ -1043,7 +1043,7 @@ impl Config {
             if neighbor
                 .tcp_ao
                 .as_ref()
-                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+                .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
             {
                 return Err(placeholder_error(&neighbor.address, "tcp_ao.key"));
             }
@@ -1052,7 +1052,7 @@ impl Config {
             if range
                 .tcp_ao
                 .as_ref()
-                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+                .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
             {
                 return Err(placeholder_error(
                     &format!("dynamic_neighbors.{}", range.prefix),
@@ -1820,7 +1820,55 @@ fn validate_fib_table_guardrails(
     Ok(())
 }
 
-fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
+fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoKeyringConfig) -> Result<(), ConfigError> {
+    if tcp_ao.is_empty() || tcp_ao.len() > 256 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao".to_string(),
+            reason: "must contain 1..=256 keys".to_string(),
+        });
+    }
+    let mut send_ids = HashSet::new();
+    let mut recv_ids = HashSet::new();
+    let mut preferred = 0usize;
+    let mut nondeprecated = 0usize;
+    for key in tcp_ao {
+        validate_tcp_ao_key(address, key)?;
+        if !send_ids.insert(key.send_id) {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: "tcp_ao.send_id".to_string(),
+                reason: format!("duplicate SendID {}", key.send_id),
+            });
+        }
+        if !recv_ids.insert(key.recv_id) {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: "tcp_ao.recv_id".to_string(),
+                reason: format!("duplicate RecvID {}", key.recv_id),
+            });
+        }
+        preferred += usize::from(key.preferred);
+        nondeprecated += usize::from(!key.deprecated);
+    }
+    if preferred > 1 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.preferred".to_string(),
+            reason: "at most one key may be preferred".to_string(),
+        });
+    }
+    if nondeprecated == 0 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.deprecated".to_string(),
+            reason: "at least one key must not be deprecated".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
     let key_len = tcp_ao.key.len();
     if key_len == 0 {
         return Err(ConfigError::InvalidNeighborConfig {

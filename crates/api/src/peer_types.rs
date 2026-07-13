@@ -7,7 +7,7 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
-    ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoConfig, TcpAoInfoSnapshot,
+    ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoInfoSnapshot, TcpAoKeyring,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1458,8 +1458,8 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.
     pub md5_password: Option<String>,
-    /// Optional TCP-AO key for static-neighbor runtime sockets.
-    pub tcp_ao: Option<TcpAoConfig>,
+    /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.
+    pub tcp_ao: Option<TcpAoKeyring>,
     /// Whether GTSM / TTL security is enabled.
     pub ttl_security: bool,
     /// Negotiated address families for this peer.

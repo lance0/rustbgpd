@@ -503,7 +503,7 @@ fn test_tcp_ao() -> crate::config::TcpAoConfig {
 #[test]
 fn runtime_dynamic_crud_rejects_startup_pinned_tcp_ao_ranges_and_overlaps() {
     let mut mgr = dynamic_test_manager();
-    mgr.current_config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao());
+    mgr.current_config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao().into());
 
     let add_err = mgr
         .add_dynamic_range("127.0.1.0/24".into(), "ix-members".into(), 0, None)
@@ -522,7 +522,7 @@ async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_confi
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut config = make_dynamic_manager_config();
-    config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao());
+    config.dynamic_neighbors[0].tcp_ao = Some(test_tcp_ao().into());
     let manager = PeerManager::new_with_config(
         rx,
         internal_rx,
@@ -1695,14 +1695,17 @@ async fn apply_peer_reshape_snapshot_rejects_tcp_ao_delta_without_mutation() {
 
     let mut replacement = make_config(addr, 65002);
     replacement.hold_time = Some(45);
-    replacement.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
-        key: "secret".to_string(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-        preferred: false,
-        deprecated: false,
-    });
+    replacement.tcp_ao = Some(
+        rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let Err(error) = mgr.apply_peer_reshape_snapshot(vec![replacement]).await else {
         panic!("TCP-AO deltas must be rejected before mutation");
@@ -3569,14 +3572,17 @@ async fn delete_tcp_ao_peer_is_restart_required() {
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let mut config = make_config(addr, 65002);
-    config.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
-        key: "secret".to_string(),
-        send_id: 1,
-        recv_id: 1,
-        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-        preferred: false,
-        deprecated: false,
-    });
+    config.tcp_ao = Some(
+        rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 1,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(PeerManagerCommand::AddPeer {
@@ -3634,14 +3640,15 @@ async fn same_key_tcp_ao_peer_reconfigure_is_allowed() {
     let handle = tokio::spawn(mgr.run());
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let tcp_ao = rustbgpd_transport::TcpAoConfig {
+    let tcp_ao: rustbgpd_transport::TcpAoKeyring = rustbgpd_transport::TcpAoConfig {
         key: "secret".to_string(),
         send_id: 1,
         recv_id: 1,
         algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
         preferred: false,
         deprecated: false,
-    };
+    }
+    .into();
     let mut config = make_config(addr, 65002);
     config.tcp_ao = Some(tcp_ao.clone());
 
@@ -4013,14 +4020,17 @@ fn build_transport_config_reflects_every_transport_field() {
         send_hold_time: Some(600),
         max_prefixes: Some(1000),
         md5_password: Some("hunter2".to_string()),
-        tcp_ao: Some(rustbgpd_transport::TcpAoConfig {
-            key: "ao-secret".to_string(),
-            send_id: 11,
-            recv_id: 22,
-            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-            preferred: true,
-            deprecated: false,
-        }),
+        tcp_ao: Some(
+            rustbgpd_transport::TcpAoConfig {
+                key: "ao-secret".to_string(),
+                send_id: 11,
+                recv_id: 22,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                preferred: true,
+                deprecated: false,
+            }
+            .into(),
+        ),
         ttl_security: true,
         families: vec![(Afi::Ipv6, Safi::Unicast)],
         graceful_restart: true,
@@ -9305,18 +9315,22 @@ fn build_transport_config_carries_tcp_ao_key() {
         None,
     );
     let mut cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
-    cfg.tcp_ao = Some(rustbgpd_transport::TcpAoConfig {
-        key: "secret".to_string(),
-        send_id: 1,
-        recv_id: 2,
-        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-        preferred: false,
-        deprecated: false,
-    });
+    cfg.tcp_ao = Some(
+        rustbgpd_transport::TcpAoConfig {
+            key: "secret".to_string(),
+            send_id: 1,
+            recv_id: 2,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }
+        .into(),
+    );
 
     let transport = mgr.build_transport_config(&cfg);
 
     let tcp_ao = transport.tcp_ao.as_ref().expect("tcp_ao carried");
+    let tcp_ao = &tcp_ao.0[0];
     assert_eq!(tcp_ao.key, "secret");
     assert_eq!(tcp_ao.send_id, 1);
     assert_eq!(tcp_ao.recv_id, 2);

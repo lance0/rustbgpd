@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
-use crate::config::TcpAoConfig;
+use crate::config::{TcpAoConfig, TcpAoKeyring};
 use crate::socket_opts::TcpAoInfoSnapshot;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
@@ -32,7 +32,7 @@ pub struct TcpAoListenerKey {
     /// Prefix length for the remote network.
     pub prefix_len: u8,
     /// TCP-AO key configuration for the peer.
-    pub config: TcpAoConfig,
+    pub config: TcpAoKeyring,
 }
 
 /// Socket options installed before the BGP listener enters `listen(2)`.
@@ -324,7 +324,7 @@ impl BgpListener {
 
         // Compare the accepted child's inventory to a fresh raw listener
         // receipt. No secret-bearing receipt survives this accept operation.
-        let receipt = crate::socket_opts::capture_tcp_ao_mkt_receipt(
+        let receipt = crate::socket_opts::capture_tcp_ao_keyring_receipt(
             &self.listener,
             key.peer,
             key.prefix_len,
@@ -344,23 +344,22 @@ impl BgpListener {
         // inherited MKT; a deprecated key remains valid when peer-selected.
         ensure_accepted_tcp_ao_info_valid(&initial, false)?;
 
-        let info = if key.config.deprecated {
-            // Preserve the existing singleton behavior until Phase 2 requires
-            // every keyring to contain a selectable non-deprecated key.
-            initial
-        } else {
-            crate::socket_opts::set_tcp_ao_rnext(stream, key.config.recv_id)?;
-            let selected = crate::socket_opts::get_tcp_ao_info_for_receipt(
-                stream,
-                &receipt,
-                peer_ip,
-                key.peer,
-                key.prefix_len,
-                &key.config,
-            )?;
-            ensure_accepted_tcp_ao_info_valid(&selected, true)?;
-            selected
-        };
+        let selected_key = key.config.selected().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "TCP-AO listener keyring has no selectable non-deprecated key",
+            )
+        })?;
+        crate::socket_opts::set_tcp_ao_rnext(stream, selected_key.recv_id)?;
+        let info = crate::socket_opts::get_tcp_ao_info_for_receipt(
+            stream,
+            &receipt,
+            peer_ip,
+            key.peer,
+            key.prefix_len,
+            &key.config,
+        )?;
+        ensure_accepted_tcp_ao_info_valid(&info, true)?;
         info!(
             peer = %peer_ip,
             current_key = info.current_key,
@@ -459,7 +458,7 @@ fn bind_socket2_listener_with<F>(
     mut install_tcp_ao: F,
 ) -> std::io::Result<TcpListener>
 where
-    F: FnMut(&Socket, &TcpAoListenerKey) -> std::io::Result<()>,
+    F: FnMut(&Socket, &TcpAoListenerKey, &TcpAoConfig) -> std::io::Result<()>,
 {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
@@ -474,8 +473,11 @@ where
         // ao_info->ao_required or a matching MKT, and tcp_inbound_hash()
         // rejects unsigned packets in that case. A global requirement would
         // also reject non-AO peers on the shared BGP listener.
-        install_tcp_ao(&socket, key).map_err(|err| listener_tcp_ao_error(key, &err))?;
-        debug!(peer = %key.peer, "TCP-AO listener key configured");
+        for config in &key.config {
+            install_tcp_ao(&socket, key, config)
+                .map_err(|err| listener_tcp_ao_error(key, config, &err))?;
+            debug!(peer = %key.peer, send_id = config.send_id, "TCP-AO listener key configured");
+        }
     }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
@@ -484,17 +486,25 @@ where
     TcpListener::from_std(std_listener)
 }
 
-fn install_listener_tcp_ao_key(socket: &Socket, key: &TcpAoListenerKey) -> std::io::Result<()> {
+fn install_listener_tcp_ao_key(
+    socket: &Socket,
+    key: &TcpAoListenerKey,
+    config: &TcpAoConfig,
+) -> std::io::Result<()> {
     crate::socket_opts::set_tcp_ao_config(
         socket,
         key.peer,
         key.prefix_len,
-        &key.config,
+        config,
         crate::socket_opts::TcpAoSocketRole::Listener,
     )
 }
 
-fn listener_tcp_ao_error(key: &TcpAoListenerKey, err: &std::io::Error) -> std::io::Error {
+fn listener_tcp_ao_error(
+    key: &TcpAoListenerKey,
+    config: &TcpAoConfig,
+    err: &std::io::Error,
+) -> std::io::Error {
     std::io::Error::new(
         err.kind(),
         format!(
@@ -502,9 +512,9 @@ fn listener_tcp_ao_error(key: &TcpAoListenerKey, err: &std::io::Error) -> std::i
              (send_id={}, recv_id={}, algorithm={}): {err}",
             key.peer,
             key.prefix_len,
-            key.config.send_id,
-            key.config.recv_id,
-            key.config.algorithm.linux_name()
+            config.send_id,
+            config.recv_id,
+            config.algorithm.linux_name()
         ),
     )
 }
@@ -516,7 +526,7 @@ mod tests {
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
 
-    fn tcp_ao_config() -> TcpAoConfig {
+    fn tcp_ao_config() -> TcpAoKeyring {
         TcpAoConfig {
             key: "secret".to_string(),
             send_id: 1,
@@ -525,6 +535,7 @@ mod tests {
             preferred: false,
             deprecated: false,
         }
+        .into()
     }
 
     fn tcp_ao_info(current_key: u8, pkt_good: u64) -> TcpAoInfoSnapshot {
@@ -711,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_accept_preserves_deprecated_singleton_until_keyrings_require_selection() {
+    fn protected_accept_initial_validation_allows_deprecated_current() {
         let mut info = tcp_ao_info(7, 0);
         info.has_rnext_key = true;
         info.rnext_key = 9;
@@ -752,57 +763,67 @@ mod tests {
     #[tokio::test]
     async fn bind_socket2_listener_installs_tcp_ao_keys_before_listen() {
         let installed = RefCell::new(Vec::new());
+        let mut second = tcp_ao_config().0.remove(0);
+        second.send_id = 2;
+        second.recv_id = 2;
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
                 prefix_len: 32,
-                config: tcp_ao_config(),
+                config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
             }],
         };
 
-        let listener =
-            bind_socket2_listener_with("127.0.0.1:0".parse().unwrap(), &options, |_socket, key| {
-                installed.borrow_mut().push(key.peer);
+        let listener = bind_socket2_listener_with(
+            "127.0.0.1:0".parse().unwrap(),
+            &options,
+            |_socket, _key, config| {
+                installed.borrow_mut().push(config.send_id);
                 Ok(())
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert!(listener.local_addr().unwrap().port() > 0);
-        assert_eq!(
-            installed.into_inner(),
-            vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]
-        );
+        assert_eq!(installed.into_inner(), vec![1, 2]);
         tokio::task::yield_now().await;
     }
 
     #[tokio::test]
     async fn bind_socket2_listener_fails_when_tcp_ao_key_install_fails() {
         let installed = RefCell::new(Vec::new());
+        let mut second = tcp_ao_config().0.remove(0);
+        second.send_id = 2;
+        second.recv_id = 2;
         let options = ListenerSocketOptions {
             tcp_ao_keys: vec![TcpAoListenerKey {
                 peer: IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)),
                 prefix_len: 32,
-                config: tcp_ao_config(),
+                config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
             }],
         };
 
-        let err =
-            bind_socket2_listener_with("127.0.0.1:0".parse().unwrap(), &options, |_socket, key| {
-                installed.borrow_mut().push(key.peer);
-                Err(std::io::Error::other("tcp-ao install failed"))
-            })
-            .expect_err("listener bind must fail when TCP-AO key install fails");
+        let err = bind_socket2_listener_with(
+            "127.0.0.1:0".parse().unwrap(),
+            &options,
+            |_socket, _key, config| {
+                installed.borrow_mut().push(config.send_id);
+                if config.send_id == 2 {
+                    Err(std::io::Error::other("tcp-ao install failed"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("listener bind must fail when TCP-AO key install fails");
 
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
         let message = err.to_string();
         assert!(message.contains("192.0.2.1"), "{message}");
-        assert!(message.contains("send_id=1"), "{message}");
-        assert!(message.contains("recv_id=1"), "{message}");
+        assert!(message.contains("send_id=2"), "{message}");
+        assert!(message.contains("recv_id=2"), "{message}");
         assert!(message.contains("hmac(sha256)"), "{message}");
-        assert_eq!(
-            installed.into_inner(),
-            vec![IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))]
-        );
+        assert_eq!(installed.into_inner(), vec![1, 2]);
         tokio::task::yield_now().await;
     }
 
@@ -858,7 +879,7 @@ mod tests {
             connect_from(
                 "127.0.0.2".parse().unwrap(),
                 destination,
-                Some(&signed_config),
+                signed_config.selected(),
             )
         })
         .await
@@ -877,6 +898,7 @@ mod tests {
         let key = &info.keys[0];
         assert_eq!(key.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(key.prefix_len, 24);
+        let config = config.selected().unwrap();
         assert_eq!(key.send_id, config.send_id);
         assert_eq!(key.recv_id, config.recv_id);
         assert_eq!(key.algorithm, config.algorithm);

@@ -631,6 +631,81 @@ pub(super) async fn poll_connect(
     task.await
 }
 
+fn install_active_tcp_ao(
+    socket: &socket2::Socket,
+    config: &TransportConfig,
+    peer_label: &str,
+) -> std::io::Result<Option<crate::socket_opts::TcpAoMktReceipt>> {
+    let Some(tcp_ao) = config.tcp_ao.as_ref() else {
+        return Ok(None);
+    };
+    tcp_ao.selected().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO keyring has no selectable non-deprecated key",
+        )
+    })?;
+    let prefix_len = if config.remote_addr.is_ipv4() {
+        32
+    } else {
+        128
+    };
+    for (index, key) in tcp_ao.startup_order().into_iter().enumerate() {
+        let role = if index == 0 {
+            crate::socket_opts::TcpAoSocketRole::ActiveOpen
+        } else {
+            crate::socket_opts::TcpAoSocketRole::Listener
+        };
+        crate::socket_opts::set_tcp_ao_config(
+            socket,
+            config.remote_addr.ip(),
+            prefix_len,
+            key,
+            role,
+        )
+        .map_err(|err| {
+            warn!(
+                peer = %peer_label,
+                addr = %config.remote_addr,
+                send_id = key.send_id,
+                recv_id = key.recv_id,
+                algorithm = key.algorithm.linux_name(),
+                error = %err,
+                "failed to configure TCP-AO authentication before active connect; protected session will retry without unauthenticated fallback"
+            );
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to install TCP-AO key for peer {peer_label} at {} \
+                     (send_id={}, recv_id={}, algorithm={}): {err}",
+                    config.remote_addr,
+                    key.send_id,
+                    key.recv_id,
+                    key.algorithm.linux_name()
+                ),
+            )
+        })?;
+    }
+    let receipt = crate::socket_opts::capture_tcp_ao_keyring_receipt(
+        socket,
+        config.remote_addr.ip(),
+        prefix_len,
+        tcp_ao,
+        true,
+    )
+    .map_err(|err| {
+        warn!(
+            peer = %peer_label,
+            addr = %config.remote_addr,
+            error = %err,
+            "failed to capture TCP-AO pre-connect kernel receipt; protected session will retry without unauthenticated fallback"
+        );
+        err
+    })?;
+    debug!(peer = %peer_label, "TCP-AO authentication configured");
+    Ok(Some(receipt))
+}
+
 async fn create_and_connect(
     config: TransportConfig,
     peer_label: String,
@@ -650,66 +725,10 @@ async fn create_and_connect(
         debug!(peer = %peer_label, "TCP MD5 authentication configured");
     }
 
-    let tcp_ao_receipt = if let Some(ref tcp_ao) = config.tcp_ao {
-        // Active-open sockets install one exact peer MKT as current/rnext; the
-        // Linux connect path rejects TCP-AO sockets without a matching MKT,
-        // signs the initial SYN with the selected current key, and
-        // tcp_inbound_hash() rejects unsigned replies from matching peers.
-        crate::socket_opts::set_tcp_ao_config(
-            &socket,
-            config.remote_addr.ip(),
-            if config.remote_addr.is_ipv4() { 32 } else { 128 },
-            tcp_ao,
-            crate::socket_opts::TcpAoSocketRole::ActiveOpen,
-        )
-        .map_err(|err| {
-            warn!(
-                peer = %peer_label,
-                addr = %config.remote_addr,
-                send_id = tcp_ao.send_id,
-                recv_id = tcp_ao.recv_id,
-                algorithm = tcp_ao.algorithm.linux_name(),
-                error = %err,
-                "failed to configure TCP-AO authentication before active connect; protected session will retry without unauthenticated fallback"
-            );
-            std::io::Error::new(
-                err.kind(),
-                format!(
-                    "failed to install TCP-AO key for peer {peer_label} at {} \
-                     (send_id={}, recv_id={}, algorithm={}): {err}",
-                    config.remote_addr,
-                    tcp_ao.send_id,
-                    tcp_ao.recv_id,
-                    tcp_ao.algorithm.linux_name()
-                ),
-            )
-        })?;
-        let prefix_len = if config.remote_addr.is_ipv4() {
-            32
-        } else {
-            128
-        };
-        let receipt = crate::socket_opts::capture_tcp_ao_mkt_receipt(
-            &socket,
-            config.remote_addr.ip(),
-            prefix_len,
-            tcp_ao,
-            true,
-        )
-        .map_err(|err| {
-            warn!(
-                peer = %peer_label,
-                addr = %config.remote_addr,
-                error = %err,
-                "failed to capture TCP-AO pre-connect kernel receipt; protected session will retry without unauthenticated fallback"
-            );
-            err
-        })?;
-        debug!(peer = %peer_label, "TCP-AO authentication configured");
-        Some(receipt)
-    } else {
-        None
-    };
+    // Install the selected exact MKT as Current/RNext, then every remaining
+    // key in declaration order before connect. Any failure abandons this fresh
+    // socket, so protected peers never fall back to plaintext.
+    let tcp_ao_receipt = install_active_tcp_ao(&socket, &config, &peer_label)?;
 
     if config.ttl_security {
         crate::socket_opts::set_gtsm(&socket, config.remote_addr)?;
