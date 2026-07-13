@@ -829,6 +829,24 @@ async fn content_identical_policy_replace_is_key_stable() {
     reason = "the scaling regression keeps every cohort counter assertion in one fixture"
 )]
 async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
+    async fn query_first_term_hits(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryExportPolicyTermHits {
+            peer: Some(peer),
+            reply,
+        })
+        .await
+        .unwrap();
+        let hits = response.await.unwrap();
+        assert_eq!(hits.len(), 1, "peer must report its installed chain");
+        assert_eq!(
+            hits[0].terms.len(),
+            1,
+            "fixture policy must expose one term"
+        );
+        (hits[0].evals, hits[0].terms[0].hits)
+    }
+
     const MEMBER_COUNT: usize = 8;
     const ROUTE_COUNT: usize = 32;
 
@@ -909,6 +927,13 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     assert_eq!(response.await.unwrap(), Ok(()));
+    let first_peer = peers[0];
+    let transition_hits = query_first_term_hits(&tx, first_peer).await;
+    assert_eq!(
+        transition_hits,
+        (ROUTE_COUNT as u64, ROUTE_COUNT as u64),
+        "the first installed member must expose the destination group's staged evaluations"
+    );
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
@@ -942,6 +967,30 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     for peer in peers {
         assert_eq!(query_update_group(&tx, peer).await, "group:1");
     }
+
+    let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(later_prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(later_prefix));
+    }
+    assert_eq!(
+        query_first_term_hits(&tx, first_peer).await,
+        (transition_hits.0 + 1, transition_hits.1 + 1),
+        "later group evaluations must keep advancing the installed member's counters"
+    );
 
     drop(tx);
     handle.await.unwrap();

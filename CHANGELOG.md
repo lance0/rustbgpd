@@ -262,6 +262,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Changed-policy update groups share transition work without hiding live
+  export-policy counters.** Eligible grouped-to-grouped unicast reloads build
+  and exact-probe one destination inventory per wire cohort, then reuse its
+  immutable payload across members. The first installed member now shares the
+  exact policy-chain instance used to stage that inventory, so
+  `rbgp policy stats` exposes the staged evaluations and continues to advance
+  as later routes arrive.
+
 - **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
   Ordinary grouped members whose exact probes all succeed no longer rebuild
   candidate keys or walk and allocate the group's prior advertised set; that

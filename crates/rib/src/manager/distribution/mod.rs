@@ -906,8 +906,9 @@ impl RibManager {
         let mut probe_cache = SharedUnicastProbeCache::default();
         let mut prepared = Vec::with_capacity(replacements.len());
         let mut full_probe_count = 0usize;
+        let destination_export_policy = self.group_ribs.get(&destination)?.export_chain.as_ref();
 
-        for replacement in replacements {
+        for (index, replacement) in replacements.iter().enumerate() {
             let peer = replacement.peer;
             let session_id = self.outbound_session_ids.get(&peer).copied()?;
             let permit = if inventory.announce.is_empty() {
@@ -964,7 +965,16 @@ impl RibManager {
             prepared.push(PreparedCleanPolicyTransitionPeer {
                 peer,
                 session_id,
-                export_policy: replacement.export_policy.clone(),
+                // Install the first member through a handle onto the exact
+                // chain instance that staged the destination group. Its
+                // operator-visible term-hit counters then keep tracking group
+                // evaluations even when the destination group pre-existed.
+                // Later members retain the established fresh-clone semantics.
+                export_policy: if index == 0 {
+                    destination_export_policy.map(rustbgpd_policy::PolicyChain::share)
+                } else {
+                    replacement.export_policy.clone()
+                },
                 snapshot,
                 permit,
             });
