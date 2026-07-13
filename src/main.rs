@@ -59,10 +59,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
+use rustbgpd_mrt::codec::WarmSnapshotBudget;
 use rustbgpd_mrt::{
     MAX_WARM_BUNDLE_SNAPSHOT_BYTES, WarmBundleDirectory, WarmBundleFamilyV1, WarmBundleIdentityV1,
     WarmBundlePolicyInputV1, WarmBundleViewKindV1, WarmBundleViewV1,
-    resolved_import_policy_digest_v1, write_warm_bundle,
+    resolved_import_policy_digest_v1, write_warm_bundle_bounded,
 };
 use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotBudget, WarmMrtSnapshotView};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
@@ -1064,6 +1065,23 @@ async fn publish_warm_checkpoint(
     directory: Arc<WarmBundleDirectory>,
     deadline: StdInstant,
 ) -> Result<String, String> {
+    publish_warm_checkpoint_bounded(
+        capture,
+        rib_query_tx,
+        directory,
+        deadline,
+        usize::try_from(MAX_WARM_BUNDLE_SNAPSHOT_BYTES).unwrap_or(usize::MAX),
+    )
+    .await
+}
+
+async fn publish_warm_checkpoint_bounded(
+    capture: WarmCheckpointCapture,
+    rib_query_tx: &mpsc::Sender<RibUpdate>,
+    directory: Arc<WarmBundleDirectory>,
+    deadline: StdInstant,
+    max_snapshot_bytes: usize,
+) -> Result<String, String> {
     let plan = build_warm_checkpoint_plan(&capture.sessions)?;
 
     let (rib_reply, rib_rx) = oneshot::channel();
@@ -1078,8 +1096,7 @@ async fn publish_warm_checkpoint(
             budget: WarmMrtSnapshotBudget {
                 deadline,
                 cancelled,
-                max_materialized_bytes: usize::try_from(MAX_WARM_BUNDLE_SNAPSHOT_BYTES)
-                    .unwrap_or(usize::MAX),
+                max_materialized_bytes: max_snapshot_bytes,
             },
             reply: rib_reply,
         })
@@ -1088,8 +1105,6 @@ async fn publish_warm_checkpoint(
     let snapshot = rib_rx
         .await
         .map_err(|_| "RIB actor dropped warm checkpoint query".to_string())??;
-    cancel_on_drop.armed = false;
-
     let now_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?
@@ -1119,19 +1134,24 @@ async fn publish_warm_checkpoint(
     };
     let local_router_id = capture.local_router_id;
     let view_name = checkpoint_generation.clone();
+    let writer_budget = WarmSnapshotBudget::new(
+        deadline,
+        Arc::clone(&cancel_on_drop.cancelled),
+        max_snapshot_bytes,
+    );
     let (writer_reply, writer_rx) = oneshot::channel();
     // Do not use Tokio's blocking pool here. A timed-out spawn_blocking task
     // cannot be cancelled and the runtime waits for it during shutdown,
     // defeating the 30-second terminal bound. This dedicated OS thread is
-    // detached if the coordinator deadline fires; daemon teardown continues
-    // immediately and process exit terminates any remaining work. It may
-    // finish an orphan bundle generation in the meantime, but main publishes
-    // marker v2 only after this reply, so a late generation is never selected.
+    // detached if the coordinator deadline fires; dropping this future flips
+    // the shared cancellation token. Encoding, validation, hashing, and
+    // chunked writes observe that token and the same monotonic deadline, so a
+    // late worker stops bounded work and can never select marker v2.
     std::thread::Builder::new()
         .name("warm-checkpoint-writer".to_string())
         .spawn(move || {
             let result = (|| {
-                let encoded = rustbgpd_mrt::codec::encode_warm_snapshot(
+                let encoded = rustbgpd_mrt::codec::encode_warm_snapshot_bounded(
                     local_router_id,
                     &view_name,
                     &snapshot.peers,
@@ -1139,9 +1159,11 @@ async fn publish_warm_checkpoint(
                     &snapshot.evpn_routes,
                     mrt_timestamp,
                     &plan.add_path_receive,
+                    &writer_budget,
                 )
                 .map_err(|error| error.to_string())?;
-                write_warm_bundle(directory.as_ref(), identity, &encoded)
+                writer_budget.check().map_err(|error| error.to_string())?;
+                write_warm_bundle_bounded(directory.as_ref(), identity, &encoded, &writer_budget)
                     .map_err(|error| error.to_string())?;
                 Ok::<(), String>(())
             })();
@@ -1151,6 +1173,7 @@ async fn publish_warm_checkpoint(
     writer_rx
         .await
         .map_err(|_| "warm checkpoint writer exited without a result".to_string())??;
+    cancel_on_drop.armed = false;
     Ok(checkpoint_generation)
 }
 
@@ -4680,6 +4703,79 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
         store.remove().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_checkpoint_publishes_no_bundle_or_v2_marker() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = Arc::new(PinnedRuntimeStateDirectory::prepare(temp.path()).unwrap());
+        let directory = Arc::new(pinned.prepare_warm_bundle().unwrap());
+        let marker_store = GrRestartMarkerStore::new(pinned);
+        let session = checkpoint_plan_session();
+        let capture = WarmCheckpointCapture {
+            local_asn: 65_001,
+            local_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            effective_config_toml: "[global]\nasn = 65001\n".to_string(),
+            restart_time_secs: Some(120),
+            sessions: vec![session.clone()],
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let responder = tokio::spawn(async move {
+            let update = rib_rx.recv().await.expect("warm query sent");
+            let RibUpdate::QueryWarmMrtSnapshot { budget, reply, .. } = update else {
+                panic!("unexpected RIB query");
+            };
+            assert_eq!(budget.max_materialized_bytes, 32);
+            reply
+                .send(Ok(rustbgpd_rib::MrtSnapshotData {
+                    peers: vec![rustbgpd_rib::MrtPeerEntry {
+                        peer_addr: session.peer.address,
+                        peer_bgp_id: session.peer_router_id,
+                        peer_asn: session.peer_asn,
+                    }],
+                    routes: vec![],
+                    evpn_routes: vec![],
+                }))
+                .expect("coordinator still waiting");
+        });
+
+        let result = publish_warm_checkpoint_bounded(
+            capture,
+            &rib_tx,
+            Arc::clone(&directory),
+            StdInstant::now() + Duration::from_mins(1),
+            32,
+        )
+        .await;
+        responder.await.unwrap();
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("32-byte cap"))
+        );
+        assert_eq!(
+            std::fs::read_dir(temp.path().join(WARM_BUNDLE_DIRECTORY))
+                .unwrap()
+                .count(),
+            0,
+            "oversized encoding must not publish an artifact, manifest, or temp file"
+        );
+
+        marker_store
+            .write_selected(
+                SystemTime::now() + Duration::from_mins(2),
+                result.ok().as_deref(),
+            )
+            .unwrap();
+        let marker = marker_store.read().unwrap().unwrap();
+        assert_eq!(
+            marker.checkpoint_generation, None,
+            "failed publication must retain marker-v1 fallback"
+        );
+        marker_store.remove().unwrap();
     }
 
     fn checkpoint_plan_session() -> WarmCheckpointSession {

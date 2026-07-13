@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+use crate::codec::{WarmSnapshotBudget, WarmSnapshotBudgetError};
 use crate::{ReadError, SnapshotNlri, SnapshotReader};
 
 /// On-disk format understood by this implementation.
@@ -353,6 +354,9 @@ pub enum WarmBundleError {
         /// Requested allocation size.
         requested: u64,
     },
+    /// The coordinated shutdown budget cancelled or expired.
+    #[error(transparent)]
+    WarmSnapshotBudget(#[from] WarmSnapshotBudgetError),
     /// JSON was torn, malformed, or not the exact V1 shape.
     #[error("warm bundle manifest is torn or corrupt: {0}")]
     CorruptManifest(#[source] serde_json::Error),
@@ -455,7 +459,34 @@ pub fn write_warm_bundle(
     identity: WarmBundleIdentityV1,
     snapshot: &[u8],
 ) -> Result<WarmBundleManifestV1, WarmBundleError> {
-    write_warm_bundle_inner(directory, identity, snapshot, FaultPoint::None)
+    write_warm_bundle_inner(directory, identity, snapshot, FaultPoint::None, None)
+}
+
+/// Atomically publish a V1 bundle while observing the shutdown work budget.
+///
+/// Semantic validation, hashing, chunked writes, fsync boundaries, and the
+/// final manifest commit all recheck the same cancellation token and monotonic
+/// deadline used by bounded MRT encoding. Cancellation before the manifest
+/// rename cannot select a partial or orphan artifact.
+///
+/// # Errors
+///
+/// Returns the same errors as [`write_warm_bundle`], plus
+/// [`WarmBundleError::WarmSnapshotBudget`] when shutdown cancellation or the
+/// terminal deadline fires.
+pub fn write_warm_bundle_bounded(
+    directory: &WarmBundleDirectory,
+    identity: WarmBundleIdentityV1,
+    snapshot: &[u8],
+    budget: &WarmSnapshotBudget,
+) -> Result<WarmBundleManifestV1, WarmBundleError> {
+    write_warm_bundle_inner(
+        directory,
+        identity,
+        snapshot,
+        FaultPoint::None,
+        Some(budget),
+    )
 }
 
 /// Load only an exact, fresh, byte- and semantically-valid bundle.
@@ -483,7 +514,7 @@ pub fn load_warm_bundle(
         serde_json::from_slice(&manifest_bytes).map_err(WarmBundleError::CorruptManifest)?;
     validate_manifest(&manifest, expected, freshness)?;
     let snapshot = read_verified_snapshot(directory, &manifest.snapshot)?;
-    let actual_counts = validate_snapshot_semantics(&snapshot, &manifest.identity)?;
+    let actual_counts = validate_snapshot_semantics(&snapshot, &manifest.identity, None)?;
     if actual_counts != manifest.view_route_counts {
         return Err(WarmBundleError::MrtIdentityMismatch {
             field: "per-view route counts",
@@ -497,7 +528,12 @@ fn write_warm_bundle_inner(
     identity: WarmBundleIdentityV1,
     snapshot: &[u8],
     fault: FaultPoint,
+    budget: Option<&WarmSnapshotBudget>,
 ) -> Result<WarmBundleManifestV1, WarmBundleError> {
+    if let Some(budget) = budget {
+        budget.check()?;
+        budget.check_growth(0, snapshot.len())?;
+    }
     validate_identity(&identity)?;
     let size_bytes = u64::try_from(snapshot.len()).unwrap_or(u64::MAX);
     if size_bytes > MAX_WARM_BUNDLE_SNAPSHOT_BYTES {
@@ -507,8 +543,8 @@ fn write_warm_bundle_inner(
             cap: MAX_WARM_BUNDLE_SNAPSHOT_BYTES,
         });
     }
-    let view_route_counts = validate_snapshot_semantics(snapshot, &identity)?;
-    let sha256 = sha256_hex(snapshot);
+    let view_route_counts = validate_snapshot_semantics(snapshot, &identity, budget)?;
+    let sha256 = sha256_hex_bounded(snapshot, budget)?;
     let manifest = WarmBundleManifestV1 {
         format_version: WARM_BUNDLE_FORMAT_VERSION,
         identity,
@@ -535,6 +571,7 @@ fn write_warm_bundle_inner(
         snapshot,
         AtomicRole::Artifact,
         fault,
+        budget,
     )?;
     write_atomic_at(
         directory,
@@ -542,6 +579,7 @@ fn write_warm_bundle_inner(
         &encoded,
         AtomicRole::Manifest,
         fault,
+        budget,
     )?;
     Ok(manifest)
 }
@@ -700,10 +738,18 @@ fn validate_view_route_counts(manifest: &WarmBundleManifestV1) -> Result<(), War
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass identity validation keeps every accepted MRT family under one fail-closed inventory"
+)]
 fn validate_snapshot_semantics(
     snapshot: &[u8],
     identity: &WarmBundleIdentityV1,
+    budget: Option<&WarmSnapshotBudget>,
 ) -> Result<Vec<u64>, WarmBundleError> {
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
     let mut reader = SnapshotReader::new(snapshot).map_err(WarmBundleError::InvalidMrt)?;
     if reader.collector_bgp_id() != identity.local_router_id {
         return Err(WarmBundleError::MrtIdentityMismatch {
@@ -738,6 +784,9 @@ fn validate_snapshot_semantics(
         .map(|view| (view, 0))
         .collect();
     for decoded in &mut reader {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
         let entry = decoded.map_err(WarmBundleError::InvalidMrt)?;
         let family = match &entry.nlri {
             SnapshotNlri::Unicast(rustbgpd_wire::Prefix::V4(_)) => WarmBundleFamilyV1::Ipv4Unicast,
@@ -849,6 +898,22 @@ fn update_len_prefixed(digest: &mut Sha256, bytes: &[u8]) {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     digest_hex(Sha256::digest(bytes))
+}
+
+fn sha256_hex_bounded(
+    bytes: &[u8],
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<String, WarmBundleError> {
+    let Some(budget) = budget else {
+        return Ok(sha256_hex(bytes));
+    };
+    let mut digest = Sha256::new();
+    for chunk in bytes.chunks(STREAM_BUFFER_BYTES) {
+        budget.check()?;
+        digest.update(chunk);
+    }
+    budget.check()?;
+    Ok(digest_hex(digest.finalize()))
 }
 
 fn digest_hex(digest: impl AsRef<[u8]>) -> String {
@@ -1142,19 +1207,48 @@ fn write_atomic_at(
     bytes: &[u8],
     role: AtomicRole,
     fault: FaultPoint,
+    budget: Option<&WarmSnapshotBudget>,
 ) -> Result<(), WarmBundleError> {
     let display = directory.display_path.join(name);
     let (temp_name, mut file) = create_temp(directory, name)?;
-    let result = (|| -> io::Result<()> {
-        fail_if(fault, stage(role, 0))?;
-        file.write_all(bytes)?;
-        fail_if(fault, stage(role, 1))?;
-        file.sync_all()?;
+    let result = (|| -> Result<(), WarmBundleError> {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        fail_if(fault, stage(role, 0)).map_err(|source| io_error(&display, source))?;
+        for chunk in bytes.chunks(STREAM_BUFFER_BYTES) {
+            if let Some(budget) = budget {
+                budget.check()?;
+            }
+            file.write_all(chunk)
+                .map_err(|source| io_error(&display, source))?;
+        }
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        fail_if(fault, stage(role, 1)).map_err(|source| io_error(&display, source))?;
+        file.sync_all()
+            .map_err(|source| io_error(&display, source))?;
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
         drop(file);
-        fail_if(fault, stage(role, 2))?;
-        renameat(&directory.file, temp_name.as_str(), &directory.file, name).map_err(errno_io)?;
-        fail_if(fault, stage(role, 3))?;
-        directory.file.sync_all()
+        fail_if(fault, stage(role, 2)).map_err(|source| io_error(&display, source))?;
+        renameat(&directory.file, temp_name.as_str(), &directory.file, name)
+            .map_err(errno_io)
+            .map_err(|source| io_error(&display, source))?;
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        fail_if(fault, stage(role, 3)).map_err(|source| io_error(&display, source))?;
+        directory
+            .file
+            .sync_all()
+            .map_err(|source| io_error(&display, source))?;
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = unlinkat(
@@ -1163,7 +1257,7 @@ fn write_atomic_at(
             UnlinkatFlags::NoRemoveDir,
         );
     }
-    result.map_err(|source| io_error(&display, source))
+    result
 }
 
 fn create_temp(
@@ -1217,6 +1311,9 @@ mod tests {
     use std::fs::OpenOptions;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
 
     const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const NOW: i64 = 1_800_000_000;
@@ -1283,6 +1380,57 @@ mod tests {
     fn opened(dir: &tempfile::TempDir) -> WarmBundleDirectory {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         WarmBundleDirectory::open(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn cancelled_bounded_writer_publishes_no_artifact_or_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let snapshot = valid_snapshot(&id);
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(true)),
+            usize::try_from(MAX_WARM_BUNDLE_SNAPSHOT_BYTES).unwrap(),
+        );
+
+        assert!(matches!(
+            write_warm_bundle_bounded(&dir, id, &snapshot, &budget),
+            Err(WarmBundleError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::Cancelled
+            ))
+        ));
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "cancelled writer must not publish an artifact, manifest, or temp file"
+        );
+    }
+
+    #[test]
+    fn oversized_bounded_writer_publishes_no_artifact_or_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let snapshot = valid_snapshot(&id);
+        let cap = snapshot.len() - 1;
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(false)),
+            cap,
+        );
+
+        assert!(matches!(
+            write_warm_bundle_bounded(&dir, id, &snapshot, &budget),
+            Err(WarmBundleError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::SizeLimitExceeded { attempted, cap: actual_cap }
+            )) if attempted == snapshot.len() && actual_cap == cap
+        ));
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "oversized writer input must not publish an artifact, manifest, or temp file"
+        );
     }
 
     fn record(output: &mut Vec<u8>, subtype: u16, payload: &[u8]) {
@@ -1885,7 +2033,8 @@ mod tests {
             next.checkpoint_generation = "boot-42".to_string();
             next.snapshot_revision += 1;
             next.created_at_utc_seconds += 1;
-            let result = write_warm_bundle_inner(&dir, next.clone(), &valid_snapshot(&next), fault);
+            let result =
+                write_warm_bundle_inner(&dir, next.clone(), &valid_snapshot(&next), fault, None);
             assert!(result.is_err(), "{fault:?}");
             if fault == FaultPoint::ManifestDirSync {
                 assert!(load_warm_bundle(&dir, &expected(&next), freshness()).is_ok());
