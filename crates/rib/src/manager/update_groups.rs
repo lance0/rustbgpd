@@ -1761,24 +1761,28 @@ impl RibManager {
         }
     }
 
-    /// Synthesized advertised-route list for a grouped peer (group
-    /// table minus own-sourced); `None` for ungrouped peers.
-    pub(in crate::manager) fn grouped_advertised_routes(&self, peer: IpAddr) -> Option<Vec<Route>> {
+    /// Borrowed synthesized advertised-route view for a grouped peer (group
+    /// table minus own-sourced and this member's exact-export rejections);
+    /// `None` for ungrouped peers.
+    pub(in crate::manager) fn grouped_advertised_routes_iter(
+        &self,
+        peer: IpAddr,
+    ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
-        Some(
-            group
-                .table
-                .iter()
-                .filter(|route| {
-                    route.peer != peer
-                        && !rejected.is_some_and(|keys| {
-                            keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                        })
+        Some(group.table.iter().filter(move |route| {
+            route.peer != peer
+                && !rejected.is_some_and(|keys| {
+                    keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
                 })
-                .cloned()
-                .collect(),
-        )
+        }))
+    }
+
+    /// Materialized sibling of [`Self::grouped_advertised_routes_iter`] for
+    /// legacy full-snapshot and route-refresh callers.
+    pub(in crate::manager) fn grouped_advertised_routes(&self, peer: IpAddr) -> Option<Vec<Route>> {
+        self.grouped_advertised_routes_iter(peer)
+            .map(|routes| routes.cloned().collect())
     }
 
     /// Synthesized advertised-route count for a grouped peer; `None`
