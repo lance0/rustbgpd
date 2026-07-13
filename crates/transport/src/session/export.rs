@@ -41,7 +41,7 @@ pub(crate) struct SessionExportProfile {
     remove_private_as: RemovePrivateAs,
     cluster_id: Option<Ipv4Addr>,
     configured_local_ipv6_nexthop: Option<Ipv6Addr>,
-    peer_asn: Option<u32>,
+    is_ebgp: bool,
     four_octet_as: bool,
     extended_messages: bool,
     extended_nexthop_ipv4: bool,
@@ -68,7 +68,7 @@ impl std::fmt::Debug for SessionExportProfile {
                 "configured_local_ipv6_nexthop",
                 &self.configured_local_ipv6_nexthop,
             )
-            .field("peer_asn", &self.peer_asn)
+            .field("is_ebgp", &self.is_ebgp)
             .field("four_octet_as", &self.four_octet_as)
             .field("extended_messages", &self.extended_messages)
             .field("extended_nexthop_ipv4", &self.extended_nexthop_ipv4)
@@ -121,7 +121,10 @@ impl SessionExportProfile {
             remove_private_as: session.config.remove_private_as,
             cluster_id: session.config.cluster_id,
             configured_local_ipv6_nexthop: session.config.local_ipv6_nexthop,
-            peer_asn: session.negotiated.as_ref().map(|neg| neg.peer_asn),
+            is_ebgp: session.negotiated.as_ref().map_or_else(
+                || session.config.peer.remote_asn != session.config.peer.local_asn,
+                |neg| neg.peer_asn != session.config.peer.local_asn,
+            ),
             four_octet_as: session
                 .negotiated
                 .as_ref()
@@ -189,7 +192,7 @@ impl SessionExportProfile {
             remove_private_as: config.remove_private_as,
             cluster_id: config.cluster_id,
             configured_local_ipv6_nexthop: config.local_ipv6_nexthop,
-            peer_asn: None,
+            is_ebgp: config.peer.remote_asn != config.peer.local_asn,
             four_octet_as: false,
             extended_messages: false,
             extended_nexthop_ipv4: false,
@@ -212,8 +215,7 @@ impl SessionExportProfile {
     }
 
     pub(super) fn is_ebgp(&self) -> bool {
-        self.peer_asn
-            .is_some_and(|peer_asn| peer_asn != self.local_asn)
+        self.is_ebgp
     }
 
     pub(super) fn add_path_send(&self, family: (Afi, Safi)) -> bool {
@@ -738,11 +740,7 @@ impl SessionExportProfile {
 
     #[cfg(test)]
     pub(super) fn with_test_ebgp(mut self, is_ebgp: bool) -> Self {
-        self.peer_asn = Some(if is_ebgp {
-            self.local_asn.wrapping_add(1)
-        } else {
-            self.local_asn
-        });
+        self.is_ebgp = is_ebgp;
         self
     }
 
@@ -1860,17 +1858,36 @@ impl SessionExportEncoder {
 #[doc(hidden)]
 #[must_use]
 pub fn fanout_bench_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    fanout_bench_encoder(false, false, Some(Ipv4Addr::new(10, 255, 255, 255)))
+}
+
+/// Build the authoritative exact-export encoder for one synthetic eBGP route-
+/// server client. The constructor derives the same wire-relevant eBGP/iBGP
+/// classification as a live negotiated session.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_route_server_export_encoder(remote_asn: u32) -> Arc<dyn ExactExportEncoder> {
+    fanout_bench_encoder(remote_asn != 64_512, true, None)
+}
+
+#[cfg(feature = "bench-internals")]
+fn fanout_bench_encoder(
+    is_ebgp: bool,
+    route_server_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+) -> Arc<dyn ExactExportEncoder> {
     Arc::new(SessionExportEncoder::new(SessionExportProfile {
         owner_id: 0,
         generation: 0,
         local_asn: 64_512,
         local_router_id: Ipv4Addr::new(10, 255, 255, 255),
         local_role: None,
-        route_server_client: false,
+        route_server_client,
         remove_private_as: RemovePrivateAs::Disabled,
-        cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
+        cluster_id,
         configured_local_ipv6_nexthop: None,
-        peer_asn: Some(64_512),
+        is_ebgp,
         four_octet_as: true,
         extended_messages: false,
         extended_nexthop_ipv4: false,
@@ -1991,8 +2008,10 @@ pub(super) fn remove_private_asns(
 mod tests {
     use super::*;
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
-    use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
+    use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Ipv4Prefix, encode_message};
+    use tokio::sync::mpsc;
 
     fn config_with_auth_secret(secret: &str) -> TransportConfig {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
@@ -2012,6 +2031,29 @@ mod tests {
         config
     }
 
+    fn capture_dynamic_profile(negotiated_remote_asn: u32) -> SessionExportProfile {
+        let peer = PeerConfig::new(65_001, 0, Ipv4Addr::new(10, 0, 0, 1));
+        let config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let mut session = PeerSession::new(
+            config,
+            BgpMetrics::new(),
+            command_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let mut negotiated = NegotiatedSession::default();
+        negotiated.peer_asn = negotiated_remote_asn;
+        session.negotiated = Some(negotiated);
+        SessionExportProfile::capture(&session)
+    }
+
     #[test]
     fn export_profile_never_retains_or_formats_transport_auth_secrets() {
         const SENTINEL: &str = "lan-380-profile-must-not-retain-this-secret";
@@ -2022,6 +2064,21 @@ mod tests {
         assert!(!rendered.contains(SENTINEL));
         assert!(!rendered.contains("tcp_ao"));
         assert!(!rendered.contains("md5"));
+    }
+
+    #[test]
+    fn live_capture_classifies_dynamic_peer_from_negotiated_asn() {
+        let ebgp = capture_dynamic_profile(65_002);
+        let ibgp = capture_dynamic_profile(65_001);
+
+        assert!(
+            ebgp.is_ebgp(),
+            "dynamic remote_asn=0 must use the negotiated eBGP ASN"
+        );
+        assert!(
+            !ibgp.is_ebgp(),
+            "dynamic remote_asn=0 must preserve a negotiated same-AS session"
+        );
     }
 
     #[test]
@@ -2162,6 +2219,83 @@ mod tests {
                 }),
             ],
             "batch order and cardinality are preserved with target-owned metadata"
+        );
+    }
+
+    #[test]
+    fn distinct_ebgp_remote_asns_share_wire_results_but_ibgp_does_not() {
+        let mut source_config = config_with_auth_secret("not-retained");
+        source_config.route_server_client = true;
+        source_config.peer.remote_asn = 65_002;
+        let mut target_config = source_config.clone();
+        target_config.peer.remote_asn = 65_003;
+        let mut ibgp_config = source_config.clone();
+        ibgp_config.peer.remote_asn = ibgp_config.peer.local_asn;
+
+        let source = SessionExportProfile::initial(&source_config, None, false);
+        let target = SessionExportProfile::initial(&target_config, None, false);
+        let ibgp = SessionExportProfile::initial(&ibgp_config, None, false);
+        assert!(source.is_ebgp());
+        assert!(target.is_ebgp());
+        assert!(!ibgp.is_ebgp());
+
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64_520])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
+                PathAttribute::LocalPref(100),
+            ]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        };
+        let wire_bytes = |profile: &SessionExportProfile| {
+            encoded(
+                profile
+                    .probe_announcement(ExportCandidate::Unicast {
+                        route: &route,
+                        next_hop_override: None,
+                    })
+                    .expect("the route-server candidate encodes")
+                    .into_message(),
+            )
+        };
+        let source_bytes = wire_bytes(&source);
+
+        assert_eq!(
+            source_bytes,
+            wire_bytes(&target),
+            "remote ASN identity does not change bytes within the eBGP class"
+        );
+        assert!(
+            target
+                .reuse_successful_probes(&source, &[source_bytes.len()])
+                .is_some(),
+            "distinct eBGP client ASNs reuse a successful exact result"
+        );
+        assert_ne!(
+            source_bytes,
+            wire_bytes(&ibgp),
+            "the eBGP/iBGP classification remains wire-relevant"
+        );
+        assert!(
+            ibgp.reuse_successful_probes(&source, &[source_bytes.len()])
+                .is_none(),
+            "eBGP results must not cross the iBGP boundary"
         );
     }
 

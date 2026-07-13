@@ -1,7 +1,6 @@
 # Exact-export fanout optimization receipt — 2026-07
 
-Status: **PASS**. This receipt captures three pinned campaigns for LAN-361 and
-LAN-395. The
+Status: **PASS**. This receipt captures four pinned exact-export campaigns. The
 first made the fanout benchmark exercise the authoritative per-session exact
 export probe and then reused the live writer's complete prepared-attribute
 memo key during an ordered precommit batch. The second measured the regression
@@ -15,6 +14,9 @@ Negative change values mean the optimized revision is faster than that
 campaign's baseline. Campaign 3 retains its complete sealed rrharness receipt
 and sanitized Criterion matrix under
 [`artifacts/grouped-exact-precommit-2026-07/`](artifacts/grouped-exact-precommit-2026-07/).
+Campaign 4 retains its complete normalized Criterion matrix and production
+transition counters under
+[`artifacts/ixp-exact-export-cohorts-2026-07/`](artifacts/ixp-exact-export-cohorts-2026-07/).
 
 ## Campaign 1: ordered prepared-attribute memo
 
@@ -353,3 +355,88 @@ never sealed after a generic privacy rule matched reviewed source vocabulary.
 The second passed and sealed, but independent review found an ignored Python
 bytecode file containing a private path. Both were rejected; only the clean
 third rrharness run and matching final-pin Criterion run are retained.
+
+## Campaign 4: IXP eBGP classification cohorts
+
+Campaign 2's full-profile equality was intentionally conservative, but its
+snapshot retained the negotiated remote ASN even though outbound encoding used
+that value only to derive eBGP versus iBGP behavior. Homogeneous RR members
+therefore reused one exact result as measured above, while real route-server
+clients in distinct ASNs appeared wire-incompatible. Once eight remote-ASN
+profiles filled the pass-local cohort cap, later clients repeated the complete
+probe. The cap remains a useful bound for genuinely different wire profiles;
+remote ASN identity was the false dimension.
+
+### Compared revisions and method
+
+| Role | Commit | Meaning |
+|------|--------|---------|
+| Fixture baseline | `a47c618ebb7cdf9c99a48e6bd7ed753f42cac664` | Adds matched manager/transport eBGP route-server clients while retaining raw remote ASN in the exact-export profile |
+| Optimized | `828e7a7f7be2a27d2556341320fe2dfc036d7e1a` | Stores only the wire-relevant eBGP/iBGP classification |
+
+The established RR benchmark is unchanged and remains valid evidence for its
+homogeneous RR workload. This complementary matrix models ordinary first
+advertise to eBGP route-server clients with the same local address,
+capabilities, route-server mode, and grouping inputs. One population assigns
+AS 65001 to every client; the other assigns a different remote ASN to each
+client. The transition matrix changes one export-policy community over 4,096
+routes. Every cell ran on the same pinned CPU and release binary settings; the
+raw medians, paired change confidence intervals, commands, and environment are
+retained in the campaign artifact directory.
+
+### Results
+
+Distinct-ASN first-advertise fanout converges on the already-fast homogeneous
+case after removing the false profile dimension:
+
+| Clients | Distinct-ASN baseline | Optimized | Criterion mean change (95% CI) |
+|--------:|----------------------:|----------:|--------------------------------:|
+| 8 | 149.111 us | 77.700 us | -47.34% (-48.48%..-46.19%) |
+| 64 | 1.026 ms | 376.547 us | -63.35% (-63.67%..-62.95%) |
+| 256 | 4.038 ms | 1.419 ms | -64.70% (-65.31%..-64.00%) |
+
+Optimized homogeneous medians were 76.207 us, 378.012 us, and 1.431 ms at 8,
+64, and 256 clients. Their paired mean changes were -2.10%, -1.21%, and +0.38%;
+the first two improve slightly and the 256-client interval crosses zero, so the
+optimization does not trade the existing first-advertise fast case for IXP
+recovery.
+
+The clean policy-transition result removes the route-times-peer probe shape:
+
+| Routes / clients | Distinct-ASN baseline | Optimized | Full probes before / after | Criterion mean change (95% CI) |
+|-----------------:|----------------------:|----------:|---------------------------:|--------------------------------:|
+| 4,096 / 64 | 49.206 ms | 3.464 ms | 262,144 / 4,096 | -93.00% (-93.14%..-92.87%) |
+| 4,096 / 700 | 510.332 ms | 7.604 ms | 2,867,200 / 4,096 | -98.51% (-98.54%..-98.49%) |
+
+The 700-client production receipt also drops from 3,599 actor polls to 803.
+The optimized distinct-ASN receipt matches the homogeneous plan count, probe
+count, shell count, and poll count exactly. This is microbenchmark evidence,
+not the loaded-reload acceptance campaign described in the policy-transition
+receipt.
+
+The homogeneous 700-client transition showed no detected change (-1.60% mean,
+-4.34%..+1.01%). The homogeneous 64-client transition also showed no detected
+change (+1.07% mean, -0.72%..+2.67%). Both cells are retained alongside the
+distinct-ASN cell's removal of 258,048 redundant full probes.
+
+### Correctness fence
+
+`SessionExportProfile` now captures a boolean eBGP/iBGP classification from
+the negotiated ASN (with the configured ASN as the pre-negotiation fallback)
+instead of retaining remote ASN identity. Owner, generation, and Extended
+Messages ceiling normalization is unchanged. Full derived-struct equality
+still includes local ASN and router ID, role, route-server mode,
+remove-private-AS mode, cluster and next-hop inputs, every negotiated family
+capability, local socket address, scoped-link-local mode, and GShut state.
+Target-owned message ceiling and generation checks still run for every member.
+
+A byte-level regression constructs two route-server profiles with different
+eBGP remote ASNs, proves their complete encoded UPDATEs are identical, and
+proves successful-length reuse. The same test changes the target to iBGP,
+observes different bytes, and requires reuse to fail. The eight-cohort bound is
+unchanged for profiles that differ on a real wire input.
+
+A separate live-capture canary configures dynamic `remote_asn = 0`, then proves
+that the negotiated ASN classifies an eBGP session as eBGP and a same-AS
+session as iBGP. This prevents the configured wildcard fallback from replacing
+live negotiated truth.
