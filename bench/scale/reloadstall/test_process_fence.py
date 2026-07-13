@@ -11,7 +11,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from process_fence import Process, ProcessScanError, find_competitors, read_process
+from process_fence import (
+    Process,
+    ProcessScanError,
+    find_competitors,
+    is_system_init_identity,
+    read_process,
+)
 
 
 ROOT = "/work/rustbgpd-policy-reload-receipt"
@@ -172,15 +178,27 @@ class ProcfsCompatibilityTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def make_record(
-        self, pid: int = 20, *, state: str = "S", flags: int = 0, links: bool = True
+        self,
+        pid: int = 20,
+        *,
+        ppid: int = 1,
+        comm: str = "cargo",
+        argv: tuple[str, ...] = ("cargo", "build"),
+        state: str = "S",
+        flags: int = 0,
+        links: bool = True,
     ) -> Path:
         base = self.proc / str(pid)
         base.mkdir()
         (base / "stat").write_text(
-            f"{pid} (cargo worker) {state} 1 0 0 0 0 {flags}\n", encoding="utf-8"
+            f"{pid} ({comm}) {state} {ppid} 0 0 0 0 {flags}\n",
+            encoding="utf-8",
         )
-        (base / "comm").write_text("cargo\n", encoding="utf-8")
-        (base / "cmdline").write_bytes(b"cargo\0build\0")
+        (base / "comm").write_text(f"{comm}\n", encoding="utf-8")
+        (base / "cmdline").write_bytes(
+            b"\0".join(value.encode("utf-8") for value in argv)
+            + (b"\0" if argv else b"")
+        )
         if links:
             (base / "cwd").symlink_to("/tmp")
             (base / "exe").symlink_to("/usr/bin/cargo")
@@ -248,6 +266,66 @@ class ProcfsCompatibilityTests(unittest.TestCase):
             return original(path)
 
         with mock.patch.object(Path, "read_bytes", denied):
+            with self.assertRaisesRegex(ProcessScanError, "permission/hidepid"):
+                read_process(20, self.proc)
+
+    def test_permission_hidden_links_are_allowed_for_exact_system_init(self) -> None:
+        self.make_record(
+            pid=1,
+            ppid=0,
+            comm="systemd",
+            argv=("/sbin/init", "splash"),
+        )
+        with mock.patch(
+            "process_fence.os.readlink", side_effect=PermissionError("denied")
+        ):
+            record = read_process(1, self.proc)
+        self.assertIsNotNone(record)
+        self.assertEqual(record.cwd, "")
+        self.assertEqual(record.exe, "")
+
+    def test_permission_hidden_links_are_allowed_for_proven_kernel_thread(self) -> None:
+        self.make_record(flags=0x00200000)
+        with mock.patch(
+            "process_fence.os.readlink", side_effect=PermissionError("denied")
+        ):
+            record = read_process(20, self.proc)
+        self.assertIsNotNone(record)
+        self.assertTrue(record.kernel_thread)
+        self.assertEqual(record.cwd, "")
+        self.assertEqual(record.exe, "")
+
+    def test_permission_hidden_links_are_allowed_for_proven_zombie(self) -> None:
+        self.make_record(state="Z")
+        with mock.patch(
+            "process_fence.os.readlink", side_effect=PermissionError("denied")
+        ):
+            record = read_process(20, self.proc)
+        self.assertIsNotNone(record)
+        self.assertEqual(record.state, "Z")
+        self.assertEqual(record.cwd, "")
+        self.assertEqual(record.exe, "")
+
+    def test_system_init_identity_rejects_every_required_field_mismatch(self) -> None:
+        self.assertTrue(
+            is_system_init_identity(1, 0, "systemd", ("/sbin/init", "splash"))
+        )
+        identities = (
+            (2, 0, "systemd", ("/sbin/init",)),
+            (1, 1, "systemd", ("/sbin/init",)),
+            (1, 0, "init", ("/sbin/init",)),
+            (1, 0, "systemd", ("systemd",)),
+            (1, 0, "systemd", ()),
+        )
+        for identity in identities:
+            with self.subTest(identity=identity):
+                self.assertFalse(is_system_init_identity(*identity))
+
+    def test_permission_hidden_links_for_ordinary_process_fail_closed(self) -> None:
+        self.make_record()
+        with mock.patch(
+            "process_fence.os.readlink", side_effect=PermissionError("denied")
+        ):
             with self.assertRaisesRegex(ProcessScanError, "permission/hidepid"):
                 read_process(20, self.proc)
 

@@ -97,8 +97,11 @@ validation rather than escaping that publication-safety contract. The final
 host fence inspects process argv, cwd, executable, state, and descendants,
 including interpreted benchmarks and Cargo target binaries. Missing cwd/exe
 links are accepted only for a `/proc/<pid>/stat`-proven zombie or kernel thread;
-an incomplete ordinary live record fails closed. The shared lock remains the
-first line of coordination. The exact-source validator accepts only the fixed 700 ×
+the same stat-proven identities may have permission-hidden links. That narrow
+permission exception also covers only the stat/comm/cmdline-proven PID 1
+systemd init process launched as `/sbin/init`. An incomplete ordinary live
+record still fails closed. The shared lock remains the first line of
+coordination. The exact-source validator accepts only the fixed 700 ×
 400,400 shape with four complete alternating-marker cycles, where each cycle
 proves exact current receiver-state coverage for its active A or B policy
 marker after the full 20-second quiesce, 700/700

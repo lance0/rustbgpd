@@ -187,6 +187,19 @@ def find_competitors(
     return [(records[pid], reasons[pid]) for pid in sorted(reasons)]
 
 
+def is_system_init_identity(
+    pid: int, ppid: int, comm: str, argv: tuple[str, ...]
+) -> bool:
+    """Return whether procfs proves the host's systemd init identity."""
+
+    return (
+        pid == 1
+        and ppid == 0
+        and comm == "systemd"
+        and argv[:1] == ("/sbin/init",)
+    )
+
+
 def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
     base = proc_root / str(pid)
     try:
@@ -214,11 +227,22 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
             value.decode("utf-8", errors="replace") for value in raw_argv if value
         )
         allow_missing_links = state == "Z" or kernel_thread
+        allow_permission_denied_links = allow_missing_links or is_system_init_identity(
+            pid, ppid, comm, argv
+        )
         cwd = read_proc_link(
-            base / "cwd", base, pid, allow_missing=allow_missing_links
+            base / "cwd",
+            base,
+            pid,
+            allow_missing=allow_missing_links,
+            allow_permission_denied=allow_permission_denied_links,
         )
         exe = read_proc_link(
-            base / "exe", base, pid, allow_missing=allow_missing_links
+            base / "exe",
+            base,
+            pid,
+            allow_missing=allow_missing_links,
+            allow_permission_denied=allow_permission_denied_links,
         )
         if not base.exists():
             return None
@@ -252,7 +276,12 @@ def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
 
 
 def read_proc_link(
-    path: Path, base: Path, pid: int, *, allow_missing: bool
+    path: Path,
+    base: Path,
+    pid: int,
+    *,
+    allow_missing: bool,
+    allow_permission_denied: bool,
 ) -> str:
     try:
         return os.readlink(path)
@@ -264,6 +293,8 @@ def read_proc_link(
             return ""
         raise ProcessScanError(f"incomplete procfs link for pid {pid}: {path}") from exc
     except PermissionError as exc:
+        if allow_permission_denied:
+            return ""
         raise ProcessScanError(
             f"procfs permission/hidepid prevents reading {path.name} for pid {pid}"
         ) from exc
