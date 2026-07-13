@@ -1677,6 +1677,15 @@ impl RibManager {
                     stats.actor_polls,
                 ));
             }
+            #[cfg(test)]
+            RibUpdate::TestQueryUncommittedPolicyTransitionGroups { reply } => {
+                let count = self
+                    .group_ribs
+                    .values()
+                    .filter(|group| group.members.is_empty())
+                    .count();
+                let _ = reply.send(count);
+            }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }
@@ -4111,17 +4120,12 @@ impl RibManager {
                         drop(done);
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+                        failed.discard_uncommitted_transition(&mut self);
                         self.record_policy_transition_poll(kind, started.elapsed());
-                        failed.cleanup_incomplete_destination(&mut self);
-                        let replacements = failed.take_replacements();
-                        let result = replacements.into_iter().try_for_each(|replacement| {
-                            self.replace_peer_export_policy_synchronously(
-                                replacement.peer,
-                                replacement.export_policy,
-                            )
-                        });
                         if let Some(reply) = failed.take_reply() {
-                            let _ = reply.send(result);
+                            let _ = reply.send(Ok(
+                                crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+                            ));
                         }
                     }
                 }

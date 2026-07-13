@@ -2469,9 +2469,9 @@ impl RibManager {
         let _ = self.stage_group_prefixes(gid, &prefixes, memo);
     }
 
-    /// Remove a partially staged, still-unowned destination before the
-    /// authoritative fallback rebuilds it from the complete Loc-RIB.
-    pub(in crate::manager) fn discard_incomplete_policy_transition_group(&mut self, gid: usize) {
+    /// Remove a partially or fully staged, still-unowned destination before
+    /// the caller hands the transition back to the authoritative per-peer path.
+    pub(in crate::manager) fn discard_uncommitted_policy_transition_group(&mut self, gid: usize) {
         if self
             .group_ribs
             .get(&gid)

@@ -326,6 +326,36 @@ async fn query_peer_outbound_state(
     reply_rx.await.unwrap()
 }
 
+async fn apply_authoritative_policy_handoff(
+    tx: &mpsc::Sender<RibUpdate>,
+    peers: &[IpAddr],
+    export_policy: Option<PolicyChain>,
+    outcome: crate::update::ExportPolicyCohortOutcome,
+) {
+    if outcome != crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply {
+        return;
+    }
+    for &peer in peers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer,
+            export_policy: export_policy.clone(),
+            reply,
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.await.unwrap(), Ok(()));
+    }
+}
+
+async fn query_uncommitted_policy_transition_groups(tx: &mpsc::Sender<RibUpdate>) -> usize {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryUncommittedPolicyTransitionGroups { reply })
+        .await
+        .unwrap();
+    response.await.unwrap()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the oracle fixture preserves full session, route, and wire-view setup"
@@ -414,7 +444,16 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        if force_ungrouped {
+            crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+        } else {
+            crate::update::ExportPolicyCohortOutcome::Committed
+        }
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     let mut folded = Vec::new();
     for receiver in &mut receivers {
@@ -930,7 +969,10 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
     let transition_hits = (ROUTE_COUNT as u64, ROUTE_COUNT as u64);
     for &peer in &peers {
         assert_eq!(
@@ -1102,7 +1144,10 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
     for receiver in &mut moving_receivers {
         assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
     }
@@ -1286,7 +1331,10 @@ async fn clean_policy_transition_yields_to_queries_and_fences_mutations() {
         Err(oneshot::error::TryRecvError::Empty)
     ));
 
-    assert_eq!(response.await.unwrap(), Ok(()));
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
     assert!(
         second_response.await.unwrap().is_err(),
         "PeerDown queued first must unregister the peer before the second replacement"
@@ -1475,7 +1523,25 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+    );
+    assert!(
+        receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err())
+    );
+    for &peer in &peers {
+        assert_eq!(query_update_group(&tx, peer).await, "group:0");
+    }
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "a fully staged destination must be removed before the fallback handoff"
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     let accepted = receivers[0].recv().await.unwrap();
     assert_eq!(accepted.announce.len(), 1);
@@ -1544,7 +1610,9 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     })
     .await
     .unwrap();
-    assert_eq!(rollback_response.await.unwrap(), Ok(()));
+    let rollback_outcome = rollback_response.await.unwrap().unwrap();
+    apply_authoritative_policy_handoff(&tx, &peers, Some(old_policy.clone()), rollback_outcome)
+        .await;
     for receiver in &mut receivers {
         let mut rollback_updates = 0;
         while receiver.try_recv().is_ok() {
@@ -1665,7 +1733,12 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
@@ -1762,7 +1835,12 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     let first_new = receivers[0].recv().await.unwrap();
     assert!(first_new.announce[0].attributes.iter().any(|attribute| {
@@ -1877,7 +1955,12 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     })
     .await
     .unwrap();
-    assert_eq!(response.await.unwrap(), Ok(()));
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
         assert!(update.announce[0].attributes.iter().any(|attribute| {

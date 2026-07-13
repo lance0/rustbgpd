@@ -6994,7 +6994,7 @@ async fn export_only_snapshot_uses_one_batched_rib_commit_and_preserves_priors()
                 } => {
                     assert_eq!(replacements.len(), peers.len());
                     batch_count.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
                     single_count.fetch_add(1, Ordering::SeqCst);
@@ -7057,6 +7057,216 @@ async fn export_only_snapshot_uses_one_batched_rib_commit_and_preserves_priors()
     }
     drop(manager);
     rib_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
+    use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 35, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 35, 0, 2)),
+    ];
+    let installs = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .map(|&address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+
+        for (index, expected_peer) in peers.into_iter().enumerate() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected ordinary per-peer RIB command");
+            };
+            assert_eq!(peer, expected_peer);
+            assert!(
+                matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "the next peer must not be queued before peer {index} replies"
+            );
+            let (readiness_reply, readiness_response) = oneshot::channel();
+            readiness_tx
+                .send(PeerManagerReadinessQuery::ListPeers {
+                    reply: readiness_reply,
+                })
+                .await
+                .unwrap();
+            let infos = tokio::time::timeout(
+                rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+                readiness_response,
+            )
+            .await
+            .expect("readiness must remain live while an ordinary RIB reply is held")
+            .unwrap();
+            assert_eq!(infos.len(), peers.len());
+            reply.send(Ok(())).unwrap();
+        }
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+
+    let priors = result.unwrap();
+    assert_eq!(priors.len(), peers.len());
+    assert_eq!(
+        installs.load(Ordering::SeqCst),
+        peers.len(),
+        "the handoff must not hot-apply session policy a second time"
+    );
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the handoff failure regression keeps forward ordering and complete reverse rollback together"
+)]
+async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 36, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 36, 0, 2)),
+    ];
+    let installs = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let rib_task = tokio::spawn(async move {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+
+        let mut order = Vec::new();
+        for expected_peer in peers {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected forward ordinary RIB command");
+            };
+            assert_eq!(peer, expected_peer);
+            order.push(peer);
+            if peer == peers[1] {
+                reply
+                    .send(Err("synthetic second-peer failure".to_string()))
+                    .unwrap();
+            } else {
+                reply.send(Ok(())).unwrap();
+            }
+        }
+        for expected_peer in peers.into_iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected rollback ordinary RIB command");
+            };
+            assert_eq!(peer, expected_peer);
+            order.push(peer);
+            reply.send(Ok(())).unwrap();
+        }
+        order
+    });
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .map(|&address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(next.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("synthetic second-peer failure")
+                && error.contains("already-applied peers restored")
+        }),
+        "a later handoff failure must surface after a complete rollback: {result:?}"
+    );
+    assert_eq!(
+        installs.load(Ordering::SeqCst),
+        peers.len() * 2,
+        "handoff must avoid a second forward session apply and restore every session once"
+    );
+    assert_eq!(
+        rib_task.await.unwrap(),
+        vec![peers[0], peers[1], peers[1], peers[0]]
+    );
+    for peer in peers {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.export_policy.is_none());
+        assert!(!peer_state.pending_export_apply);
+        assert!(!peer_state.pending_refresh);
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -7221,7 +7431,9 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
     assert_eq!(late_infos.len(), peers.len());
     assert_eq!(attempts.load(Ordering::SeqCst), peers.len());
 
-    rib_reply.send(Ok(())).unwrap();
+    rib_reply
+        .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+        .unwrap();
     apply_response.await.unwrap().unwrap();
     mutation_response.await.unwrap();
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
@@ -7337,7 +7549,9 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
     else {
         panic!("expected cohort RIB command after the stalled session resumes");
     };
-    rib_reply.send(Ok(())).unwrap();
+    rib_reply
+        .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+        .unwrap();
     apply_response.await.unwrap().unwrap();
     assert_session_state_query_count(&state_queries, 1).await;
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();

@@ -239,10 +239,11 @@ struct PreparedCleanPolicyTransitionPeer {
 /// ordinary mutation traffic remains queued until `Finalize` completes.
 pub(super) struct PendingCleanPolicyTransition {
     replacements: Vec<PeerExportPolicyReplacement>,
-    reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    reply: Option<
+        tokio::sync::oneshot::Sender<Result<crate::update::ExportPolicyCohortOutcome, String>>,
+    >,
     phase: Option<CleanPolicyTransitionPhase>,
     created_destination: Option<usize>,
-    destination_staged: bool,
 }
 
 /// The deliberately narrow five-phase transition contract approved for the
@@ -314,7 +315,9 @@ pub(super) enum CleanPolicyTransitionPollKind {
 impl PendingCleanPolicyTransition {
     pub(super) fn new(
         replacements: Vec<PeerExportPolicyReplacement>,
-        reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+        reply: Option<
+            tokio::sync::oneshot::Sender<Result<crate::update::ExportPolicyCohortOutcome, String>>,
+        >,
     ) -> Self {
         Self {
             replacements,
@@ -325,21 +328,15 @@ impl PendingCleanPolicyTransition {
                 transition: None,
             }),
             created_destination: None,
-            destination_staged: false,
         }
     }
 
     pub(super) fn take_reply(
         &mut self,
-    ) -> Option<tokio::sync::oneshot::Sender<Result<(), String>>> {
+    ) -> Option<
+        tokio::sync::oneshot::Sender<Result<crate::update::ExportPolicyCohortOutcome, String>>,
+    > {
         self.reply.take()
-    }
-
-    pub(super) fn take_replacements(&mut self) -> Vec<PeerExportPolicyReplacement> {
-        // Drop any prepared writer permits before authoritative fallback tries
-        // to reserve/send through those same bounded channels.
-        self.phase = None;
-        std::mem::take(&mut self.replacements)
     }
 
     pub(super) fn poll_kind(&self) -> CleanPolicyTransitionPollKind {
@@ -355,11 +352,13 @@ impl PendingCleanPolicyTransition {
         }
     }
 
-    pub(super) fn cleanup_incomplete_destination(&self, manager: &mut RibManager) {
-        if !self.destination_staged
-            && let Some(destination) = self.created_destination
-        {
-            manager.discard_incomplete_policy_transition_group(destination);
+    /// Release prepared send permits and remove any destination created for a
+    /// transition that did not commit. This terminal work completes before
+    /// fallback timing is recorded or the caller receives its handoff.
+    pub(super) fn discard_uncommitted_transition(&mut self, manager: &mut RibManager) {
+        self.phase = None;
+        if let Some(destination) = self.created_destination.take() {
+            manager.discard_uncommitted_policy_transition_group(destination);
         }
     }
 }
@@ -1118,7 +1117,6 @@ impl RibManager {
                         pending.replacements[0].export_policy.as_ref(),
                     ) {
                         super::update_groups::PolicyTransitionGroupStart::Maintained => {
-                            pending.destination_staged = true;
                             pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                                 source,
                                 destination,
@@ -1161,7 +1159,6 @@ impl RibManager {
                         memo,
                     });
                 } else {
-                    pending.destination_staged = true;
                     pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                         source,
                         destination,
@@ -1462,7 +1459,7 @@ impl RibManager {
                         .saturating_add(materialized_routes);
                 }
                 if let Some(reply) = pending.take_reply() {
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(crate::update::ExportPolicyCohortOutcome::Committed));
                 }
                 CleanPolicyTransitionAdvance::Committed(pending)
             }
@@ -1491,9 +1488,9 @@ impl RibManager {
                     drop(done);
                     return true;
                 }
-                CleanPolicyTransitionAdvance::Fallback(failed) => {
+                CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+                    failed.discard_uncommitted_transition(self);
                     self.record_policy_transition_poll(kind, started.elapsed());
-                    failed.cleanup_incomplete_destination(self);
                     return false;
                 }
             }
@@ -2171,10 +2168,12 @@ impl RibManager {
     pub(super) fn handle_replace_peer_export_policies(
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::ExportPolicyCohortOutcome, String>,
+        >,
     ) {
         if replacements.is_empty() {
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(crate::update::ExportPolicyCohortOutcome::Committed));
             return;
         }
         if let Some(replacement) = replacements

@@ -635,6 +635,20 @@ pub struct PeerExportPolicyReplacement {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// Result of attempting an optimized export-policy cohort transition.
+///
+/// A handoff is fail-closed: the RIB has removed every uncommitted destination
+/// and has not changed any peer policy, group membership, counter, or wire
+/// state. The caller must then apply the replacements through ordinary
+/// [`RibUpdate::ReplacePeerExportPolicy`] commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportPolicyCohortOutcome {
+    /// The cohort transition committed atomically.
+    Committed,
+    /// The optimized transition was ineligible or became stale before commit.
+    RequiresAuthoritativePerPeerApply,
+}
+
 /// Routes to be sent outbound to a peer.
 #[derive(Default)]
 pub struct OutboundRouteUpdate {
@@ -1547,6 +1561,12 @@ pub enum RibUpdate {
         /// poll in nanoseconds, and actual state-machine poll count.
         reply: oneshot::Sender<(usize, usize, usize, u128, usize)>,
     },
+    /// TEST ONLY: prospective destination groups that have no committed member.
+    #[cfg(test)]
+    TestQueryUncommittedPolicyTransitionGroups {
+        /// Response channel for the number of still-unowned group RIBs.
+        reply: oneshot::Sender<usize>,
+    },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters
     /// accumulate since a chain instance was installed and reset when
@@ -1574,8 +1594,8 @@ pub enum RibUpdate {
     ReplacePeerExportPolicies {
         /// Replacements in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,
-        /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Response channel for failure or the committed/per-peer-handoff outcome.
+        reply: oneshot::Sender<Result<ExportPolicyCohortOutcome, String>>,
     },
     /// Force re-emission of all currently-advertised routes to a peer
     /// without changing policy. Used when an outbound *attribute*
