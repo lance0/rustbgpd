@@ -70,6 +70,62 @@ def strip_descriptions(value):
     return value
 
 
+def stable_config_object_shape(definition_schema: dict, fields: list[str]) -> dict:
+    """Return the compatibility-relevant shape for selected stable fields."""
+    properties = definition_schema.get("properties", {})
+    return {
+        "additionalProperties": strip_descriptions(
+            definition_schema.get("additionalProperties", True)
+        ),
+        "properties": {
+            field: strip_descriptions(properties[field]) for field in fields
+        },
+        "required": sorted(definition_schema.get("required", [])),
+    }
+
+
+def schema_digest(value) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def check_stable_config_object_shape_regressions() -> None:
+    fields = ["address", "remote_asn"]
+    neighbor = {
+        "additionalProperties": False,
+        "properties": {
+            "address": {"description": "ignored prose", "type": "string"},
+            "remote_asn": {"minimum": 0, "type": "integer"},
+            "optional_sibling": {"type": "boolean"},
+        },
+        "required": ["remote_asn", "address"],
+    }
+    baseline = schema_digest(stable_config_object_shape(neighbor, fields))
+
+    required_changed = {**neighbor, "required": ["address"]}
+    if schema_digest(stable_config_object_shape(required_changed, fields)) == baseline:
+        fail("internal config-shape regression did not detect required-field drift")
+
+    unknown_fields_allowed = {**neighbor, "additionalProperties": True}
+    if schema_digest(stable_config_object_shape(unknown_fields_allowed, fields)) == baseline:
+        fail("internal config-shape regression did not detect unknown-field policy drift")
+
+    additive_sibling = {
+        **neighbor,
+        "properties": {
+            **neighbor["properties"],
+            "another_optional_sibling": {"default": False, "type": "boolean"},
+        },
+    }
+    if schema_digest(stable_config_object_shape(additive_sibling, fields)) != baseline:
+        fail("internal config-shape regression rejected an additive optional sibling")
+
+    required_reordered = {**neighbor, "required": ["address", "remote_asn"]}
+    if schema_digest(stable_config_object_shape(required_reordered, fields)) != baseline:
+        fail("internal config-shape regression treated required ordering as semantic")
+
+
 def check_config(inventory: dict, schema: dict) -> None:
     stable_entries = inventory["config"]["stable_fields"]
     definitions: set[str] = set()
@@ -86,14 +142,15 @@ def check_config(inventory: dict, schema: dict) -> None:
             if field not in properties:
                 fail(f"stable config field {definition}.{field} disappeared")
             stable_paths.add(f"{definition}.{field}")
-        pinned_schema = {field: strip_descriptions(properties[field]) for field in fields}
-        digest = hashlib.sha256(
-            json.dumps(pinned_schema, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        pinned_schema = stable_config_object_shape(
+            schema_definition(schema, definition), fields
+        )
+        digest = schema_digest(pinned_schema)
         if digest != entry["schema_sha256"]:
             fail(
-                f"stable config schema changed for {definition} ({digest}); review types, defaults, "
-                "constraints, and compatibility before updating the inventory"
+                f"stable config schema changed for {definition} ({digest}); review selected "
+                "properties, required fields, unknown-field policy, and compatibility before "
+                "updating the inventory"
             )
 
     stable_types = inventory["config"]["stable_types"]
@@ -102,9 +159,7 @@ def check_config(inventory: dict, schema: dict) -> None:
     for entry in stable_types:
         definition = entry["definition"]
         value = strip_descriptions(schema_definition(schema, definition))
-        digest = hashlib.sha256(
-            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = schema_digest(value)
         if digest != entry["schema_sha256"]:
             fail(
                 f"stable config type changed for {definition} ({digest}); review enum values, "
@@ -778,6 +833,7 @@ def check_policy(inventory: dict) -> None:
 
 def main() -> None:
     check_release_line_selftests()
+    check_stable_config_object_shape_regressions()
     inventory = load_json(INVENTORY_PATH)
     if inventory.get("schema_version") != 1 or inventory.get("contract") != "rustbgpd-rs-rr-v1":
         fail("unexpected inventory schema or contract id")

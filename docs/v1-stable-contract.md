@@ -38,8 +38,12 @@ intentional: for example, core `Neighbor` route-server and route-reflector
 fields are stable while `Neighbor.tcp_ao`, `Neighbor.bfd`, and
 `Neighbor.interface` remain outside v1. The same rule applies to RPCs: the
 inventory pins the native gRPC method name, request type, response type, and
-streaming mode. Nested protobuf evolution follows the compatibility rules
-below. The message-graph digest is a review tripwire, not an implicit promotion:
+streaming mode. Each stable config definition's digest covers the selected
+property schemas, its complete (order-independent) required-field set, and its
+unknown-field policy. Unselected optional sibling properties and descriptive
+prose remain outside that digest, so additive optional siblings stay possible.
+Nested protobuf evolution follows the compatibility rules below. The
+message-graph digest is a review tripwire, not an implicit promotion:
 experimental fields such as Paths-Limit are explicitly excluded in the
 inventory and may evolve under their experimental contract after review. The
 new update-group impact projection and alpha EVPN/BFD/dataplane event payloads
@@ -70,8 +74,9 @@ and series.
   v1. Additive optional fields and new RPCs are allowed. Removed field numbers
   and names stay reserved.
 - **Config:** a stable field may gain optional siblings with documented safe
-  defaults. Removing, renaming, changing the type, or changing the effective
-  default of a stable field is breaking.
+  defaults. Removing, renaming, changing the type, changing the effective
+  default, changing required-field membership, or changing whether unknown
+  fields are accepted is breaking.
 - **rpol:** grammar additions must keep existing v1 programs parseable and
   preserve the golden decision corpus. A change to an existing program's
   accept/reject result or emitted modifications is breaking even if it still

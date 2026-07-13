@@ -127,6 +127,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured window. Expired markers, or markers without a positive effective
   restart window, produce an immediate cold start.
 
+- **The v1 config compatibility gate now pins stable object shape.** Stable
+  definition digests cover the complete required-field set and unknown-field
+  policy in addition to selected property schemas, while continuing to allow
+  unselected optional sibling fields and descriptive-prose changes.
+
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
   encoder and negotiated message ceiling. The RIB probes the final one-route

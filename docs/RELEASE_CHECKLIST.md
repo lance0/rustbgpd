@@ -12,9 +12,9 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 
 - [ ] `cargo fmt --check`
 - [ ] `python3 scripts/check-clippy-reasons.py`
-- [ ] `python3 scripts/check-v1-stable-surface.py` — stable config fields,
-      native gRPC signatures/messages, CLI paths/JSON contracts, role
-      classifications, compatibility floor, and the consecutive-release
+- [ ] `python3 scripts/check-v1-stable-surface.py` — stable config fields and
+      object shape, native gRPC signatures/messages, CLI paths/JSON contracts,
+      role classifications, compatibility floor, and the consecutive-release
       upgrade receipt still match their machine sources.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
@@ -69,8 +69,10 @@ The project remains public alpha outside the explicit
 - [ ] Stable protobuf changes are additive; removed numbers/names remain
       reserved. Any changed stable service-signature digest has an explicit
       compatibility review.
-- [ ] Stable config changes preserve names, types, and effective defaults, or
-      carry the documented deprecation and migration window.
+- [ ] Stable config changes preserve names, types, effective defaults,
+      required-field membership, and unknown-field handling, or carry the
+      documented deprecation and migration window. Additive optional siblings
+      remain permitted.
 - [ ] rpol golden decision compatibility, stable metric names/types/label
       meanings, and stable event/JSON field meanings remain intact.
 - [ ] The transaction path remains canonical for live compound mutation.
