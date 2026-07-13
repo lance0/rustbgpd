@@ -2,7 +2,8 @@
 # Adversarial probes for the retained event-history producer host-isolation helpers.
 set -euo pipefail
 
-export EVENT_HISTORY_PERF_LOAD_ONE_MAX=999
+# Prove the inherited environment cannot relax the fixed receipt noise gate.
+export EVENT_HISTORY_PERF_REQUIRED_LOAD_ONE_MAX=999
 # shellcheck source=docs/perf/event-history-host-fence.sh
 source "$(dirname "$0")/event-history-host-fence.sh"
 

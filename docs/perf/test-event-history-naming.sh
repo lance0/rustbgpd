@@ -3,6 +3,13 @@
 # private issue tracker that operators and contributors cannot inspect.
 set -euo pipefail
 
+for required_command in git grep rg; do
+    command -v "$required_command" >/dev/null 2>&1 || {
+        printf 'required command not found: %s\n' "$required_command" >&2
+        exit 1
+    }
+done
+
 ROOT=$(git rev-parse --show-toplevel)
 mapfile -t files < <(
     git -C "$ROOT" ls-files -- \
