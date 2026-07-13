@@ -6,12 +6,15 @@ rustbgpd is configured via a single TOML file, passed as the first argument to t
 rustbgpd /etc/rustbgpd/config.toml
 ```
 
-The config file defines the initial boot state. At runtime, the gRPC API is the
-source of truth -- peers can be added, removed, enabled, and disabled dynamically
-without restarting the daemon. Neighbor add/delete mutations made via gRPC are
-persisted back to the config file. Sending `SIGHUP` to the daemon triggers a
-config reload with per-peer reconciliation. Starting with zero `[[neighbors]]` is valid when
-all peers are managed via gRPC.
+The config file defines the initial boot state. The canonical live compound
+mutation path is the gRPC config transaction lifecycle (plan, snapshot-fenced
+apply, and optional commit-confirmed confirm/abort). Focused RPCs can add,
+remove, enable, and disable peers without restarting the daemon and persist
+supported mutations back to the config file. `SIGHUP` is the file-driven
+compatibility/reconcile path; it follows the reload matrix and is not an atomic
+compound-mutation API. Starting with zero `[[neighbors]]` is valid when all
+peers are managed via gRPC. The exact compatibility boundary is the narrow
+[v1 RS/RR inventory](v1-stable-contract.md), not the full schema.
 
 > **Reload behavior.** For a per-field table of which config keys hot-apply,
 > which are restart-required, and which are rejected at parse time, see

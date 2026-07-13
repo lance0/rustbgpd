@@ -812,6 +812,83 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::time::Instant;
 
+    fn json_type(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+
+    fn assert_json_shape(value: &serde_json::Value, shape: &serde_json::Value) {
+        let object = value.as_object().expect("contract value is an object");
+        for (key, expected) in shape["required_json_types"].as_object().unwrap() {
+            let field = object
+                .get(key)
+                .unwrap_or_else(|| panic!("required rbgp-ribdiff/1 field {key:?} is absent"));
+            let allowed: Vec<&str> = match expected {
+                serde_json::Value::String(value) => vec![value.as_str()],
+                serde_json::Value::Array(values) => {
+                    values.iter().map(|value| value.as_str().unwrap()).collect()
+                }
+                _ => panic!("invalid rbgp-ribdiff/1 type floor for {key:?}"),
+            };
+            assert!(
+                allowed.contains(&json_type(field)),
+                "rbgp-ribdiff/1 field {key:?} changed JSON type"
+            );
+        }
+        for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
+            if let Some(field) = object.get(key) {
+                let allowed: Vec<&str> = match expected {
+                    serde_json::Value::String(value) => vec![value.as_str()],
+                    serde_json::Value::Array(values) => {
+                        values.iter().map(|value| value.as_str().unwrap()).collect()
+                    }
+                    _ => panic!("invalid rbgp-ribdiff/1 type floor for {key:?}"),
+                };
+                assert!(allowed.contains(&json_type(field)));
+            }
+        }
+    }
+
+    fn assert_ribdiff_inventory_contract(value: &serde_json::Value) {
+        let inventory_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/v1-stable-surface.json"
+        );
+        let inventory: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
+        let contract = inventory["cli"]["versioned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == "rbgp-ribdiff/1")
+            .expect("rbgp-ribdiff/1 contract is inventoried");
+        assert_json_shape(value, contract);
+        for nested in contract["nested_json_contracts"].as_array().unwrap() {
+            match nested["path"].as_str().unwrap() {
+                "entries[]" => value["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .for_each(|entry| assert_json_shape(entry, nested)),
+                "incumbent" => assert_json_shape(&value["incumbent"], nested),
+                "normalization" => assert_json_shape(&value["normalization"], nested),
+                "rustbgpd" => assert_json_shape(&value["rustbgpd"], nested),
+                "summaries[]" => value["summaries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .for_each(|summary| assert_json_shape(summary, nested)),
+                path => panic!("unhandled rbgp-ribdiff/1 nested contract path {path}"),
+            }
+        }
+    }
+
     fn meta(generation: u64) -> SnapshotMeta {
         SnapshotMeta {
             source: "test".to_string(),
@@ -1313,6 +1390,8 @@ mod tests {
             )],
         );
         let report = serde_json::to_value(diff(&incumbent, &rustbgpd)).unwrap();
+
+        assert_ribdiff_inventory_contract(&report);
 
         assert_eq!(report["schema"], "rbgp-ribdiff/1");
         assert_eq!(report["normalization"]["version"], "v1");

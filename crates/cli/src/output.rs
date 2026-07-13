@@ -887,6 +887,77 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 mod tests {
     use super::*;
 
+    fn json_type(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    fn assert_json_shape(value: &Value, shape: &Value, contract_id: &str) {
+        let object = value.as_object().expect("representative JSON is an object");
+        for (key, expected) in shape["required_json_types"].as_object().unwrap() {
+            let field = object
+                .get(key)
+                .unwrap_or_else(|| panic!("required {contract_id} field {key:?} is absent"));
+            assert_json_type(field, expected, contract_id, key);
+        }
+        for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
+            if let Some(field) = object.get(key) {
+                assert_json_type(field, expected, contract_id, key);
+            }
+        }
+    }
+
+    fn assert_json_type(value: &Value, expected: &Value, contract_id: &str, key: &str) {
+        let allowed: Vec<&str> = match expected {
+            Value::String(value) => vec![value.as_str()],
+            Value::Array(values) => values.iter().map(|value| value.as_str().unwrap()).collect(),
+            _ => panic!("invalid {contract_id} type floor for {key:?}"),
+        };
+        assert!(
+            allowed.contains(&json_type(value)),
+            "{contract_id} field {key:?} changed JSON type: expected {allowed:?}, got {}",
+            json_type(value)
+        );
+    }
+
+    fn assert_inventory_json_contract(value: &Value, contract_id: &str) {
+        let inventory_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/v1-stable-surface.json"
+        );
+        let inventory: Value =
+            serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
+        let contract = inventory["cli"]["test_pinned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == contract_id)
+            .unwrap_or_else(|| panic!("missing JSON contract {contract_id}"));
+        assert_json_shape(value, contract, contract_id);
+        for nested in contract["nested_json_contracts"].as_array().unwrap() {
+            match nested["path"].as_str().unwrap() {
+                "selection_deferral[]" => {
+                    for row in value["selection_deferral"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
+                "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
+                "tcp_ao.keys[]" => {
+                    for key in value["tcp_ao"]["keys"].as_array().unwrap() {
+                        assert_json_shape(key, nested, contract_id);
+                    }
+                }
+                path => panic!("unhandled {contract_id} nested contract path {path}"),
+            }
+        }
+    }
+
     #[test]
     fn paths_limit_json_preserves_raw_and_adds_normalized_limit() {
         let row = JsonPathsLimit {
@@ -1067,10 +1138,10 @@ mod tests {
     fn test_json_neighbor_detail_serializes_dynamic_peer_fields() {
         let detail = JsonNeighborDetail {
             address: "10.0.0.2".to_string(),
-            interface: String::new(),
+            interface: "eth0".to_string(),
             remote_asn: 65002,
             state: "Established".to_string(),
-            stale: false,
+            stale: true,
             uptime_seconds: 42,
             prefixes_received: 1,
             prefixes_sent: 2,
@@ -1104,7 +1175,7 @@ mod tests {
                     is_rnext: true,
                     preferred: true,
                     deprecated: false,
-                    vrf_ifindex: None,
+                    vrf_ifindex: Some(10),
                     packets_good: 12,
                     packets_bad: 0,
                 }],
@@ -1116,7 +1187,7 @@ mod tests {
             peer_group: "rs-clients".to_string(),
             route_reflector_client: false,
             route_server_client: true,
-            per_client_best: false,
+            per_client_best: true,
             distribution_mode: "add-path".to_string(),
             role: "rs".to_string(),
             strict_role: true,
@@ -1130,7 +1201,15 @@ mod tests {
             add_path_receive: true,
             add_path_send: true,
             add_path_send_max: 4,
-            paths_limits: Vec::new(),
+            paths_limits: vec![JsonPathsLimit {
+                family: "ipv4_unicast".to_string(),
+                configured_receive_max: 4,
+                advertised_receive_max: 4,
+                received_receive_max: 4,
+                effective_send_max: 4,
+                effective_send_limit: Some(4),
+                effective_send_active: true,
+            }],
             update_group: "group:0".to_string(),
             selection_deferral: vec![JsonSelectionDeferralFamily {
                 afi: 1,
@@ -1140,13 +1219,18 @@ mod tests {
                 waiter_session_id: Some(42),
                 blocking_waiters: 2,
                 remaining_millis: 1_500,
-                release_reason: String::new(),
+                release_reason: "all_eor".to_string(),
             }],
         };
 
         let value: Value =
             serde_json::from_str(&serde_json::to_string(&detail).expect("JSON serialize"))
                 .expect("JSON parse");
+
+        // The inventory is the required-key/type floor. This assertion
+        // deliberately allows additive fields while rejecting removal or
+        // type drift of every currently promised field.
+        assert_inventory_json_contract(&value, "neighbor-detail-v1");
 
         assert_eq!(value["peer_group"], "rs-clients");
         assert_eq!(value["route_server_client"], true);

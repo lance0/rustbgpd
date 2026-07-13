@@ -1,0 +1,146 @@
+# IXP route server configuration
+#
+# rustbgpd as an IX route server with two members. Every member gets:
+# - transparent route-server mode (preserve original NEXT_HOP, no AS prepend)
+# - local BGP role "route_server" (RFC 9234: OTC attached on egress,
+#   role capability negotiated when the member also sets its role)
+# - dual-stack (IPv4 + IPv6 unicast)
+# - RPKI origin validation (drop invalid, prefer valid) and import
+#   hygiene (reject AS_SET, reject ASPA-invalid — see hygiene.rpol)
+#
+# Path-hiding mitigation (RFC 7947 §2.3.2), both flavors:
+# - member-alpha negotiates Add-Path send: it sees all candidate paths
+#   and runs its own selection (the preferred mitigation);
+# - member-beta cannot do Add-Path, so it opts into per_client_best:
+#   when its export policy denies the best path, the route server
+#   advertises the best *permitted* candidate instead of hiding the
+#   prefix (the BIRD-`secondary` equivalent).
+#
+# Add more [[neighbors]] blocks for additional IXP members, or manage
+# them dynamically via gRPC at runtime.
+
+[global]
+asn = 65500
+router_id = "198.51.100.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# For remote management, prefer an mTLS proxy (see examples/envoy-mtls/).
+# Uncomment below only for trusted management networks:
+# [global.telemetry.grpc_tcp]
+# address = "127.0.0.1:50051"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+# Audit principal for this local socket (UDS access is gated by file perms);
+# mapped to a role in [security.grpc.roles] below.
+principal = "operator"
+
+[security.grpc]
+# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
+# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+# --- RPKI origin validation ---
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"       # Routinator, rpki-client, etc.
+
+# --- Named policy definitions ---
+
+[policy.definitions.reject-rpki-invalid]
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
+[policy.definitions.reject-bogon-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "0.0.0.0/0"
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "10.0.0.0/8"
+le = 32
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "172.16.0.0/12"
+le = 32
+action = "deny"
+[[policy.definitions.reject-bogon-prefixes.statements]]
+prefix = "192.168.0.0/16"
+le = 32
+action = "deny"
+
+[policy.definitions.reject-long-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "::/0"
+ge = 49
+le = 128
+action = "deny"
+
+[policy.definitions.prefer-rpki-valid]
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "valid"
+action = "permit"
+set_local_pref = 200
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "not_found"
+action = "permit"
+set_local_pref = 100
+
+[policy]
+# ixp-hygiene (reject AS_SET, reject ASPA-invalid) lives in hygiene.rpol;
+# rpol and TOML policies share one namespace and compose in one chain.
+rpol_files = ["hygiene.rpol"]
+import_chain = [
+    "reject-rpki-invalid",
+    "ixp-hygiene",
+    "reject-bogon-prefixes",
+    "reject-long-prefixes",
+    "prefer-rpki-valid",
+]
+
+# --- IXP member peers ---
+
+# Add-Path-capable member: sees all candidate paths (preferred
+# path-hiding mitigation) and stays update-group-shareable.
+[[neighbors]]
+address = "198.51.100.2"
+remote_asn = 64501
+description = "member-alpha"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+role = "route_server"
+max_prefixes = 50000
+
+[neighbors.add_path]
+send = true
+send_max = 8
+
+# Member without Add-Path: per_client_best advertises the best
+# export-policy-permitted candidate when the overall best is denied
+# (RFC 7947 §2.3.2 per-client best-path). Requires route_server_client.
+[[neighbors]]
+address = "198.51.100.3"
+remote_asn = 64502
+description = "member-beta"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+per_client_best = true
+role = "route_server"
+max_prefixes = 50000

@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Narrow v1 route-server / route-reflector compatibility contract.** A
+  machine-checked inventory now pins only the proven IPv4/IPv6 unicast RS/RR
+  config fields, native gRPC signatures and messages, CLI/JSON contracts, and
+  scoped RR-only BGP-LS, VPN, labeled-unicast, and RTC surfaces. EVPN,
+  dataplane, experimental, and otherwise unlisted surfaces remain outside v1.
+  Compatibility and deprecation windows, the canonical transaction mutation
+  path, SIGHUP reconcile limits, a release gate, and a consecutive v0.50.0 to
+  v0.51.0 route-server upgrade receipt are explicit and CI-pinned. (LAN-355)
+
 - **Neighbor state reports live effective transport and distribution truth.**
   TCP-AO health is refreshed read-only from the connected socket for every
   state query, clears rather than serving stale data when inspection fails,

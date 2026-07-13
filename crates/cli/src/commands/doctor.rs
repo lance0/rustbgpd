@@ -948,6 +948,78 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
 
+    fn json_type(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+
+    fn assert_json_type(
+        value: &serde_json::Value,
+        expected: &serde_json::Value,
+        contract_id: &str,
+        key: &str,
+    ) {
+        let allowed: Vec<&str> = match expected {
+            serde_json::Value::String(value) => vec![value.as_str()],
+            serde_json::Value::Array(values) => {
+                values.iter().map(|value| value.as_str().unwrap()).collect()
+            }
+            _ => panic!("invalid {contract_id} type floor for {key:?}"),
+        };
+        assert!(
+            allowed.contains(&json_type(value)),
+            "{contract_id} field {key:?} changed JSON type: expected {allowed:?}, got {}",
+            json_type(value)
+        );
+    }
+
+    fn assert_json_shape(value: &serde_json::Value, shape: &serde_json::Value, contract_id: &str) {
+        let object = value.as_object().expect("representative JSON is an object");
+        for (key, expected) in shape["required_json_types"].as_object().unwrap() {
+            let field = object
+                .get(key)
+                .unwrap_or_else(|| panic!("required {contract_id} field {key:?} is absent"));
+            assert_json_type(field, expected, contract_id, key);
+        }
+        for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
+            if let Some(field) = object.get(key) {
+                assert_json_type(field, expected, contract_id, key);
+            }
+        }
+    }
+
+    fn assert_inventory_json_contract(value: &serde_json::Value, contract_id: &str) {
+        let inventory_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/v1-stable-surface.json"
+        );
+        let inventory: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
+        let contract = inventory["cli"]["test_pinned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == contract_id)
+            .unwrap_or_else(|| panic!("missing JSON contract {contract_id}"));
+        assert_json_shape(value, contract, contract_id);
+        for nested in contract["nested_json_contracts"].as_array().unwrap() {
+            match nested["path"].as_str().unwrap() {
+                "checks[]" => {
+                    for check in value["checks"].as_array().unwrap() {
+                        assert_json_shape(check, nested, contract_id);
+                    }
+                }
+                path => panic!("unhandled {contract_id} nested contract path {path}"),
+            }
+        }
+    }
+
     // ---- pure-logic checks -------------------------------------------
 
     #[test]
@@ -1218,6 +1290,9 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
         let manifest: serde_json::Value =
             serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        // Pin the complete required manifest floor while allowing future
+        // bundle versions to add fields without breaking v2 consumers.
+        assert_inventory_json_contract(&manifest, "support-bundle-manifest/2");
         assert_eq!(manifest["format"], 2);
         assert_eq!(manifest["cli_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["daemon_version"], "0.0.0-mock");
@@ -1400,6 +1475,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         find(&files, "system/environment.json");
         let manifest: serde_json::Value =
             serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert_inventory_json_contract(&manifest, "support-bundle-manifest/2");
         assert_eq!(manifest["daemon_version"], serde_json::Value::Null);
         assert_eq!(
             manifest["sections"]["config"],
