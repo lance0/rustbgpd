@@ -115,6 +115,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The v1 stable-surface release gate now supports patch and major releases.**
+  Upgrade exercises remain a contiguous, fail-closed chain of adjacent release
+  lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
+  separately pins the exact workspace patch version.
+
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
   encoder and negotiated message ceiling. The RIB probes the final one-route

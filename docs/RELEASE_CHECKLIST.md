@@ -77,11 +77,13 @@ The project remains public alpha outside the explicit
       SIGHUP wording remains file-driven reconcile with reload-matrix behavior,
       not an atomic compound-mutation guarantee.
 - [ ] At least one consecutive-release upgrade fixture is accepted by the new
-      release. The latest receipt must end at the workspace version and start
-      at the immediately previous minor; its immutable files must still match
-      their source git tag. The current workspace target is proven by its
-      parser test before tagging; both tags are required once an exercise is
-      historical. Add a new receipt for a real migration; do not overwrite
+      release. The latest receipt must end at the workspace release-line anchor
+      (`vMAJOR.MINOR.0`), while `baseline_release` must match the exact workspace
+      version. Receipts form one contiguous chain of adjacent minor release
+      lines, with an explicit transition into a new major; immutable files must
+      still match their source git tag. The current workspace target is proven
+      by its parser test before tagging; both tags are required once an exercise
+      is historical. Add a new receipt for a real migration; do not overwrite
       older evidence.
 - [ ] Inventoried CLI commands preserve their path and command name. Flags,
       positional arguments, defaults, exit behavior, and human output are not
