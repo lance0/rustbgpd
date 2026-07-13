@@ -31,6 +31,11 @@ stack leaf first; the first owning-function marker wins:
 
 | Phase | Owning markers |
 |---|---|
+| exact encode | `probe_exact_export_announcements` |
+| ceiling reuse | `reuse_grouped_exact_export_ceiling` |
+| overlay reconciliation | `reconcile_exact_export_overlay` |
+| group-prior materialization | `materialize_clean_group_prior` |
+| channel enqueue | `enqueue_outbound_update` |
 | group-table commit | `GroupRibOut::apply_delta`, `GroupRibOut::apply_vpn_delta` |
 | member-emit | `emit_group_deltas_for_member`, `emit_vpn_group_deltas_for_member` |
 | event-publish | `publish_route_event`, `publish_best_change_events` |

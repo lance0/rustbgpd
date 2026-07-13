@@ -1,6 +1,7 @@
 # Exact-export fanout optimization receipt — 2026-07
 
-Status: **PASS**. This receipt captures two pinned campaigns for LAN-361. The
+Status: **PASS**. This receipt captures three pinned campaigns for LAN-361 and
+LAN-395. The
 first made the fanout benchmark exercise the authoritative per-session exact
 export probe and then reused the live writer's complete prepared-attribute
 memo key during an ordered precommit batch. The second measured the regression
@@ -8,10 +9,12 @@ against the old permissive benchmark and recovered most of that excess by
 sharing successful exact-probe lengths across provably wire-equivalent members
 of one update group.
 
-The extracted Criterion data is checked in as
+The extracted Criterion data for the first two campaigns is checked in as
 [`artifacts/exact-export-fanout-2026-07.csv`](artifacts/exact-export-fanout-2026-07.csv).
 Negative change values mean the optimized revision is faster than that
-campaign's baseline.
+campaign's baseline. Campaign 3 retains its complete sealed rrharness receipt
+and sanitized Criterion matrix under
+[`artifacts/grouped-exact-precommit-2026-07/`](artifacts/grouped-exact-precommit-2026-07/).
 
 ## Campaign 1: ordered prepared-attribute memo
 
@@ -217,3 +220,136 @@ negotiated maximum and generation:
 The optimized benchmark therefore measures one real exact encoding per shared
 route and compatible cohort, plus a target-owned ceiling/generation recheck per
 member. It must not be described as performing a full exact encode per peer.
+
+## Campaign 3: grouped exact-precommit fast path
+
+Campaign 2 removed redundant exact encoding across compatible update-group
+members, but the common all-success path still rebuilt every candidate key,
+walked the group's advertised-state delta for every peer, and allocated a
+per-peer prior set that was used only when a probe failed. LAN-395 defers that
+work until the rejection fallback actually needs it and keeps the clean
+grouped path keyless.
+
+### Compared revisions
+
+| Role | Commit | Meaning |
+|------|--------|---------|
+| Baseline | `b2ec55f21364978f26662b1ec35fd47ddcfce9a6` | Current exact-export grouped path after campaign 2; eagerly materializes candidate keys and prior advertised state per member |
+| Optimized | `ea579bea4ad6602dc719a1664441f04330c5ef64` | Defers keys and group-prior materialization until a rejection fallback; preserves the shared exact-length cohort cache |
+| Tooling | `e6c6ea75819869cb2cd188711891459f8991d51d` | Fail-closed rrharness comparator and strict Criterion receipt validator |
+| Pin | `deb52f7b92f7f633714573a86f0eaeb22bb94bad` | Exact refs, normalized production diff, and reviewed tooling pin |
+
+The normalized production diff SHA-256 is
+`363ca576015ced26223b72b109acede0b88c1859db4cffb5c702d3d95ba236c4`.
+
+### Environment and method
+
+| Field | Value |
+|-------|-------|
+| Host | AMD Ryzen Threadripper 7970X, 32 cores / 64 threads |
+| Kernel | Linux 6.17.0-35-generic x86_64 |
+| rustc / Cargo | 1.97.0 (2026-07-07) |
+| Criterion | 0.8 |
+| Build | Criterion: workspace release (`lto=true`, `codegen-units=1`); rrharness: standalone release (`debug=1`) built with `--locked --jobs 1` |
+| Pinning | `taskset -c 5`; CPU 5 governor observed as `performance` |
+| Isolation | shared host lock; every rrharness cell required load below 2.0 and zero competing build/performance processes |
+| Ordering | two repetitions, counterbalanced base-first then head-first |
+
+Two complementary measurements are retained:
+
+- the manager-level rrharness runs 16 fresh processes: flood at 256 and 1,000
+  peers over 100,000 prefixes, and churn at 256×256 and 1,000×1,000 peers over
+  3,000 prefixes, for 20 seconds per cell;
+- Criterion runs the 64-route first-advertise `distribute_fanout` matrix at 1,
+  8, 64, and 256 peers, with and without export policy, in two alternating
+  attempts. The strict gate requires every 64/256-peer conservative 95% CI
+  upper bound below zero and a one-peer mean regression below 5%.
+
+The rrharness run started at `2026-07-13T09:46:41Z` and sealed at
+`09:57:49Z`. All 16 preflights passed with one-minute load from 1.21 to 1.72,
+the `performance` governor, and no competing process. The Criterion campaign
+started immediately afterward from the same exact pin.
+
+The pin commit must be the invoking checkout; both drivers reject dirty or
+different source state:
+
+```bash
+git switch --detach deb52f7b92f7f633714573a86f0eaeb22bb94bad
+
+bench/scale/compare-rrharness.sh \
+  --base b2ec55f21364978f26662b1ec35fd47ddcfce9a6 \
+  --head ea579bea4ad6602dc719a1664441f04330c5ef64 \
+  --core 5 \
+  --output-dir target/rrharness-compare/reproduction
+
+bench/compare-criterion.sh \
+  --base b2ec55f21364978f26662b1ec35fd47ddcfce9a6 \
+  --head ea579bea4ad6602dc719a1664441f04330c5ef64 \
+  --core 5 \
+  --package rustbgpd-transport \
+  --bench fanout \
+  --features bench-internals \
+  --filter distribute_fanout \
+  --attempts 2 \
+  --require-performance \
+  --lan395-gate-out target/lan395-criterion-receipt
+```
+
+### Results
+
+The rrharness values are head throughput improvement over baseline. Both
+counterbalanced repetitions pass their shape-specific acceptance gates.
+
+| Shape | Repetition 1 | Repetition 2 | Gate |
+|-------|-------------:|-------------:|------|
+| flood / 256 peers / 100k prefixes | +197.04% | +199.53% | no repetition worse than -5% |
+| flood / 1,000 peers / 100k prefixes | +279.87% | +281.84% | every repetition at least +15% |
+| churn / 256×256 peers / 3k prefixes | +480.28% | +491.15% | every repetition at least +15% |
+| churn / 1,000×1,000 peers / 3k prefixes | +638.60% | +648.86% | every repetition at least +15% |
+
+The Criterion columns below are the median across the two attempts; change is
+the mean of the two paired median deltas. Every 64/256-peer per-attempt
+conservative 95% CI upper bound is below zero.
+
+| Shape | Baseline median | Optimized median | Mean change |
+|-------|----------------:|-----------------:|------------:|
+| no policy / 1 peer | 42.11 µs | 38.84 µs | -7.76% |
+| no policy / 8 peers | 103.96 µs | 79.11 µs | -23.90% |
+| no policy / 64 peers | 573.75 µs | 377.92 µs | -34.13% |
+| no policy / 256 peers | 2.19 ms | 1.39 ms | -36.27% |
+| policy / 1 peer | 46.48 µs | 42.83 µs | -7.85% |
+| policy / 8 peers | 111.87 µs | 86.48 µs | -22.69% |
+| policy / 64 peers | 615.84 µs | 416.22 µs | -32.41% |
+| policy / 256 peers | 2.33 ms | 1.55 ms | -33.46% |
+
+### Correctness and evidence fence
+
+The optimization changes no BGP wire form and does not weaken exact export:
+
+- every grouped member still receives a target-owned ceiling and generation
+  recheck of a successful exact encoded length;
+- the keyless path is available only to an ordinary clean grouped member when
+  every probe succeeds and the peer has no rejection overlay;
+- any rejection, existing overlay, resync, regroup, VPN or other non-unicast
+  payload, mixed-family envelope, malformed batch, or non-shared payload takes
+  the ordinary fallback;
+- fallback materializes the staged prior at most once, maintains the sparse
+  rejection overlay, and emits any withdrawal owed for a previously advertised
+  route; and
+- focused regressions pin shared payload/snapshot fencing, cached failure with
+  an owed withdrawal, and overlay fallback retaining an unrelated family.
+
+The retained artifacts fail closed too. The rrharness archive includes its
+reviewed source snapshot, production patch/hash, exact refs and binary hashes,
+raw rows, folded profiles and reclassification hashes, preflights, execution
+order, final manifest, checksum envelope, and `COMPLETED` marker. The Criterion
+receipt retains exactly five whitelisted files with 16 rows and 32 reconciled
+input hashes. Retained Python bytecode is disabled; the final source inventory
+is NUL-safe and exact; ignored and binary files are scanned for private values
+after the final parser reconciliation; scanner errors reject the seal.
+
+Two earlier measurement attempts are not publication evidence. The first was
+never sealed after a generic privacy rule matched reviewed source vocabulary.
+The second passed and sealed, but independent review found an ignored Python
+bytecode file containing a private path. Both were rejected; only the clean
+third rrharness run and matching final-pin Criterion run are retained.

@@ -16,8 +16,9 @@ build).
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation and memory attribution correction: 2026-06-02;
 structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
-distribution fanout A/B and update-group recovery: 2026-07-12; revision-pinned
-production-exact manager CPU and full-daemon DHAT rebaseline: 2026-07-13.
+distribution fanout A/B, update-group recovery, and grouped exact-precommit
+fast path: 2026-07-13; revision-pinned production-exact manager CPU and
+full-daemon DHAT rebaseline: 2026-07-13.
 
 | Field | Value |
 |-------|-------|
@@ -475,8 +476,34 @@ cardinality-correct all-success batches are retained. Default-refusing
 snapshots, non-shared/resync/exception payloads, and mixed-family envelopes
 remain on the ordinary exact-probe path.
 
+A third pinned campaign removes the remaining eager per-member bookkeeping on
+the common clean grouped path. Candidate keys and the group's prior advertised
+set are now materialized only when a failed probe or existing rejection
+overlay needs reconciliation:
+
+| Peers | No policy baseline → optimized | Change | Policy baseline → optimized | Change |
+|-------|--------------------------------|--------|-----------------------------|--------|
+| 1 | 42.11 → 38.84 µs | -7.76% | 46.48 → 42.83 µs | -7.85% |
+| 8 | 103.96 → 79.11 µs | -23.90% | 111.87 → 86.48 µs | -22.69% |
+| 64 | 573.75 → 377.92 µs | -34.13% | 615.84 → 416.22 µs | -32.41% |
+| 256 | 2.19 → 1.39 ms | -36.27% | 2.33 → 1.55 ms | -33.46% |
+
+The complementary manager-level rrharness reproduced the scaling result in
+both counterbalanced repetitions: +197%..+200% for 256-peer flood,
++280%..+282% for 1,000-peer flood, +480%..+491% for 256×256 churn, and
++639%..+649% for 1,000×1,000 churn. All 16 cells passed the load/governor/no-
+competitor preflight. The strict Criterion receipt has 16 rows and 32 exact
+input hashes; every required 64/256-peer conservative 95% CI stayed below zero,
+and both one-peer shapes improved rather than consuming the 5% regression
+allowance.
+
+This fast path does not skip per-target ceiling/generation checks. It is used
+only when every probe succeeds for a clean grouped member with no rejection
+overlay. Failures, overlays, resync/regroup, VPN or mixed-family envelopes, and
+non-shared payloads retain the ordinary exact reconciliation path.
+
 The full environments, commands, commit IDs, confidence intervals, correctness
-fences, and checked-in CSV for both campaigns are in the
+fences, and checked-in artifacts for all three campaigns are in the
 [`exact-export fanout receipt`](perf/exact-export-fanout-2026-07.md).
 
 The previous 2026-06 numbers used a permissive benchmark stub and did not time

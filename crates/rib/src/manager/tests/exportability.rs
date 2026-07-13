@@ -350,6 +350,26 @@ fn commit_shared_unicast_with_cache(
     group_prior: HashSet<ExactExportKey>,
     cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
 ) -> bool {
+    commit_shared_unicast_with_precommit(
+        manager,
+        peer,
+        announce,
+        next_hop_override,
+        group_prior,
+        cache,
+        None,
+    )
+}
+
+fn commit_shared_unicast_with_precommit(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    announce: Arc<[Route]>,
+    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+    group_prior: HashSet<ExactExportKey>,
+    cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
+    lazy_group_prior: Option<crate::manager::distribution::LazyCleanGroupPrior<'_>>,
+) -> bool {
     manager.try_send_and_commit_outbound_update_with_group_prior(
         peer,
         next_hop_override,
@@ -370,7 +390,11 @@ fn commit_shared_unicast_with_cache(
         Vec::new(),
         Vec::new(),
         group_prior,
-        Some((7, cache)),
+        Some(crate::manager::distribution::SharedUnicastPrecommit {
+            group_id: 7,
+            probe_cache: cache,
+            lazy_group_prior,
+        }),
     )
 }
 
@@ -883,6 +907,156 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
         0,
         "the limited target must reject by rechecking the cached encoded length"
     );
+}
+
+#[test]
+fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() {
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+    let encoder = ReusableExactExportEncoder::new(4_242, 17);
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, target, encoder);
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 42),
+    );
+    let deltas = [crate::manager::update_groups::GroupDelta {
+        prefix: route.prefix,
+        path_id: route.path_id,
+        new: Some((route.clone(), None)),
+        old_source: Some(source),
+        policy_label: None,
+    }];
+    let announce: Arc<[Route]> = vec![route].into();
+    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+
+    assert!(commit_shared_unicast_with_precommit(
+        &mut manager,
+        target,
+        Arc::clone(&announce),
+        Arc::clone(&next_hop_override),
+        HashSet::new(),
+        &mut cache,
+        Some(crate::manager::distribution::LazyCleanGroupPrior {
+            peer: target,
+            deltas: &deltas,
+        }),
+    ));
+    let update = rx.try_recv().unwrap();
+    assert!(Arc::ptr_eq(&update.announce, &announce));
+    assert!(Arc::ptr_eq(&update.next_hop_override, &next_hop_override));
+    let snapshot = update.exact_export_snapshot.unwrap();
+    assert_eq!(snapshot.owner_id(), 4_242);
+    assert_eq!(snapshot.generation(), 1);
+    assert!(!manager.peer_unexportable.contains_key(&target));
+}
+
+#[test]
+fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
+    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 43));
+    let limited = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
+    let source_encoder = ReusableExactExportEncoder::with_limits(43, 88, 8_192, 65_535);
+    let limited_encoder = ReusableExactExportEncoder::with_limits(44, 88, 8_192, 4_096);
+    let mut manager = test_manager();
+    let mut source_rx = register_exact_target(&mut manager, source, source_encoder.clone());
+    let mut limited_rx = register_exact_target(&mut manager, limited, limited_encoder.clone());
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 43),
+    );
+    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let route_identity = (route.prefix, route.path_id);
+    let deltas = [crate::manager::update_groups::GroupDelta {
+        prefix: route.prefix,
+        path_id: route.path_id,
+        new: Some((route.clone(), None)),
+        old_source: Some(source),
+        policy_label: None,
+    }];
+    let announce: Arc<[Route]> = vec![route].into();
+    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+
+    assert!(commit_shared_unicast_with_cache(
+        &mut manager,
+        source,
+        Arc::clone(&announce),
+        Arc::clone(&next_hop_override),
+        HashSet::new(),
+        &mut cache,
+    ));
+    assert_eq!(source_rx.try_recv().unwrap().announce.len(), 1);
+    assert!(commit_shared_unicast_with_precommit(
+        &mut manager,
+        limited,
+        Arc::clone(&announce),
+        Arc::clone(&next_hop_override),
+        HashSet::new(),
+        &mut cache,
+        Some(crate::manager::distribution::LazyCleanGroupPrior {
+            peer: limited,
+            deltas: &deltas,
+        }),
+    ));
+    let limited_update = limited_rx.try_recv().unwrap();
+    assert!(limited_update.announce.is_empty());
+    assert_eq!(limited_update.withdraw, vec![route_identity]);
+    assert!(manager.peer_unexportable[&limited].contains(&key));
+    assert_eq!(source_encoder.probe_count(), 1);
+    assert_eq!(
+        limited_encoder.probe_count(),
+        0,
+        "the target must apply its ceiling to the shared encoded length"
+    );
+}
+
+#[test]
+fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45));
+    let encoder = ReusableExactExportEncoder::new(45, 19);
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, target, encoder);
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 45),
+    );
+    let route_key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let unrelated_key = ExactExportKey::FlowSpec(
+        make_flowspec_route(Ipv4Addr::new(198, 51, 100, 45)).selection_key(),
+    );
+    manager.peer_unexportable.insert(
+        target,
+        HashSet::from([route_key.clone(), unrelated_key.clone()]),
+    );
+    let deltas = [crate::manager::update_groups::GroupDelta {
+        prefix: route.prefix,
+        path_id: route.path_id,
+        new: Some((route.clone(), None)),
+        old_source: Some(source),
+        policy_label: None,
+    }];
+    let announce: Arc<[Route]> = vec![route].into();
+    let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+
+    assert!(commit_shared_unicast_with_precommit(
+        &mut manager,
+        target,
+        announce,
+        next_hop_override,
+        HashSet::new(),
+        &mut cache,
+        Some(crate::manager::distribution::LazyCleanGroupPrior {
+            peer: target,
+            deltas: &deltas,
+        }),
+    ));
+    assert_eq!(rx.try_recv().unwrap().announce.len(), 1);
+    let overlay = &manager.peer_unexportable[&target];
+    assert!(!overlay.contains(&route_key));
+    assert!(overlay.contains(&unrelated_key));
 }
 
 #[tokio::test]

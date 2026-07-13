@@ -1,0 +1,4 @@
+schema=rustbgpd.lan395-criterion-receipt.v1
+sha256sums_sha256=84af55df1f17d29898d099ba7b8fcaf046e99b05c225f7c9afb46aec450194ca
+matrix_complete=1
+criterion_gates_passed=1

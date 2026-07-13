@@ -71,6 +71,19 @@ rrharness churn 256  256  3000 20 churn-256-{a,b}
 rrharness churn 1000 1000 3000 20 churn-1000-{a,b}
 ```
 
+For the pinned LAN-395 A/B campaign, use
+[`../compare-rrharness.sh`](../compare-rrharness.sh). It builds the exact base
+and candidate in detached worktrees, launches prebuilt binaries directly on a
+performance-governor CPU, counterbalances two repetitions of every shape, and
+refuses to complete a receipt unless every log/profile parses and every
+throughput gate passes. The companion parser and its adversarial tests live in
+[`../rebaseline/parse_rrharness.py`](../rebaseline/parse_rrharness.py) and
+[`../rebaseline/test_parse_rrharness.py`](../rebaseline/test_parse_rrharness.py).
+Retained runs must execute from the canonical driver in a clean pin commit;
+that commit may add only `lan395-run-pin.env` over the reviewed tooling parent.
+This binds the driver, parser, classifier, production refs, and normalized
+production diff before the shared host lock or any build begins.
+
 A tiny smoke shape (`flood 4 100 2 /tmp/smoke`) runs in a couple of seconds and
 emits a folded profile.
 

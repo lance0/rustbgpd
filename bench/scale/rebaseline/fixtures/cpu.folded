@@ -2,6 +2,11 @@ ribmgr	root;array::<[u8%3B 32]>::percent%25unknown	1
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes	4
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::RibManager::stage_group_prefixes	3
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::RibManager::stage_group_prefixes;rustbgpd_rib::manager::RibManager::distribute_single_best_prefix	10
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::distribution::enqueue_outbound_update	1
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::distribution::materialize_clean_group_prior	1
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::distribution::probe_exact_export_announcements	1
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::distribution::reconcile_exact_export_overlay	1
+ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::distribution::reuse_grouped_exact_export_ceiling	1
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::GroupRibOut::apply_delta	20
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::GroupStageOutput::build_shared_emit	5
 ribmgr	root;rustbgpd_rib::manager::RibManager::distribute_changes;rustbgpd_rib::manager::update_groups::emit_group_deltas_for_member	10

@@ -1,0 +1,9 @@
+mode,clients,candidates,prefixes,repetition,pair_order,base_rate,head_rate,head_improvement_percent,required_improvement_percent,maximum_regression_percent,verdict
+churn,256,256,3000,1,base-first,9.080476975,52.692096186,480.278947,15.0,5.0,pass
+churn,256,256,3000,2,head-first,9.074591145,53.644635536,491.152094,15.0,5.0,pass
+churn,1000,1000,3000,1,base-first,2.271492766,16.777350577,638.604623,15.0,0.0,pass
+churn,1000,1000,3000,2,head-first,2.257668712,16.906887437,648.864851,15.0,0.0,pass
+flood,256,0,100000,1,base-first,0.517720149,1.537850977,197.042906,0.0,5.0,pass
+flood,256,0,100000,2,head-first,0.516625963,1.547446713,199.529413,0.0,5.0,pass
+flood,1000,0,100000,1,base-first,0.147066033,0.558659218,279.869645,15.0,0.0,pass
+flood,1000,0,100000,2,head-first,0.147739584,0.564121850,281.835277,15.0,0.0,pass
