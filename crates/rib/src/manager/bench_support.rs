@@ -1,15 +1,16 @@
-//! Bench-only fanout driver.
+//! Bench-only manager hot-path drivers.
 //!
-//! Exposed solely to the `fanout` distribution microbench behind the
-//! `bench-internals` feature (set via `required-features` on the bench target).
-//! The `pub fn bench_*` methods join the crate's public surface only when that
-//! feature is enabled; in a normal (default-feature) build the whole module is
-//! compiled out and nothing here is reachable.
+//! Exposed solely to workspace microbenchmarks behind the `bench-internals`
+//! feature (set via `required-features` on each bench target). The `pub fn
+//! bench_*` methods join the crate's public surface only when that feature is
+//! enabled; in a normal (default-feature) build the whole module is compiled
+//! out and nothing here is reachable.
 //!
-//! The driver registers N synthetic outbound peers, seeds the Loc-RIB, and runs
-//! the manager's `distribute_changes` directly, so the bench measures the
-//! per-peer export fanout cost (policy eval + Adj-RIB-Out staging + bounded
-//! channel send) without the async `run()` task loop in the way.
+//! The fanout driver registers synthetic outbound peers, seeds the Loc-RIB, and
+//! runs `distribute_changes` directly. The event-history driver calls the same
+//! private publish helpers as the manager actor so the API crate can compare
+//! the default no-op sink with its concrete EHM sink without widening the
+//! normal public API or duplicating manager-side ring/broadcast work.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -21,6 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::RibManager;
 use crate::adj_rib_in::AdjRibIn;
+use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::Route;
 use crate::update::{
     ExactExportEncoder, OutboundRouteUpdate, RoutePage, RouteQueryKey, RouteQueryScope,
@@ -156,5 +158,27 @@ impl RibManager {
         response
             .try_recv()
             .expect("route page handler replies synchronously")
+    }
+
+    /// Publish an owned batch through the production route-event helper.
+    ///
+    /// Input construction belongs in the benchmark setup closure. Consuming
+    /// the batch here keeps event cloning out of the timed manager phase while
+    /// retaining the real process-local ID, ring, sink, and legacy-broadcast
+    /// work performed by `RibManager::publish_route_event`.
+    pub fn bench_publish_route_events(&mut self, events: impl IntoIterator<Item = RouteEvent>) {
+        for event in events {
+            self.publish_route_event(event);
+        }
+    }
+
+    /// Publish an owned batch through the production EVPN-event helper.
+    ///
+    /// Like [`Self::bench_publish_route_events`], this method exists only under
+    /// `bench-internals` and deliberately adds no alternate production path.
+    pub fn bench_publish_evpn_events(&mut self, events: impl IntoIterator<Item = EvpnRouteEvent>) {
+        for event in events {
+            self.publish_evpn_route_event(event);
+        }
     }
 }
