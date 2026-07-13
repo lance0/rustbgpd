@@ -63,9 +63,9 @@ const LIVE_SOURCE_NOTES: &[&str] = &[
     "unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, \
      med, local_pref, communities, extended/large communities) are not visible over gRPC \
      and are not compared",
-    "generation: the route-listing API exposes no RIB generation token; mid-walk listing \
-     drift is detected via per-page total_count instead, and the snapshot header's \
-     generation is adopted for the live side",
+    "generation: route-page tokens are process-local and mutation-fenced, so mid-walk \
+     drift aborts the listing and requires a restart; the API still exposes no numeric \
+     RIB generation, so the snapshot header's generation is adopted for the live side",
 ];
 
 /// MED-conflation caveat, emitted only when the daemon never populated
@@ -769,9 +769,9 @@ fn as_path_segment(asns: &[u32]) -> Vec<AsPathSegment> {
 ///
 /// - a `next_page_token` already used in this walk (non-advancing or
 ///   cyclic pagination — the same page twice) refuses the comparison;
-/// - `total_count` changing between pages means the listing moved under
-///   the walk (the API exposes no generation token, so this is the drift
-///   detector) and refuses the comparison;
+/// - the API's mutation-fenced token makes mid-walk drift fail with ABORTED;
+///   a changing `total_count` remains a defense-in-depth check for older
+///   daemons and refuses the comparison;
 /// - the fetched route count must equal the server's `total_count`;
 /// - `--max-routes` is enforced before each page is buffered into the set;
 /// - the shared deadline is checked before every RPC.

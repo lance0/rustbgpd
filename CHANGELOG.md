@@ -66,6 +66,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edits/reordering, and protected-owner CRUD remain restart-required. (LAN-16,
   #159)
 
+- **Unicast route pagination resumes from ordered indices and fails closed on
+  mutation.** Unfiltered received, best, and private advertised pages clone
+  only the requested page plus lookahead instead of sorting a full table.
+  Grouped advertised pages also resume from the shared index, while their
+  member-local split-horizon and exact-rejection filters may inspect additional
+  underlying rows. Opaque process-local continuations bind the exact route
+  scope, canonical filter semantics, conservative manager-owned scope-class
+  generation, and last route key. Changed scope or filters return gRPC
+  `INVALID_ARGUMENT`; any mutation in the same Received, Best, or Advertised
+  class returns `ABORTED` and requires a restart, without retaining server-side
+  snapshots or cursor registries. Filtered queries preserve their exact
+  full-scan semantics. The retained comparison enforces the 10x 400k-grouped
+  traversal target plus p99, seed-ingest, remove/reannounce churn, and
+  resident-memory gates.
+
 - **TCP-AO accepts ordered startup keyrings.** Static neighbors and direct
   dynamic-prefix selectors may configure one to 256 MKTs. The existing
   singleton table remains accepted and serializes unchanged; multiple keys use

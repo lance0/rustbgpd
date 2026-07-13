@@ -42,6 +42,7 @@ prometheus.workspace = true
 bytes.workspace = true
 x509-parser.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 
 [build-dependencies]
 tonic-prost-build.workspace = true
