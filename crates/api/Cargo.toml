@@ -11,6 +11,12 @@ categories.workspace = true
 description = "gRPC API server — tonic bindings for the rustbgpd services (Global, Neighbor, Policy, PeerGroup, Rib, Injection, Control, Evpn)"
 readme = "README.md"
 
+[features]
+# Exposes the RIB manager's benchmark-only event-publish driver to the
+# event-history producer benchmark. Normal API and daemon builds do not compile
+# that surface.
+bench-internals = ["rustbgpd-rib/bench-internals"]
+
 [dependencies]
 rustbgpd-wire.workspace = true
 rustbgpd-fsm.workspace = true
@@ -42,5 +48,11 @@ tonic-prost-build.workspace = true
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
+criterion.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "event_history_producer"
+harness = false
+required-features = ["bench-internals"]

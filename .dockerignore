@@ -9,5 +9,6 @@ clab-*/
 # postmortem into the tree.
 tests/soak/runs/
 docs/artifacts/
+docs/perf/artifacts/
 target/criterion/
 *.log

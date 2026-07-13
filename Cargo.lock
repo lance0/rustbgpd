@@ -2824,6 +2824,7 @@ version = "0.51.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "criterion",
  "futures",
  "prometheus",
  "prost",
