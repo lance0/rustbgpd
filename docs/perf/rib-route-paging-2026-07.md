@@ -14,23 +14,32 @@ pinned matrix completes on an otherwise idle host.
 
 | Variant | Commit | Behavior |
 |---|---|---|
-| Baseline | `5f6dd2960933c356eeda53625caf7f8b91f77a7c` | Rewritten manager-level benchmark baseline on current `main`, with repeated scan + grouped full materialization |
+| Baseline | `5f6dd2960933c356eeda53625caf7f8b91f77a7c` | Committed rewritten manager-level benchmark baseline, with repeated scan + grouped full materialization |
 | Borrowed grouped view | `ef0b6260313638e126d57c847f7990da991faa16` | The grouped page scans the filtered group iterator directly; legacy full-snapshot/refresh callers still materialize |
 
-The paired driver overlays one canonical benchmark and bench-support source
+The paired driver accepts only the full baseline and candidate commit IDs in
+the table above. It overlays one canonical benchmark and bench-support source
 byte-for-byte into detached baseline and optimized worktrees, records their
 combined SHA-256, archives both sources plus the comparison driver and both
 commits' production paging sources under a verified `SHA256SUMS` manifest, and
-refuses source drift. Each scope/route/page/repetition cell runs in a fresh process.
+refuses source drift. The normalized diff of the two production paging files
+must match SHA-256
+`558cf2ebc9101ca722b3d733a4dc2f4a91859a08e16ab6c7258844e99930ec87`.
+Each scope/route/page/repetition cell runs in a fresh process.
 Pair order alternates between baseline-first and optimized-first across
 repetitions so allocator, cache, and thermal history do not always favor one
-side. Both refs must resolve to distinct commits and the baseline must be an
+side. Both refs must resolve to the pinned commits and the baseline must be an
 ancestor of the optimized commit. Anchored executable-line and iterator-body
 guards require the materialized call only at the baseline and the borrowed
-grouped view only at the head. A strict changed-file allowlist rejects unrelated
-production changes while permitting the benchmark, test, and documentation
-overlay; uncommitted production changes are deliberately excluded. The driver
-also refuses a nonempty output directory so retained evidence cannot mix runs.
+grouped view only at the head. Exact commit and production-diff pins reject
+extra changes even inside an allowed implementation file; the changed-file
+allowlist remains a secondary audit fence. After the canonical overlays, every
+tracked Cargo manifest and lockfile, build script, Cargo config, and optional
+Rust toolchain selector must be byte-identical between worktrees. Those inputs
+include the workspace profiles in the root `Cargo.toml` and the RIB benchmark
+declaration in `crates/rib/Cargo.toml`. Uncommitted production changes are
+deliberately excluded. The driver also refuses a nonempty output directory so
+retained evidence cannot mix runs.
 
 Each process constructs a real `RibManager`, two identical RR-client update-
 group members, and a 100k- or 400k-route group table outside the timed region.
@@ -80,11 +89,13 @@ bench/compare-route-paging.sh \
   --core 5
 ```
 
-The driver records the exact refs, commits, canonical harness hash, individual
-source hashes, CPU pinning, pair order, and every one-row-per-process raw output
-under `raw/` beside the combined CSV. The exact harness, bench-support module,
-driver, and baseline/optimized production paging sources used for the run are
-retained under `measurement-sources/` with a checked hash manifest.
+The driver records the exact refs, pinned commits, normalized production-diff
+hash, canonical harness hash, individual source hashes, compile-input manifest
+hash, CPU pinning, pair order, and every one-row-per-process raw output under
+`raw/` beside the combined CSV. The exact harness, bench-support module,
+driver, baseline/optimized production paging sources, and common Cargo/build
+inputs used for the run are retained under `measurement-sources/` with checked
+hash manifests.
 
 ## Results
 

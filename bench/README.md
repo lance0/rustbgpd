@@ -67,25 +67,31 @@ bench/compare-route-paging.sh \
   --core 5
 ```
 
-The driver creates detached worktrees for both pinned refs and overlays the
-invoking checkout's benchmark plus bench-support source byte-for-byte into
-both. It records and verifies their combined SHA-256, runs every traversal in a
-fresh process, and alternates baseline-first/optimized-first order for paired
-repetitions. The harness validates row totals, strict cursor order, page bounds,
-complete traversal, and a deterministic ordered-route-key checksum. The
+The driver requires the exact full commit IDs shown above, creates detached
+worktrees for them, and overlays the invoking checkout's benchmark plus
+bench-support source byte-for-byte into both. It records and verifies their
+combined SHA-256, runs every traversal in a fresh process, and alternates
+baseline-first/optimized-first order for paired repetitions. The harness
+validates row totals, strict cursor order, page bounds, complete traversal, and
+a deterministic ordered-route-key checksum. The
 grouped fixture is intentionally distinct from the best control: two RR-client
 members share a group while every sixteenth route is sourced by the queried
 member and removed by member-specific split horizon. The driver rejects any
 baseline/optimized row, page-count, or checksum disagreement and any grouped
 fixture that collapses back to the best control. Both refs are required, must
-resolve to distinct commits, and executable-line plus iterator-body guards
-require the materialized call only at the baseline and the borrowed grouped
-view only at the optimized ref; dirty production files are never measured.
+resolve to the pinned distinct commits, and executable-line plus iterator-body
+guards require the materialized call only at the baseline and the borrowed
+grouped view only at the optimized ref. The normalized production diff must
+match its pinned SHA-256, so extra edits inside an otherwise allowed
+implementation file are rejected. After the shared overlays, all tracked Cargo
+manifests and lockfiles, build scripts, Cargo config, and optional Rust
+toolchain selector files must be byte-identical; dirty production files are
+never measured.
 Each per-process CSV is retained under the comparison artifact's `raw/`
 directory. The exact overlaid harness, bench-support module, comparison driver,
-and baseline/optimized production paging sources are retained under
-`measurement-sources/` with a verified `SHA256SUMS` manifest, and an explicitly
-selected output directory must be empty.
+baseline/optimized production paging sources, and common Cargo/build inputs are
+retained under `measurement-sources/` with verified manifests, and an
+explicitly selected output directory must be empty.
 
 For a quick single-process mechanics check, invoke the bench target directly
 with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publish

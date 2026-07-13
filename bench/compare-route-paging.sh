@@ -7,8 +7,8 @@ Compare RIB route paging at two pinned refs with one fresh process per cell.
 
 Usage: bench/compare-route-paging.sh [options]
 
-  --base REF          Baseline ref (required; must predate the optimization)
-  --head REF          Optimized ref (required; must contain the optimization)
+  --base REF          Baseline ref (required; must resolve to the pinned baseline)
+  --head REF          Optimized ref (required; must resolve to the pinned candidate)
   --routes LIST       Comma-separated route counts (default: 100000,400000)
   --page-sizes LIST   Comma-separated page sizes (default: 100,1000)
   --repetitions N     Paired repetitions per cell (default: 2)
@@ -19,12 +19,16 @@ Usage: bench/compare-route-paging.sh [options]
 
 The invoking checkout's route_paging.rs and benchmark-support module are copied
 byte-for-byte into both detached worktrees. The script refuses to run if those
-measurement sources differ. REF values must resolve to distinct committed
-trees in one ancestry chain. Production differences outside the two route-paging
-implementation files are rejected; benchmark, test, and documentation overlays
+measurement sources differ. REF values must resolve to the exact reviewed
+baseline/candidate commits. The normalized production patch and all Cargo/build
+inputs must match the pinned hashes; benchmark, test, and documentation overlays
 remain auditable. Uncommitted production changes are intentionally never measured.
 EOF
 }
+
+readonly expected_base_commit=5f6dd2960933c356eeda53625caf7f8b91f77a7c
+readonly expected_head_commit=ef0b6260313638e126d57c847f7990da991faa16
+readonly expected_production_diff_sha256=558cf2ebc9101ca722b3d733a4dc2f4a91859a08e16ab6c7258844e99930ec87
 
 base_ref=
 head_ref=
@@ -102,6 +106,16 @@ head_commit=$(git rev-parse --verify "${head_ref}^{commit}") || {
   printf 'baseline and optimized refs resolve to the same commit: %s\n' "$base_commit" >&2
   exit 2
 }
+[[ $base_commit == "$expected_base_commit" ]] || {
+  printf 'baseline must resolve to the pinned commit: expected %s, got %s\n' \
+    "$expected_base_commit" "$base_commit" >&2
+  exit 2
+}
+[[ $head_commit == "$expected_head_commit" ]] || {
+  printf 'optimized ref must resolve to the pinned commit: expected %s, got %s\n' \
+    "$expected_head_commit" "$head_commit" >&2
+  exit 2
+}
 git merge-base --is-ancestor "$base_commit" "$head_commit" || {
   printf 'baseline must be an ancestor of optimized commit: %s !<= %s\n' \
     "$base_commit" "$head_commit" >&2
@@ -128,6 +142,20 @@ for changed_file in "${changed_files[@]}"; do
       ;;
   esac
 done
+production_diff_sha256=$(
+  LC_ALL=C git -C "$repo_root" -c diff.algorithm=myers --no-pager diff \
+    --no-ext-diff --no-textconv --no-color --abbrev=8 \
+    --src-prefix=a/ --dst-prefix=b/ --indent-heuristic \
+    "$base_commit..$head_commit" -- \
+    crates/rib/src/manager/mod.rs \
+    crates/rib/src/manager/update_groups.rs \
+    | sha256sum | awk '{print $1}'
+)
+[[ $production_diff_sha256 == "$expected_production_diff_sha256" ]] || {
+  printf 'normalized production diff hash mismatch: expected %s, got %s\n' \
+    "$expected_production_diff_sha256" "$production_diff_sha256" >&2
+  exit 2
+}
 baseline_call='^[[:space:]]*match self\.grouped_advertised_routes\(peer\) \{$'
 optimized_call='^[[:space:]]*match self\.grouped_advertised_routes_iter\(peer\) \{$'
 iterator_definition='^[[:space:]]*pub\(in crate::manager\) fn grouped_advertised_routes_iter\($'
@@ -202,21 +230,6 @@ for production_source in \
   git -C "$repo_root" show "$head_commit:$production_source" \
     >"$source_dir/optimized-production/$source_name"
 done
-(
-  cd "$source_dir"
-  sha256sum \
-    route_paging.rs \
-    bench_support.rs \
-    compare-route-paging.sh \
-    baseline-production/mod.rs \
-    baseline-production/update_groups.rs \
-    optimized-production/mod.rs \
-    optimized-production/update_groups.rs \
-    >SHA256SUMS
-  sha256sum --check SHA256SUMS >/dev/null
-)
-measurement_source_manifest_sha256=$(sha256sum "$source_dir/SHA256SUMS" | awk '{print $1}')
-
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/rustbgpd-route-paging.XXXXXX")
 base_tree="$scratch/base"
 head_tree="$scratch/head"
@@ -246,16 +259,96 @@ cmp --silent \
   exit 1
 }
 
+# The canonical benchmark/support overlays are identical, but Cargo can still
+# compile them differently if dependency resolution, profiles, build scripts,
+# toolchain selection, or Cargo configuration differs. Require and retain one
+# byte-identical copy of every tracked input in those categories.
+compile_input_path() {
+  case "$1" in
+    Cargo.lock|*/Cargo.lock|Cargo.toml|*/Cargo.toml|\
+    build.rs|*/build.rs|\
+    .cargo/config|*/.cargo/config|.cargo/config.toml|*/.cargo/config.toml|\
+    rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+mapfile -t base_compile_inputs < <(
+  git -C "$base_tree" ls-files | while IFS= read -r path; do
+    compile_input_path "$path" && printf '%s\n' "$path"
+  done
+)
+mapfile -t head_compile_inputs < <(
+  git -C "$head_tree" ls-files | while IFS= read -r path; do
+    compile_input_path "$path" && printf '%s\n' "$path"
+  done
+)
+[[ ${#base_compile_inputs[@]} -gt 0 ]] || {
+  printf 'no Cargo/build inputs found in baseline worktree\n' >&2
+  exit 1
+}
+[[ ${#base_compile_inputs[@]} -eq ${#head_compile_inputs[@]} ]] || {
+  printf 'baseline and optimized Cargo/build input sets differ\n' >&2
+  exit 1
+}
+compile_input_dir="$source_dir/compile-inputs"
+mkdir "$compile_input_dir"
+compile_input_manifest="$source_dir/compile-inputs.sha256"
+: >"$compile_input_manifest"
+for index in "${!base_compile_inputs[@]}"; do
+  path=${base_compile_inputs[$index]}
+  [[ $path == "${head_compile_inputs[$index]}" ]] || {
+    printf 'baseline and optimized Cargo/build input sets differ: %s != %s\n' \
+      "$path" "${head_compile_inputs[$index]}" >&2
+    exit 1
+  }
+  cmp --silent "$base_tree/$path" "$head_tree/$path" || {
+    printf 'baseline and optimized Cargo/build input differs: %s\n' "$path" >&2
+    exit 1
+  }
+  destination="$compile_input_dir/$path"
+  mkdir -p "$(dirname "$destination")"
+  cp "$base_tree/$path" "$destination"
+  printf '%s  %s\n' "$(sha256sum "$base_tree/$path" | awk '{print $1}')" "$path" \
+    >>"$compile_input_manifest"
+done
+(
+  cd "$compile_input_dir"
+  sha256sum --check ../compile-inputs.sha256 >/dev/null
+)
+compile_input_manifest_sha256=$(sha256sum "$compile_input_manifest" | awk '{print $1}')
+compile_input_count=${#base_compile_inputs[@]}
+
+source_manifest_tmp="$scratch/measurement-source-SHA256SUMS"
+(
+  cd "$source_dir"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum >"$source_manifest_tmp"
+  mv "$source_manifest_tmp" SHA256SUMS
+  sha256sum --check SHA256SUMS >/dev/null
+)
+measurement_source_manifest_sha256=$(sha256sum "$source_dir/SHA256SUMS" | awk '{print $1}')
+
 cat >"$output_dir/metadata.txt" <<EOF
 base_ref=$base_ref
 base_commit=$base_commit
+expected_base_commit=$expected_base_commit
 head_ref=$head_ref
 head_commit=$head_commit
+expected_head_commit=$expected_head_commit
+production_diff_sha256=$production_diff_sha256
+expected_production_diff_sha256=$expected_production_diff_sha256
 harness_sha256=$harness_sha256
 harness_source_sha256=$harness_source_sha256
 bench_support_source_sha256=$bench_support_source_sha256
 driver_source_sha256=$driver_source_sha256
 measurement_source_manifest_sha256=$measurement_source_manifest_sha256
+compile_input_manifest_sha256=$compile_input_manifest_sha256
+compile_input_count=$compile_input_count
 routes=$routes_csv
 page_sizes=$page_sizes_csv
 repetitions=$repetitions
