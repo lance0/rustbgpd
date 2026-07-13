@@ -415,7 +415,8 @@ fn accepted_tcp_ao_info_is_valid(
                 && key.send_id == info.current_key
                 && belongs_to_owner(key)
         })
-        .collect::<Vec<_>>();
+        .take(2)
+        .count();
     let rnext = info
         .keys
         .iter()
@@ -428,14 +429,15 @@ fn accepted_tcp_ao_info_is_valid(
                 && (!require_nondeprecated_rnext
                     || (!key.deprecated && selected_rnext == Some(key.recv_id)))
         })
-        .collect::<Vec<_>>();
+        .take(2)
+        .count();
     info.has_current_key
         && info.has_rnext_key
         && info.pkt_bad == 0
         && info.pkt_key_not_found == 0
         && info.pkt_ao_required == 0
-        && current.len() == 1
-        && rnext.len() == 1
+        && current == 1
+        && rnext == 1
         && info.keys.iter().all(|key| key.pkt_bad == 0)
 }
 
