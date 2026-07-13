@@ -3,7 +3,28 @@ set -euo pipefail
 
 repo=$(git rev-parse --show-toplevel)
 driver="$repo/bench/scale/compare-rrharness.sh"
-pin="$repo/bench/scale/rebaseline/lan395-run-pin.env"
+pin_rel=bench/scale/rebaseline/lan395-run-pin.env
+pin="$repo/$pin_rel"
+
+# The retained driver deliberately refuses to measure from any descendant of
+# the exact pin commit. Once the receipt documentation is added above that
+# commit, run the mechanics suite from a clean detached pin worktree instead
+# of weakening the measurement fence for ordinary CI checkouts.
+pin_commit=$(git -C "$repo" log -1 --format=%H -- "$pin_rel")
+current_commit=$(git -C "$repo" rev-parse --verify HEAD)
+if [[ $current_commit != "$pin_commit" ]]; then
+  pin_worktree=$(mktemp -d "${TMPDIR:-/tmp}/lan395-pin-worktree.XXXXXX")
+  rmdir "$pin_worktree"
+  # shellcheck disable=SC2317 # Invoked indirectly by the trap below.
+  cleanup_pin_worktree() {
+    git -C "$repo" worktree remove --force "$pin_worktree" >/dev/null 2>&1 || true
+  }
+  trap cleanup_pin_worktree EXIT INT TERM
+  git -C "$repo" worktree add --detach "$pin_worktree" "$pin_commit" >/dev/null
+  (cd "$pin_worktree" && bench/tests/test-rrharness-driver.sh)
+  exit
+fi
+
 marker="$repo/.lan395-dirty-probe"
 external_driver=$(mktemp "${TMPDIR:-/tmp}/compare-rrharness.XXXXXX")
 privacy_fixture=$(mktemp -d "${TMPDIR:-/tmp}/rrharness-privacy.XXXXXX")
