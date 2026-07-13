@@ -255,6 +255,7 @@ pub struct OrrInputDiagnostics {
 impl OrrInputDiagnostics {
     fn record(&mut self, classification: InputClassification) {
         match classification {
+            InputClassification::IgnoredUnknown => {}
             InputClassification::IncludedDefault => {
                 self.included_default = self.included_default.saturating_add(1);
             }
@@ -318,6 +319,7 @@ impl OrrInputDiagnostics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputClassification {
+    IgnoredUnknown,
     IncludedDefault,
     ExcludedNonDefault,
     MalformedTopology,
@@ -338,6 +340,12 @@ fn classify_input(
     nlri: &BgpLsNlri,
     attributes: Result<Option<&[BgpLsTlv]>, ()>,
 ) -> InputClassification {
+    // Unknown NLRI are retained for reflection, but they are opaque to ORR.
+    // Classify that contract here so every caller gets the same uncounted
+    // result instead of relying on a separate guard before classification.
+    if matches!(nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
+        return InputClassification::IgnoredUnknown;
+    }
     // Descriptor/topology framing takes precedence over Attribute 29. This
     // keeps one stable classification when both independent surfaces are bad.
     let descriptor_scope = descriptor_topology_scope(nlri);
@@ -375,7 +383,7 @@ fn classify_input(
                 descriptor_scope
             }
         }
-        BgpLsNlriType::Unknown(_) => return InputClassification::MalformedTopology,
+        BgpLsNlriType::Unknown(_) => unreachable!("unknown BGP-LS NLRI returned above"),
     };
     match scope {
         TopologyScope::NonDefault => InputClassification::ExcludedNonDefault,
@@ -494,10 +502,13 @@ impl OrrTopology {
         let mut seen: HashMap<&'a BgpLsNlri, usize> = HashMap::new();
         let mut input_diagnostics = OrrInputDiagnostics::default();
         for route in routes {
-            if matches!(route.nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
-                continue;
-            }
-            let attribute_tlvs = attribute_tlvs(route);
+            // Unknown NLRI are opaque to ORR, including their attributes. Do
+            // not parse Attribute 29 merely to discard the classification.
+            let attribute_tlvs = if matches!(route.nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
+                Ok(None)
+            } else {
+                attribute_tlvs(route)
+            };
             let classification_attributes = match &attribute_tlvs {
                 Ok(tlvs) => Ok(tlvs.as_deref()),
                 Err(()) => Err(()),
@@ -1400,6 +1411,26 @@ mod tests {
 
     fn raw_tlv(type_code: u16, value: &[u8]) -> BgpLsTlv {
         BgpLsTlv::new(type_code, Bytes::copy_from_slice(value))
+    }
+
+    #[test]
+    fn unknown_nlri_is_ignored_and_uncounted() {
+        let nlri = BgpLsNlri::try_new(
+            BgpLsNlriType::Unknown(65_000),
+            None,
+            Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+        )
+        .expect("opaque unknown NLRI is valid");
+        assert_eq!(
+            classify(nlri.clone(), vec![]),
+            InputClassification::IgnoredUnknown
+        );
+
+        let route = rib_route(PEER1, nlri, vec![]);
+        let topology = OrrTopology::build(std::iter::once(&route));
+        assert_eq!(topology.input_diagnostics(), OrrInputDiagnostics::default());
+        assert_eq!(topology.node_count(), 0);
+        assert_eq!(topology.link_count(), 0);
     }
 
     #[test]

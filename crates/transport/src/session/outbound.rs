@@ -1,6 +1,6 @@
 use super::export::{
-    ExportWithdrawal, PreparedAttrCache, PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri,
-    SessionExportProfile, UnreachNlri, has_otc,
+    ExportProbeError, ExportWithdrawal, PreparedAttrCache, PreparedUnicastCandidate,
+    PreparedWithdrawal, ReachNlri, SessionExportProfile, UnreachNlri, has_otc,
 };
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
@@ -248,6 +248,7 @@ impl PeerSession {
         let mut v4_mp_wire = None;
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
         let mut v6_wire = None;
+        let mut scoped_ipv4_without_extended_nexthop = 0usize;
         for &(ref prefix, path_id) in &update.withdraw {
             if !self.is_family_negotiated(prefix) {
                 continue;
@@ -268,6 +269,10 @@ impl PeerSession {
                     }
                 }
                 Ok(_) => unreachable!("unicast withdrawal must prepare as unicast"),
+                Err(ExportProbeError::Ipv4RequiresExtendedNextHop) => {
+                    scoped_ipv4_without_extended_nexthop =
+                        scoped_ipv4_without_extended_nexthop.saturating_add(1);
+                }
                 Err(error) => warn!(
                     peer = %self.peer_label,
                     %prefix,
@@ -275,6 +280,13 @@ impl PeerSession {
                     "not sending unicast withdrawal: exact export preparation failed"
                 ),
             }
+        }
+        if scoped_ipv4_without_extended_nexthop != 0 {
+            warn!(
+                peer = %self.peer_label,
+                dropped = scoped_ipv4_without_extended_nexthop,
+                "not sending IPv4 withdrawals to scoped link-local peer without negotiated Extended Next Hop"
+            );
         }
         if !v4_body_withdraw.is_empty() {
             let max_len = export.max_message_len();
@@ -490,6 +502,10 @@ impl PeerSession {
                     unreachable!("IPv6 must prepare as MP_REACH")
                 }
                 Err(error) => {
+                    debug_assert!(
+                        !matches!(&error, ExportProbeError::MissingIpv6NextHop),
+                        "RIB sent IPv6 route to eBGP peer with no valid IPv6 next-hop"
+                    );
                     warn!(
                         peer = %self.peer_label,
                         prefix = %route.prefix,
@@ -1813,9 +1829,11 @@ mod tests {
     use bytes::Bytes;
     use rustbgpd_fsm::PeerConfig;
     use rustbgpd_wire::{
-        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, MacAddress, MplsLabel, Origin,
-        RouteDistinguisher, notification::NotificationCode, notification::cease_subcode,
+        AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, Ipv6Prefix,
+        MacAddress, MplsLabel, Origin, RouteDistinguisher, notification::NotificationCode,
+        notification::cease_subcode,
     };
+    use std::time::Instant;
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
@@ -1860,6 +1878,46 @@ mod tests {
         complete.extend_from_slice(&body);
         let mut bytes = Bytes::from(complete);
         rustbgpd_wire::decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "RIB sent IPv6 route to eBGP peer with no valid IPv6 next-hop")]
+    fn ipv6_ebgp_without_local_next_hop_trips_debug_contract() {
+        let mut session = make_test_session();
+        session.config.peer.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        session.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let snapshot = session
+            .export_encoder
+            .publish(SessionExportProfile::capture(&session).with_test_ebgp(true));
+        let route = Route {
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+            next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+            ]),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        };
+        session.send_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(snapshot),
+            announce: Arc::from([route]),
+            next_hop_override: Arc::from([None]),
+            ..OutboundRouteUpdate::default()
+        });
     }
 
     /// A single EVPN NLRI that cannot fit the negotiated message ceiling is

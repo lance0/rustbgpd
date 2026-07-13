@@ -492,6 +492,55 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
 }
 
+#[test]
+fn paths_limit_ignores_entries_outside_negotiated_send_families() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.2".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
+
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 7,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        add_path_send_max: 8,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    assert_one_dual_stack_eor(&mut out_rx);
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![((Afi::Ipv6, Safi::Unicast), 2)],
+    });
+
+    assert!(
+        manager
+            .peer_add_path_send_limits
+            .get(&peer)
+            .is_some_and(HashMap::is_empty),
+        "an unnegotiated family must not survive into the exact limit map"
+    );
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 0);
+    assert!(
+        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "rejecting an inert foreign-family limit must not replay the table"
+    );
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
