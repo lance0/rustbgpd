@@ -1,5 +1,5 @@
 remote_asn_shape,routes,peers,fast,plans,full_exact_probes,route_shell_materializations,actor_polls,max_actor_poll_ns,max_prefix_snapshot_poll_ns,max_finalize_poll_ns
-homogeneous_remote_asn,4096,64,true,1,4096,4096,87,460409,86360,196835
-distinct_remote_asns,4096,64,true,1,262144,4096,339,393028,97686,220941
-homogeneous_remote_asn,4096,700,true,1,4096,4096,803,2067775,147541,2067775
-distinct_remote_asns,4096,700,true,1,2867200,4096,3599,2456806,267010,2456806
+homogeneous_remote_asn,4096,64,true,1,4096,4096,87,463945,91657,193120
+distinct_remote_asns,4096,64,true,1,262144,4096,339,573719,120321,332258
+homogeneous_remote_asn,4096,700,true,1,4096,4096,803,2005596,400310,2005596
+distinct_remote_asns,4096,700,true,1,2867200,4096,3599,2939946,363355,2939946

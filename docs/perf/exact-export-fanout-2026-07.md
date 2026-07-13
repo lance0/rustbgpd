@@ -371,8 +371,8 @@ remote ASN identity was the false dimension.
 
 | Role | Commit | Meaning |
 |------|--------|---------|
-| Fixture baseline | `3e64168919f1f5a7f2631663c8b02f536950cc86` | Adds matched manager/transport eBGP route-server clients while retaining raw remote ASN in the exact-export profile |
-| Optimized | `e76e6fa55c39ebdd00ec9122a163c3b704d3bedc` | Stores only the wire-relevant eBGP/iBGP classification |
+| Fixture baseline | `a47c618ebb7cdf9c99a48e6bd7ed753f42cac664` | Adds matched manager/transport eBGP route-server clients while retaining raw remote ASN in the exact-export profile |
+| Optimized | `828e7a7f7be2a27d2556341320fe2dfc036d7e1a` | Stores only the wire-relevant eBGP/iBGP classification |
 
 The established RR benchmark is unchanged and remains valid evidence for its
 homogeneous RR workload. This complementary matrix models ordinary first
@@ -391,21 +391,22 @@ case after removing the false profile dimension:
 
 | Clients | Distinct-ASN baseline | Optimized | Criterion mean change (95% CI) |
 |--------:|----------------------:|----------:|--------------------------------:|
-| 8 | 154.539 us | 77.182 us | -49.29% (-49.85%..-48.69%) |
-| 64 | 1.025 ms | 375.541 us | -63.57% (-64.04%..-63.23%) |
-| 256 | 3.993 ms | 1.408 ms | -65.02% (-65.44%..-64.69%) |
+| 8 | 149.111 us | 77.700 us | -47.34% (-48.48%..-46.19%) |
+| 64 | 1.026 ms | 376.547 us | -63.35% (-63.67%..-62.95%) |
+| 256 | 4.038 ms | 1.419 ms | -64.70% (-65.31%..-64.00%) |
 
-Optimized homogeneous medians were 76.218 us, 378.321 us, and 1.414 ms at 8,
-64, and 256 clients. Their paired mean changes were +0.24%, -0.90%, and -3.79%,
-so the optimization does not trade the existing first-advertise fast case for
-IXP recovery.
+Optimized homogeneous medians were 76.207 us, 378.012 us, and 1.431 ms at 8,
+64, and 256 clients. Their paired mean changes were -2.10%, -1.21%, and +0.38%;
+the first two improve slightly and the 256-client interval crosses zero, so the
+optimization does not trade the existing first-advertise fast case for IXP
+recovery.
 
 The clean policy-transition result removes the route-times-peer probe shape:
 
 | Routes / clients | Distinct-ASN baseline | Optimized | Full probes before / after | Criterion mean change (95% CI) |
 |-----------------:|----------------------:|----------:|---------------------------:|--------------------------------:|
-| 4,096 / 64 | 49.026 ms | 3.384 ms | 262,144 / 4,096 | -93.11% (-93.19%..-93.02%) |
-| 4,096 / 700 | 516.344 ms | 7.544 ms | 2,867,200 / 4,096 | -98.53% (-98.57%..-98.49%) |
+| 4,096 / 64 | 49.206 ms | 3.464 ms | 262,144 / 4,096 | -93.00% (-93.14%..-92.87%) |
+| 4,096 / 700 | 510.332 ms | 7.604 ms | 2,867,200 / 4,096 | -98.51% (-98.54%..-98.49%) |
 
 The 700-client production receipt also drops from 3,599 actor polls to 803.
 The optimized distinct-ASN receipt matches the homogeneous plan count, probe
@@ -413,11 +414,10 @@ count, shell count, and poll count exactly. This is microbenchmark evidence,
 not the loaded-reload acceptance campaign described in the policy-transition
 receipt.
 
-The homogeneous 700-client transition showed no detected change (-1.69% mean,
--5.69%..+2.39%). The homogeneous 64-client transition measured 3.454 ms before
-and 3.621 ms after, a +4.14% mean change (+2.63%..+5.56%). That small cell is
-retained rather than hidden as a statistically detected limitation alongside
-the distinct-ASN cell's removal of 258,048 redundant full probes.
+The homogeneous 700-client transition showed no detected change (-1.60% mean,
+-4.34%..+1.01%). The homogeneous 64-client transition also showed no detected
+change (+1.07% mean, -0.72%..+2.67%). Both cells are retained alongside the
+distinct-ASN cell's removal of 258,048 redundant full probes.
 
 ### Correctness fence
 

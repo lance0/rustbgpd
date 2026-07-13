@@ -289,11 +289,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   incompatible, including when dynamic peers negotiate away from a configured
   ASN wildcard. In the pinned route-server fixture, 4,096-route policy
   transitions across 700 distinct-ASN clients collapse from 2,867,200 to 4,096
-  full exact probes and improve from 516.344 ms to 7.544 ms; 64-route
-  first-advertise fanout improves 49%..65% at 8..256 clients with no
-  homogeneous first-advertise regression. The retained 64-client homogeneous
-  transition cell shifts +4.14% while its distinct-ASN counterpart improves
-  93.11%.
+  full exact probes and improve from 510.332 ms to 7.604 ms; 64-route
+  first-advertise fanout improves 47%..65% at 8..256 clients with no
+  homogeneous first-advertise regression. The 64-client homogeneous transition
+  cell has no detected change while its distinct-ASN counterpart improves
+  93.00%.
 
 - **Changed-policy update groups share transition work without hiding live
   export-policy counters.** Eligible grouped-to-grouped unicast reloads build
