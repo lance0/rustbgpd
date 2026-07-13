@@ -178,4 +178,59 @@ complete-traversal speedups are 9.342x and 8.086x rather than the issue's full
 10x gate. The residual cost is the measured repeated full-table scan shared by
 grouped and best scopes. A continuation should evaluate an ordered index or
 equivalent resumable continuation against its ingest and memory cost; it must
-retain the opaque cursor and mutation semantics fenced above.
+retain an opaque cursor while replacing the permissive mutation behavior above
+with an explicit fail-closed generation fence.
+
+## Ordered-continuation campaign contract
+
+The retained results above remain the immutable borrowed-view receipt; its
+exact historical driver is inside the checksummed artifact. The live
+`bench/compare-route-paging.sh` now targets the ordered-continuation
+route-paging tranche:
+
+| Variant | Commit | Behavior |
+|---|---|---|
+| Baseline | `aacb3a89527759b610bead421c80612f04d04826` | Current main through #872; unfiltered pages still rescan their complete scope |
+| Ordered continuation | `c9922e4b8b8cb5cda975be2363c17907978fc68c` | Final RIB ordered indices plus mutation-fenced continuation at every ingest, lifecycle, distribution, refresh, and selection-release seam |
+
+The performance pin intentionally ends at the exact final RIB production
+checkpoint. Subsequent benchmark, API, protobuf, and documentation commits do
+not alter any measured RIB production source; the normalized production-diff
+hash below enforces that boundary.
+
+The normalized production diff across all twelve changed RIB sources —
+Adj-RIB-In, Adj-RIB-Out, Loc-RIB, prefix map, `lib.rs`, `update.rs`, the central
+manager, update groups, distribution, GR/LLGR, route refresh, and selection
+deferral — is pinned to
+`83f64788b48f1347e3fc722f504903da78f2f5ffb58ac8260f58d46b0b01f6f9`.
+Both refs' sources are retained under their exact repository-relative paths in
+the nested receipt manifest, so the two manager `mod.rs` files cannot collide.
+
+Every one-process row records traversal latency/throughput, `ingest_ns`,
+`churn_routes`, `churn_ns`, and `resident_bytes`. Seed and churn use each ref's
+production `RoutesReceived` dispatcher and chunk drain, including the
+candidate's real continuation invalidation, before outbound peers are
+registered. The churn control withdraws and re-announces the same 1,000 seeded
+routes before traversal, so both sides must retain the same route/page checksum
+and churn cardinality. Missing, malformed, non-finite, zero, or internally
+unordered measurements fail closed. Every requested 400k grouped shape must
+improve median complete traversal by at least 10x; other complete shapes may
+regress at most 3%, and median handler-boundary p99 may not regress. Median seed
+ingest and churn may regress at most 10% each; resident growth must remain at or
+below both 25% and 128 MiB. The driver writes every verdict to
+`gate-summary.csv`, records the thresholds in metadata, and will not seal a
+receipt unless every read, write, and memory gate passes.
+
+```bash
+bench/compare-route-paging.sh \
+  --base aacb3a89527759b610bead421c80612f04d04826 \
+  --head c9922e4b8b8cb5cda975be2363c17907978fc68c \
+  --routes 100000,400000 \
+  --page-sizes 100,1000 \
+  --repetitions 4 \
+  --core 5
+```
+
+This section defines the measurement and acceptance envelope only. Performance
+results are not claimed until an exclusive-host run produces a complete,
+checksummed receipt.
