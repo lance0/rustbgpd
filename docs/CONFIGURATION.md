@@ -1041,8 +1041,12 @@ across static peers, the process-start selection deferral.
 retains their `all_eor` or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
 `bgp_selection_deferral_releases_total`, and
-`bgp_selection_deferral_timeouts_total` (all bounded by configured family and
-release-reason labels).
+`bgp_selection_deferral_timeouts_total`. The process-wide deferred-identity
+ledger is capped at one million keys; if it fills,
+`bgp_selection_deferral_ledger_overflows_total` increments once for each
+affected family and release sweeps the complete Adj-RIB-In plus Loc-RIB family
+so an already-withdrawn identity cannot remain stale. All labels are bounded by
+configured family and release reason.
 See [ADR-0024](adr/0024-graceful-restart.md).
 
 ### Long-Lived Graceful Restart (RFC 9494)

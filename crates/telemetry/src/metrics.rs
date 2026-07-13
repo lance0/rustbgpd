@@ -175,6 +175,7 @@ pub struct BgpMetrics {
     selection_deferral_waiters: IntGaugeVec,
     selection_deferral_releases: IntCounterVec,
     selection_deferral_timeouts: IntCounterVec,
+    selection_deferral_ledger_overflows: IntCounterVec,
 
     // ── RPKI ───────────────────────────────────────────────────
     rpki_vrp_count: IntGaugeVec,
@@ -919,6 +920,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let selection_deferral_ledger_overflows = IntCounterVec::new(
+            Opts::new(
+                "bgp_selection_deferral_ledger_overflows_total",
+                "RFC 4724 selection-deferral families that exceeded the bounded identity ledger and required a complete release sweep.",
+            ),
+            &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
         let rpki_vrp_count = IntGaugeVec::new(
             Opts::new(
                 "bgp_rpki_vrp_count",
@@ -1621,6 +1631,9 @@ impl BgpMetrics {
             .register(Box::new(selection_deferral_timeouts.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(selection_deferral_ledger_overflows.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rpki_vrp_count.clone()))
             .expect("metric not already registered");
         registry
@@ -1874,6 +1887,7 @@ impl BgpMetrics {
             selection_deferral_waiters,
             selection_deferral_releases,
             selection_deferral_timeouts,
+            selection_deferral_ledger_overflows,
             rpki_vrp_count,
             aspa_records,
             validation_import_refreshes,
@@ -2761,6 +2775,13 @@ impl BgpMetrics {
     /// Record expiry of one family `Selection_Deferral_Timer`.
     pub fn record_selection_deferral_timeout(&self, afi_safi: &str) {
         self.selection_deferral_timeouts
+            .with_label_values(&[afi_safi])
+            .inc();
+    }
+
+    /// Record a family entering bounded-ledger release fallback.
+    pub fn record_selection_deferral_ledger_overflow(&self, afi_safi: &str) {
+        self.selection_deferral_ledger_overflows
             .with_label_values(&[afi_safi])
             .inc();
     }
