@@ -77,7 +77,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP
   against two FRR peers over unnumbered links.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
-- M43: ADR-0062 static-neighbor TCP-AO protected session against BIRD 3.2.1
+- M43: TCP-AO queued-child reconciliation and live successor rotation against BIRD 3.3.1
   (conditional on the runner advertising `CONFIG_TCP_AO=y`).
 - M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
 - M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.

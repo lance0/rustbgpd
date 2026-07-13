@@ -283,8 +283,11 @@ For TCP-AO peers, `NeighborState.tcp_ao_desired_generation`,
 `tcp_ao_applied_generation`, `tcp_ao_rotation_phase`, and
 `tcp_ao_rotation_error` expose the secret-free add-only rollout state. A phase
 of `add_only_failed` retains the prior selectable keys and is retryable with
-another SIGHUP; newly accepted protected sockets are generation-fenced until
-the listener and all managed sessions converge.
+another SIGHUP. During `add_only`, protected accepts may carry either the
+globally applied generation or the exactly proved desired generation. During
+`add_only_failed`, only the applied generation may enter the peer manager;
+fully installed but uncommitted children remain fail-closed. A partial listener
+mutation may reject affected passive accepts until retry or restart.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is
