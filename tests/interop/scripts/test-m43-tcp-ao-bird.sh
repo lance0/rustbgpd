@@ -2,9 +2,10 @@
 # M43 interop test — TCP-AO with BIRD 3.x
 #
 # Validates:
-#   1. BGP session establishes with TCP-AO configured on both peers.
-#   2. BIRD advertises a route over the protected session.
-#   3. Mismatched key material fails closed and does not re-establish.
+#   1. BGP establishes with the preferred entry in a two-key startup ring.
+#   2. GET_KEYS exposes the complete redacted inventory and selected IDs.
+#   3. BIRD advertises a route over the protected session.
+#   4. A mismatch in the selected key fails closed and does not re-establish.
 #
 # Prerequisites:
 #   - BIRD image built:
@@ -30,6 +31,12 @@ grpc_list_received() {
     grpcurl -plaintext -import-path . -proto "$PROTO" \
         -d '{"neighbor_address": "10.0.43.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
+}
+
+grpc_neighbor_state() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d '{"address": "10.0.43.2"}' \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
 bird_state() {
@@ -112,6 +119,42 @@ wait_route_present() {
     return 1
 }
 
+assert_two_key_inventory() {
+    log "Checking selected IDs and complete redacted TCP-AO inventory..."
+    local state
+    state=$(grpc_neighbor_state || echo '{}')
+
+    if printf '%s' "$state" | grep -Eq \
+        'interop-(old|next)-secret-m43|wrong-next-secret-m43'; then
+        fail "Neighbor state leaked TCP-AO secret material"
+        return 1
+    fi
+
+    if ! jq -e '
+        .authentication == "AUTHENTICATION_MODE_TCP_AO" and
+        .tcpAoHealth == "TCP_AO_HEALTH_HEALTHY" and
+        .tcpAo.currentKeyId == 2 and
+        .tcpAo.rnextKeyId == 12 and
+        (.tcpAo.keys | length == 2) and
+        any(.tcpAo.keys[];
+          .peerAddress == "10.0.43.2" and .prefixLength == 32 and
+          .sendId == 1 and .recvId == 11 and
+          .algorithm == "hmac(sha256)" and .deprecated == true and
+          .preferred != true and .isCurrent != true and .isRnext != true) and
+        any(.tcpAo.keys[];
+          .peerAddress == "10.0.43.2" and .prefixLength == 32 and
+          .sendId == 2 and .recvId == 12 and
+          .algorithm == "hmac(sha256)" and .preferred == true and
+          .deprecated != true and .isCurrent == true and .isRnext == true)
+    ' >/dev/null <<<"$state"; then
+        fail "TCP-AO state did not report the exact selected two-key inventory"
+        printf '%s\n' "$state" >&2
+        return 1
+    fi
+
+    ok "Selected IDs are Current=2/RNext=12; GET_KEYS inventory is exact and redacted"
+}
+
 wait_route_absent() {
     log "Waiting for $TEST_PREFIX/32 to be absent..."
     for i in $(seq 1 20); do
@@ -142,7 +185,7 @@ assert_bad_key_does_not_establish() {
 }
 
 main() {
-    log "M43 interop test: TCP-AO with BIRD 3.x"
+    log "M43 interop test: TCP-AO two-key startup ring with BIRD 3.x"
     log "Topology: $TOPO"
 
     resolve_grpc_addr
@@ -153,8 +196,9 @@ main() {
 
     wait_bird_established
     wait_route_present
+    assert_two_key_inventory
 
-    log "Restarting BIRD with mismatched TCP-AO secret"
+    log "Restarting BIRD with a mismatched preferred TCP-AO secret"
     start_bird "$BAD_CONF"
     wait_route_absent
     assert_bad_key_does_not_establish

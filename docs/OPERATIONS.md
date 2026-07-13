@@ -921,16 +921,18 @@ expected but no socket inspection snapshot is available (the peer may be
 disconnected, connecting, or socket inspection may have failed).
 Persistent disagreement between `TCP_AO_INFO` and `TCP_AO_GET_KEYS` is also
 `unavailable`: rustbgpd clears the whole snapshot instead of publishing an
-inconsistent degraded value. `healthy` means the published live snapshot has valid current/RNext keys, a consistent
-nondeprecated kernel MKT inventory, and no authentication error counters;
-`degraded` means a key-validity flag is missing, an active key is deprecated,
-or at least one cumulative socket-lifetime error counter is non-zero. When socket inspection succeeds, connected sessions
+inconsistent degraded value. `healthy` means the published live snapshot has
+valid current/RNext keys mapped to a nonempty, internally consistent live MKT
+inventory, neither active key is deprecated, and there are no authentication
+error counters; `degraded` means a key-validity flag is missing, an active key
+is deprecated, or at least one cumulative socket-lifetime error counter is
+non-zero. When socket inspection succeeds, connected sessions
 also show current/RNext KeyIDs,
 packet verification counters, and redacted per-key peer/prefix, directional
 IDs, algorithm, selection flags, rollover metadata, and counters. Key bytes,
 lengths, hashes, and fingerprints are never returned. `TCP_AO_GET_KEYS` does
 copy raw key bytes into a private temporary buffer; rustbgpd compares accepted
-sockets against the configured singleton without logging the bytes and
+sockets against the complete configured keyring without logging the bytes and
 zeroizes every temporary on success, error, retry, and unwind.
 
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
@@ -1248,11 +1250,12 @@ rbgp global
 The `TCP-AO` row reports the local kernel capability probe for RFC 5925
 TCP-AO support. `supported` means the daemon's internal socket primitive can
 install keys on this host. `unsupported` / `probe_failed` means any configured
-static-neighbor `tcp_ao` key will fail closed instead of falling back to
-unauthenticated sessions: listener failures abort startup, while active-open
-failures reject that connect attempt and retry later. TCP-AO key additions,
-removals, and rotations are restart-required because Linux requires the keys to
-exist when active-open or passive-listener sockets are created.
+static-neighbor or direct dynamic-prefix `tcp_ao` keyring will fail closed
+instead of falling back to unauthenticated sessions: listener failures abort
+startup, while active-open failures reject that connect attempt and retry
+later. TCP-AO key additions, removals, edits, and reordering are
+restart-required because Linux requires the keys to exist when active-open or
+passive-listener sockets are created. Live rotation remains LAN-16 / #159.
 
 `rbgp neighbor <address>` reads TCP-AO KeyIDs and verification counters from
 the live connected socket on every query. Inspection failure is reported as

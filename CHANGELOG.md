@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **TCP-AO accepts ordered startup keyrings.** Static neighbors and direct
+  dynamic-prefix selectors may configure one to 256 MKTs. The existing
+  singleton table remains accepted and serializes unchanged; multiple keys use
+  an ordered array of inline tables. At most one key may be `preferred`, at
+  least one must be non-deprecated, and SendIDs and RecvIDs must each be unique
+  within the keyring. The preferred key, or otherwise the first declared
+  non-deprecated key, is selected for startup transmission while every key is
+  installed and reconciled against the kernel. Partial installation and
+  accepted-socket inventory mismatches fail closed. For passive opens, static
+  exact ownership precedes dynamic longest-prefix-match and the kernel
+  inventory must equal the union of every covering protected owner. Overlapping
+  owners require directionally disjoint SendID and RecvID sets;
+  TCP-AO/plaintext and TCP-AO/MD5 overlaps remain invalid. Listener inventories
+  are capped at 4,096 MKTs per address family so inspection cannot truncate a
+  valid configuration. Keyring changes, including reordering, remain
+  restart-required; live rotation remains tracked in LAN-16 / #159. (LAN-389)
+
 - **Narrow v1 route-server / route-reflector compatibility contract.** A
   machine-checked inventory now pins only the proven IPv4/IPv6 unicast RS/RR
   config fields, native gRPC signatures and messages, CLI/JSON contracts, and

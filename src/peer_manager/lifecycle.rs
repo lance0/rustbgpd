@@ -5,7 +5,7 @@ use rustbgpd_api::peer_types::{
     PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
-use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoConfig, TransportConfig};
+use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
@@ -292,7 +292,7 @@ impl PeerManager {
     pub(super) async fn delete_peer_for_reconfigure(
         &mut self,
         peer: PeerKey,
-        next_tcp_ao: Option<&TcpAoConfig>,
+        next_tcp_ao: Option<&TcpAoKeyring>,
     ) -> Result<(), PeerLifecycleError> {
         self.delete_peer_checked(peer, false, next_tcp_ao, false)
             .await
@@ -685,7 +685,7 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         sync_config_snapshot: bool,
-        next_tcp_ao: Option<&TcpAoConfig>,
+        next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;

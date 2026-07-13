@@ -14,12 +14,12 @@ use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
-use crate::config::TcpAoAlgorithm;
+use crate::config::{TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm};
 #[cfg(target_os = "linux")]
-use crate::config::TcpAoConfig;
+use crate::config::{TcpAoConfig, TcpAoKeyring};
 use socket2::Socket;
 #[cfg(target_os = "linux")]
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Set TCP MD5 signature on a socket for a specific peer.
 ///
@@ -205,6 +205,78 @@ impl TcpAoGetSockOpt {
     }
 }
 
+/// Secret-bearing, kernel-normalized MKT fields used only while reconciling
+/// socket inventories. Selection flags and packet counters are intentionally
+/// excluded: Linux may change those when a listener MKT is inherited by a
+/// connected child, but the cryptographic identity must remain identical.
+///
+/// This type deliberately implements neither formatting nor cloning. Its
+/// secret buffer is scrubbed when the short-lived reconciliation value drops.
+#[cfg(target_os = "linux")]
+struct TcpAoMktCore {
+    send_id: u8,
+    recv_id: u8,
+    algorithm: TcpAoAlgorithm,
+    mac_len: u8,
+    key_flags: u8,
+    vrf_ifindex: Option<u32>,
+    // Heap-backed so moving a receipt relocates only the Vec pointer rather
+    // than copying secret bytes through un-scrubbed stack locations.
+    key: Zeroizing<Vec<u8>>,
+}
+
+#[cfg(target_os = "linux")]
+struct TcpAoMktMetadata {
+    peer: IpAddr,
+    prefix_len: u8,
+    preferred: bool,
+    deprecated: bool,
+}
+
+/// One configured listener owner used to build an owned-union receipt.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) peer: IpAddr,
+    pub(crate) prefix_len: u8,
+    pub(crate) keyring: &'a TcpAoKeyring,
+}
+
+#[cfg(target_os = "linux")]
+impl PartialEq for TcpAoMktCore {
+    fn eq(&self, other: &Self) -> bool {
+        self.send_id == other.send_id
+            && self.recv_id == other.recv_id
+            && self.algorithm == other.algorithm
+            && self.mac_len == other.mac_len
+            && self.key_flags == other.key_flags
+            && self.vrf_ifindex == other.vrf_ifindex
+            && tcp_ao_secret_eq(self.key.as_slice(), other.key.as_slice())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for TcpAoMktCore {}
+
+/// A pre-connect MKT receipt. It is intentionally crate-private and cannot be
+/// cloned or formatted, so key material cannot escape into session state or
+/// logs. Active open retains it only across the connect syscall; passive open
+/// obtains the equivalent listener receipt synchronously during accept.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoMktReceipt {
+    cores: Vec<TcpAoMktCore>,
+    metadata: Vec<TcpAoMktMetadata>,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoMktReceipt;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) peer: std::net::IpAddr,
+    pub(crate) prefix_len: u8,
+    pub(crate) keyring: &'a crate::config::TcpAoKeyring,
+}
+
 #[cfg(target_os = "linux")]
 impl Drop for TcpAoGetSockOpt {
     fn drop(&mut self) {
@@ -296,39 +368,67 @@ const TCP_AO_GET_KEYS: libc::c_int = 41;
 #[cfg(target_os = "linux")]
 const TCP_AO_MAXKEYLEN: usize = 80;
 #[cfg(target_os = "linux")]
-const TCP_AO_ADD_SET_CURRENT: u32 = 1 << 0;
+const TCP_AO_TARGET_BIG_ENDIAN: bool = cfg!(target_endian = "big");
+
+/// Return the numeric mask for a bit in a Linux UAPI `u32` C bitfield word.
+///
+/// Linux big-endian C ABIs allocate the first declared bitfield from the most
+/// significant bit; little-endian ABIs allocate it from the least significant
+/// bit. The surrounding `repr(C)` records stay identical on both targets.
 #[cfg(target_os = "linux")]
-const TCP_AO_ADD_SET_RNEXT: u32 = 1 << 1;
+const fn tcp_ao_u32_bitfield_mask(index: u32, big_endian: bool) -> u32 {
+    let shift = if big_endian {
+        u32::BITS - 1 - index
+    } else {
+        index
+    };
+    1u32 << shift
+}
+
+/// Return the numeric mask for a bit in a Linux UAPI `u16` C bitfield word.
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_SET_CURRENT: u32 = 1 << 0;
+const fn tcp_ao_u16_bitfield_mask(index: u32, big_endian: bool) -> u16 {
+    let shift = if big_endian {
+        u16::BITS - 1 - index
+    } else {
+        index
+    };
+    1u16 << shift
+}
+
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_SET_RNEXT: u32 = 1 << 1;
+const TCP_AO_ADD_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_AO_REQUIRED: u32 = 1 << 2;
+const TCP_AO_ADD_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_INFO_ACCEPT_ICMPS: u32 = 1 << 4;
+const TCP_AO_INFO_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_IS_CURRENT: u16 = 1 << 0;
+const TCP_AO_INFO_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_IS_RNEXT: u16 = 1 << 1;
+const TCP_AO_INFO_AO_REQUIRED: u32 = tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
-const TCP_AO_GET_ALL: u16 = 1 << 2;
+const TCP_AO_INFO_ACCEPT_ICMPS: u32 = tcp_ao_u32_bitfield_mask(4, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_CURRENT: u16 = tcp_ao_u16_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_IS_RNEXT: u16 = tcp_ao_u16_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_GET_ALL: u16 = tcp_ao_u16_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
+// `keyflags` is an ordinary one-byte flag field, not a C bitfield word, so its
+// numeric masks are endian-independent.
 #[cfg(target_os = "linux")]
 const TCP_AO_KEYF_IFINDEX: u8 = 1 << 0;
 #[cfg(target_os = "linux")]
 const TCP_AO_KEYF_EXCLUDE_OPT: u8 = 1 << 1;
 #[cfg(target_os = "linux")]
 const TCP_AO_KEY_QUERY_ATTEMPTS: usize = 3;
-#[cfg(target_os = "linux")]
-const TCP_AO_MAX_DUMP_KEYS: usize = 4096;
 
 /// Add a TCP-AO key to a socket.
 ///
-/// The public transport config only carries one key per static neighbor in
-/// the first runtime slice. Active-open sockets install it as both current and
-/// rnext so the initial SYN is signed. Listener sockets install the same MKT
-/// without current/rnext flags because Linux rejects those flags on listening
-/// sockets.
+/// Active-open sockets install the selected key as both current and rnext so
+/// the initial SYN is signed. Listener sockets and non-selected active-open
+/// keyring entries install MKTs without current/rnext flags because Linux
+/// rejects those flags on listening sockets and only one key may be selected.
 ///
 /// Do not set `TCP_AO_INFO.ao_required` here. Linux treats peers matching an
 /// MKT as TCP-AO candidates, while the global `ao_required` bit would require
@@ -541,10 +641,12 @@ where
             .map(|_| TcpAoGetSockOpt::zeroed())
             .collect::<Vec<_>>();
         let matched = query(&mut raw)?;
-        if matched > TCP_AO_MAX_DUMP_KEYS {
+        if matched > TCP_AO_MAX_INSPECT_KEYS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("TCP-AO key count {matched} exceeds safety limit {TCP_AO_MAX_DUMP_KEYS}"),
+                format!(
+                    "TCP-AO key count {matched} exceeds safety limit {TCP_AO_MAX_INSPECT_KEYS}"
+                ),
             ));
         }
         if matched > capacity {
@@ -695,24 +797,38 @@ pub(crate) fn get_tcp_ao_info(socket: &impl AsRawFd) -> io::Result<TcpAoInfoSnap
     Ok(info)
 }
 
-/// Inspect and annotate the singleton MKT installed from configuration.
-/// `exact` is used for accepted sockets, where any missing/unexpected key or
-/// transient secret mismatch must fail closed.
 #[cfg(target_os = "linux")]
-pub(crate) fn get_tcp_ao_info_for_config(
-    socket: &impl AsRawFd,
+fn mkt_core(raw: &TcpAoGetSockOpt) -> io::Result<TcpAoMktCore> {
+    let state = decode_tcp_ao_key_state(raw)?;
+    let key_len = usize::from(raw.keylen);
+    Ok(TcpAoMktCore {
+        send_id: state.send_id,
+        recv_id: state.recv_id,
+        algorithm: state.algorithm,
+        mac_len: raw.maclen,
+        key_flags: raw.keyflags,
+        vrf_ifindex: state.vrf_ifindex,
+        key: Zeroizing::new(raw.key[..key_len].to_vec()),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn raw_matches_owner(
+    raw: &TcpAoGetSockOpt,
     peer: IpAddr,
     prefix_len: u8,
     config: &TcpAoConfig,
-    exact: bool,
-) -> io::Result<TcpAoInfoSnapshot> {
-    let (mut info, keys) = get_tcp_ao_snapshot_with(
-        || get_tcp_ao_info_only(socket),
-        || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
-    )?;
-    annotate_tcp_ao_config(&mut info, &keys, peer, prefix_len, config, exact)?;
-    drop(keys);
-    Ok(info)
+) -> io::Result<bool> {
+    let state = decode_tcp_ao_key_state(raw)?;
+    Ok(state.peer == peer
+        && state.prefix_len == prefix_len
+        && state.send_id == config.send_id
+        && state.recv_id == config.recv_id
+        // Compare the decoded canonical algorithm. Linux reports AES-CMAC as
+        // `cmac(aes)` even though the add-key API accepts `cmac(aes128)`.
+        && state.algorithm == config.algorithm
+        && state.vrf_ifindex.is_none()
+        && raw.keyflags == 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -731,47 +847,295 @@ fn tcp_ao_secret_eq(lhs: &[u8], rhs: &[u8]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn annotate_tcp_ao_config(
-    info: &mut TcpAoInfoSnapshot,
+#[allow(
+    dead_code,
+    reason = "singleton receipt helper retained for focused ABI tests"
+)]
+fn receipt_from_raw_inventory(
     keys: &[TcpAoGetSockOpt],
     peer: IpAddr,
     prefix_len: u8,
     config: &TcpAoConfig,
-    exact: bool,
+    exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    let mut matching = Vec::new();
+    for raw in keys {
+        if raw_matches_owner(raw, peer, prefix_len, config)? {
+            matching.push(raw);
+        }
+    }
+    if matching.len() != 1 || (exact_inventory && keys.len() != 1) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO kernel MKT inventory does not exactly contain the configured owner",
+        ));
+    }
+    Ok(TcpAoMktReceipt {
+        cores: vec![mkt_core(matching[0])?],
+        metadata: vec![TcpAoMktMetadata {
+            peer,
+            prefix_len,
+            preferred: config.preferred,
+            deprecated: config.deprecated,
+        }],
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn keyring_receipt_from_raw_inventory(
+    keys: &[TcpAoGetSockOpt],
+    peer: IpAddr,
+    prefix_len: u8,
+    keyring: &TcpAoKeyring,
+    exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    let mut cores = Vec::with_capacity(keyring.0.len());
+    let mut metadata = Vec::with_capacity(keyring.0.len());
+    let mut used = vec![false; keys.len()];
+    for config in keyring {
+        let mut found = None;
+        for (index, raw) in keys.iter().enumerate() {
+            if !used[index] && raw_matches_owner(raw, peer, prefix_len, config)? {
+                if found.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "TCP-AO kernel MKT inventory contains a duplicate configured key",
+                    ));
+                }
+                found = Some(index);
+            }
+        }
+        let index = found.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO kernel MKT inventory is missing a configured key",
+            )
+        })?;
+        used[index] = true;
+        cores.push(mkt_core(&keys[index])?);
+        metadata.push(TcpAoMktMetadata {
+            peer,
+            prefix_len,
+            preferred: config.preferred,
+            deprecated: config.deprecated,
+        });
+    }
+    if exact_inventory && used.iter().any(|matched| !matched) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO kernel MKT inventory contains a foreign key",
+        ));
+    }
+    Ok(TcpAoMktReceipt { cores, metadata })
+}
+
+#[cfg(target_os = "linux")]
+fn owned_receipt_from_raw_inventory(
+    keys: &[TcpAoGetSockOpt],
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    let expected_len = owners.iter().map(|owner| owner.keyring.0.len()).sum();
+    let mut cores = Vec::with_capacity(expected_len);
+    let mut metadata = Vec::with_capacity(expected_len);
+    let mut used = vec![false; keys.len()];
+    for owner in owners {
+        for config in owner.keyring {
+            let mut found = None;
+            for (index, raw) in keys.iter().enumerate() {
+                if !used[index] && raw_matches_owner(raw, owner.peer, owner.prefix_len, config)? {
+                    if found.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "TCP-AO listener inventory contains a duplicate owned key",
+                        ));
+                    }
+                    found = Some(index);
+                }
+            }
+            let index = found.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO listener inventory is missing an owned key",
+                )
+            })?;
+            used[index] = true;
+            cores.push(mkt_core(&keys[index])?);
+            metadata.push(TcpAoMktMetadata {
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                preferred: config.preferred,
+                deprecated: config.deprecated,
+            });
+        }
+    }
+    Ok(TcpAoMktReceipt { cores, metadata })
+}
+
+/// Capture the kernel-normalized cryptographic identity of one configured
+/// owner. The returned secret-bearing receipt must remain short-lived.
+#[cfg(target_os = "linux")]
+#[allow(
+    dead_code,
+    reason = "singleton compatibility seam retained for Phase 1 callers"
+)]
+pub(crate) fn capture_tcp_ao_mkt_receipt(
+    socket: &impl AsRawFd,
+    peer: IpAddr,
+    prefix_len: u8,
+    config: &TcpAoConfig,
+    exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    receipt_from_raw_inventory(&keys, peer, prefix_len, config, exact_inventory)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_tcp_ao_keyring_receipt(
+    socket: &impl AsRawFd,
+    peer: IpAddr,
+    prefix_len: u8,
+    keyring: &TcpAoKeyring,
+    exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    keyring_receipt_from_raw_inventory(&keys, peer, prefix_len, keyring, exact_inventory)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_tcp_ao_owned_receipt(
+    socket: &impl AsRawFd,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
+    owned_receipt_from_raw_inventory(&keys, owners)
+}
+
+#[cfg(target_os = "linux")]
+fn target_record_matches_receipt_entry(
+    state: &TcpAoKeyState,
+    connected_peer: IpAddr,
+    metadata: &TcpAoMktMetadata,
+) -> bool {
+    let exact_prefix = if connected_peer.is_ipv4() { 32 } else { 128 };
+    (state.peer == metadata.peer && state.prefix_len == metadata.prefix_len)
+        || (state.peer == connected_peer && state.prefix_len == exact_prefix)
+}
+
+#[cfg(target_os = "linux")]
+fn annotate_tcp_ao_receipt(
+    info: &mut TcpAoInfoSnapshot,
+    keys: &[TcpAoGetSockOpt],
+    receipt: &TcpAoMktReceipt,
+    connected_peer: IpAddr,
 ) -> io::Result<()> {
-    let states = keys
+    let mut states = keys
         .iter()
         .map(decode_tcp_ao_key_state)
         .collect::<io::Result<Vec<_>>>()?;
-    let matching = keys
-        .iter()
-        .zip(&states)
-        .enumerate()
-        .filter(|(_, (raw, state))| {
-            state.peer == peer
-                && state.prefix_len == prefix_len
-                && state.send_id == config.send_id
-                && state.recv_id == config.recv_id
-                && state.algorithm == config.algorithm
-                && state.vrf_ifindex.is_none()
-                && raw.keyflags == 0
-                && usize::from(raw.keylen) == config.key.len()
-                && tcp_ao_secret_eq(&raw.key[..usize::from(raw.keylen)], config.key.as_bytes())
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if matching.len() != 1 || (exact && keys.len() != 1) {
+    let mut matching = Vec::new();
+    let mut expected_matched = vec![false; receipt.cores.len()];
+    for (index, raw) in keys.iter().enumerate() {
+        let core = mkt_core(raw)?;
+        if let Some(expected_index) =
+            receipt
+                .cores
+                .iter()
+                .enumerate()
+                .position(|(expected_index, expected)| {
+                    !expected_matched[expected_index]
+                        && target_record_matches_receipt_entry(
+                            &states[index],
+                            connected_peer,
+                            &receipt.metadata[expected_index],
+                        )
+                        && core == *expected
+                })
+        {
+            expected_matched[expected_index] = true;
+            matching.push((index, expected_index));
+        }
+    }
+    // A connected socket must inherit exactly the complete expected-owned
+    // keyring inventory. Missing, foreign, duplicated, or cryptographically
+    // changed records all fail closed.
+    if matching.len() != receipt.cores.len()
+        || keys.len() != receipt.cores.len()
+        || expected_matched.iter().any(|matched| !matched)
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "TCP-AO kernel MKT inventory does not exactly match configured singleton",
+            "TCP-AO connected-socket MKT inventory differs from its kernel-normalized source",
         ));
     }
-    let mut states = states;
-    states[matching[0]].preferred = config.preferred;
-    states[matching[0]].deprecated = config.deprecated;
+    for (matched, expected) in matching {
+        let metadata = &receipt.metadata[expected];
+        states[matched].peer = metadata.peer;
+        states[matched].prefix_len = metadata.prefix_len;
+        states[matched].preferred = metadata.preferred;
+        states[matched].deprecated = metadata.deprecated;
+    }
     states.sort_by_key(|key| (key.peer, key.prefix_len, key.send_id, key.recv_id));
     info.keys = states;
     Ok(())
+}
+
+/// Reconcile a connected socket against a pre-connect/listener raw kernel MKT
+/// receipt and return a redacted runtime snapshot. The receipt comparison is
+/// unordered with respect to selection flags and counters; inventory and core
+/// identity remain exact and fail closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn get_tcp_ao_info_for_receipt(
+    socket: &impl AsRawFd,
+    receipt: &TcpAoMktReceipt,
+    connected_peer: IpAddr,
+) -> io::Result<TcpAoInfoSnapshot> {
+    let (mut info, keys) = get_tcp_ao_snapshot_with(
+        || get_tcp_ao_info_only(socket),
+        || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
+    )?;
+    annotate_tcp_ao_receipt(&mut info, &keys, receipt, connected_peer)?;
+    Ok(info)
+}
+
+/// Select only `RNext` on an accepted child. `Current` is peer-selected by the
+/// authenticated handshake and must never be overwritten by the passive side.
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "TCP-AO RNext selection uses the raw Linux TCP_AO_INFO ABI"
+)]
+pub(crate) fn set_tcp_ao_rnext(socket: &impl AsRawFd, recv_id: u8) -> io::Result<()> {
+    let info = tcp_ao_rnext_update(recv_id);
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_AO_INFO,
+            std::ptr::from_ref(&info).cast(),
+            std::mem::size_of::<TcpAoInfoOpt>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_ao_rnext_update(recv_id: u8) -> TcpAoInfoOpt {
+    TcpAoInfoOpt {
+        flags: TCP_AO_INFO_SET_RNEXT,
+        reserved2: 0,
+        current_key: 0,
+        rnext: recv_id,
+        pkt_good: 0,
+        pkt_bad: 0,
+        pkt_key_not_found: 0,
+        pkt_ao_required: 0,
+        pkt_dropped_icmp: 0,
+    }
 }
 
 /// Inspect runtime TCP-AO socket state.
@@ -784,16 +1148,68 @@ pub(crate) fn get_tcp_ao_info<T>(_socket: &T) -> io::Result<TcpAoInfoSnapshot> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn get_tcp_ao_info_for_config<T>(
+#[allow(
+    dead_code,
+    reason = "singleton compatibility seam retained for Phase 1 callers"
+)]
+pub(crate) fn capture_tcp_ao_mkt_receipt<T>(
     _socket: &T,
     _peer: std::net::IpAddr,
     _prefix_len: u8,
     _config: &crate::config::TcpAoConfig,
-    _exact: bool,
+    _exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_tcp_ao_keyring_receipt<T>(
+    _socket: &T,
+    _peer: std::net::IpAddr,
+    _prefix_len: u8,
+    _keyring: &crate::config::TcpAoKeyring,
+    _exact_inventory: bool,
+) -> io::Result<TcpAoMktReceipt> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_tcp_ao_owned_receipt<T>(
+    _socket: &T,
+    owners: &[TcpAoMktOwner<'_>],
+) -> io::Result<TcpAoMktReceipt> {
+    for owner in owners {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn get_tcp_ao_info_for_receipt<T>(
+    _socket: &T,
+    _receipt: &TcpAoMktReceipt,
+    _connected_peer: std::net::IpAddr,
 ) -> io::Result<TcpAoInfoSnapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn set_tcp_ao_rnext<T>(_socket: &T, _recv_id: u8) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO RNext selection is only supported on Linux",
     ))
 }
 
@@ -1113,12 +1529,61 @@ mod tests {
         assert_eq!(TCP_AO_INFO, 40);
         assert_eq!(TCP_AO_GET_KEYS, 41);
         assert_eq!(TCP_AO_MAXKEYLEN, 80);
-        assert_eq!(TCP_AO_ADD_SET_CURRENT, 1);
-        assert_eq!(TCP_AO_ADD_SET_RNEXT, 2);
-        assert_eq!(TCP_AO_INFO_SET_CURRENT, 1);
-        assert_eq!(TCP_AO_INFO_SET_RNEXT, 2);
-        assert_eq!(TCP_AO_INFO_AO_REQUIRED, 4);
-        assert_eq!(TCP_AO_INFO_ACCEPT_ICMPS, 16);
+        assert_eq!(
+            TCP_AO_ADD_SET_CURRENT,
+            tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_ADD_SET_RNEXT,
+            tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_SET_CURRENT,
+            tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_SET_RNEXT,
+            tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_AO_REQUIRED,
+            tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_INFO_ACCEPT_ICMPS,
+            tcp_ao_u32_bitfield_mask(4, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_IS_CURRENT,
+            tcp_ao_u16_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_IS_RNEXT,
+            tcp_ao_u16_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_GET_ALL,
+            tcp_ao_u16_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(TCP_AO_KEYF_IFINDEX, 1);
+        assert_eq!(TCP_AO_KEYF_EXCLUDE_OPT, 2);
+    }
+
+    #[test]
+    fn tcp_ao_c_bitfield_masks_cover_little_and_big_endian_abis() {
+        assert_eq!(tcp_ao_u32_bitfield_mask(0, false), 1);
+        assert_eq!(tcp_ao_u32_bitfield_mask(1, false), 2);
+        assert_eq!(tcp_ao_u32_bitfield_mask(4, false), 16);
+        assert_eq!(tcp_ao_u32_bitfield_mask(0, true), 1 << 31);
+        assert_eq!(tcp_ao_u32_bitfield_mask(1, true), 1 << 30);
+        assert_eq!(tcp_ao_u32_bitfield_mask(4, true), 1 << 27);
+
+        assert_eq!(tcp_ao_u16_bitfield_mask(0, false), 1);
+        assert_eq!(tcp_ao_u16_bitfield_mask(1, false), 2);
+        assert_eq!(tcp_ao_u16_bitfield_mask(2, false), 4);
+        assert_eq!(tcp_ao_u16_bitfield_mask(0, true), 1 << 15);
+        assert_eq!(tcp_ao_u16_bitfield_mask(1, true), 1 << 14);
+        assert_eq!(tcp_ao_u16_bitfield_mask(2, true), 1 << 13);
     }
 
     #[test]
@@ -1169,7 +1634,7 @@ mod tests {
 
     #[test]
     fn tcp_ao_get_keys_bounds_growth_and_retries() {
-        let err = get_tcp_ao_keys_with(|_| Ok(TCP_AO_MAX_DUMP_KEYS + 1))
+        let err = get_tcp_ao_keys_with(|_| Ok(TCP_AO_MAX_INSPECT_KEYS + 1))
             .err()
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1236,6 +1701,17 @@ mod tests {
         assert!(raw.alg_name.iter().all(|byte| *byte == 0));
         assert!(raw.key.iter().all(|byte| *byte == 0));
         assert_eq!(raw.keylen, 0);
+
+        assert!(std::mem::needs_drop::<TcpAoMktCore>());
+        let raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha256)", b"secret");
+        let core = mkt_core(&raw).unwrap();
+        let heap_address = core.key.as_ptr();
+        let moved = core;
+        assert_eq!(
+            moved.key.as_ptr(),
+            heap_address,
+            "moving a core must not copy secret bytes"
+        );
     }
 
     #[test]
@@ -1247,8 +1723,9 @@ mod tests {
     }
 
     #[test]
-    fn tcp_ao_config_annotation_requires_transient_secret_and_exact_singleton() {
-        let peer = IpAddr::from([192, 0, 2, 1]);
+    fn tcp_ao_kernel_receipt_reconciles_normalized_core_and_rejects_inventory_drift() {
+        let owner = IpAddr::from([192, 0, 2, 0]);
+        let connected = IpAddr::from([192, 0, 2, 9]);
         let config = TcpAoConfig {
             key: "secret".to_string(),
             send_id: 7,
@@ -1268,26 +1745,43 @@ mod tests {
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
         };
-        let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
-        let raw = raw_dump_key(peer, "hmac(sha256)", b"secret");
-        let keys = vec![raw];
-        annotate_tcp_ao_config(&mut info, &keys, peer, 32, &config, true).unwrap();
-        assert!(info.keys[0].preferred);
+        let mut listener_raw = raw_dump_key(owner, "hmac(sha256)", b"secret");
+        listener_raw.prefix = 24;
+        listener_raw.flags = 0;
+        listener_raw.pkt_good = 0;
+        let receipt =
+            receipt_from_raw_inventory(&[listener_raw], owner, 24, &config, false).unwrap();
 
-        let wrong_secret = vec![raw_dump_key(peer, "hmac(sha256)", b"wrong")];
+        let mut child_raw = raw_dump_key(connected, "hmac(sha256)", b"secret");
+        child_raw.pkt_good = 101;
+        let keys = vec![child_raw];
+        let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
+        annotate_tcp_ao_receipt(&mut info, &keys, &receipt, connected).unwrap();
+        assert!(info.keys[0].preferred);
+        assert_eq!(info.keys[0].peer, owner);
+        assert_eq!(info.keys[0].prefix_len, 24);
+
         assert_eq!(
-            annotate_tcp_ao_config(&mut info, &wrong_secret, peer, 32, &config, true)
+            annotate_tcp_ao_receipt(&mut info, &[], &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let wrong_secret = vec![raw_dump_key(connected, "hmac(sha256)", b"wrong")];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &wrong_secret, &receipt, connected)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
 
         let extra = vec![
-            raw_dump_key(peer, "hmac(sha256)", b"secret"),
+            raw_dump_key(connected, "hmac(sha256)", b"secret"),
             raw_dump_key(IpAddr::from([192, 0, 2, 2]), "hmac(sha256)", b"other"),
         ];
         assert_eq!(
-            annotate_tcp_ao_config(&mut info, &extra, peer, 32, &config, true)
+            annotate_tcp_ao_receipt(&mut info, &extra, &receipt, connected)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
@@ -1295,22 +1789,231 @@ mod tests {
 
         for mut wrong in [
             raw_dump_key(IpAddr::from([192, 0, 2, 2]), "hmac(sha256)", b"secret"),
-            raw_dump_key(peer, "hmac(sha1)", b"secret"),
-            raw_dump_key(peer, "hmac(sha256)", b"secret"),
+            raw_dump_key(connected, "hmac(sha1)", b"secret"),
+            raw_dump_key(connected, "hmac(sha256)", b"secret"),
         ] {
             if wrong.alg_name.starts_with(b"hmac(sha256)")
-                && read_sockaddr(&wrong.addr).unwrap() == peer
+                && read_sockaddr(&wrong.addr).unwrap() == connected
             {
                 wrong.sndid = 8;
             }
             let wrong = vec![wrong];
             assert_eq!(
-                annotate_tcp_ao_config(&mut info, &wrong, peer, 32, &config, true)
+                annotate_tcp_ao_receipt(&mut info, &wrong, &receipt, connected)
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::PermissionDenied
             );
         }
+    }
+
+    #[test]
+    fn tcp_ao_raw_config_receipt_accepts_kernel_normalized_aes_cmac_material() {
+        let peer = IpAddr::from([192, 0, 2, 1]);
+        let config = TcpAoConfig {
+            key: "cmac-master13".to_string(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::CmacAes128,
+            preferred: false,
+            deprecated: false,
+        };
+        assert_eq!(config.key.len(), 13);
+        let normalized = [0xa5; 16];
+        let raw = raw_dump_key(peer, "cmac(aes)", &normalized);
+        let receipt = receipt_from_raw_inventory(&[raw], peer, 32, &config, true).unwrap();
+        assert_eq!(receipt.cores[0].key.as_slice(), normalized);
+        assert_ne!(receipt.cores[0].key.as_slice(), config.key.as_bytes());
+    }
+
+    #[test]
+    fn tcp_ao_keyring_receipt_requires_and_annotates_complete_owned_inventory() {
+        let owner = IpAddr::from([192, 0, 2, 0]);
+        let connected = IpAddr::from([192, 0, 2, 9]);
+        let first = TcpAoConfig {
+            key: "old".into(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: true,
+        };
+        let second = TcpAoConfig {
+            key: "next".into(),
+            send_id: 8,
+            recv_id: 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        };
+        let ring = TcpAoKeyring(vec![first, second]);
+        let mut listener_first = raw_dump_key(owner, "hmac(sha256)", b"old");
+        listener_first.prefix = 24;
+        let mut listener_second = raw_dump_key(owner, "hmac(sha256)", b"next");
+        listener_second.prefix = 24;
+        listener_second.sndid = 8;
+        listener_second.rcvid = 10;
+        let receipt = keyring_receipt_from_raw_inventory(
+            &[listener_first, listener_second],
+            owner,
+            24,
+            &ring,
+            true,
+        )
+        .unwrap();
+
+        let mut child_first = raw_dump_key(connected, "hmac(sha256)", b"old");
+        child_first.flags = TCP_AO_GET_IS_CURRENT;
+        let mut child_second = raw_dump_key(connected, "hmac(sha256)", b"next");
+        child_second.sndid = 8;
+        child_second.rcvid = 10;
+        child_second.flags = TCP_AO_GET_IS_RNEXT;
+        let info_raw = TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT,
+            reserved2: 0,
+            current_key: 7,
+            rnext: 10,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        };
+        let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
+        annotate_tcp_ao_receipt(&mut info, &[child_first, child_second], &receipt, connected)
+            .unwrap();
+        assert_eq!(info.keys.len(), 2);
+        assert!(
+            info.keys
+                .iter()
+                .find(|key| key.send_id == 7)
+                .unwrap()
+                .deprecated
+        );
+        assert!(
+            info.keys
+                .iter()
+                .find(|key| key.send_id == 8)
+                .unwrap()
+                .preferred
+        );
+
+        let missing = vec![raw_dump_key(connected, "hmac(sha256)", b"old")];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &missing, &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn tcp_ao_owned_union_receipt_requires_exact_child_inventory_and_keeps_owners() {
+        let connected = IpAddr::from([192, 0, 2, 9]);
+        let covering_peer = IpAddr::from([192, 0, 2, 0]);
+        let covering = TcpAoKeyring(vec![TcpAoConfig {
+            key: "covering".into(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        }]);
+        let exact = TcpAoKeyring(vec![TcpAoConfig {
+            key: "exact".into(),
+            send_id: 8,
+            recv_id: 10,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        }]);
+        let owners = [
+            TcpAoMktOwner {
+                peer: covering_peer,
+                prefix_len: 24,
+                keyring: &covering,
+            },
+            TcpAoMktOwner {
+                peer: connected,
+                prefix_len: 32,
+                keyring: &exact,
+            },
+        ];
+        let mut listener_covering = raw_dump_key(covering_peer, "hmac(sha256)", b"covering");
+        listener_covering.prefix = 24;
+        let mut listener_exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+        listener_exact.sndid = 8;
+        listener_exact.rcvid = 10;
+        let receipt =
+            owned_receipt_from_raw_inventory(&[listener_covering, listener_exact], &owners)
+                .unwrap();
+
+        let child_covering = raw_dump_key(connected, "hmac(sha256)", b"covering");
+        let mut child_exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+        child_exact.sndid = 8;
+        child_exact.rcvid = 10;
+        let mut info = TcpAoInfoSnapshot::from_raw(&TcpAoInfoOpt {
+            flags: 0,
+            reserved2: 0,
+            current_key: 0,
+            rnext: 0,
+            pkt_good: 0,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        });
+        annotate_tcp_ao_receipt(
+            &mut info,
+            &[child_covering, child_exact],
+            &receipt,
+            connected,
+        )
+        .unwrap();
+        assert_eq!(info.keys.len(), 2);
+        assert!(
+            info.keys.iter().any(|key| {
+                key.peer == covering_peer && key.prefix_len == 24 && key.send_id == 7
+            })
+        );
+        assert!(info.keys.iter().any(|key| {
+            key.peer == connected && key.prefix_len == 32 && key.send_id == 8 && key.preferred
+        }));
+
+        let missing = [raw_dump_key(connected, "hmac(sha256)", b"covering")];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &missing, &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let mut foreign = raw_dump_key(connected, "hmac(sha256)", b"foreign");
+        foreign.sndid = 99;
+        foreign.rcvid = 100;
+        let extra = [
+            raw_dump_key(connected, "hmac(sha256)", b"covering"),
+            {
+                let mut exact = raw_dump_key(connected, "hmac(sha256)", b"exact");
+                exact.sndid = 8;
+                exact.rcvid = 10;
+                exact
+            },
+            foreign,
+        ];
+        assert_eq!(
+            annotate_tcp_ao_receipt(&mut info, &extra, &receipt, connected)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn tcp_ao_passive_rnext_update_never_forces_current() {
+        let update = tcp_ao_rnext_update(19);
+        assert_eq!(update.flags, TCP_AO_INFO_SET_RNEXT);
+        assert_eq!(update.current_key, 0);
+        assert_eq!(update.rnext, 19);
     }
 
     #[test]

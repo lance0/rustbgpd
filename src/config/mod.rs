@@ -20,7 +20,8 @@ use rustbgpd_policy::{
     RouteModifications, parse_community_match,
 };
 use rustbgpd_transport::{
-    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TransportConfig,
+    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring,
+    TransportConfig,
 };
 use rustbgpd_wire::{
     Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
@@ -36,6 +37,57 @@ use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 #[cfg(test)]
 use self::parse::parse_named_policy;
 
+#[derive(Clone, Copy)]
+enum DatasetBindMode {
+    Apply,
+    Stage,
+}
+
+pub(crate) struct StagedDatasetCommit {
+    updates: Vec<StagedDatasetUpdate>,
+}
+
+enum StagedDatasetUpdate {
+    Refresh {
+        handle: Arc<rustbgpd_policy::datasets::DatasetHandle>,
+        data: rustbgpd_policy::datasets::DatasetData,
+    },
+    Failure {
+        handle: Arc<rustbgpd_policy::datasets::DatasetHandle>,
+        reason: String,
+    },
+}
+
+impl StagedDatasetCommit {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
+
+    pub(crate) fn commit(self) {
+        for update in self.updates {
+            match update {
+                StagedDatasetUpdate::Refresh { handle, data } => {
+                    if let Some(generation) = handle.refresh(data) {
+                        tracing::info!(
+                            dataset = %handle.name(),
+                            %generation,
+                            "dataset content swapped; scoped peer refresh follows"
+                        );
+                    }
+                }
+                StagedDatasetUpdate::Failure { handle, reason } => {
+                    tracing::warn!(
+                        dataset = %handle.name(),
+                        error = %reason,
+                        "dataset refresh failed; retaining prior snapshot"
+                    );
+                    handle.record_error(reason);
+                }
+            }
+        }
+    }
+}
+
 impl Config {
     fn interface_index(interface: &str) -> Result<u32, String> {
         nix::net::if_::if_nametoindex(interface)
@@ -47,7 +99,13 @@ impl Config {
         source_name: &str,
         base_dir: Option<&std::path::Path>,
     ) -> Result<Self, String> {
-        Self::load_from_toml_source_with_datasets(content, source_name, base_dir, None)
+        Self::load_from_toml_source_with_datasets(
+            content,
+            source_name,
+            base_dir,
+            None,
+            DatasetBindMode::Apply,
+        )
     }
 
     fn load_from_toml_source_with_datasets(
@@ -55,6 +113,7 @@ impl Config {
         source_name: &str,
         base_dir: Option<&std::path::Path>,
         prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        dataset_bind_mode: DatasetBindMode,
     ) -> Result<Self, String> {
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
@@ -88,7 +147,7 @@ impl Config {
         // SIGHUP reload path) existing handles are reused — content
         // swaps happen inside them and a failed refresh keeps the
         // prior snapshot instead of failing the load.
-        if let Err(error) = config.bind_datasets(base_dir, prior_datasets) {
+        if let Err(error) = config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode) {
             return Err(format!("error: {error}"));
         }
         if let Err(error) = config.validate() {
@@ -225,6 +284,7 @@ impl Config {
         &mut self,
         base_dir: Option<&std::path::Path>,
         prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        mode: DatasetBindMode,
     ) -> Result<(), ConfigError> {
         use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind, load_dataset_file};
 
@@ -297,8 +357,29 @@ impl Config {
             let existing = prior
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
-            match (existing, load_dataset_file(&path, kind)) {
-                (Some(handle), Ok(data)) => {
+            match (existing, load_dataset_file(&path, kind), mode) {
+                (Some(handle), Ok(data), DatasetBindMode::Stage) => {
+                    if handle.pin().data != data {
+                        self.policy.dataset_events.swapped.push(name.clone());
+                    }
+                    // Validate the candidate against its proposed snapshot,
+                    // but do not mutate the live handle until the complete
+                    // reload preflight has passed.
+                    self.policy
+                        .dataset_bindings
+                        .insert(Arc::new(DatasetHandle::new(name, kind, data)));
+                }
+                (Some(handle), Err(reason), DatasetBindMode::Stage) => {
+                    // A failed reload read retains the prior snapshot. Defer
+                    // recording the operational error on the live handle too:
+                    // an otherwise rejected config must have no side effects.
+                    self.policy
+                        .dataset_events
+                        .failed
+                        .push((name.clone(), reason));
+                    self.policy.dataset_bindings.insert(Arc::clone(handle));
+                }
+                (Some(handle), Ok(data), DatasetBindMode::Apply) => {
                     if let Some(generation) = handle.refresh(data) {
                         tracing::info!(
                             dataset = %name,
@@ -309,7 +390,7 @@ impl Config {
                     }
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (Some(handle), Err(reason)) => {
+                (Some(handle), Err(reason), DatasetBindMode::Apply) => {
                     // Keep the prior snapshot serving probes; surface
                     // the failure (WARN here, counter + `rbgp policy
                     // stats` via the recorded error).
@@ -325,12 +406,12 @@ impl Config {
                         .push((name.clone(), reason));
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (None, Ok(data)) => {
+                (None, Ok(data), _) => {
                     self.policy
                         .dataset_bindings
                         .insert(Arc::new(DatasetHandle::new(name, kind, data)));
                 }
-                (None, Err(reason)) => {
+                (None, Err(reason), _) => {
                     return Err(ConfigError::InvalidPolicyEntry {
                         reason: format!(
                             "dataset {name:?}: cannot load {}: {reason}",
@@ -388,9 +469,83 @@ impl Config {
             path,
             base_dir.as_deref(),
             prior_datasets,
+            DatasetBindMode::Apply,
         )?;
         config.file_path = Some(PathBuf::from(path));
         Ok(config)
+    }
+
+    /// Load a reload candidate against the running dataset snapshots without
+    /// mutating their shared handles. Call [`Self::prepare_staged_datasets`]
+    /// after every no-side-effect reload preflight has passed, then commit the
+    /// returned plan at the ordered dataset reconciliation step.
+    pub(crate) fn load_with_diagnostics_and_staged_datasets(
+        path: &str,
+        prior_datasets: &rustbgpd_policy::datasets::DatasetBindings,
+    ) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|error| format!("error: failed to read {path}: {error}"))?;
+        let content = test_only_inject_legacy_grpc_security(&content);
+        let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
+        let mut config = Self::load_from_toml_source_with_datasets(
+            content.as_ref(),
+            path,
+            base_dir.as_deref(),
+            Some(prior_datasets),
+            DatasetBindMode::Stage,
+        )?;
+        config.file_path = Some(PathBuf::from(path));
+        Ok(config)
+    }
+
+    /// Rewrite staged bindings to stable running-handle identities and return
+    /// the still-unapplied content/error changes. The caller commits the plan
+    /// only after earlier fallible reload reconciliation has succeeded.
+    pub(crate) fn prepare_staged_datasets(
+        &mut self,
+        prior: &rustbgpd_policy::datasets::DatasetBindings,
+    ) -> StagedDatasetCommit {
+        use rustbgpd_policy::datasets::DatasetBindings;
+
+        let failed: HashMap<&str, &str> = self
+            .policy
+            .dataset_events
+            .failed
+            .iter()
+            .map(|(name, reason)| (name.as_str(), reason.as_str()))
+            .collect();
+        let mut committed = DatasetBindings::new();
+        let mut staged_handles: Vec<_> = self.policy.dataset_bindings.handles().cloned().collect();
+        staged_handles.sort_by(|left, right| left.name().cmp(right.name()));
+        let mut updates = Vec::new();
+        for staged in staged_handles {
+            let Some(live) = prior
+                .get(staged.name())
+                .filter(|live| live.kind() == staged.kind())
+            else {
+                committed.insert(staged);
+                continue;
+            };
+            if let Some(reason) = failed.get(staged.name().as_ref()) {
+                updates.push(StagedDatasetUpdate::Failure {
+                    handle: Arc::clone(live),
+                    reason: (*reason).to_string(),
+                });
+            } else {
+                let data = staged.pin().data.clone();
+                let content_changed = live.pin().data != data;
+                let clears_error = live.status().last_error.is_some();
+                if content_changed || clears_error {
+                    updates.push(StagedDatasetUpdate::Refresh {
+                        handle: Arc::clone(live),
+                        data,
+                    });
+                }
+            }
+            committed.insert(Arc::clone(live));
+        }
+        self.policy.dataset_bindings = committed;
+        StagedDatasetCommit { updates }
     }
 
     pub fn prometheus_addr(&self) -> Option<SocketAddr> {
@@ -1002,14 +1157,21 @@ impl Config {
             .md5_password
             .clone()
             .or_else(|| group.and_then(|g| g.md5_password.clone()));
-        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| TransportTcpAoConfig {
-            key: tcp_ao.key.clone(),
-            send_id: tcp_ao.send_id,
-            recv_id: tcp_ao.recv_id,
-            algorithm: TcpAoAlgorithm::from_linux_name(&tcp_ao.algorithm)
-                .expect("validated in Config::load"),
-            preferred: tcp_ao.preferred,
-            deprecated: tcp_ao.deprecated,
+        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| {
+            TcpAoKeyring(
+                tcp_ao
+                    .iter()
+                    .map(|key| TransportTcpAoConfig {
+                        key: key.key.clone(),
+                        send_id: key.send_id,
+                        recv_id: key.recv_id,
+                        algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
+                            .expect("validated in Config::load"),
+                        preferred: key.preferred,
+                        deprecated: key.deprecated,
+                    })
+                    .collect(),
+            )
         });
         transport.ttl_security = neighbor
             .ttl_security
@@ -2837,7 +2999,9 @@ impl Config {
                 neighbor.md5_password = Some(REDACTED_SECRET.to_string());
             }
             if let Some(tcp_ao) = &mut neighbor.tcp_ao {
-                tcp_ao.key = REDACTED_SECRET.to_string();
+                for key in &mut tcp_ao.0 {
+                    key.key = REDACTED_SECRET.to_string();
+                }
             }
         }
         for group in effective.peer_groups.values_mut() {
@@ -2847,7 +3011,9 @@ impl Config {
         }
         for range in &mut effective.dynamic_neighbors {
             if let Some(tcp_ao) = &mut range.tcp_ao {
-                tcp_ao.key = REDACTED_SECRET.to_string();
+                for key in &mut tcp_ao.0 {
+                    key.key = REDACTED_SECRET.to_string();
+                }
             }
         }
 
@@ -4371,12 +4537,7 @@ fn protected_dynamic_range_cmp(
         .then_with(|| left.peer_group.cmp(&right.peer_group))
         .then_with(|| left.remote_asn.cmp(&right.remote_asn))
         .then_with(|| left.description.cmp(&right.description))
-        .then_with(|| left_ao.key.cmp(&right_ao.key))
-        .then_with(|| left_ao.send_id.cmp(&right_ao.send_id))
-        .then_with(|| left_ao.recv_id.cmp(&right_ao.recv_id))
-        .then_with(|| left_ao.algorithm.cmp(&right_ao.algorithm))
-        .then_with(|| left_ao.preferred.cmp(&right_ao.preferred))
-        .then_with(|| left_ao.deprecated.cmp(&right_ao.deprecated))
+        .then_with(|| left_ao.cmp(right_ao))
 }
 
 /// Pin dynamic TCP-AO listener state to the startup snapshot while preserving

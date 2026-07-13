@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use rustbgpd_wire::BgpRole;
 
@@ -282,7 +283,7 @@ pub struct DynamicNeighborConfig {
     /// TCP-AO key installed as a prefix MKT on the passive listener at startup.
     /// Dynamic ranges never inherit authentication from their peer group.
     #[serde(default)]
-    pub tcp_ao: Option<TcpAoConfig>,
+    pub tcp_ao: Option<TcpAoKeyringConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -683,7 +684,7 @@ pub struct Neighbor {
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) configuration. Installed on
     /// startup active-open sockets and the passive listener when configured.
-    pub tcp_ao: Option<TcpAoConfig>,
+    pub tcp_ao: Option<TcpAoKeyringConfig>,
     /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
     /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
     pub bfd: Option<BfdConfig>,
@@ -775,7 +776,7 @@ pub struct Neighbor {
     pub export_policy_chain: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TcpAoConfig {
     /// TCP-AO Master Key Tuple secret. 1..=80 bytes.
@@ -790,8 +791,10 @@ pub struct TcpAoConfig {
     /// installation. Runtime key rotation remains deferred.
     #[serde(default)]
     pub preferred: bool,
-    /// Mark this key as deprecated for future rollover behavior. Startup socket
-    /// installation carries the flag through; runtime rollover remains deferred.
+    /// Mark this key as deprecated for local startup selection and health
+    /// metadata. Deprecated keys are still installed and may remain usable
+    /// when peer-selected, but rustbgpd never selects one as its startup
+    /// fallback. Live rotation remains deferred.
     #[serde(default)]
     pub deprecated: bool,
 }
@@ -806,6 +809,87 @@ impl fmt::Debug for TcpAoConfig {
             .field("preferred", &self.preferred)
             .field("deprecated", &self.deprecated)
             .finish()
+    }
+}
+
+/// Ordered TCP-AO startup keyring. A singleton retains the legacy table wire
+/// shape; two or more entries use an ordered array of tables.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TcpAoKeyringConfig(pub Vec<TcpAoConfig>);
+
+impl TcpAoKeyringConfig {
+    pub fn iter(&self) -> std::slice::Iter<'_, TcpAoConfig> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a TcpAoKeyringConfig {
+    type Item = &'a TcpAoConfig;
+    type IntoIter = std::slice::Iter<'a, TcpAoConfig>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl fmt::Debug for TcpAoKeyringConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TcpAoKeyringConfig").field(&self.0).finish()
+    }
+}
+
+impl From<TcpAoConfig> for TcpAoKeyringConfig {
+    fn from(key: TcpAoConfig) -> Self {
+        Self(vec![key])
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum TcpAoKeyringWire {
+    Singleton(TcpAoConfig),
+    Ordered(#[schemars(length(min = 1, max = 256))] Vec<TcpAoConfig>),
+}
+
+impl JsonSchema for TcpAoKeyringConfig {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("TcpAoKeyringConfig")
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        TcpAoKeyringWire::json_schema(generator)
+    }
+}
+
+impl<'de> Deserialize<'de> for TcpAoKeyringConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match TcpAoKeyringWire::deserialize(deserializer)? {
+            TcpAoKeyringWire::Singleton(key) => Self(vec![key]),
+            TcpAoKeyringWire::Ordered(keys) => Self(keys),
+        })
+    }
+}
+
+impl Serialize for TcpAoKeyringConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0.as_slice() {
+            [key] => key.serialize(serializer),
+            keys => keys.serialize(serializer),
+        }
     }
 }
 

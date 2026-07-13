@@ -1,7 +1,7 @@
 # Containerlab topology: rustbgpd ↔ BIRD 3.x (M43 — TCP-AO)
 #
-# Validates static-neighbor TCP-AO startup support against a real BIRD 3.x
-# peer on a Linux kernel with CONFIG_TCP_AO=y.
+# Validates an ordered two-key static-neighbor TCP-AO startup keyring against a
+# real BIRD 3.x peer on a Linux kernel with CONFIG_TCP_AO=y.
 #
 # Usage:
 #   docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop

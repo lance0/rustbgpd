@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
+use rustbgpd_transport::TCP_AO_MAX_INSPECT_KEYS;
+
 use super::parse::{
     ChainDirection, parse_families, parse_named_policy, parse_neighbor_set, parse_policy,
     resolve_chain,
@@ -13,7 +15,7 @@ use super::schema::{
 };
 use super::{
     Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig, dynamic_prefixes_intersect,
+    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
     is_unicast_nonzero_mac, parse_mac_address,
 };
 
@@ -904,44 +906,74 @@ impl Config {
             }
         }
 
-        // A prefix MKT creates an authentication boundary in the kernel. Until
-        // Linux precedence for overlapping MKTs is proven and modeled, every
-        // protected dynamic range must be disjoint from all other dynamic
-        // ranges and static peers. This prevents longest-prefix application
-        // matching from disagreeing with listener authentication.
-        for (i, protected) in self.dynamic_neighbors.iter().enumerate() {
-            if protected.tcp_ao.is_none() {
-                continue;
-            }
-            let protected_prefix = parsed_dynamic_prefixes[i];
-            for (j, other_prefix) in parsed_dynamic_prefixes.iter().copied().enumerate() {
-                if i != j && dynamic_prefixes_intersect(protected_prefix, other_prefix) {
+        // Linux may inherit every covering MKT onto an accepted child. Permit
+        // overlapping TCP-AO owners only when their directional ID namespaces
+        // are disjoint; the listener then reconciles the complete owned union
+        // while static-exact/dynamic-LPM selects Current and RNext ownership.
+        // Any AO/plaintext or AO/MD5 overlap remains fail-closed.
+        for (i, left) in self.dynamic_neighbors.iter().enumerate() {
+            for (j, right) in self.dynamic_neighbors.iter().enumerate().skip(i + 1) {
+                if !dynamic_prefixes_intersect(
+                    parsed_dynamic_prefixes[i],
+                    parsed_dynamic_prefixes[j],
+                ) || (left.tcp_ao.is_none() && right.tcp_ao.is_none())
+                {
+                    continue;
+                }
+                let (Some(left_ao), Some(right_ao)) = (&left.tcp_ao, &right.tcp_ao) else {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
-                            "dynamic_neighbors[{i}]: TCP-AO range {:?} overlaps \
-                             dynamic_neighbors[{j}] {:?}; protected ranges must be disjoint",
-                            protected.prefix, self.dynamic_neighbors[j].prefix
+                            "dynamic_neighbors[{i}] {:?} and dynamic_neighbors[{j}] {:?} \
+                             overlap across a TCP-AO and non-TCP-AO authentication boundary",
+                            left.prefix, right.prefix
+                        ),
+                    });
+                };
+                if let Some(direction) = tcp_ao_overlap_id_collision(left_ao, right_ao) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?} and dynamic_neighbors[{j}] {:?} \
+                             overlap with a TCP-AO {direction} collision; overlapping owners \
+                             require disjoint SendID and RecvID sets",
+                            left.prefix, right.prefix
                         ),
                     });
                 }
             }
+
             for neighbor in &self.neighbors {
                 let Ok(address) = neighbor.address.parse::<IpAddr>() else {
                     continue;
                 };
                 let host_prefix = (address, if address.is_ipv4() { 32 } else { 128 });
-                if dynamic_prefixes_intersect(protected_prefix, host_prefix) {
+                if !dynamic_prefixes_intersect(parsed_dynamic_prefixes[i], host_prefix)
+                    || (left.tcp_ao.is_none() && neighbor.tcp_ao.is_none())
+                {
+                    continue;
+                }
+                let (Some(dynamic_ao), Some(static_ao)) = (&left.tcp_ao, &neighbor.tcp_ao) else {
                     return Err(ConfigError::InvalidDynamicNeighbor {
                         reason: format!(
-                            "dynamic_neighbors[{i}]: TCP-AO range {:?} contains static \
-                             neighbor {:?}; static and dynamic authentication boundaries \
-                             must be disjoint",
-                            protected.prefix, neighbor.address
+                            "dynamic_neighbors[{i}] TCP-AO boundary {:?} overlaps static \
+                             neighbor {:?} across a TCP-AO and non-TCP-AO authentication boundary",
+                            left.prefix, neighbor.address
+                        ),
+                    });
+                };
+                if let Some(direction) = tcp_ao_overlap_id_collision(dynamic_ao, static_ao) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?} and static neighbor {:?} overlap \
+                             with a TCP-AO {direction} collision; overlapping owners require \
+                             disjoint SendID and RecvID sets",
+                            left.prefix, neighbor.address
                         ),
                     });
                 }
             }
         }
+
+        validate_tcp_ao_listener_capacity(self, &parsed_dynamic_prefixes)?;
 
         // Validate dynamic_neighbor_limit range
         if let Some(limit) = self.global.dynamic_neighbor_limit
@@ -1043,7 +1075,7 @@ impl Config {
             if neighbor
                 .tcp_ao
                 .as_ref()
-                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+                .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
             {
                 return Err(placeholder_error(&neighbor.address, "tcp_ao.key"));
             }
@@ -1052,7 +1084,7 @@ impl Config {
             if range
                 .tcp_ao
                 .as_ref()
-                .is_some_and(|tcp_ao| tcp_ao.key == super::REDACTED_SECRET)
+                .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
             {
                 return Err(placeholder_error(
                     &format!("dynamic_neighbors.{}", range.prefix),
@@ -1820,7 +1852,134 @@ fn validate_fib_table_guardrails(
     Ok(())
 }
 
-fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
+fn validate_tcp_ao_config(address: &str, tcp_ao: &TcpAoKeyringConfig) -> Result<(), ConfigError> {
+    if tcp_ao.is_empty() || tcp_ao.len() > 256 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao".to_string(),
+            reason: "must contain 1..=256 keys".to_string(),
+        });
+    }
+    let mut send_ids = HashSet::new();
+    let mut recv_ids = HashSet::new();
+    let mut preferred = 0usize;
+    let mut nondeprecated = 0usize;
+    for key in tcp_ao {
+        validate_tcp_ao_key(address, key)?;
+        if !send_ids.insert(key.send_id) {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: "tcp_ao.send_id".to_string(),
+                reason: format!("duplicate SendID {}", key.send_id),
+            });
+        }
+        if !recv_ids.insert(key.recv_id) {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: "tcp_ao.recv_id".to_string(),
+                reason: format!("duplicate RecvID {}", key.recv_id),
+            });
+        }
+        preferred += usize::from(key.preferred);
+        nondeprecated += usize::from(!key.deprecated);
+    }
+    if preferred > 1 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.preferred".to_string(),
+            reason: "at most one key may be preferred".to_string(),
+        });
+    }
+    if nondeprecated == 0 {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_ao.deprecated".to_string(),
+            reason: "at least one key must not be deprecated".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tcp_ao_listener_capacity(
+    config: &Config,
+    parsed_dynamic_prefixes: &[(IpAddr, u8)],
+) -> Result<(), ConfigError> {
+    let mut ipv4_keys = 0usize;
+    let mut ipv6_keys = 0usize;
+    for neighbor in &config.neighbors {
+        let Some(tcp_ao) = &neighbor.tcp_ao else {
+            continue;
+        };
+        let address = neighbor
+            .address
+            .parse::<IpAddr>()
+            .expect("neighbor addresses were validated before TCP-AO capacity");
+        let count = if address.is_ipv4() {
+            &mut ipv4_keys
+        } else {
+            &mut ipv6_keys
+        };
+        *count =
+            count
+                .checked_add(tcp_ao.len())
+                .ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                    address: "BGP listener".to_string(),
+                    field: "tcp_ao".to_string(),
+                    reason: "aggregate TCP-AO listener key count overflow".to_string(),
+                })?;
+    }
+    for (range, (address, _prefix_len)) in
+        config.dynamic_neighbors.iter().zip(parsed_dynamic_prefixes)
+    {
+        let Some(tcp_ao) = &range.tcp_ao else {
+            continue;
+        };
+        let count = if address.is_ipv4() {
+            &mut ipv4_keys
+        } else {
+            &mut ipv6_keys
+        };
+        *count =
+            count
+                .checked_add(tcp_ao.len())
+                .ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                    address: "BGP listener".to_string(),
+                    field: "tcp_ao".to_string(),
+                    reason: "aggregate TCP-AO listener key count overflow".to_string(),
+                })?;
+    }
+
+    for (family, key_count) in [("IPv4", ipv4_keys), ("IPv6", ipv6_keys)] {
+        if key_count > TCP_AO_MAX_INSPECT_KEYS {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: format!("{family} BGP listener"),
+                field: "tcp_ao".to_string(),
+                reason: format!(
+                    "aggregate key count {key_count} exceeds accepted-socket inspection limit \
+                     {TCP_AO_MAX_INSPECT_KEYS}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn tcp_ao_overlap_id_collision(
+    left: &TcpAoKeyringConfig,
+    right: &TcpAoKeyringConfig,
+) -> Option<&'static str> {
+    let right_send = right.iter().map(|key| key.send_id).collect::<HashSet<_>>();
+    if left.iter().any(|key| right_send.contains(&key.send_id)) {
+        return Some("SendID");
+    }
+    let right_recv = right.iter().map(|key| key.recv_id).collect::<HashSet<_>>();
+    if left.iter().any(|key| right_recv.contains(&key.recv_id)) {
+        return Some("RecvID");
+    }
+    None
+}
+
+fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
     let key_len = tcp_ao.key.len();
     if key_len == 0 {
         return Err(ConfigError::InvalidNeighborConfig {

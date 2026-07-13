@@ -58,7 +58,7 @@ use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
     BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
-    TcpAoListenerKey,
+    TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -610,6 +610,7 @@ fn tcp_ao_listener_key_for_neighbor(
         return None;
     }
     Some(TcpAoListenerKey {
+        owner: TcpAoListenerOwnerKind::Static,
         peer,
         prefix_len: if peer.is_ipv4() { 32 } else { 128 },
         config: tcp_ao.clone(),
@@ -626,17 +627,23 @@ fn tcp_ao_listener_key_for_dynamic_range(
         return None;
     }
     Some(TcpAoListenerKey {
+        owner: TcpAoListenerOwnerKind::Dynamic,
         peer,
         prefix_len,
-        config: TransportTcpAoConfig {
-            key: tcp_ao.key.clone(),
-            send_id: tcp_ao.send_id,
-            recv_id: tcp_ao.recv_id,
-            algorithm: TcpAoAlgorithm::from_linux_name(&tcp_ao.algorithm)
-                .expect("validated in Config::load"),
-            preferred: tcp_ao.preferred,
-            deprecated: tcp_ao.deprecated,
-        },
+        config: TcpAoKeyring(
+            tcp_ao
+                .iter()
+                .map(|key| TransportTcpAoConfig {
+                    key: key.key.clone(),
+                    send_id: key.send_id,
+                    recv_id: key.recv_id,
+                    algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
+                        .expect("validated in Config::load"),
+                    preferred: key.preferred,
+                    deprecated: key.deprecated,
+                })
+                .collect(),
+        ),
     })
 }
 
@@ -3621,14 +3628,17 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             peer_group: "dynamic".to_string(),
             remote_asn: 0,
             description: None,
-            tcp_ao: Some(config::TcpAoConfig {
-                key: "secret".to_string(),
-                send_id: 7,
-                recv_id: 9,
-                algorithm: "hmac(sha256)".to_string(),
-                preferred: false,
-                deprecated: false,
-            }),
+            tcp_ao: Some(
+                config::TcpAoConfig {
+                    key: "secret".to_string(),
+                    send_id: 7,
+                    recv_id: 9,
+                    algorithm: "hmac(sha256)".to_string(),
+                    preferred: false,
+                    deprecated: false,
+                }
+                .into(),
+            ),
         };
 
         let v4 = tcp_ao_listener_key_for_dynamic_range(

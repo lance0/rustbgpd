@@ -1998,14 +1998,17 @@ mod tests {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
         let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
         config.md5_password = Some(secret.to_string());
-        config.tcp_ao = Some(TcpAoConfig {
-            key: secret.to_string(),
-            send_id: 7,
-            recv_id: 9,
-            algorithm: TcpAoAlgorithm::HmacSha256,
-            preferred: true,
-            deprecated: false,
-        });
+        config.tcp_ao = Some(
+            TcpAoConfig {
+                key: secret.to_string(),
+                send_id: 7,
+                recv_id: 9,
+                algorithm: TcpAoAlgorithm::HmacSha256,
+                preferred: true,
+                deprecated: false,
+            }
+            .into(),
+        );
         config
     }
 

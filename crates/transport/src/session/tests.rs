@@ -1144,16 +1144,128 @@ fn tcp_ao_snapshot(good: u64, bad: u64) -> crate::TcpAoInfoSnapshot {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn active_open_second_key_install_failure_abandons_socket_before_connect() {
+    use socket2::Socket;
+    use std::cell::{Cell, RefCell};
+    use std::io::Read as _;
+    use std::time::Duration;
+
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "192.0.2.2:179".parse().unwrap());
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![
+        crate::TcpAoConfig {
+            key: "selected".to_string(),
+            send_id: 1,
+            recv_id: 11,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        },
+        crate::TcpAoConfig {
+            key: "standby".to_string(),
+            send_id: 2,
+            recv_id: 12,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        },
+    ]));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let socket = Socket::from(client);
+    let installed = RefCell::new(Vec::new());
+    let connect_attempts = Cell::new(0usize);
+    let result = super::io::prepare_active_socket_for_test(
+        socket,
+        &config,
+        "192.0.2.2",
+        |_socket, _peer, _prefix_len, key, role| {
+            installed.borrow_mut().push((key.send_id, role));
+            if key.send_id == 2 {
+                Err(std::io::Error::other("injected second-key failure"))
+            } else {
+                Ok(())
+            }
+        },
+        |_socket, _addr| {
+            connect_attempts.set(connect_attempts.get() + 1);
+            Ok(())
+        },
+    );
+    let Err(error) = result else {
+        panic!("a partial TCP-AO keyring install must abandon the active-open socket");
+    };
+
+    assert_eq!(
+        installed.into_inner(),
+        vec![
+            (1, crate::socket_opts::TcpAoSocketRole::ActiveOpen),
+            (2, crate::socket_opts::TcpAoSocketRole::Listener),
+        ]
+    );
+    assert_eq!(connect_attempts.get(), 0, "connect must not be attempted");
+    assert!(error.to_string().contains("send_id=2"), "{error}");
+    assert!(error.to_string().contains("recv_id=12"), "{error}");
+
+    // The peer observes EOF on this exact connection, proving the consumed
+    // partially programmed socket was closed rather than retained for a
+    // plaintext retry. The timeout keeps a retained descriptor from hanging
+    // the suite indefinitely.
+    let mut byte = [0u8; 1];
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
+    reason = "test helper keeps multi-key TCP-AO state fixtures readable"
+)]
+fn tcp_ao_key_state(
+    peer: &str,
+    prefix_len: u8,
+    send_id: u8,
+    recv_id: u8,
+    is_current: bool,
+    is_rnext: bool,
+    preferred: bool,
+    deprecated: bool,
+    pkt_good: u64,
+) -> crate::TcpAoKeyState {
+    crate::TcpAoKeyState {
+        peer: peer.parse().unwrap(),
+        prefix_len,
+        send_id,
+        recv_id,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        is_current,
+        is_rnext,
+        preferred,
+        deprecated,
+        vrf_ifindex: None,
+        pkt_good,
+        pkt_bad: 0,
+    }
+}
+
 async fn tcp_ao_query_test_session() -> PeerSession {
     let mut session = make_test_session(65001, 65002);
-    session.config.tcp_ao = Some(crate::TcpAoConfig {
-        key: "test-secret".to_string(),
-        send_id: 7,
-        recv_id: 9,
-        algorithm: crate::TcpAoAlgorithm::HmacSha256,
-        preferred: true,
-        deprecated: false,
-    });
+    session.config.tcp_ao = Some(
+        crate::TcpAoConfig {
+            key: "test-secret".to_string(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        }
+        .into(),
+    );
     // The test mutates config after construction; production constructors
     // seed this durable bit from config before the session starts.
     session.tcp_ao_protected = true;
@@ -1171,6 +1283,13 @@ async fn accepted_query_test_session(tcp_ao_info: Option<crate::TcpAoInfoSnapsho
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     let config = TransportConfig::new(peer_config, "127.0.0.1:179".parse().unwrap());
     assert!(config.tcp_ao.is_none());
+    accepted_query_test_session_with_config(config, tcp_ao_info).await
+}
+
+async fn accepted_query_test_session_with_config(
+    config: TransportConfig,
+    tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+) -> PeerSession {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let connect = TcpStream::connect(listener.local_addr().unwrap());
     let accept = listener.accept();
@@ -1243,6 +1362,66 @@ async fn accepted_tcp_ao_snapshot_seeds_durable_refresh_across_failure_and_recov
     session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(44, 0)));
     assert_eq!(session.tcp_ao_info.as_ref().unwrap().pkt_good, 44);
     assert!(session.tcp_ao_info.as_ref().unwrap().keys[0].preferred);
+}
+
+#[tokio::test]
+async fn accepted_tcp_ao_refresh_restores_overlapping_owner_selectors_after_host_normalization() {
+    let connected: IpAddr = "127.0.0.1".parse().unwrap();
+    let mut initial = tcp_ao_snapshot(20, 0);
+    initial.current_key = 8;
+    initial.rnext_key = 12;
+    initial.keys = vec![
+        tcp_ao_key_state("127.0.0.0", 24, 7, 9, false, false, false, false, 20),
+        tcp_ao_key_state("127.0.0.1", 32, 8, 10, true, false, false, true, 20),
+        tcp_ao_key_state("127.0.0.1", 32, 11, 12, false, true, true, false, 20),
+    ];
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "127.0.0.1:179".parse().unwrap());
+    config.tcp_ao = Some(crate::TcpAoKeyring(vec![
+        crate::TcpAoConfig {
+            key: "static-current".to_string(),
+            send_id: 8,
+            recv_id: 10,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: true,
+        },
+        crate::TcpAoConfig {
+            key: "static-selected".to_string(),
+            send_id: 11,
+            recv_id: 12,
+            algorithm: crate::TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        },
+    ]));
+    let mut session = accepted_query_test_session_with_config(config, Some(initial)).await;
+
+    let mut refreshed = tcp_ao_snapshot(43, 0);
+    refreshed.current_key = 8;
+    refreshed.rnext_key = 12;
+    refreshed.keys = vec![
+        tcp_ao_key_state("127.0.0.1", 32, 7, 9, false, false, false, false, 43),
+        tcp_ao_key_state("127.0.0.1", 32, 8, 10, true, false, false, false, 43),
+        tcp_ao_key_state("127.0.0.1", 32, 11, 12, false, true, false, false, 43),
+    ];
+    session.refresh_tcp_ao_info_with(|_| Ok(refreshed));
+
+    let keys = &session.tcp_ao_info.as_ref().unwrap().keys;
+    let covering = keys.iter().find(|key| key.send_id == 7).unwrap();
+    assert_eq!(covering.peer, "127.0.0.0".parse::<IpAddr>().unwrap());
+    assert_eq!(covering.prefix_len, 24);
+    let deprecated_current = keys.iter().find(|key| key.send_id == 8).unwrap();
+    assert_eq!(deprecated_current.peer, connected);
+    assert_eq!(deprecated_current.prefix_len, 32);
+    assert!(deprecated_current.is_current);
+    assert!(deprecated_current.deprecated);
+    let selected_rnext = keys.iter().find(|key| key.send_id == 11).unwrap();
+    assert_eq!(selected_rnext.peer, connected);
+    assert_eq!(selected_rnext.prefix_len, 32);
+    assert!(selected_rnext.is_rnext);
+    assert!(selected_rnext.preferred);
 }
 
 #[tokio::test]

@@ -88,9 +88,9 @@ message GlobalState {
   uint32 asn = 1;
   string router_id = 2;
   uint32 listen_port = 3;
-  // Kernel/runtime capability probe for future TCP-AO support (RFC 5925).
-  // This is read-only status only; rustbgpd does not yet accept TCP-AO
-  // neighbor configuration or apply TCP-AO keys to BGP sessions.
+  // Read-only kernel/runtime capability probe for TCP-AO support (RFC 5925).
+  // TCP-AO keyrings are configured through TOML and applied to Linux startup
+  // sockets; this field reports whether the host supports that configuration.
   TcpAoSupport tcp_ao_support = 4;
   // Human-readable probe detail, populated when tcp_ao_support is
   // TCP_AO_SUPPORT_UNSUPPORTED or TCP_AO_SUPPORT_PROBE_FAILED.
@@ -460,14 +460,16 @@ message NeighborState {
   bool route_reflector_client = 25;
   // Experimental Paths-Limit values, one row per relevant family.
   repeated PathsLimitState paths_limits = 26;
-  // Configured transport authentication for this session.
+  // Effective transport authentication for this session. Direct dynamic-prefix
+  // TCP-AO sessions derive this identity from the validated accepted socket.
   AuthenticationMode authentication = 27;
   // Best-effort query-time Linux TCP-AO inspection; absent when not AO or when
   // no live snapshot is available (including disconnect or inspection failure).
   TcpAoState tcp_ao = 28;
-  // Health derived from the configured mode and query-time inspection.
-  // UNAVAILABLE means TCP-AO is configured but no socket snapshot is available
-  // (disconnected, still connecting, or inspection failed).
+  // Health derived from the effective protection identity and query-time
+  // inspection. UNAVAILABLE means TCP-AO protection is expected but no socket
+  // snapshot is available (disconnected, still connecting, or inspection
+  // failed).
   TcpAoHealth tcp_ao_health = 29;
   // Effective live unicast distribution mode reported by the RIB. This is
   // UNKNOWN while the peer has no active outbound registration.

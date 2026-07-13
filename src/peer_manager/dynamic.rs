@@ -194,6 +194,21 @@ impl PeerManager {
                 key.0, key.1
             )));
         }
+        if self.current_config.neighbors.iter().any(|neighbor| {
+            neighbor.tcp_ao.is_some()
+                && neighbor.address.parse::<IpAddr>().is_ok_and(|address| {
+                    crate::config::dynamic_prefixes_intersect(
+                        key,
+                        (address, if address.is_ipv4() { 32 } else { 128 }),
+                    )
+                })
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic range {}/{} contains a startup-pinned static TCP-AO neighbor; \
+                 restart rustbgpd with an updated configuration instead",
+                key.0, key.1
+            )));
+        }
         if self
             .dynamic_ranges
             .iter()

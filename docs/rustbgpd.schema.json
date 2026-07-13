@@ -462,7 +462,7 @@
           "description": "TCP-AO key installed as a prefix MKT on the passive listener at startup.\nDynamic ranges never inherit authentication from their peer group.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpAoConfig"
+              "$ref": "#/$defs/TcpAoKeyringConfig"
             },
             {
               "type": "null"
@@ -1795,7 +1795,7 @@
           "description": "Static-neighbor TCP-AO (RFC 5925) configuration. Installed on\nstartup active-open sockets and the passive listener when configured.",
           "anyOf": [
             {
-              "$ref": "#/$defs/TcpAoConfig"
+              "$ref": "#/$defs/TcpAoKeyringConfig"
             },
             {
               "type": "null"
@@ -2426,7 +2426,7 @@
           "type": "string"
         },
         "deprecated": {
-          "description": "Mark this key as deprecated for future rollover behavior. Startup socket\ninstallation carries the flag through; runtime rollover remains deferred.",
+          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. Live rotation remains deferred.",
           "type": "boolean",
           "default": false
         },
@@ -2460,6 +2460,21 @@
         "send_id",
         "recv_id",
         "algorithm"
+      ]
+    },
+    "TcpAoKeyringConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TcpAoConfig"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TcpAoConfig"
+          },
+          "maxItems": 256,
+          "minItems": 1
+        }
       ]
     },
     "TelemetryConfig": {

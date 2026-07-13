@@ -325,8 +325,12 @@ fn tcp_ao_key_metadata(
     config: &TransportConfig,
     initial: Option<&crate::TcpAoInfoSnapshot>,
 ) -> Vec<TcpAoKeyMetadata> {
-    if let Some(key) = config.tcp_ao.as_ref() {
-        return vec![TcpAoKeyMetadata {
+    let mut metadata: Vec<_> = config
+        .tcp_ao
+        .as_ref()
+        .into_iter()
+        .flat_map(|keyring| keyring.iter())
+        .map(|key| TcpAoKeyMetadata {
             peer: config.remote_addr.ip(),
             prefix_len: if config.remote_addr.is_ipv4() {
                 32
@@ -338,21 +342,29 @@ fn tcp_ao_key_metadata(
             algorithm: key.algorithm,
             preferred: key.preferred,
             deprecated: key.deprecated,
-        }];
-    }
-    initial
-        .into_iter()
-        .flat_map(|snapshot| &snapshot.keys)
-        .map(|key| TcpAoKeyMetadata {
-            peer: key.peer,
-            prefix_len: key.prefix_len,
-            send_id: key.send_id,
-            recv_id: key.recv_id,
-            algorithm: key.algorithm,
-            preferred: key.preferred,
-            deprecated: key.deprecated,
         })
-        .collect()
+        .collect();
+    for key in initial.into_iter().flat_map(|snapshot| &snapshot.keys) {
+        let already_configured = metadata.iter().any(|configured| {
+            configured.peer == key.peer
+                && configured.prefix_len == key.prefix_len
+                && configured.send_id == key.send_id
+                && configured.recv_id == key.recv_id
+                && configured.algorithm == key.algorithm
+        });
+        if !already_configured {
+            metadata.push(TcpAoKeyMetadata {
+                peer: key.peer,
+                prefix_len: key.prefix_len,
+                send_id: key.send_id,
+                recv_id: key.recv_id,
+                algorithm: key.algorithm,
+                preferred: key.preferred,
+                deprecated: key.deprecated,
+            });
+        }
+    }
+    metadata
 }
 
 /// Outbound channel buffer size.

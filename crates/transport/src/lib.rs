@@ -27,7 +27,10 @@ pub use session::export::fanout_bench_export_encoder;
 #[cfg(feature = "bench-internals")]
 pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 
-pub use config::{RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig, TransportConfig};
+pub use config::{
+    RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring,
+    TransportConfig,
+};
 pub use error::TransportError;
 pub use event_sink::{
     NoopTransportEventSink, OtcDirection, OtcRouteBlockedEvent, TransportEventSink,
@@ -37,7 +40,10 @@ pub use handle::{
     PeerShutdownError, SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionRole, StateQueryOutcome,
 };
-pub use listener::{AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey};
+pub use listener::{
+    AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerKey,
+    TcpAoListenerOwnerKind,
+};
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::import_decision_cache::{

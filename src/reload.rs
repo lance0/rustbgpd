@@ -480,13 +480,14 @@ pub(crate) async fn reload_config(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
 ) -> Option<ReloadedConfig> {
-    // LAN-305: carry the running dataset bindings into the load so
-    // declared datasets reuse their handles — content re-reads swap in
-    // place (scoped refresh below) and a bad file keeps the prior
-    // snapshot instead of rejecting the reload.
-    let desired_config = match Config::load_with_diagnostics_and_datasets(
+    // LAN-305: parse dataset contents against the running binding schema, but
+    // stage changed data and refresh errors on detached candidate handles.
+    // Shared live handles are committed only after the complete no-side-effect
+    // preflight below, so a rejected authentication-boundary reload cannot
+    // leak new policy data into running chains.
+    let mut desired_config = match Config::load_with_diagnostics_and_staged_datasets(
         config_path,
-        Some(&current.policy.dataset_bindings),
+        &current.policy.dataset_bindings,
     ) {
         Ok(c) => c,
         Err(diagnostic) => {
@@ -553,6 +554,50 @@ pub(crate) async fn reload_config(
         );
         new_config.global.telemetry.grpc_uds = live_grpc_uds.cloned();
     }
+
+    // TCP-AO startup state is pinned before the first fallible external
+    // apply. Static and dynamic pinning run in separate passes, so their
+    // combination can synthesize a new authentication-boundary conflict.
+    // For example, a desired reload may remove a protected dynamic range and
+    // add a plaintext static peer inside it; restoring the live range must
+    // not then hot-add that peer without AO. Reject before EVPN or any other
+    // runtime actor can mutate so a rejected reload leaves no partial state.
+    let tcp_ao_pinned_neighbors = config::pin_tcp_ao_startup_only_runtime(&mut new_config, current);
+    if tcp_ao_pinned_neighbors > 0 {
+        error!(
+            neighbors = tcp_ao_pinned_neighbors,
+            "[[neighbors]].tcp_ao differs from the live listener/session startup keys: \
+             TCP-AO MKTs are installed only when sockets are created. Restart rustbgpd \
+             to add, remove, edit, reorder, or rotate TCP-AO keyrings. Peer-group and policy dependencies \
+             referenced by pinned TCP-AO neighbors, plus restart-required global fields \
+             that affect neighbor validation, are also kept at their live startup values \
+             for this reload."
+        );
+    }
+
+    let pinned_dynamic_tcp_ao = config::pin_dynamic_tcp_ao_startup_only(&mut new_config, current);
+    if pinned_dynamic_tcp_ao > 0 {
+        error!(
+            ranges = pinned_dynamic_tcp_ao,
+            "[[dynamic_neighbors]].tcp_ao differs from the live listener prefix MKTs: \
+             protected ranges and overlapping replacements remain pinned to the startup \
+             snapshot. Restart rustbgpd to add, remove, move, edit, reorder, or rotate \
+             dynamic TCP-AO keyrings."
+        );
+    }
+
+    if let Err(error) = new_config.validate() {
+        error!(
+            error = %error,
+            "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change TCP-AO authentication boundaries"
+        );
+        return None;
+    }
+
+    let dataset_commit = desired_config.prepare_staged_datasets(&current.policy.dataset_bindings);
+    let dataset_commit_pending = !dataset_commit.is_empty();
+    new_config.policy.dataset_bindings = desired_config.policy.dataset_bindings.clone();
+    new_config.policy.dataset_events = desired_config.policy.dataset_events.clone();
 
     if let Some(apply) = evpn_runtime_apply {
         let attempt = apply
@@ -655,29 +700,6 @@ pub(crate) async fn reload_config(
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
     }
-    let tcp_ao_pinned_neighbors = config::pin_tcp_ao_startup_only_runtime(&mut new_config, current);
-    if tcp_ao_pinned_neighbors > 0 {
-        error!(
-            neighbors = tcp_ao_pinned_neighbors,
-            "[[neighbors]].tcp_ao differs from the live listener/session startup keys: \
-             TCP-AO MKTs are installed only when sockets are created. Restart rustbgpd \
-             to add, remove, or rotate TCP-AO keys. Peer-group and policy dependencies \
-             referenced by pinned TCP-AO neighbors, plus restart-required global fields \
-             that affect neighbor validation, are also kept at their live startup values \
-             for this reload."
-        );
-    }
-
-    let pinned_dynamic_tcp_ao = config::pin_dynamic_tcp_ao_startup_only(&mut new_config, current);
-    if pinned_dynamic_tcp_ao > 0 {
-        error!(
-            ranges = pinned_dynamic_tcp_ao,
-            "[[dynamic_neighbors]].tcp_ao differs from the live listener prefix MKTs: \
-             protected ranges and overlapping replacements remain pinned to the startup \
-             snapshot. Restart rustbgpd to add, remove, move, or rotate a dynamic TCP-AO key."
-        );
-    }
-
     if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
         error!(
             "BFD config differs from the live session set: the ADR-0067 BFD actor \
@@ -715,6 +737,7 @@ pub(crate) async fn reload_config(
         && !honor_blackhole_changed
         && !dynamic_neighbors_changed
         && !fib_tables_changed
+        && !dataset_commit_pending
     {
         if explain_changed {
             warn!(
@@ -890,15 +913,13 @@ pub(crate) async fn reload_config(
         }
     }
 
-    // LAN-305: dataset bindings and their `[policy.datasets]` table
-    // ride every reload — handles were reused (or freshly built) by
-    // the load above, so this is bookkeeping for the runtime snapshot,
-    // never a live-chain mutation. Content swaps already happened
-    // atomically inside the shared handles during the load; here we
-    // fan out the dependency-scoped refresh so routes evaluated under
-    // the old generation get re-evaluated. A refresh failure is
-    // warned, not halted: the swap itself is durable, and the stale
-    // evaluations converge on the next churn or refresh.
+    // LAN-305: this is the first point after preflight where every earlier
+    // fallible peer-manager registry/snapshot step has succeeded. Commit the
+    // staged contents/errors now, then publish honest snapshot bookkeeping and
+    // dependency-scoped refreshes. A refresh failure is warned, not halted:
+    // an accepted swap is durable, and stale evaluations converge on the next
+    // churn or refresh.
+    dataset_commit.commit();
     working_config
         .policy
         .datasets
@@ -1426,17 +1447,13 @@ pub(crate) async fn reload_config(
                     // diff against state that doesn't match live, which is
                     // worse than just bailing.
                     //
-                    // Instead: return `None` so the daemon's in-memory
-                    // config stays at `current` and log clearly that live
-                    // state may differ. Operators investigate via
-                    // `rbgp neighbor list`, fix the failing TOML,
-                    // and reload again. The retry-succeeded-operations
-                    // concern is bounded by the underlying ops being
-                    // mostly idempotent (`delete_peer` of a missing peer
-                    // returns Ok, `add_peer` of an existing peer returns
-                    // a visible error rather than silent corruption); the
-                    // operator gets surfaced errors on the retry rather
-                    // than hidden drift.
+                    // Preserve the last-known neighbor config in the honest
+                    // partial snapshot while retaining every earlier step
+                    // that definitely landed (including dataset generations,
+                    // policy, and EVPN state). The live peer table remains
+                    // explicitly ambiguous either way; discarding the partial
+                    // snapshot would additionally make all known-successful
+                    // state look unapplied and corrupt the next reload's diff.
                     for failure in &reconcile.failures {
                         warn!(
                             bucket = "neighbors.reconcile",
@@ -1454,7 +1471,7 @@ pub(crate) async fn reload_config(
                      reloading again. Earlier reload steps (policy / peer-group / chain \
                      edits) DID land at the manager and remain in effect."
                     );
-                    return None;
+                    return Some(ReloadedConfig::new(working_config, desired_config));
                 }
                 Err(e) => {
                     error!(
@@ -1465,7 +1482,7 @@ pub(crate) async fn reload_config(
                          steps (policy / peer-group / chain edits) DID land at the manager \
                          and remain in effect."
                     );
-                    return None;
+                    return Some(ReloadedConfig::new(working_config, desired_config));
                 }
             }
         }
@@ -1813,6 +1830,26 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
+    }
+
+    fn dataset_reload_dir(config_toml: &str, dataset: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("policies")).unwrap();
+        std::fs::create_dir(dir.path().join("datasets")).unwrap();
+        std::fs::write(
+            dir.path().join("policies/core.rpol"),
+            r"
+dataset asn-set customers
+policy origin-guard {
+    term customers { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("datasets/customers.list"), dataset).unwrap();
+        std::fs::write(dir.path().join("config.toml"), config_toml).unwrap();
+        dir
     }
 
     #[derive(Clone)]
@@ -4553,14 +4590,47 @@ hold_time = 90
             "tcp_ao-only edits are restart-required and must not reconcile peers: {tags:?}"
         );
         assert_eq!(
-            returned.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            returned.neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
             "old-secret",
             "runtime snapshot must keep the startup listener/session key"
         );
         assert_eq!(
-            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().key,
+            returned.desired.neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
             "new-secret",
             "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_tcp_ao_keyring_reordering_and_preserves_desired_order() {
+        let old_ring = r#"tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+  { key = "next", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#;
+        let new_ring = r#"tcp_ao = [
+  { key = "next", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true },
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" }
+]"#;
+        let initial =
+            baseline_toml().replace("hold_time = 90", &format!("hold_time = 90\n{old_ring}"));
+        let new_toml =
+            baseline_toml().replace("hold_time = 90", &format!("hold_time = 90\n{new_ring}"));
+
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        let returned = returned.expect("reload should pin reordered startup keyring");
+        assert!(
+            tags.is_empty(),
+            "reordering must not reach live reconciliation"
+        );
+        let runtime = returned.neighbors[0].tcp_ao.as_ref().unwrap();
+        let desired = returned.desired.neighbors[0].tcp_ao.as_ref().unwrap();
+        assert_eq!(
+            runtime.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            desired.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
+            [2, 1]
         );
     }
 
@@ -4605,7 +4675,7 @@ tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" 
             .iter()
             .find(|range| range.tcp_ao.is_some())
             .unwrap();
-        assert_eq!(protected.tcp_ao.as_ref().unwrap().key, "old");
+        assert_eq!(protected.tcp_ao.as_ref().unwrap().0[0].key, "old");
         assert!(
             candidate
                 .dynamic_neighbors
@@ -4649,6 +4719,444 @@ peer_group = "dynamic"
             1
         );
         assert_eq!(candidate.dynamic_neighbors, current.dynamic_neighbors);
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_unprotected_static_peer_inside_restored_dynamic_tcp_ao_boundary() {
+        let initial = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/8"
+peer_group = "dynamic"
+tcp_ao = { key = "startup", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+
+        for (label, authentication) in [("plaintext", ""), ("MD5", "md5_password = \"new-md5\"")] {
+            let desired = format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[neighbors]]
+address = "10.1.1.1"
+remote_asn = 65002
+{authentication}
+"#
+            );
+            let (returned, tags) = drive_reload(initial, &desired).await;
+            assert!(
+                returned.is_none(),
+                "{label} peer must not cross the restored TCP-AO boundary"
+            );
+            assert!(
+                tags.is_empty(),
+                "{label} boundary rejection must precede peer-manager mutation: {tags:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_pins_new_static_tcp_ao_peer_inside_restored_dynamic_boundary() {
+        let initial = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/8"
+peer_group = "dynamic"
+tcp_ao = { key = "dynamic-startup", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+        let desired = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[neighbors]]
+address = "10.1.1.1"
+remote_asn = 65002
+tcp_ao = { key = "static-next-start", send_id = 3, recv_id = 4, algorithm = "hmac(sha256)" }
+"#;
+
+        let (returned, tags) = drive_reload(initial, desired).await;
+        let returned = returned.expect("valid startup-only AO edits are pinned");
+        assert!(tags.is_empty(), "pinned AO addition must not mutate peers");
+        assert!(returned.neighbors.is_empty());
+        assert_eq!(returned.dynamic_neighbors.len(), 1);
+        assert_eq!(
+            returned.dynamic_neighbors[0].tcp_ao.as_ref().unwrap().0[0].key,
+            "dynamic-startup"
+        );
+        assert_eq!(returned.desired.neighbors.len(), 1);
+        assert!(returned.desired.dynamic_neighbors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_tcp_ao_pin_conflict_before_evpn_runtime_apply() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/8"
+peer_group = "dynamic"
+tcp_ao = { key = "startup", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+        let desired_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.dynamic]
+hold_time = 90
+[[neighbors]]
+address = "10.1.1.1"
+remote_asn = 65002
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#;
+        let path = unique_temp_path("reload-ao-conflict-before-evpn");
+        std::fs::write(&path, initial_toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+        std::fs::write(&path, desired_toml).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await;
+
+        assert!(returned.is_none());
+        let guard = coordinator.lock().unwrap();
+        assert!(
+            guard.model().instances().is_empty(),
+            "AO boundary rejection must precede EVPN coordinator mutation"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_content_only_dataset_swap_refreshes_dependents_before_return() {
+        let config_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let dir = dataset_reload_dir(config_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
+        let refresh = tokio::spawn(async move {
+            let command = peer_mgr_rx.recv().await.expect("dataset refresh command");
+            match command {
+                PeerManagerCommand::RefreshDatasetDependents {
+                    swapped,
+                    failed,
+                    reply,
+                } => {
+                    assert_eq!(swapped, vec!["customers"]);
+                    assert!(failed.is_empty());
+                    let _ = reply.send(Ok(()));
+                }
+                other => panic!("expected dataset refresh, got {}", cmd_tag(&other)),
+            }
+        });
+
+        let returned = reload_config(
+            config_path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("content-only dataset reload succeeds");
+        refresh.await.unwrap();
+
+        assert_eq!(live.pin().generation, 2);
+        assert_eq!(live.pin().data.records(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &live,
+            returned.policy.dataset_bindings.get("customers").unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn reload_halt_before_dataset_step_leaves_live_snapshot_unmodified() {
+        let config_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let dir = dataset_reload_dir(config_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        std::fs::write(
+            &config_path,
+            format!("{config_toml}\n[policy.explain]\nenabled = false\n"),
+        )
+        .unwrap();
+        let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
+        drop(peer_mgr_rx);
+
+        let returned = reload_config(
+            config_path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("explain-sync failure returns the honest partial snapshot");
+
+        assert_eq!(live.pin().generation, 1);
+        assert_eq!(live.pin().data.records(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &live,
+            returned.policy.dataset_bindings.get("customers").unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn reload_neighbor_reconcile_failure_retains_committed_dataset_snapshot() {
+        use rustbgpd_api::peer_types::{ReconcileFailure, ReconcileFailureKind, ReconcileResult};
+
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let desired_toml = initial_toml
+            .replace("datasets/customers.list", "datasets/customers-next.list")
+            + r#"
+[[neighbors]]
+address = "192.0.2.99"
+remote_asn = 65099
+"#;
+        let dir = dataset_reload_dir(initial_toml, "64500\n");
+        std::fs::write(
+            dir.path().join("datasets/customers-next.list"),
+            "64500\n64999\n",
+        )
+        .unwrap();
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        std::fs::write(&config_path, desired_toml).unwrap();
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let mock = tokio::spawn(async move {
+            while let Some(command) = peer_mgr_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RefreshDatasetDependents { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
+                        let _ = reply.send(ReconcileResult {
+                            failures: vec![ReconcileFailure {
+                                kind: ReconcileFailureKind::Add,
+                                peer: rustbgpd_api::peer_types::PeerKey::new(
+                                    "192.0.2.99".parse().unwrap(),
+                                    None,
+                                ),
+                                error: "injected add failure".to_string(),
+                            }],
+                        });
+                    }
+                    other => panic!("unexpected command: {}", cmd_tag(&other)),
+                }
+            }
+        });
+
+        let returned = reload_config(
+            config_path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("failed neighbor reconcile returns a partial snapshot");
+        drop(peer_mgr_tx);
+        mock.await.unwrap();
+
+        assert_eq!(live.pin().generation, 2);
+        assert_eq!(live.pin().data.records(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &live,
+            returned.policy.dataset_bindings.get("customers").unwrap()
+        ));
+        assert!(
+            returned.policy.datasets["customers"]
+                .path
+                .ends_with("datasets/customers-next.list")
+        );
+        assert_eq!(returned.neighbors, initial.neighbors);
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_tcp_ao_pin_conflict_without_committing_staged_datasets() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[peer_groups.dynamic]
+hold_time = 90
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/8"
+peer_group = "dynamic"
+tcp_ao = { key = "startup", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+"#;
+        let desired_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[peer_groups.dynamic]
+hold_time = 90
+[[neighbors]]
+address = "10.1.1.1"
+remote_asn = 65002
+"#;
+        let dir = dataset_reload_dir(initial_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        std::fs::write(&config_path, desired_toml).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+
+        let returned = reload_config(
+            config_path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(returned.is_none());
+        assert_eq!(live.pin().generation, 1);
+        assert_eq!(live.pin().data.records(), 1);
+        assert!(live.status().last_error.is_none());
     }
 
     #[test]
@@ -5052,21 +5560,16 @@ peer_group = "secure"
         let tags = mock.await.unwrap();
         std::fs::remove_file(&path).ok();
 
-        // Reconcile partial failure returns None: live peer-manager
-        // state is ambiguous (delete-then-readd ordering, independent
-        // adds/removes), so guessing a snapshot would let the next
-        // reload diff against a config that doesn't match reality.
-        // Operators investigate live state via `rbgp neighbor
-        // list`. Earlier reload steps (the SetPolicy here) DID land
-        // at the manager and remain in effect — assert via the mock's
-        // command log, since the in-memory config doesn't advance for
-        // this failure class.
+        // Live peers are ambiguous, so the partial snapshot keeps the prior
+        // neighbor set. Earlier steps are known to have landed and must remain
+        // represented; otherwise the next reload would retry them against a
+        // fictional all-old snapshot.
+        let returned = returned.expect("reconcile failure returns an honest partial snapshot");
         assert!(
-            returned.is_none(),
-            "reconcile partial failure must return None — guessing a snapshot \
-             when live state is ambiguous would let the next reload diff against \
-             a fictional config"
+            returned.policy.definitions.contains_key("block-private"),
+            "the successfully applied policy must survive the partial snapshot"
         );
+        assert_eq!(returned.neighbors, initial.neighbors);
         assert!(
             tags.contains(&"SetPolicy(block-private)".to_string()),
             "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
