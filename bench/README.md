@@ -47,22 +47,49 @@ summary, command logs, environment metadata, and raw Criterion artifacts under
 `target/bench-compare/`.
 
 `route_paging` is a manager-level custom harness for the long-running LAN-391
-complete-traversal shape. It reports one CSV row per traversal plus per-page
-actor-occupancy p50/p99/max; unlike Criterion it does not multiply the 400k
-route/page-size 100 repeated-scan baseline by a minimum sample count:
+complete-traversal shape. One harness process runs exactly one scope/route/page
+cell and reports one CSV row plus per-page synchronous handler-boundary
+p50/p99/max. Those page timings include oneshot setup/retrieval around the
+direct handler call: they are a conservative proxy for manager-task occupancy,
+not an observation of actor scheduling or end-to-end gRPC latency. Unlike
+Criterion, the harness does not multiply the 400k route/page-size 100
+repeated-scan baseline by a minimum sample count.
+
+Use the paired driver for retained comparisons:
 
 ```bash
-RUSTBGPD_ROUTE_PAGING_VARIANT=baseline \
-RUSTBGPD_ROUTE_PAGING_COMMIT="$(git rev-parse HEAD)" \
-taskset -c 5 cargo bench -p rustbgpd-rib --features bench-internals \
-  --bench route_paging -- \
-  --routes 100000,400000 --page-sizes 100,1000 \
-  --repetitions 1 --output /tmp/route-paging.csv
+bench/compare-route-paging.sh \
+  --base 5f6dd2960933c356eeda53625caf7f8b91f77a7c \
+  --head ef0b6260313638e126d57c847f7990da991faa16 \
+  --routes 100000,400000 \
+  --page-sizes 100,1000 \
+  --repetitions 2 \
+  --core 5
 ```
 
-Run the identical command at each pinned comparison commit with different
-`VARIANT`/`COMMIT` values. The harness validates row totals, strict cursor
-order, page bounds, and complete traversal while it measures.
+The driver creates detached worktrees for both pinned refs and overlays the
+invoking checkout's benchmark plus bench-support source byte-for-byte into
+both. It records and verifies their combined SHA-256, runs every traversal in a
+fresh process, and alternates baseline-first/optimized-first order for paired
+repetitions. The harness validates row totals, strict cursor order, page bounds,
+complete traversal, and a deterministic ordered-route-key checksum. The
+grouped fixture is intentionally distinct from the best control: two RR-client
+members share a group while every sixteenth route is sourced by the queried
+member and removed by member-specific split horizon. The driver rejects any
+baseline/optimized row, page-count, or checksum disagreement and any grouped
+fixture that collapses back to the best control. Both refs are required, must
+resolve to distinct commits, and executable-line plus iterator-body guards
+require the materialized call only at the baseline and the borrowed grouped
+view only at the optimized ref; dirty production files are never measured.
+Each per-process CSV is retained under the comparison artifact's `raw/`
+directory. The exact overlaid harness, bench-support module, comparison driver,
+and baseline/optimized production paging sources are retained under
+`measurement-sources/` with a verified `SHA256SUMS` manifest, and an explicitly
+selected output directory must be empty.
+
+For a quick single-process mechanics check, invoke the bench target directly
+with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publish
+that output as comparison evidence.
 
 Requirements: `bash`, `git`, `cargo`, `python3`, and `taskset` from
 util-linux. Use `--no-taskset` only for a quick mechanics check; results from

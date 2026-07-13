@@ -105,25 +105,26 @@ impl RibManager {
         receivers
     }
 
-    /// Seed the Loc-RIB by inserting `routes` from one synthetic inbound peer and
-    /// recomputing best paths, so [`RibManager::bench_distribute`] has a
+    /// Seed the Loc-RIB by inserting each route under its declared source peer
+    /// and recomputing best paths, so [`RibManager::bench_distribute`] has a
     /// populated table to fan out. Call AFTER [`RibManager::bench_register_peers`]
     /// so the initial-table dump sees an empty Loc-RIB (it then emits only the
     /// drained `EoR` marker, no route announces).
     pub fn bench_seed_loc_rib(&mut self, routes: Vec<Route>) {
-        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
-        let rib = self
-            .ribs
-            .entry(source)
-            .or_insert_with(|| AdjRibIn::new(source));
         let mut affected = HashSet::with_capacity(routes.len());
+        let mut announcers = HashSet::with_capacity(routes.len());
         for mut route in routes {
+            let source = route.peer;
             affected.insert(route.prefix);
+            announcers.insert((source, route.prefix));
             self.attr_intern.intern(&mut route.attributes);
-            rib.insert(route);
+            self.ribs
+                .entry(source)
+                .or_insert_with(|| AdjRibIn::new(source))
+                .insert(route);
         }
-        for prefix in &affected {
-            self.register_unicast_announcer(source, *prefix);
+        for (source, prefix) in announcers {
+            self.register_unicast_announcer(source, prefix);
         }
         self.recompute_best(&affected);
     }
@@ -142,7 +143,7 @@ impl RibManager {
     /// # Panics
     ///
     /// Panics if the production handler stops replying synchronously; that
-    /// would invalidate this benchmark's actor-occupancy measurement model.
+    /// would invalidate this benchmark's synchronous handler-boundary model.
     #[must_use]
     pub fn bench_query_route_page(
         &mut self,
