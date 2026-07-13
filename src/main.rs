@@ -454,14 +454,30 @@ fn grpc_principal_roles(config: &Config) -> BTreeMap<String, rustbgpd_api::authz
         .collect()
 }
 
-fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
+fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
     config
-        .resolved_neighbors()
-        .ok()?
+        .neighbors
         .iter()
-        .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
-        .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+        .filter(|neighbor| neighbor.graceful_restart.unwrap_or(true))
+        .map(|neighbor| u64::from(neighbor.gr_restart_time.unwrap_or(120)))
         .max()
+}
+
+fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
+    match config.resolved_neighbors() {
+        Ok(neighbors) => neighbors
+            .iter()
+            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
+            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            .max(),
+        Err(error) => {
+            warn!(
+                %error,
+                "failed to resolve effective neighbors while computing the planned-restart window; falling back to raw neighbor GR settings"
+            );
+            raw_max_gr_restart_time_secs(config)
+        }
+    }
 }
 
 fn marker_expires_at(marker: &GrRestartMarker) -> Result<SystemTime, String> {
@@ -3786,5 +3802,15 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));
+
+        let mut unresolved = config.clone();
+        unresolved.neighbors[0].address = "fe80::1".to_string();
+        unresolved.neighbors[0].interface = Some("rbgp-definitely-missing0".to_string());
+        assert!(unresolved.resolved_neighbors().is_err());
+        assert_eq!(
+            max_gr_restart_time_secs(&unresolved),
+            Some(180),
+            "resolution failure must retain the previous raw-config marker fallback"
+        );
     }
 }

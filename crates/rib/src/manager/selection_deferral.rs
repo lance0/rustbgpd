@@ -222,8 +222,15 @@ impl SelectionDeferral {
         peer_gr_families: &HashSet<(Afi, Safi)>,
         metrics: &BgpMetrics,
     ) -> Vec<(Afi, Safi)> {
-        if session_id == 0 || self.ambiguous_peers.contains(&peer) {
+        if session_id == 0 {
             tracing::warn!(%peer, "selection-deferral waiter received unstamped PeerUp; keeping it blocked");
+            return Vec::new();
+        }
+        if self.ambiguous_peers.contains(&peer) {
+            tracing::warn!(
+                %peer,
+                "selection-deferral waiter address is ambiguous in the configured roster; keeping it blocked"
+            );
             return Vec::new();
         }
         let families: Vec<_> = self.active.keys().copied().collect();
