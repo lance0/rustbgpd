@@ -84,7 +84,7 @@ const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 /// Readiness requests serviced after each bounded policy-transaction step.
 /// A small fixed budget prevents probe traffic from starving forward policy
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
-const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 8;
+const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 
 /// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
 /// actor (export-policy swap, per-peer outbound refresh). Generous — the

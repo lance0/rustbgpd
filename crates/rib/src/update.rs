@@ -1544,8 +1544,8 @@ pub enum RibUpdate {
     #[cfg(test)]
     TestQueryPolicyTransitionStats {
         /// Plan builds, full probes, route-shell materializations, max actor
-        /// slice in nanoseconds.
-        reply: oneshot::Sender<(usize, usize, usize, u128)>,
+        /// poll in nanoseconds, and actual state-machine poll count.
+        reply: oneshot::Sender<(usize, usize, usize, u128, usize)>,
     },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters

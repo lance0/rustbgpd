@@ -290,6 +290,20 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
             );
         }
     }
+    if std::env::var_os("RUSTBGPD_POLICY_TRANSITION_LARGE_RECEIPT").is_some() {
+        let routes = 4_096usize;
+        let peers = 700usize;
+        group.bench_function("shared_plan/4096/700", |bench| {
+            bench.iter_batched_ref(
+                || build_policy_regroup(routes, peers),
+                |(manager, _receivers, next)| {
+                    let fast = manager.bench_replace_export_policy_cohort(peers, next);
+                    std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
     group.finish();
 }
 

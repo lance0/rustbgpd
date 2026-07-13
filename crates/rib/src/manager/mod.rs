@@ -1,5 +1,7 @@
 #[cfg(feature = "bench-internals")]
 mod bench_support;
+#[cfg(feature = "bench-internals")]
+pub use bench_support::PolicyTransitionBenchReceipt;
 mod distribution;
 mod graceful_restart;
 mod helpers;
@@ -45,7 +47,10 @@ struct PolicyTransitionStats {
     plan_builds: usize,
     full_exact_probes: usize,
     route_shell_materializations: usize,
+    actor_polls: usize,
     max_actor_slice: std::time::Duration,
+    max_prefix_snapshot_poll: std::time::Duration,
+    max_finalize_poll: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -392,6 +397,11 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// One explicit shared policy transition advanced by the actor itself.
+    /// While present, only bounded read-only priority queries may interleave;
+    /// primary mutations and timers remain ordered behind the final commit or
+    /// authoritative fallback.
+    pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
     /// Withdrawn NLRI identities accumulated across the currently-draining
     /// batch. Retired only after distribution so the exact overlay can
     /// suppress any rejected-only wire withdrawal first.
@@ -600,10 +610,13 @@ fn page_routes<'a>(
     }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
-/// Maximum route identities processed before the strict shared policy
-/// transition services the existing priority-query lane.
+/// Maximum route identities processed by one strict shared-policy actor poll.
+#[cfg(not(test))]
 pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize = 1_024;
-/// Maximum member commits between shared transition query drains.
+/// Tiny deterministic unit used to prove multi-poll ordering in tests.
+#[cfg(test)]
+pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize = 1;
+/// Maximum members classified by one strict shared-policy actor poll.
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
@@ -986,6 +999,7 @@ impl RibManager {
             rx,
             query_rx,
             pending_route_batches: VecDeque::new(),
+            pending_clean_policy_transition: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
@@ -1148,23 +1162,101 @@ impl RibManager {
         }
     }
 
-    /// Close one explicit policy-transition actor slice, record benchmark/test
-    /// evidence, then service only the existing priority-query lane. Normal RIB
-    /// mutations remain queued on `rx`, so no route or policy mutation can
-    /// interleave with the all-or-nothing preflight/commit transaction.
-    pub(in crate::manager) fn finish_policy_transition_slice(
+    fn is_read_only_priority_query(update: &RibUpdate) -> bool {
+        let production_query = matches!(
+            update,
+            RibUpdate::QueryReceivedRoutes { .. }
+                | RibUpdate::QueryRoutesPage { .. }
+                | RibUpdate::QueryBestRoutes { .. }
+                | RibUpdate::QueryFibInstallCandidates { .. }
+                | RibUpdate::QueryPeerGroups { .. }
+                | RibUpdate::QueryAdvertisedRoutes { .. }
+                | RibUpdate::ExplainBestPath { .. }
+                | RibUpdate::ExplainAdvertisedRoute { .. }
+                | RibUpdate::SubscribeRouteEvents { .. }
+                | RibUpdate::QueryRouteEventHistory { .. }
+                | RibUpdate::SubscribeEvpnRouteEvents { .. }
+                | RibUpdate::QueryEvpnRouteEventHistory { .. }
+                | RibUpdate::QueryLocRibCount { .. }
+                | RibUpdate::QueryAdjRibOutCounts { .. }
+                | RibUpdate::QueryAdvertisedCount { .. }
+                | RibUpdate::QueryNeighborPolicyStats { .. }
+                | RibUpdate::QueryPeerUpdateGroup { .. }
+                | RibUpdate::QueryPeerOutboundState { .. }
+                | RibUpdate::QueryUpdateGroupSnapshot { .. }
+                | RibUpdate::QueryExportPolicyTermHits { .. }
+                | RibUpdate::QueryFlowSpecRoutes { .. }
+                | RibUpdate::QueryEvpnRoutes { .. }
+                | RibUpdate::QueryBgpLsRoutes { .. }
+                | RibUpdate::QueryVpnRoutes { .. }
+                | RibUpdate::QueryLabeledRoutes { .. }
+                | RibUpdate::QueryRtcRoutes { .. }
+                | RibUpdate::QueryOrrTopology { .. }
+                | RibUpdate::QueryOrrStatus { .. }
+                | RibUpdate::QueryMrtSnapshot { .. }
+                | RibUpdate::QueryWarmMrtSnapshot { .. }
+                | RibUpdate::QueryBmpLocRibDump { .. }
+                | RibUpdate::QueryBmpLocRibStats { .. }
+        );
+        #[cfg(test)]
+        let test_query = matches!(
+            update,
+            RibUpdate::TestQueryVpnAdvertised { .. }
+                | RibUpdate::TestQueryOutboundHealth { .. }
+                | RibUpdate::TestQueryPolicyTransitionStats { .. }
+        );
+        #[cfg(not(test))]
+        let test_query = false;
+        production_query || test_query
+    }
+
+    /// Service only the explicitly enumerated read side while a policy
+    /// transaction owns the actor. A mutation on the query sender is an
+    /// internal wiring violation and fails closed rather than bypassing FIFO.
+    fn drain_policy_transition_queries(&mut self, limit: usize) {
+        for _ in 0..limit {
+            let Ok(query) = self.query_rx.try_recv() else {
+                break;
+            };
+            assert!(
+                Self::is_read_only_priority_query(&query),
+                "mutation routed onto RIB priority-query lane"
+            );
+            self.handle_update(query);
+        }
+    }
+
+    /// Record one real state-machine poll. Production yields immediately after
+    /// each call; the benchmark driver invokes the same advance seam
+    /// synchronously and records identical phase boundaries.
+    #[allow(clippy::unused_self)]
+    pub(in crate::manager) fn record_policy_transition_poll(
         &mut self,
-        started: &mut std::time::Instant,
+        kind: distribution::CleanPolicyTransitionPollKind,
+        elapsed: std::time::Duration,
     ) {
         #[cfg(any(test, feature = "bench-internals"))]
         {
-            self.policy_transition_stats.max_actor_slice = self
-                .policy_transition_stats
-                .max_actor_slice
-                .max(started.elapsed());
+            self.policy_transition_stats.actor_polls =
+                self.policy_transition_stats.actor_polls.saturating_add(1);
+            self.policy_transition_stats.max_actor_slice =
+                self.policy_transition_stats.max_actor_slice.max(elapsed);
+            match kind {
+                distribution::CleanPolicyTransitionPollKind::PrefixSnapshot => {
+                    self.policy_transition_stats.max_prefix_snapshot_poll = self
+                        .policy_transition_stats
+                        .max_prefix_snapshot_poll
+                        .max(elapsed);
+                }
+                distribution::CleanPolicyTransitionPollKind::Finalize => {
+                    self.policy_transition_stats.max_finalize_poll =
+                        self.policy_transition_stats.max_finalize_poll.max(elapsed);
+                }
+                distribution::CleanPolicyTransitionPollKind::Bounded => {}
+            }
         }
-        self.drain_queries(QUERY_BUDGET_PER_CHUNK);
-        *started = std::time::Instant::now();
+        #[cfg(not(any(test, feature = "bench-internals")))]
+        let _ = (kind, elapsed);
     }
 
     fn drain_ready_updates(&mut self) -> bool {
@@ -1573,6 +1665,7 @@ impl RibManager {
                     stats.full_exact_probes,
                     stats.route_shell_materializations,
                     stats.max_actor_slice.as_nanos(),
+                    stats.actor_polls,
                 ));
             }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
@@ -3990,6 +4083,45 @@ impl RibManager {
             // (sessions, local originators) are parked on backpressure.
             self.metrics
                 .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
+
+            if let Some(pending) = self.pending_clean_policy_transition.take() {
+                // Queries admitted here are explicitly read-only and observe
+                // the old committed membership until the single atomic
+                // `Finalize` poll. Primary updates, route chunks, timers, and
+                // resync work are deliberately not polled in this branch.
+                self.drain_policy_transition_queries(QUERY_BUDGET_PER_CHUNK);
+                let kind = pending.poll_kind();
+                let started = std::time::Instant::now();
+                match self.advance_clean_policy_transition(pending) {
+                    distribution::CleanPolicyTransitionAdvance::Continue(next) => {
+                        self.record_policy_transition_poll(kind, started.elapsed());
+                        self.pending_clean_policy_transition = Some(next);
+                    }
+                    distribution::CleanPolicyTransitionAdvance::Committed(mut done) => {
+                        self.record_policy_transition_poll(kind, started.elapsed());
+                        if let Some(reply) = done.take_reply() {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+                        self.record_policy_transition_poll(kind, started.elapsed());
+                        failed.cleanup_incomplete_destination(&mut self);
+                        let replacements = failed.take_replacements();
+                        let result = replacements.into_iter().try_for_each(|replacement| {
+                            self.replace_peer_export_policy_synchronously(
+                                replacement.peer,
+                                replacement.export_policy,
+                            )
+                        });
+                        if let Some(reply) = failed.take_reply() {
+                            let _ = reply.send(result);
+                        }
+                    }
+                }
+                self.drain_policy_transition_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
+                continue;
+            }
 
             // Arm the resync timer when dirty_peers transitions empty → non-empty.
             if !self.dirty_peers.is_empty() && !resync_armed {

@@ -32,6 +32,18 @@ use crate::update::{
 
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
 
+/// Instrumentation from the production clean-transition state machine.
+#[derive(Clone, Copy, Debug)]
+pub struct PolicyTransitionBenchReceipt {
+    pub plan_builds: usize,
+    pub full_exact_probes: usize,
+    pub route_shell_materializations: usize,
+    pub actor_polls: usize,
+    pub max_actor_poll: std::time::Duration,
+    pub max_prefix_snapshot_poll: std::time::Duration,
+    pub max_finalize_poll: std::time::Duration,
+}
+
 impl RibManager {
     /// Synthetic peer address used by [`Self::bench_register_peers`].
     ///
@@ -175,12 +187,18 @@ impl RibManager {
         if std::env::var_os("RUSTBGPD_POLICY_TRANSITION_RECEIPT").is_some()
             && !POLICY_TRANSITION_RECEIPT_PRINTED.swap(true, Ordering::Relaxed)
         {
-            let (plans, probes, materialized, max_slice) = self.bench_policy_transition_receipt();
+            let receipt = self.bench_policy_transition_receipt();
             eprintln!(
-                "policy_transition_receipt peers={n_peers} fast={fast} plans={plans} \
-                 full_exact_probes={probes} route_shell_materializations={materialized} \
-                 max_actor_slice_ns={}",
-                max_slice.as_nanos()
+                "policy_transition_receipt peers={n_peers} fast={fast} plans={} \
+                 full_exact_probes={} route_shell_materializations={} actor_polls={} \
+                 max_actor_poll_ns={} max_prefix_snapshot_poll_ns={} max_finalize_poll_ns={}",
+                receipt.plan_builds,
+                receipt.full_exact_probes,
+                receipt.route_shell_materializations,
+                receipt.actor_polls,
+                receipt.max_actor_poll.as_nanos(),
+                receipt.max_prefix_snapshot_poll.as_nanos(),
+                receipt.max_finalize_poll.as_nanos(),
             );
         }
         fast
@@ -206,17 +224,20 @@ impl RibManager {
         }
     }
 
-    /// `(plan builds, full probes, route-shell materializations, max actor
-    /// slice)` from the most recent shared transition.
+    /// Production state-machine instrumentation from the most recent shared
+    /// transition.
     #[must_use]
-    pub fn bench_policy_transition_receipt(&self) -> (usize, usize, usize, std::time::Duration) {
+    pub fn bench_policy_transition_receipt(&self) -> PolicyTransitionBenchReceipt {
         let stats = self.policy_transition_stats;
-        (
-            stats.plan_builds,
-            stats.full_exact_probes,
-            stats.route_shell_materializations,
-            stats.max_actor_slice,
-        )
+        PolicyTransitionBenchReceipt {
+            plan_builds: stats.plan_builds,
+            full_exact_probes: stats.full_exact_probes,
+            route_shell_materializations: stats.route_shell_materializations,
+            actor_polls: stats.actor_polls,
+            max_actor_poll: stats.max_actor_slice,
+            max_prefix_snapshot_poll: stats.max_prefix_snapshot_poll,
+            max_finalize_poll: stats.max_finalize_poll,
+        }
     }
 
     /// Drive the production paged-query handler synchronously and return its
