@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = ROOT / "docs/v1-stable-surface.json"
 SCHEMA_PATH = ROOT / "docs/rustbgpd.schema.json"
 GRPC_INVENTORY_PATH = ROOT / "docs/grpc-method-inventory.json"
+WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
+JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
 
 
 def fail(message: str) -> None:
@@ -302,9 +304,47 @@ def semantic_toml_sha256(path: Path) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        fail(f"cannot read {path.relative_to(ROOT)}: {error}")
+
+
+def safe_relative_path(value: str, label: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        fail(f"unsafe {label} path {value!r}")
+    return path
+
+
+def workspace_release() -> tuple[str, tuple[int, int, int]]:
+    try:
+        manifest = tomllib.loads(WORKSPACE_MANIFEST_PATH.read_text())
+        raw = manifest["workspace"]["package"]["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        fail(f"cannot read workspace package version: {error}")
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", raw)
+    if not match:
+        fail(f"workspace package version {raw!r} is not MAJOR.MINOR.PATCH")
+    version = tuple(map(int, match.groups()))
+    return f"v{raw}", version
+
+
+def require_git_tag(tag: str) -> None:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"refs/tags/{tag}^{{commit}}"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        fail(f"required release tag {tag!r} is unavailable; fetch tags before validating")
+
+
 def tagged_file(tag: str, path: str) -> bytes | None:
     result = subprocess.run(
-        ["git", "show", f"{tag}:{path}"],
+        ["git", "show", f"refs/tags/{tag}:{path}"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -313,9 +353,19 @@ def tagged_file(tag: str, path: str) -> bytes | None:
 
 
 def check_upgrade_exercises(inventory: dict) -> None:
+    baseline, baseline_version = workspace_release()
+    if inventory.get("baseline_release") != baseline:
+        fail(
+            f"baseline_release must match the workspace package version: expected {baseline}, "
+            f"found {inventory.get('baseline_release')!r}"
+        )
     exercises = inventory["upgrade_exercises"]
     if not exercises:
         fail("at least one consecutive-release upgrade exercise is required")
+    exercise_versions: list[tuple[int, int, int]] = []
+    validation_tests = [exercise["validation_test"] for exercise in exercises]
+    if len(validation_tests) != len(set(validation_tests)):
+        fail("upgrade exercises must use unique validation_test ids")
     for exercise in exercises:
         from_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", exercise["from_release"])
         to_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", exercise["to_release"])
@@ -333,48 +383,280 @@ def check_upgrade_exercises(inventory: dict) -> None:
                 f"upgrade exercise is not between consecutive minor releases: "
                 f"{exercise['from_release']} -> {exercise['to_release']}"
             )
-        fixture = ROOT / exercise["fixture"]
-        digest = semantic_toml_sha256(fixture)
+        exercise_versions.append(to_version)
+        if exercise.get("result") not in {
+            "accepted_without_config_migration",
+            "accepted_with_documented_migration",
+        }:
+            fail(f"upgrade exercise has no recognized accepted result: {exercise.get('result')!r}")
+        require_git_tag(exercise["from_release"])
+        if exercise["to_release"] != baseline:
+            require_git_tag(exercise["to_release"])
+
+        fixture_relative = safe_relative_path(
+            exercise["fixture_directory"], "upgrade fixture directory"
+        )
+        fixture_directory = ROOT / fixture_relative
+        source_directory = safe_relative_path(
+            exercise["source_directory"], "upgrade source directory"
+        )
+        files = exercise["files"]
+        file_names = [entry["path"] for entry in files]
+        require_sorted_unique(file_names, "upgrade_exercise.files")
+        if "config.toml" not in file_names:
+            fail("upgrade exercise must archive config.toml")
+        actual_files = []
+        for path in fixture_directory.rglob("*"):
+            relative_path = str(path.relative_to(fixture_directory))
+            if path.is_symlink():
+                fail(f"upgrade fixture {relative_path!r} must not be a symlink")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                fail(f"upgrade fixture {relative_path!r} must be a regular file")
+            actual_files.append(relative_path)
+        actual_files.sort()
+        if actual_files != file_names:
+            fail(
+                f"upgrade fixture directory must contain exactly the inventoried files: "
+                f"expected {file_names}, found {actual_files}"
+            )
+        for entry in files:
+            relative = safe_relative_path(entry["path"], "upgrade fixture")
+            fixture = fixture_directory / relative
+            if fixture.is_symlink() or not fixture.is_file():
+                fail(f"upgrade fixture {fixture.relative_to(ROOT)} must be a regular file")
+            digest = file_sha256(fixture)
+            if digest != entry["sha256"]:
+                fail(
+                    f"immutable upgrade fixture {fixture.relative_to(ROOT)} changed "
+                    f"({digest}); archive a new release fixture instead"
+                )
+            tag_path = str(source_directory / relative)
+            tagged = tagged_file(exercise["from_release"], tag_path)
+            if tagged is None:
+                fail(f"required tag path {exercise['from_release']}:{tag_path} is unavailable")
+            tagged_digest = hashlib.sha256(tagged).hexdigest()
+            if tagged_digest != entry["sha256"]:
+                fail(
+                    f"archived fixture {fixture.relative_to(ROOT)} does not match "
+                    f"{exercise['from_release']}:{tag_path}"
+                )
+            if exercise["to_release"] != baseline and tagged_file(
+                exercise["to_release"], tag_path
+            ) is None:
+                fail(f"required tag path {exercise['to_release']}:{tag_path} is unavailable")
+
+        config_fixture = fixture_directory / "config.toml"
+        digest = semantic_toml_sha256(config_fixture)
         expected = exercise["semantic_toml_sha256"]
         if digest != expected:
             fail(
-                f"upgrade fixture {exercise['fixture']} changed semantically; run and record a new "
+                f"upgrade fixture {config_fixture.relative_to(ROOT)} changed semantically; run and record a new "
                 "consecutive-release migration exercise before updating the digest"
             )
-        for release_key in ("from_release", "to_release"):
-            release = exercise[release_key]
-            tagged = tagged_file(release, exercise["fixture"])
-            if tagged is None:
-                continue
-            tagged_value = tomllib.loads(tagged.decode())
-            tagged_digest = hashlib.sha256(
-                json.dumps(tagged_value, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-            if tagged_digest != expected:
-                fail(f"recorded upgrade fixture does not match {release}:{exercise['fixture']}")
+
+        validation_source = ROOT / safe_relative_path(
+            exercise["validation_source"], "upgrade validation source"
+        )
+        try:
+            validation_text = validation_source.read_text()
+        except OSError as error:
+            fail(f"cannot read upgrade validation source {exercise['validation_source']}: {error}")
+        validation_test = exercise["validation_test"].rsplit("::", 1)[-1]
+        test_region = named_rust_test_region(validation_text, validation_test)
+        if test_region is None:
+            fail(
+                f"upgrade validation test {exercise['validation_test']!r} disappeared from "
+                f"{exercise['validation_source']}"
+            )
+        if exercise["fixture_directory"] not in test_region:
+            fail(
+                f"upgrade validation test {exercise['validation_test']!r} does not reference "
+                f"the immutable fixture directory"
+            )
+
+    if exercise_versions != sorted(exercise_versions) or len(exercise_versions) != len(
+        set(exercise_versions)
+    ):
+        fail("upgrade exercises must be ordered by unique target release")
+    latest = exercises[-1]
+    expected_previous = (baseline_version[0], baseline_version[1] - 1, 0)
+    latest_from = tuple(
+        map(int, re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", latest["from_release"]).groups())
+    )
+    if latest["to_release"] != baseline or latest_from != expected_previous:
+        fail(
+            f"latest upgrade exercise must cover the immediately previous minor through {baseline}"
+        )
+
+
+def check_json_type_spec(type_spec, label: str) -> None:
+    if isinstance(type_spec, str):
+        types = [type_spec]
+    elif isinstance(type_spec, list):
+        types = type_spec
+        require_sorted_unique(types, label)
+    else:
+        fail(f"{label} must be a JSON type or sorted type union")
+    if not types:
+        fail(f"{label} type union cannot be empty")
+    invalid = sorted({value for value in types if value not in JSON_TYPES})
+    if invalid:
+        fail(f"{label} contains invalid JSON types: {invalid}")
+
+
+def check_json_type_map(type_map: dict, label: str, *, required: bool) -> None:
+    if not isinstance(type_map, dict) or (required and not type_map):
+        qualifier = "at least one" if required else "zero or more"
+        fail(f"{label} must pin {qualifier} JSON field/type entries")
+    require_sorted_unique(list(type_map), label)
+    for field, type_spec in type_map.items():
+        check_json_type_spec(type_spec, f"{label}.{field}")
+
+
+def check_json_shape(shape: dict, label: str) -> None:
+    required = shape.get("required_json_types")
+    optional = shape.get("optional_json_types", {})
+    check_json_type_map(required, f"{label}.required_json_types", required=True)
+    check_json_type_map(optional, f"{label}.optional_json_types", required=False)
+    overlap = sorted(set(required) & set(optional))
+    if overlap:
+        fail(f"{label} fields are both required and optional: {overlap}")
+
+
+def strip_rust_comments(source: str) -> str:
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", source)
+
+
+def named_rust_test_region(source: str, name: str) -> str | None:
+    source = strip_rust_comments(source)
+    match = re.search(rf"\b(?:async\s+)?fn\s+{re.escape(name)}\s*\(", source)
+    if not match:
+        return None
+    attributes_match = re.search(
+        r"((?:\s*#\[[^\]]*\])+\s*)$", source[: match.start()], flags=re.DOTALL
+    )
+    attributes = attributes_match.group(1) if attributes_match else ""
+    if not re.search(r"#\[(?:tokio::)?test(?:\([^\]]*\))?\]", attributes):
+        return None
+    if re.search(r"#\[ignore(?:\([^\]]*\))?\]", attributes):
+        fail(f"JSON/upgrade contract test {name!r} must not be ignored")
+    body_start = source.find("{", match.end())
+    if body_start < 0:
+        return None
+    depth = 1
+    cursor = body_start + 1
+    while cursor < len(source) and depth:
+        if source[cursor] == "{":
+            depth += 1
+        elif source[cursor] == "}":
+            depth -= 1
+        cursor += 1
+    if depth:
+        return None
+    return source[match.start() : cursor]
+
+
+def check_json_contract(contract: dict, label: str, *, require_id_literal: bool) -> None:
+    if contract.get("evolution") not in {
+        "additive_fields_only",
+        "additive_fields_only_except_explicitly_experimental_fields",
+        "closed_schema_version_bump_required",
+    }:
+        fail(f"{label} has no recognized evolution policy")
+    source_path = ROOT / safe_relative_path(contract["source"], "JSON contract source")
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read JSON contract source {contract['source']}: {error}")
+    if require_id_literal and contract["id"] not in source:
+        fail(f"JSON contract {contract['id']!r} disappeared from {contract['source']}")
+    test = contract.get("test")
+    test_region = named_rust_test_region(source, test) if test else None
+    if not test_region:
+        fail(f"JSON contract {contract['id']!r} has no live named contract test")
+    linkage = contract.get("test_linkage")
+    if not linkage or linkage not in test_region:
+        fail(f"JSON contract {contract['id']!r} test is not linked to its inventory floor")
+    evidence_test = contract.get("evidence_test")
+    if evidence_test and named_rust_test_region(source, evidence_test) is None:
+        fail(f"JSON contract {contract['id']!r} has no live named evidence test")
+    if not contract.get("executable_type_floor"):
+        fail(f"JSON contract {contract['id']!r} type floor is not marked executable")
+    if "required_json_types" not in source or "optional_json_types" not in source:
+        fail(f"JSON contract {contract['id']!r} test source does not consume its type floor")
+    golden_files = contract.get("golden_files", [])
+    golden_paths = [golden["path"] for golden in golden_files]
+    require_sorted_unique(golden_paths, f"{label}.golden_files")
+    for golden in golden_files:
+        golden_path = ROOT / safe_relative_path(golden["path"], "JSON contract golden")
+        if golden_path.is_symlink() or not golden_path.is_file():
+            fail(f"JSON contract golden {golden['path']} must be a regular file")
+        if file_sha256(golden_path) != golden["sha256"]:
+            fail(f"JSON contract golden {golden['path']} changed without an inventory update")
+    if "required_json_types" in contract:
+        check_json_shape(contract, label)
+    elif "record_json_contracts" in contract:
+        records = contract["record_json_contracts"]
+        require_sorted_unique(list(records), f"{label}.record_json_contracts")
+        if not records:
+            fail(f"{label} must pin at least one record shape")
+        for record, shape in records.items():
+            check_json_shape(shape, f"{label}.{record}")
+    else:
+        fail(f"{label} has no required JSON field/type metadata")
+    nested = contract.get("nested_json_contracts", [])
+    nested_paths = [shape["path"] for shape in nested]
+    require_sorted_unique(nested_paths, f"{label}.nested_json_contracts")
+    for shape in nested:
+        check_json_shape(shape, f"{label}.{shape['path']}")
+    experimental = contract.get("explicitly_experimental_json_fields", [])
+    require_sorted_unique(experimental, f"{label}.explicitly_experimental_json_fields")
+    classified = set(contract.get("required_json_types", {})) | set(
+        contract.get("optional_json_types", {})
+    )
+    overlap = sorted(classified & set(experimental))
+    if overlap:
+        fail(f"{label} fields are both contract-pinned and explicitly experimental: {overlap}")
+    for field in experimental:
+        if field not in source:
+            fail(f"{label} experimental JSON field {field!r} disappeared from its source")
 
 
 def check_cli(inventory: dict) -> None:
+    if inventory["cli"].get("stability_scope") != "command_path_and_name_only":
+        fail("CLI stability scope must remain command path/name only")
     stable_paths = inventory["cli"]["stable_command_paths"]
     scoped_paths = inventory["cli"]["scoped_rr_only_command_paths"]
-    require_sorted_unique(stable_paths, "cli.stable_command_paths")
-    require_sorted_unique(scoped_paths, "cli.scoped_rr_only_command_paths")
-    overlap = sorted(set(stable_paths) & set(scoped_paths))
+    stable_canonical = [" ".join(path.split()) for path in stable_paths]
+    scoped_canonical = [" ".join(path.split()) for path in scoped_paths]
+    require_sorted_unique(stable_canonical, "cli.stable_command_paths")
+    require_sorted_unique(scoped_canonical, "cli.scoped_rr_only_command_paths")
+    if stable_paths != stable_canonical or scoped_paths != scoped_canonical:
+        fail("CLI command paths must use canonical single-space separators")
+    overlap = sorted(set(stable_canonical) & set(scoped_canonical))
     if overlap:
         fail(f"CLI paths are both stable and scoped RR-only: {overlap}")
-    for contract in inventory["cli"]["versioned_json_contracts"]:
-        source = ROOT / contract["source"]
-        if contract["id"] not in source.read_text():
-            fail(f"JSON contract {contract['id']!r} disappeared from {contract['source']}")
+    versioned = inventory["cli"]["versioned_json_contracts"]
+    versioned_ids = [contract["id"] for contract in versioned]
+    require_sorted_unique(versioned_ids, "cli.versioned_json_contracts")
+    for contract in versioned:
+        check_json_contract(
+            contract,
+            f"cli.versioned_json_contracts.{contract['id']}",
+            require_id_literal=True,
+        )
     pinned = inventory["cli"]["test_pinned_json_contracts"]
     pinned_ids = [contract["id"] for contract in pinned]
     require_sorted_unique(pinned_ids, "cli.test_pinned_json_contracts")
     for contract in pinned:
-        source = (ROOT / contract["source"]).read_text()
-        if contract["test"] not in source:
-            fail(
-                f"JSON contract test {contract['test']!r} disappeared from {contract['source']}"
-            )
+        check_json_contract(
+            contract,
+            f"cli.test_pinned_json_contracts.{contract['id']}",
+            require_id_literal=False,
+        )
 
 
 def check_policy(inventory: dict) -> None:

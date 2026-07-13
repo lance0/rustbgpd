@@ -46,12 +46,17 @@ new update-group impact projection and alpha EVPN/BFD/dataplane event payloads
 are excluded the same way even though they are reachable through otherwise
 stable transaction or event envelopes.
 
-The stable CLI set is also explicit. Its versioned machine formats currently
-include `rbgp-ribdiff/1` and `rbgp-ribsnap/1`; adding fields is compatible, but
-removing or reinterpreting existing fields is not. The neighbor-detail JSON and
-support-bundle manifest v2 are pinned to their serializer contract tests.
-Human-readable output may improve without a compatibility promise unless the
-command or field is pinned in the inventory or an existing golden test.
+The stable CLI set is also explicit. For an inventoried command, the v1 promise
+covers only its command path and command name. Flags, positional arguments,
+defaults, exit behavior, and human-readable output remain outside v1 unless a
+separate inventory entry explicitly pins them. The versioned machine formats
+currently include `rbgp-ribdiff/1` and `rbgp-ribsnap/1`. The ribdiff report may
+gain additive fields, but removing or reinterpreting existing fields is not
+compatible. The ribsnap parser is intentionally closed and rejects unknown
+fields; changing its record schema requires a new format version rather than an
+in-place additive change. The neighbor-detail JSON and support-bundle manifest
+v2 pin required and optional key/type floors, including promised nested object
+shapes, in their serializer contract tests while allowing additive fields.
 
 Prometheus metrics and structured event payloads used by the stable roles are
 covered by semantic rules rather than a promise that no new metric, event kind,
@@ -106,13 +111,17 @@ commit-confirmed rollback must use the transaction path.
 
 ## Upgrade receipt
 
-The first pinned exercise is the byte-independent semantic shape of the
-v0.50.0 route-server example loaded by v0.51.0/current code. The TOML fixture is
-unchanged semantically across those consecutive releases, and the current
-example parser also loads and runs its referenced rpol policy. The inventory
-records the source/target releases, semantic TOML digest, validation test, and
-result. Future stable-surface migrations add a new consecutive-release fixture
-rather than overwriting this receipt.
+The first pinned exercise archives the complete v0.50.0 route-server example
+(`config.toml` plus its referenced `hygiene.rpol`) under
+`tests/fixtures/v1-stable/v0.50.0/`. The checker verifies every immutable byte
+digest against the v0.50.0 git tag, and a dedicated current-parser test loads,
+compiles, and validates that archived fixture under v0.51.0/current code. A
+version-bump PR therefore does not require the not-yet-created target tag;
+historical exercises require both release tags. The
+inventory records the source/target releases, file and semantic TOML digests,
+validation test, and result. It must end at the workspace release and start at
+the immediately previous minor. Future stable-surface migrations add a new
+consecutive-release fixture rather than overwriting this receipt.
 
 ## Release gate
 
@@ -121,7 +130,7 @@ Run:
 ```bash
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
-cargo test -p rustbgpd config_examples_parse
+cargo test -p rustbgpd v1_stable_v0_50_route_server_fixture_parses
 ```
 
 Updating a digest is not a mechanical fix. Review the compatibility policy,

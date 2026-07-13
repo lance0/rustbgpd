@@ -1056,6 +1056,65 @@ mod tests {
     const PEER: &str = "192.0.2.1";
     const PEER_ASN: u32 = 64501;
 
+    fn json_type(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+
+    fn assert_ribsnap_shape(value: &serde_json::Value, shape: &serde_json::Value) {
+        let object = value.as_object().expect("snapshot record is an object");
+        for (key, expected) in shape["required_json_types"].as_object().unwrap() {
+            let field = object
+                .get(key)
+                .unwrap_or_else(|| panic!("required rbgp-ribsnap/1 field {key:?} is absent"));
+            let allowed: Vec<&str> = match expected {
+                serde_json::Value::String(value) => vec![value.as_str()],
+                serde_json::Value::Array(values) => {
+                    values.iter().map(|value| value.as_str().unwrap()).collect()
+                }
+                _ => panic!("invalid rbgp-ribsnap/1 type floor for {key:?}"),
+            };
+            assert!(
+                allowed.contains(&json_type(field)),
+                "rbgp-ribsnap/1 field {key:?} changed JSON type"
+            );
+        }
+        for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
+            if let Some(field) = object.get(key) {
+                let allowed: Vec<&str> = match expected {
+                    serde_json::Value::String(value) => vec![value.as_str()],
+                    serde_json::Value::Array(values) => {
+                        values.iter().map(|value| value.as_str().unwrap()).collect()
+                    }
+                    _ => panic!("invalid rbgp-ribsnap/1 type floor for {key:?}"),
+                };
+                assert!(allowed.contains(&json_type(field)));
+            }
+        }
+    }
+
+    fn ribsnap_inventory_contract() -> serde_json::Value {
+        let inventory_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/v1-stable-surface.json"
+        );
+        let inventory: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
+        inventory["cli"]["versioned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == "rbgp-ribsnap/1")
+            .expect("rbgp-ribsnap/1 contract is inventoried")
+            .clone()
+    }
+
     fn opts(against: &std::path::Path) -> AdvertisedDiffOpts {
         AdvertisedDiffOpts {
             peers: Vec::new(),
@@ -1077,6 +1136,52 @@ mod tests {
         }
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn ribsnap_json_contract_floor_matches_representative_records() {
+        let records = [
+            serde_json::json!({
+                "record": "header",
+                "schema": "rbgp-ribsnap/1",
+                "source": "contract-test",
+                "generation": 7,
+            }),
+            serde_json::json!({
+                "record": "route",
+                "peer": PEER,
+                "peer_asn": PEER_ASN,
+                "prefix": "203.0.113.0/24",
+                "path_id": 1,
+                "origin": 0,
+                "as_path": [64501],
+                "next_hop": "192.0.2.254",
+                "med": 10,
+                "local_pref": 100,
+                "communities": ["64501:100"],
+                "extended_communities": [281474976710756_u64],
+                "large_communities": ["64501:1:1"],
+                "unknown_attrs": [{"type_code": 99, "flags": 128, "value": "00"}],
+            }),
+            serde_json::json!({"record": "trailer", "routes": 1}),
+        ];
+        let contract = ribsnap_inventory_contract();
+        let shapes = contract["record_json_contracts"].as_object().unwrap();
+        for record in &records {
+            let kind = record["record"].as_str().unwrap();
+            assert_ribsnap_shape(record, &shapes[kind]);
+        }
+
+        let mut bytes = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        bytes.push(b'\n');
+        let opts = opts(std::path::Path::new("unused"));
+        parse_snapshot(&bytes[..], &opts, &[], &BTreeSet::new(), &[])
+            .expect("representative rbgp-ribsnap/1 records must pass the fail-closed parser");
     }
 
     fn header_line() -> String {
