@@ -1,0 +1,5 @@
+remote_asn_shape,routes,peers,fast,plans,full_exact_probes,route_shell_materializations,actor_polls,max_actor_poll_ns,max_prefix_snapshot_poll_ns,max_finalize_poll_ns
+homogeneous_remote_asn,4096,64,true,1,4096,4096,87,465025,90415,206859
+distinct_remote_asns,4096,64,true,1,4096,4096,87,463834,89885,193419
+homogeneous_remote_asn,4096,700,true,1,4096,4096,803,2091007,164887,2091007
+distinct_remote_asns,4096,700,true,1,4096,4096,803,2058208,151797,2058208

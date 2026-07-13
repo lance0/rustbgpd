@@ -46,7 +46,7 @@ use tokio::sync::mpsc;
 const CHANGED: usize = 64;
 /// Peer fanout factors (the independent variable).
 const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
-/// IXP route-server fanout factors retained in the LAN-409 receipt.
+/// IXP route-server fanout factors retained in the exact-export receipt.
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).

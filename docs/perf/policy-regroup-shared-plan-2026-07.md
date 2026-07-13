@@ -253,3 +253,25 @@ times and individual poll samples—including the two O(table) prefix/inventory
 snapshot polls—remain microbenchmark evidence, not an extrapolated bound or a
 loaded-reload acceptance claim. The exclusive 700-peer campaign must run from
 a fresh integrated SHA before the rejected campaign can be superseded.
+
+## IXP remote-AS cohort follow-up
+
+The IXP follow-up adds a complementary eBGP route-server fixture without
+changing the homogeneous RR workload above. Before the fix, a clean transition
+treated each remote ASN as a distinct exact-export profile even though encoding
+consumed it only as eBGP/iBGP classification. At 4,096 routes and 700 distinct-ASN clients,
+that produced 2,867,200 full probes, 3,599 actor polls, and a 508.389 ms median.
+
+The exact-export profile now stores the derived eBGP/iBGP class while retaining
+full equality for every actual wire input. The same distinct-ASN workload uses
+4,096 full probes and 803 polls and completes in 7.744 ms, a -98.47% Criterion
+mean change (-98.52%..-98.42%). The 64-client cell drops from 262,144 to 4,096
+full probes and from 48.639 ms to 3.438 ms. Optimized homogeneous and
+distinct-ASN receipts have identical plan/probe/shell/poll counts. Byte-level
+tests prove cross-ASN eBGP equality and preserve the eBGP/iBGP incompatibility
+boundary; per-member ceiling and generation checks remain mandatory.
+
+Raw medians, confidence bounds, deterministic counters, environment, and
+reproduction commands are retained in
+[`artifacts/ixp-exact-export-cohorts-2026-07/`](artifacts/ixp-exact-export-cohorts-2026-07/).
+These results do not supersede the still-required loaded 700-peer campaign.

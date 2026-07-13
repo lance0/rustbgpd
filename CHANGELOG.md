@@ -280,6 +280,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **IXP route-server clients share exact-export work across remote ASNs.** The
+  immutable session export profile now retains the wire-relevant eBGP/iBGP
+  classification instead of negotiated remote-AS identity; every other wire
+  input still participates in full profile equality, and each target still
+  rechecks its own message ceiling and generation. Byte-level tests prove that
+  distinct eBGP ASNs encode identically while eBGP and iBGP remain
+  incompatible. In the pinned route-server fixture, 4,096-route policy
+  transitions across 700 distinct-ASN clients collapse from 2,867,200 to 4,096
+  full exact probes and improve from 508.389 ms to 7.744 ms; 64-route
+  first-advertise fanout improves 47%..64% at 8..256 clients without a
+  measurable homogeneous-cohort regression.
+
 - **Changed-policy update groups share transition work without hiding live
   export-policy counters.** Eligible grouped-to-grouped unicast reloads build
   and exact-probe one destination inventory per wire cohort, then reuse its

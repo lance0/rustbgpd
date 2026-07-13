@@ -1,10 +1,11 @@
-# LAN-409 IXP exact-export cohort artifacts
+# IXP exact-export cohort artifacts
 
 This directory retains the raw, normalized Criterion medians and deterministic
 production-state-machine counters for the IXP exact-export cohort campaign.
-All durations are nanoseconds. The fixture-only baseline is commit
-`5ba459833190b72cc1f1c348155557ed0d090ff1`, stacked on
-`89208314c018e43af55233ccefb26eaf32eb330a`.
+All durations are nanoseconds. The measured fixture-only baseline is commit
+`5ba459833190b72cc1f1c348155557ed0d090ff1`; its tree-equivalent rebased commit
+is `3e6416894e93668393b28f0d21e52a1d1a30ee03`. The measured wire-equivalence
+optimization is `e76e6fa55c39ebdd00ec9122a163c3b704d3bedc`.
 
 Environment: Linux 6.17.0-35-generic x86_64, AMD Ryzen Threadripper 7970X,
 `rustc 1.97.0 (2d8144b78 2026-07-07)`, Criterion 0.8, workspace release
@@ -41,5 +42,6 @@ taskset -c 7 env CARGO_TARGET_DIR="$TARGET" \
 ```
 
 Criterion's `median.point_estimate` and median confidence bounds are retained
-verbatim in the CSV. Counter receipts are the first measured production state
-machine invocation emitted by the benchmark process.
+verbatim in the CSVs. The optimized CSV also retains Criterion's paired mean
+change estimate and confidence bounds. Counter receipts are the first measured
+production state-machine invocation emitted by the benchmark process.
