@@ -136,6 +136,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
   separately pins the exact workspace patch version.
 
+- **TCP-AO passive accepts survive an add-only listener generation flip.**
+  Linux does not copy newly added listener MKTs into children that already
+  completed in the accept queue. rustbgpd now recognizes only the exact
+  immediately previous inventory, adds the missing successor suffix while it
+  still exclusively owns the child, verifies the exact current inventory, and
+  stamps the current generation. Partial inventories, generations outside the
+  applied/desired phase fence, and failed repairs remain fail-closed. The hosted
+  kernel receipt deterministically exercises the queued-child race, while M43
+  proves a live SIGHUP successor rotation against BIRD 3.3.1 without a session
+  flap.
+
 - **Planned-restart deferral remains bounded across backward clock steps.**
   Marker-backed startup now clamps the persisted marker's remaining lifetime to
   the maximum effective `gr_restart_time`, so a wall-clock correction cannot

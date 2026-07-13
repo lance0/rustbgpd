@@ -29,7 +29,7 @@ fabric use.
   weighted multipath); broader routing-suite features remain future work.
 - **Validated** with a workspace test suite, fuzz targets, and an automated
   interop suite — primarily against FRR 10.3.1, plus GoBGP 3.37.0–4.6.0 and
-  StayRTR-backed RTR coverage, with BIRD 2.0.12 (M0) and BIRD 3.2.1 (TCP-AO
+  StayRTR-backed RTR coverage, with BIRD 2.0.12 (M0) and BIRD 3.3.1 (TCP-AO
   smoke). A foundation tier runs on every PR and the privileged Linux
   dataplane smokes run in hosted CI; longer soaks and platform-diversity
   scripts remain local. Full matrix: [`docs/INTEROP.md`](docs/INTEROP.md).
@@ -244,7 +244,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, run nightly in CI |
-| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0–4.6.0 across labs and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.2.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
+| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0–4.6.0 across labs and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.3.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md). |
 | Protocol coverage | [Supported standards at a glance](docs/RFC_NOTES.md#supported-standards-at-a-glance) plus per-RFC conformance notes in [docs/RFC_NOTES.md](docs/RFC_NOTES.md); interop matrix in [docs/INTEROP.md](docs/INTEROP.md) and receipts in [docs/RECEIPTS.md](docs/RECEIPTS.md). |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |

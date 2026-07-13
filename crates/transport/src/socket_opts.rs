@@ -321,6 +321,32 @@ pub(crate) struct TcpAoMktReceipt {
     metadata: Vec<TcpAoMktMetadata>,
 }
 
+/// Short-lived proof used to classify an accepted child against the complete
+/// current listener inventory or its exact immediately previous inventory.
+/// The previous mask is meaningful only while the listener retains the
+/// adjacent generation that produced it.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoAcceptedGenerationReceipt {
+    current: TcpAoMktReceipt,
+    previous: Option<Vec<bool>>,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoAcceptedGenerationReceipt;
+
+/// Exact generation relation proved from one accepted-child inventory read.
+#[cfg(target_os = "linux")]
+pub(crate) enum TcpAoAcceptedGeneration {
+    Current(TcpAoInfoSnapshot),
+    Previous(TcpAoInfoSnapshot),
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) enum TcpAoAcceptedGeneration {
+    Current(TcpAoInfoSnapshot),
+    Previous(TcpAoInfoSnapshot),
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct TcpAoMktReceipt;
 
@@ -1488,13 +1514,53 @@ pub(crate) fn capture_tcp_ao_keyring_receipt(
     keyring_receipt_from_raw_inventory(&keys, peer, prefix_len, keyring, exact_inventory)
 }
 
+/// Capture the complete current covering-owner receipt and, when the listener
+/// can prove an adjacent predecessor, mark exactly the entries inherited by
+/// that predecessor. `previous_key_counts` is aligned to `owners`; listener
+/// code derives it with owner-kind-aware identity matching.
 #[cfg(target_os = "linux")]
-pub(crate) fn capture_tcp_ao_owned_receipt(
+pub(crate) fn capture_tcp_ao_accepted_generation_receipt(
     socket: &impl AsRawFd,
     owners: &[TcpAoMktOwner<'_>],
-) -> io::Result<TcpAoMktReceipt> {
+    previous_key_counts: Option<&[usize]>,
+) -> io::Result<TcpAoAcceptedGenerationReceipt> {
+    let previous = previous_key_counts
+        .map(|counts| {
+            if counts.len() != owners.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP-AO previous listener inventory is not aligned to current owners",
+                ));
+            }
+            let expected = owners
+                .iter()
+                .map(|owner| owner.keyring.0.len())
+                .sum::<usize>();
+            let mut mask = Vec::with_capacity(expected);
+            for (owner, previous_count) in owners.iter().zip(counts) {
+                if *previous_count > owner.keyring.0.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TCP-AO previous listener keyring is not a current-keyring prefix",
+                    ));
+                }
+                mask.extend((0..owner.keyring.0.len()).map(|index| index < *previous_count));
+            }
+            Ok(mask)
+        })
+        .transpose()?;
     let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
-    owned_receipt_from_raw_inventory(&keys, owners)
+    let current = owned_receipt_from_raw_inventory(&keys, owners)?;
+    if previous
+        .as_ref()
+        .is_some_and(|mask| mask.len() != current.cores.len())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO previous listener inventory has an invalid receipt shape",
+        ));
+    }
+    Ok(TcpAoAcceptedGenerationReceipt { current, previous })
 }
 
 /// Capture a complete listener-generation receipt. Unlike accepted-child
@@ -1537,6 +1603,27 @@ fn annotate_tcp_ao_receipt(
     receipt: &TcpAoMktReceipt,
     connected_peer: IpAddr,
 ) -> io::Result<()> {
+    annotate_tcp_ao_receipt_subset(info, keys, receipt, connected_peer, None)
+}
+
+#[cfg(target_os = "linux")]
+fn annotate_tcp_ao_receipt_subset(
+    info: &mut TcpAoInfoSnapshot,
+    keys: &[TcpAoGetSockOpt],
+    receipt: &TcpAoMktReceipt,
+    connected_peer: IpAddr,
+    expected: Option<&[bool]>,
+) -> io::Result<()> {
+    if expected.is_some_and(|mask| mask.len() != receipt.cores.len()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO accepted-generation receipt has an invalid mask shape",
+        ));
+    }
+    let expected_entry = |index: usize| expected.is_none_or(|mask| mask[index]);
+    let expected_len = expected.map_or(receipt.cores.len(), |mask| {
+        mask.iter().filter(|included| **included).count()
+    });
     let mut states = keys
         .iter()
         .map(decode_tcp_ao_key_state)
@@ -1551,7 +1638,8 @@ fn annotate_tcp_ao_receipt(
                 .iter()
                 .enumerate()
                 .position(|(expected_index, expected)| {
-                    !expected_matched[expected_index]
+                    expected_entry(expected_index)
+                        && !expected_matched[expected_index]
                         && target_record_matches_receipt_entry(
                             &states[index],
                             connected_peer,
@@ -1567,9 +1655,12 @@ fn annotate_tcp_ao_receipt(
     // A connected socket must inherit exactly the complete expected-owned
     // keyring inventory. Missing, foreign, duplicated, or cryptographically
     // changed records all fail closed.
-    if matching.len() != receipt.cores.len()
-        || keys.len() != receipt.cores.len()
-        || expected_matched.iter().any(|matched| !matched)
+    if matching.len() != expected_len
+        || keys.len() != expected_len
+        || expected_matched
+            .iter()
+            .enumerate()
+            .any(|(index, matched)| expected_entry(index) && !matched)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1586,6 +1677,129 @@ fn annotate_tcp_ao_receipt(
     states.sort_by_key(|key| (key.peer, key.prefix_len, key.send_id, key.recv_id));
     info.keys = states;
     Ok(())
+}
+
+/// Read an accepted child once and classify only an exact current inventory or
+/// an exact adjacent-previous inventory. Arbitrary prefixes, partial successor
+/// applications, older generations, and foreign records all fail closed.
+#[cfg(target_os = "linux")]
+pub(crate) fn inspect_tcp_ao_accepted_generation(
+    socket: &impl AsRawFd,
+    receipt: &TcpAoAcceptedGenerationReceipt,
+    connected_peer: IpAddr,
+) -> io::Result<TcpAoAcceptedGeneration> {
+    let (info, keys) = get_tcp_ao_snapshot_with(
+        || get_tcp_ao_info_only(socket),
+        || get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries)),
+    )?;
+    if keys.len() == receipt.current.cores.len() {
+        let mut current = info;
+        annotate_tcp_ao_receipt(&mut current, &keys, &receipt.current, connected_peer)?;
+        return Ok(TcpAoAcceptedGeneration::Current(current));
+    }
+    if let Some(previous) = receipt.previous.as_deref()
+        && keys.len() == previous.iter().filter(|included| **included).count()
+    {
+        let mut previous_info = info;
+        annotate_tcp_ao_receipt_subset(
+            &mut previous_info,
+            &keys,
+            &receipt.current,
+            connected_peer,
+            Some(previous),
+        )?;
+        return Ok(TcpAoAcceptedGeneration::Previous(previous_info));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "TCP-AO accepted socket matches neither current nor immediate previous listener inventory",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn get_tcp_ao_info_for_accepted_generation_receipt(
+    socket: &impl AsRawFd,
+    receipt: &TcpAoAcceptedGenerationReceipt,
+    connected_peer: IpAddr,
+) -> io::Result<TcpAoInfoSnapshot> {
+    get_tcp_ao_info_for_receipt(socket, &receipt.current, connected_peer)
+}
+
+/// Add only the current-generation suffix missing from an exact
+/// adjacent-previous accepted child, then require one exact final inventory
+/// and unchanged Current/RNext selection. The child is still exclusively
+/// owned by the listener; callers must discard it on any error.
+#[cfg(target_os = "linux")]
+pub(crate) fn reconcile_tcp_ao_accepted_previous(
+    socket: &impl AsRawFd,
+    receipt: &TcpAoAcceptedGenerationReceipt,
+    owners: &[TcpAoMktOwner<'_>],
+    connected_peer: IpAddr,
+    initial: &TcpAoInfoSnapshot,
+) -> Result<TcpAoInfoSnapshot, TcpAoAddOnlyApplyError> {
+    let Some(previous) = receipt.previous.as_deref() else {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO accepted child has no adjacent previous-generation proof",
+            ),
+            false,
+        ));
+    };
+    let configs = owners
+        .iter()
+        .flat_map(|owner| {
+            owner
+                .keyring
+                .iter()
+                .map(move |config| (owner.peer, owner.prefix_len, config))
+        })
+        .collect::<Vec<_>>();
+    if configs.len() != receipt.current.cores.len() || previous.len() != configs.len() {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO accepted-child repair inventory differs from its listener receipt",
+            ),
+            false,
+        ));
+    }
+    let expected_selection = selection(initial);
+    let mut mutation_started = false;
+    for (index, (peer, prefix_len, config)) in configs.into_iter().enumerate() {
+        if previous[index] {
+            continue;
+        }
+        let metadata = &receipt.current.metadata[index];
+        if metadata.peer != peer
+            || metadata.prefix_len != prefix_len
+            || metadata.preferred != config.preferred
+            || metadata.deprecated != config.deprecated
+        {
+            return Err(apply_error(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TCP-AO accepted-child repair metadata differs from its listener receipt",
+                ),
+                mutation_started,
+            ));
+        }
+        mutation_started = true;
+        let key = tcp_ao_key_from_config(peer, prefix_len, config, TcpAoSocketRole::Listener);
+        set_tcp_ao_key(socket, &key).map_err(|error| apply_error(error, mutation_started))?;
+    }
+    let final_info = get_tcp_ao_info_for_receipt(socket, &receipt.current, connected_peer)
+        .map_err(|error| apply_error(error, mutation_started))?;
+    if selection(&final_info) != expected_selection {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO accepted-child repair changed Current/RNext selection",
+            ),
+            mutation_started,
+        ));
+    }
+    Ok(final_info)
 }
 
 /// Reconcile a connected socket against a pre-connect/listener raw kernel MKT
@@ -1689,13 +1903,15 @@ pub(crate) fn capture_tcp_ao_keyring_receipt<T>(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn capture_tcp_ao_owned_receipt<T>(
+pub(crate) fn capture_tcp_ao_accepted_generation_receipt<T>(
     _socket: &T,
     owners: &[TcpAoMktOwner<'_>],
-) -> io::Result<TcpAoMktReceipt> {
+    previous_key_counts: Option<&[usize]>,
+) -> io::Result<TcpAoAcceptedGenerationReceipt> {
     for owner in owners {
         let _ = (owner.peer, owner.prefix_len, owner.keyring);
     }
+    let _ = previous_key_counts;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO inspection is only supported on Linux",
@@ -1726,6 +1942,50 @@ pub(crate) fn get_tcp_ao_info_for_receipt<T>(
         io::ErrorKind::Unsupported,
         "TCP-AO inspection is only supported on Linux",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn inspect_tcp_ao_accepted_generation<T>(
+    _socket: &T,
+    _receipt: &TcpAoAcceptedGenerationReceipt,
+    _connected_peer: std::net::IpAddr,
+) -> io::Result<TcpAoAcceptedGeneration> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn get_tcp_ao_info_for_accepted_generation_receipt<T>(
+    _socket: &T,
+    _receipt: &TcpAoAcceptedGenerationReceipt,
+    _connected_peer: std::net::IpAddr,
+) -> io::Result<TcpAoInfoSnapshot> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO inspection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn reconcile_tcp_ao_accepted_previous<T>(
+    _socket: &T,
+    _receipt: &TcpAoAcceptedGenerationReceipt,
+    owners: &[TcpAoMktOwner<'_>],
+    _connected_peer: std::net::IpAddr,
+    _initial: &TcpAoInfoSnapshot,
+) -> Result<TcpAoInfoSnapshot, TcpAoAddOnlyApplyError> {
+    for owner in owners {
+        let _ = (owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(TcpAoAddOnlyApplyError {
+        error: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP-AO inspection is only supported on Linux",
+        ),
+        mutation_started: false,
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2463,6 +2723,96 @@ mod tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[test]
+    fn accepted_generation_receipt_allows_only_exact_current_or_adjacent_previous() {
+        let owner = IpAddr::from([192, 0, 2, 0]);
+        let connected = IpAddr::from([192, 0, 2, 9]);
+        let configs = [("old", 7, 9), ("selected", 8, 10), ("successor", 11, 13)];
+        let ring = TcpAoKeyring(
+            configs
+                .iter()
+                .map(|(secret, send_id, recv_id)| TcpAoConfig {
+                    key: (*secret).into(),
+                    send_id: *send_id,
+                    recv_id: *recv_id,
+                    algorithm: TcpAoAlgorithm::HmacSha256,
+                    preferred: *send_id == 8,
+                    deprecated: *send_id == 7,
+                })
+                .collect(),
+        );
+        let listener = configs
+            .iter()
+            .map(|(secret, send_id, recv_id)| {
+                let mut raw = raw_dump_key(owner, "hmac(sha256)", secret.as_bytes());
+                raw.prefix = 24;
+                raw.sndid = *send_id;
+                raw.rcvid = *recv_id;
+                raw.flags = 0;
+                raw
+            })
+            .collect::<Vec<_>>();
+        let receipt =
+            keyring_receipt_from_raw_inventory(&listener, owner, 24, &ring, true).unwrap();
+        let info_raw = TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT,
+            reserved2: 0,
+            current_key: 8,
+            rnext: 10,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+        };
+        let child = |entries: &[usize]| {
+            entries
+                .iter()
+                .map(|index| {
+                    let (secret, send_id, recv_id) = configs[*index];
+                    let mut raw = raw_dump_key(connected, "hmac(sha256)", secret.as_bytes());
+                    raw.sndid = send_id;
+                    raw.rcvid = recv_id;
+                    raw.flags = 0;
+                    raw
+                })
+                .collect::<Vec<_>>()
+        };
+        let previous = [true, true, false];
+
+        let mut current_info = TcpAoInfoSnapshot::from_raw(&info_raw);
+        annotate_tcp_ao_receipt(&mut current_info, &child(&[0, 1, 2]), &receipt, connected)
+            .unwrap();
+        assert_eq!(current_info.keys.len(), 3);
+
+        let mut previous_info = TcpAoInfoSnapshot::from_raw(&info_raw);
+        annotate_tcp_ao_receipt_subset(
+            &mut previous_info,
+            &child(&[0, 1]),
+            &receipt,
+            connected,
+            Some(&previous),
+        )
+        .unwrap();
+        assert_eq!(previous_info.keys.len(), 2);
+
+        for invalid in [child(&[0]), child(&[0, 2]), child(&[0, 1, 2])] {
+            let mut info = TcpAoInfoSnapshot::from_raw(&info_raw);
+            assert_eq!(
+                annotate_tcp_ao_receipt_subset(
+                    &mut info,
+                    &invalid,
+                    &receipt,
+                    connected,
+                    Some(&previous),
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
     }
 
     #[test]

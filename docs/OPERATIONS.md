@@ -947,6 +947,11 @@ The same neighbor view reports TCP-AO rotation `desired`, `applied`, and
 inventory; `add_only` is an in-progress successor install; and
 `add_only_failed` includes a secret-free actionable error. A failed add-only
 generation does not select or delete keys and is safe to retry with SIGHUP.
+If listener mutation may have started, affected protected passive accepts can
+reject until the same generation is retried or the daemon restarts; established
+sessions keep their prior selectable keys. A child queued before a successful
+listener flip is repaired only when it exactly matches the immediately previous
+inventory. Partial inventories and older queued generations remain rejected.
 
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
 an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound

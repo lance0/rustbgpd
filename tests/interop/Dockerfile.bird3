@@ -1,6 +1,6 @@
 FROM debian:trixie-slim
 
-ARG BIRD_VERSION=3.2.1
+ARG BIRD_VERSION=3.3.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bison \

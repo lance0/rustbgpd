@@ -1,10 +1,10 @@
 # Containerlab topology: rustbgpd ↔ BIRD 3.x (M43 — TCP-AO)
 #
-# Validates an ordered two-key static-neighbor TCP-AO startup keyring against a
-# real BIRD 3.x peer on a Linux kernel with CONFIG_TCP_AO=y.
+# Validates an ordered TCP-AO startup keyring and no-flap add-only successor
+# rotation against a real BIRD 3.x peer on a Linux kernel with CONFIG_TCP_AO=y.
 #
 # Usage:
-#   docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#   docker build -t bird:3.3.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
 #   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
@@ -20,6 +20,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m43-tcp-ao.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/rustbgpd-m43-tcp-ao-successor.toml:/etc/rustbgpd/config-successor.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.43.1/24 dev eth1
@@ -29,7 +30,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:3.2.1-tcpao
+      image: bird:3.3.1-tcpao
       binds:
         - ./configs/bird-m43-tcp-ao.conf:/etc/bird/bird.conf:ro
         - ./configs/bird-m43-tcp-ao-bad.conf:/etc/bird/bird-bad.conf:ro

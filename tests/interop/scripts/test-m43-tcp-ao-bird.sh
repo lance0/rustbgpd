@@ -4,12 +4,14 @@
 # Validates:
 #   1. BGP establishes with the preferred entry in a two-key startup ring.
 #   2. GET_KEYS exposes the complete redacted inventory and selected IDs.
-#   3. BIRD advertises a route over the protected session.
-#   4. A mismatch in the selected key fails closed and does not re-establish.
+#   3. SIGHUP appends a nonpreferred successor without changing selection or
+#      flapping the BIRD session.
+#   4. BIRD advertises a route throughout the protected live rotation.
+#   5. A mismatch in the selected key fails closed and does not re-establish.
 #
 # Prerequisites:
 #   - BIRD image built:
-#       docker build -t bird:3.2.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#       docker build -t bird:3.3.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   - rustbgpd image built:
 #       docker build --target dev -t rustbgpd:dev .
 #   - containerlab deployed:
@@ -41,6 +43,10 @@ grpc_neighbor_state() {
 
 bird_state() {
     docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null || true
+}
+
+bird_since() {
+    bird_state | awk '$1 == "rustbgpd" { print $5; exit }'
 }
 
 dump_diagnostics() {
@@ -155,6 +161,71 @@ assert_two_key_inventory() {
     ok "Selected IDs are Current=2/RNext=12; GET_KEYS inventory is exact and redacted"
 }
 
+wait_successor_generation() {
+    log "Waiting for TCP-AO successor generation to converge..."
+    local state='{}'
+    for i in $(seq 1 30); do
+        state=$(grpc_neighbor_state || echo '{}')
+        if printf '%s' "$state" | grep -Eq \
+            'interop-(old|next|successor)-secret-m43|wrong-next-secret-m43'; then
+            fail "Neighbor state leaked TCP-AO secret material after rotation"
+            return 1
+        fi
+        if jq -e '
+            (.tcpAoDesiredGeneration | tonumber) == 2 and
+            (.tcpAoAppliedGeneration | tonumber) == 2 and
+            .tcpAoRotationPhase == "idle" and
+            (.tcpAoRotationError // "") == "" and
+            .authentication == "AUTHENTICATION_MODE_TCP_AO" and
+            .tcpAoHealth == "TCP_AO_HEALTH_HEALTHY" and
+            .tcpAo.currentKeyId == 2 and
+            .tcpAo.rnextKeyId == 12 and
+            ((.tcpAo.packetsBad // 0) | tonumber) == 0 and
+            ((.tcpAo.packetsKeyNotFound // 0) | tonumber) == 0 and
+            ((.tcpAo.packetsAoRequired // 0) | tonumber) == 0 and
+            (.tcpAo.keys | length) == 3 and
+            any(.tcpAo.keys[];
+              .sendId == 1 and .recvId == 11 and
+              .algorithm == "hmac(sha256)" and
+              .preferred != true and .deprecated == true and
+              .isCurrent != true and .isRnext != true) and
+            any(.tcpAo.keys[];
+              .sendId == 2 and .recvId == 12 and
+              .algorithm == "hmac(sha256)" and
+              .preferred == true and .deprecated != true and
+              .isCurrent == true and .isRnext == true) and
+            any(.tcpAo.keys[];
+              .sendId == 3 and .recvId == 13 and
+              .algorithm == "hmac(sha256)" and
+              .preferred != true and .deprecated != true and
+              .isCurrent != true and .isRnext != true)
+        ' >/dev/null <<<"$state"; then
+            ok "Generation 2 converged with the exact three-key inventory (attempt $i)"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "TCP-AO successor generation did not converge within 60s"
+    printf '%s\n' "$state" >&2
+    dump_diagnostics
+    return 1
+}
+
+apply_successor_generation() {
+    log "Appending the nonpreferred TCP-AO successor with SIGHUP..."
+    docker exec "$RUSTBGPD" cp \
+        /etc/rustbgpd/config-successor.toml /tmp/m43-config.toml
+    if ! docker exec "$RUSTBGPD" sh -lc '
+        pid=$(pidof rustbgpd)
+        [ -n "$pid" ]
+        kill -HUP "$pid"
+    '; then
+        fail "could not deliver SIGHUP to rustbgpd"
+        return 1
+    fi
+    ok "SIGHUP delivered for the add-only successor generation"
+}
+
 wait_route_absent() {
     log "Waiting for $TEST_PREFIX/32 to be absent..."
     for i in $(seq 1 20); do
@@ -185,18 +256,42 @@ assert_bad_key_does_not_establish() {
 }
 
 main() {
-    log "M43 interop test: TCP-AO two-key startup ring with BIRD 3.x"
+    log "M43 interop test: TCP-AO live successor rotation with BIRD 3.3.1"
     log "Topology: $TOPO"
 
     resolve_grpc_addr
     start_bird "$GOOD_CONF"
-    # start_rustbgpd intentionally uses its default daemon wrapper here.
-    # shellcheck disable=SC2119
-    start_rustbgpd
+    docker exec "$RUSTBGPD" cp /etc/rustbgpd/config.toml /tmp/m43-config.toml
+    start_rustbgpd "exec /usr/local/bin/rustbgpd /tmp/m43-config.toml"
 
     wait_bird_established
     wait_route_present
     assert_two_key_inventory
+    local established_since
+    local initial_flaps
+    established_since=$(bird_since)
+    initial_flaps=$(grpc_neighbor_state | jq -r '((.flapCount // 0) | tonumber)')
+    if [ -z "$established_since" ]; then
+        fail "could not capture BIRD's Established-since token"
+        return 1
+    fi
+
+    apply_successor_generation
+    wait_successor_generation
+    wait_route_present
+    wait_bird_established
+    local rotated_since
+    local rotated_flaps
+    rotated_since=$(bird_since)
+    rotated_flaps=$(grpc_neighbor_state | jq -r '((.flapCount // 0) | tonumber)')
+    if [ "$rotated_since" = "$established_since" ] && \
+        [ "$rotated_flaps" -eq "$initial_flaps" ]; then
+        ok "Session did not flap across SIGHUP (BIRD since $rotated_since; flapCount $rotated_flaps)"
+    else
+        fail "Session flapped across SIGHUP (BIRD since $established_since -> $rotated_since; flapCount $initial_flaps -> $rotated_flaps)"
+        dump_diagnostics
+        return 1
+    fi
 
     log "Restarting BIRD with a mismatched preferred TCP-AO secret"
     start_bird "$BAD_CONF"

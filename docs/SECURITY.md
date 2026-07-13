@@ -191,9 +191,10 @@ active-open key-install failures fail the connection attempt and retry later
 without falling back to unauthenticated TCP.
 Runtime deletion of configured TCP-AO neighbors is rejected because listener
 MKTs are installed on the startup listener socket and are not deleted yet.
-Static-neighbor protected interop is validated by M43 against BIRD 3.2.1:
-matching keys establish and import a route, while a mismatched key withdraws
-the route and does not re-establish within the fail-closed window. The
+Static-neighbor protected interop is validated by M43 against BIRD 3.3.1:
+matching keys establish and import a route, a nonpreferred successor is added
+with SIGHUP without flapping the session, and a mismatched preferred key
+withdraws the route and does not re-establish within the fail-closed window. The
 hosted `kernel-dataplane` workflow includes M43, and the current hosted
 runner advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
 warning-only skip guard for future runner kernels without TCP-AO support.
@@ -209,6 +210,9 @@ connected socket without exposing key material. Ordered keyrings are
 supported. Static exact owners take precedence over dynamic longest-prefix
 matches; accepted sockets must expose the owned union of all covering protected
 selectors, while current and RNext selection must belong to the resolved owner.
+If a child completed before an add-only listener flip, only the exact
+immediately previous inventory may be reconciled forward; arbitrary subsets,
+partial successor inventories, and older generations remain fail-closed.
 Overlapping TCP-AO owners require directionally disjoint SendID and RecvID sets;
 TCP-AO/plaintext and TCP-AO/MD5 overlaps are rejected. Config validation and
 transport binding enforce the same 4,096-MKT inspection ceiling independently
@@ -348,7 +352,7 @@ the roadmap:
   plus add-only non-preferred successor installation on SIGHUP. Selection,
   deprecation, deletion, edits/reordering, and protected-owner CRUD require a
   restart.
-  Protected static-neighbor interop is covered by M43 against BIRD 3.2.1 on
+  Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
   Linux with `CONFIG_TCP_AO=y`.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
   all-listener generation. Alert on

@@ -72,6 +72,10 @@ pub struct BgpListener {
     /// Latest generation installed in the listener kernel inventory. This may
     /// lead the globally committed generation while sessions are applying.
     tcp_ao_generation: TcpAoRotationGeneration,
+    /// Complete immediately previous listener generation retained only to
+    /// reconcile children that completed before the last successful add-only
+    /// listener flip. No older history is accepted.
+    previous_tcp_ao_generation: Option<TcpAoPreviousListenerGeneration>,
     tcp_ao_committed_generation: TcpAoRotationGeneration,
     rotation_rx: mpsc::Receiver<TcpAoListenerCommand>,
     rotation_tx: mpsc::Sender<TcpAoListenerCommand>,
@@ -80,6 +84,11 @@ pub struct BgpListener {
     /// may reconcile partial kernel additions, but may not redefine what the
     /// generation means.
     pending_tcp_ao_generation: Option<TcpAoListenerGeneration>,
+}
+
+struct TcpAoPreviousListenerGeneration {
+    generation: TcpAoRotationGeneration,
+    keys: TcpAoListenerKeyIndex,
 }
 
 /// One immutable desired listener inventory for the add-only rotation phase.
@@ -514,6 +523,7 @@ impl BgpListener {
             accept_tx,
             tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
             tcp_ao_generation: TcpAoRotationGeneration::STARTUP,
+            previous_tcp_ao_generation: None,
             tcp_ao_committed_generation: TcpAoRotationGeneration::STARTUP,
             rotation_rx,
             rotation_tx,
@@ -683,13 +693,33 @@ impl BgpListener {
                 &desired_owners,
                 None,
             )
-            .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)?;
+            .map_err(|error| {
+                let mutation_started = error.mutation_started();
+                let error = error.into_inner();
+                if mutation_started {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{error}; listener mutation may be partial, so affected protected passive accepts may reject until this generation is retried or the daemon restarts"
+                        ),
+                    )
+                } else {
+                    error
+                }
+            })?;
             Ok::<(), std::io::Error>(())
         })();
 
         match apply {
             Ok(()) => {
-                self.tcp_ao_keys = TcpAoListenerKeyIndex::new(desired.keys.to_vec());
+                let previous_keys = std::mem::replace(
+                    &mut self.tcp_ao_keys,
+                    TcpAoListenerKeyIndex::new(desired.keys.to_vec()),
+                );
+                self.previous_tcp_ao_generation = Some(TcpAoPreviousListenerGeneration {
+                    generation: self.tcp_ao_generation,
+                    keys: previous_keys,
+                });
                 self.tcp_ao_generation = desired.generation;
                 status.applied = self.tcp_ao_committed_generation;
                 status.phase = TcpAoRotationPhase::AddOnly;
@@ -829,6 +859,11 @@ impl BgpListener {
         };
         let key = owner;
         let covering_owners = self.tcp_ao_keys.owned_union(peer_ip);
+        let previous_key_counts = accepted_previous_key_counts(
+            &covering_owners,
+            self.previous_tcp_ao_generation.as_ref(),
+            self.tcp_ao_generation,
+        );
         let receipt_owners = covering_owners
             .iter()
             .map(|owned| crate::socket_opts::TcpAoMktOwner {
@@ -841,13 +876,37 @@ impl BgpListener {
         // Compare the accepted child's inventory to the union of every
         // configured owner whose selector covers this peer. No secret-bearing
         // receipt survives this accept operation.
-        let receipt =
-            crate::socket_opts::capture_tcp_ao_owned_receipt(&self.listener, &receipt_owners)?;
-        let initial = crate::socket_opts::get_tcp_ao_info_for_receipt(stream, &receipt, peer_ip)?;
+        let receipt = crate::socket_opts::capture_tcp_ao_accepted_generation_receipt(
+            &self.listener,
+            &receipt_owners,
+            previous_key_counts.as_deref(),
+        )?;
+        let accepted =
+            crate::socket_opts::inspect_tcp_ao_accepted_generation(stream, &receipt, peer_ip)?;
+        let (initial, reconcile_previous) = match accepted {
+            crate::socket_opts::TcpAoAcceptedGeneration::Current(info) => (info, false),
+            crate::socket_opts::TcpAoAcceptedGeneration::Previous(info) => (info, true),
+        };
         // Validate the handshake-selected Current and initial RNext before
         // mutating either selection. Both must identify the resolved owner's
         // inherited MKT; a deprecated key remains valid when peer-selected.
         ensure_accepted_tcp_ao_info_valid(&initial, key, false)?;
+        if reconcile_previous {
+            let repaired = crate::socket_opts::reconcile_tcp_ao_accepted_previous(
+                stream,
+                &receipt,
+                &receipt_owners,
+                peer_ip,
+                &initial,
+            )
+            .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)?;
+            ensure_accepted_tcp_ao_info_valid(&repaired, key, false)?;
+            info!(
+                peer = %peer_ip,
+                generation = self.tcp_ao_generation.as_u64(),
+                "reconciled queued TCP-AO child to current listener generation"
+            );
+        }
 
         let selected_key = key.config.selected().ok_or_else(|| {
             std::io::Error::new(
@@ -856,7 +915,9 @@ impl BgpListener {
             )
         })?;
         crate::socket_opts::set_tcp_ao_rnext(stream, selected_key.recv_id)?;
-        let info = crate::socket_opts::get_tcp_ao_info_for_receipt(stream, &receipt, peer_ip)?;
+        let info = crate::socket_opts::get_tcp_ao_info_for_accepted_generation_receipt(
+            stream, &receipt, peer_ip,
+        )?;
         ensure_accepted_tcp_ao_info_valid(&info, key, true)?;
         info!(
             peer = %peer_ip,
@@ -875,6 +936,33 @@ impl BgpListener {
         );
         Ok(Some(info))
     }
+}
+
+fn accepted_previous_key_counts(
+    current: &[&TcpAoListenerKey],
+    previous: Option<&TcpAoPreviousListenerGeneration>,
+    current_generation: TcpAoRotationGeneration,
+) -> Option<Vec<usize>> {
+    let previous = previous?;
+    if previous.generation.next() != Some(current_generation) {
+        return None;
+    }
+    current
+        .iter()
+        .map(|owner| {
+            let identity = listener_owner_identity(owner);
+            let mut matches = previous
+                .keys
+                .keys
+                .iter()
+                .filter(|candidate| listener_owner_identity(candidate) == identity);
+            let prior = matches.next()?;
+            if matches.next().is_some() || !owner.config.0.starts_with(&prior.config.0) {
+                return None;
+            }
+            Some(prior.config.0.len())
+        })
+        .collect()
 }
 
 fn listener_owner_identity(key: &TcpAoListenerKey) -> (TcpAoListenerOwnerKind, IpAddr, u8) {
@@ -1233,6 +1321,50 @@ mod tests {
     }
 
     #[test]
+    fn accepted_child_fallback_requires_exact_adjacent_owner_prefix() {
+        let old = tcp_ao_owner();
+        let mut current = old.clone();
+        let mut successor = current.config.0[0].clone();
+        successor.key = "successor".to_string();
+        successor.send_id = 11;
+        successor.recv_id = 13;
+        successor.preferred = false;
+        current.config.0.push(successor);
+        let current_index = TcpAoListenerKeyIndex::new(vec![current]);
+        let current_union = current_index.owned_union(old.peer);
+        let previous = TcpAoPreviousListenerGeneration {
+            generation: TcpAoRotationGeneration::STARTUP,
+            keys: TcpAoListenerKeyIndex::new(vec![old.clone()]),
+        };
+        let generation_two = TcpAoRotationGeneration::new(2).unwrap();
+        assert_eq!(
+            accepted_previous_key_counts(&current_union, Some(&previous), generation_two),
+            Some(vec![1])
+        );
+
+        assert_eq!(
+            accepted_previous_key_counts(
+                &current_union,
+                Some(&previous),
+                TcpAoRotationGeneration::new(3).unwrap()
+            ),
+            None,
+            "an N-2 inventory must not be treated as the adjacent predecessor"
+        );
+
+        let mut redefined = old;
+        redefined.config.0[0].key = "redefined".to_string();
+        let redefined_previous = TcpAoPreviousListenerGeneration {
+            generation: TcpAoRotationGeneration::STARTUP,
+            keys: TcpAoListenerKeyIndex::new(vec![redefined]),
+        };
+        assert_eq!(
+            accepted_previous_key_counts(&current_union, Some(&redefined_previous), generation_two),
+            None
+        );
+    }
+
+    #[test]
     fn add_only_generation_rejects_preferred_successor_and_owner_replacement() {
         let old = tcp_ao_owner();
         let mut preferred = old.clone();
@@ -1413,6 +1545,10 @@ mod tests {
         let generation = TcpAoRotationGeneration::new(2).unwrap();
         let desired = TcpAoListenerGeneration::new(generation, Vec::new());
         listener.tcp_ao_generation = generation;
+        listener.previous_tcp_ao_generation = Some(TcpAoPreviousListenerGeneration {
+            generation: TcpAoRotationGeneration::STARTUP,
+            keys: TcpAoListenerKeyIndex::new(Vec::new()),
+        });
         listener.pending_tcp_ao_generation = Some(desired.clone());
         listener
             .rotation_status_tx
@@ -1441,6 +1577,14 @@ mod tests {
         assert_eq!(staged.desired, generation);
         assert_eq!(staged.applied, TcpAoRotationGeneration::STARTUP);
         assert_eq!(staged.phase, TcpAoRotationPhase::AddOnly);
+        assert_eq!(
+            listener
+                .previous_tcp_ao_generation
+                .as_ref()
+                .map(|previous| previous.generation),
+            Some(TcpAoRotationGeneration::STARTUP),
+            "same-generation retry must not replace the queued-child predecessor"
+        );
         let committed = listener
             .acknowledge_global_commit_generation_with(generation, |_socket, _desired| Ok(()))
             .unwrap();
@@ -1448,6 +1592,14 @@ mod tests {
         assert_eq!(committed.applied, generation);
         assert_eq!(committed.phase, TcpAoRotationPhase::Idle);
         assert!(listener.pending_tcp_ao_generation.is_none());
+        assert_eq!(
+            listener
+                .previous_tcp_ao_generation
+                .as_ref()
+                .map(|previous| previous.generation),
+            Some(TcpAoRotationGeneration::STARTUP),
+            "global commit must retain the predecessor for children still queued in the kernel"
+        );
     }
 
     #[tokio::test]
@@ -1931,6 +2083,148 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("4097"), "{err}");
         assert_eq!(*installed.borrow(), 0);
+    }
+
+    /// Deterministic Linux accept-queue receipt: complete the TCP-AO handshake
+    /// before the listener actor accepts the child, then flip the listener to
+    /// its add-only successor. Linux leaves the queued child at the previous
+    /// inventory, so accept must reconcile it forward without changing key
+    /// selection or dropping authenticated traffic.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "kernel receipt keeps the queued handshake, listener flip, exact inventory, and traffic proof together"
+    )]
+    async fn queued_tcp_ao_child_reconciles_immediate_listener_successor() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let peer_ip = Ipv4Addr::new(127, 0, 0, 2);
+        let current = TcpAoConfig {
+            key: "queued-child-current-secret".to_string(),
+            send_id: 21,
+            recv_id: 31,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        };
+        let current_ring = TcpAoKeyring(vec![current.clone()]);
+        let owner = TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Static,
+            peer: peer_ip.into(),
+            prefix_len: 32,
+            config: current_ring.clone(),
+        };
+        let (accept_tx, mut accept_rx) = mpsc::channel(1);
+        let mut listener = BgpListener::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            accept_tx,
+            ListenerSocketOptions {
+                tcp_ao_keys: vec![owner.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        let destination = listener.local_addr().unwrap();
+
+        let client = tokio::task::spawn_blocking(move || -> std::io::Result<Socket> {
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            socket.bind(&SockAddr::from(SocketAddr::new(peer_ip.into(), 0)))?;
+            let client_key = TcpAoConfig {
+                send_id: current.recv_id,
+                recv_id: current.send_id,
+                ..current
+            };
+            crate::socket_opts::set_tcp_ao_config(
+                &socket,
+                destination.ip(),
+                32,
+                &client_key,
+                crate::socket_opts::TcpAoSocketRole::ActiveOpen,
+            )?;
+            socket.connect_timeout(&SockAddr::from(destination), Duration::from_secs(2))?;
+            Ok(socket)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let mut desired_owner = owner;
+        desired_owner.config.0.push(TcpAoConfig {
+            key: "queued-child-successor-secret".to_string(),
+            send_id: 22,
+            recv_id: 32,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: false,
+            deprecated: false,
+        });
+        let generation = TcpAoRotationGeneration::new(2).unwrap();
+        listener
+            .apply_add_only_generation(&TcpAoListenerGeneration::new(
+                generation,
+                vec![desired_owner],
+            ))
+            .unwrap();
+        assert_eq!(listener.tcp_ao_generation, generation);
+        assert_eq!(
+            listener
+                .previous_tcp_ao_generation
+                .as_ref()
+                .map(|previous| previous.generation),
+            Some(TcpAoRotationGeneration::STARTUP)
+        );
+
+        let task = tokio::spawn(listener.run());
+        let mut accepted = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.tcp_ao_generation, Some(generation));
+        let info = accepted.tcp_ao_info.as_ref().unwrap();
+        assert_eq!(info.keys.len(), 2);
+        assert_eq!(info.current_key, 21);
+        assert_eq!(info.rnext_key, 31);
+        assert_eq!(info.pkt_bad, 0);
+        assert_eq!(info.pkt_key_not_found, 0);
+        assert_eq!(info.pkt_ao_required, 0);
+        assert!(
+            info.keys
+                .iter()
+                .any(|key| key.send_id == 22 && key.recv_id == 32)
+        );
+
+        let std_client: std::net::TcpStream = client.into();
+        std_client.set_nonblocking(true).unwrap();
+        let mut client = TcpStream::from_std(std_client).unwrap();
+        client
+            .write_all(b"previous-generation traffic")
+            .await
+            .unwrap();
+        let mut inbound = vec![0; b"previous-generation traffic".len()];
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            accepted.stream.read_exact(&mut inbound),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(inbound, b"previous-generation traffic");
+        accepted
+            .stream
+            .write_all(b"reconciled traffic")
+            .await
+            .unwrap();
+        let mut outbound = vec![0; b"reconciled traffic".len()];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut outbound))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outbound, b"reconciled traffic");
+
+        drop((client, accepted));
+        task.abort();
     }
 
     /// Bounded privileged/kernel receipt for GitHub #158. Run on a Linux host

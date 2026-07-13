@@ -17,11 +17,19 @@ fn tcp_ao_accept_generation_valid(
     accepted: Option<TcpAoRotationGeneration>,
     rotation: &rustbgpd_transport::TcpAoRotationStatus,
 ) -> bool {
-    if protected && rotation.phase == rustbgpd_transport::TcpAoRotationPhase::AddOnly {
-        return false;
+    match (protected, accepted) {
+        (false, None) => true,
+        (true, Some(generation)) => match rotation.phase {
+            rustbgpd_transport::TcpAoRotationPhase::AddOnly => {
+                generation == rotation.applied || generation == rotation.desired
+            }
+            rustbgpd_transport::TcpAoRotationPhase::Idle
+            | rustbgpd_transport::TcpAoRotationPhase::AddOnlyFailed => {
+                generation == rotation.applied
+            }
+        },
+        _ => false,
     }
-    matches!((protected, accepted), (false, None))
-        || matches!((protected, accepted), (true, Some(generation)) if generation == rotation.applied)
 }
 
 impl PeerManager {
@@ -135,21 +143,14 @@ impl PeerManager {
             tcp_ao_generation,
             &self.tcp_ao_rotation,
         ) {
-            if tcp_ao_info.is_some()
-                && self.tcp_ao_rotation.phase == rustbgpd_transport::TcpAoRotationPhase::AddOnly
-            {
+            if tcp_ao_info.is_some() {
                 warn!(
                     %peer_ip,
+                    accepted_generation = tcp_ao_generation.map(TcpAoRotationGeneration::as_u64),
                     desired_generation = self.tcp_ao_rotation.desired.as_u64(),
                     applied_generation = self.tcp_ao_rotation.applied.as_u64(),
-                    "rejecting protected inbound connection while TCP-AO generation preflight/apply is in progress"
-                );
-            } else if let Some(generation) = tcp_ao_generation {
-                warn!(
-                    %peer_ip,
-                    accepted_generation = generation.as_u64(),
-                    applied_generation = self.tcp_ao_generation.as_u64(),
-                    "rejecting protected inbound connection from a stale or partially applied TCP-AO generation"
+                    phase = ?self.tcp_ao_rotation.phase,
+                    "rejecting protected inbound connection outside the valid TCP-AO generation fence"
                 );
             } else {
                 warn!(%peer_ip, "rejecting inbound connection with inconsistent TCP-AO generation metadata");
@@ -649,7 +650,22 @@ mod generation_tests {
             phase: rustbgpd_transport::TcpAoRotationPhase::AddOnly,
             ..idle
         };
-        assert!(!tcp_ao_accept_generation_valid(true, Some(two), &applying));
+        assert!(tcp_ao_accept_generation_valid(true, Some(two), &applying));
+        assert!(!tcp_ao_accept_generation_valid(true, Some(one), &applying));
+
+        let applying = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: one,
+            phase: rustbgpd_transport::TcpAoRotationPhase::AddOnly,
+            last_error: None,
+        };
+        assert!(tcp_ao_accept_generation_valid(true, Some(one), &applying));
+        assert!(tcp_ao_accept_generation_valid(true, Some(two), &applying));
+        assert!(!tcp_ao_accept_generation_valid(
+            true,
+            TcpAoRotationGeneration::new(3),
+            &applying
+        ));
 
         let failed = rustbgpd_transport::TcpAoRotationStatus {
             desired: two,

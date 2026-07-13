@@ -630,7 +630,12 @@ order, and every appended key has `preferred = false`. The daemon globally
 preflights capacity and every managed protected session, adds keys without
 changing Current/RNext, verifies the complete listener and connected-socket
 inventories, and generation-fences newly accepted protected sockets until all
-managed sessions converge. Changing selection, marking an existing key
+managed sessions converge. A child that completed in the kernel accept queue
+before the listener flip still has the exact immediately previous inventory;
+rustbgpd adds only that generation's missing suffix, requires an exact final
+current inventory, and then stamps the current generation. Arbitrary subsets,
+partial successor inventories, and children older than the immediate previous
+generation are rejected. Changing selection, marking an existing key
 deprecated, removing/editing/reordering a key, or changing a protected owner
 remains restart-required and is pinned to the live snapshot. Runtime deletion
 of a configured TCP-AO neighbor also remains rejected.
@@ -638,8 +643,10 @@ of a configured TCP-AO neighbor also remains rejected.
 If an add-only apply fails, the old selectable keys remain usable and the same
 desired generation is retryable with another SIGHUP. Some successor MKTs may
 already be present; retries accept them only when their kernel-normalized key
-material is identical. Protected inbound accepts can be rejected while a
-partially applied generation is fenced. Inspect per-neighbor
+material is identical. If listener mutation failed partway, affected protected
+passive accepts may reject until the same generation is retried or the daemon
+restarts; a fully installed but globally uncommitted generation also remains
+fenced. Established sessions retain their prior selectable keys. Inspect per-neighbor
 `tcp_ao_desired_generation`, `tcp_ao_applied_generation`,
 `tcp_ao_rotation_phase`, and `tcp_ao_rotation_error` in JSON, or the equivalent
 `TCP-AO Rotation` rows in human output.

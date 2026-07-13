@@ -108,7 +108,13 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   configured keyring, including transient key-byte equality, matches the
   kernel inventory. Dropped-ICMP counters degrade health but do not by
   themselves reject an accepted authenticated socket.
-- Protected M43 interop against BIRD 3.2.1 runs in the GitHub-hosted
+- Linux does not copy keys newly added to a listener into already-established
+  children in its accept queue. Such a child is reconciled only when it exactly
+  matches the retained immediately previous generation; after adding the
+  successor suffix, the exact current inventory and unchanged Current/RNext
+  selection are required. Partial, arbitrary-subset, and older inventories are
+  rejected.
+- Protected M43 interop against BIRD 3.3.1 runs in the GitHub-hosted
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the
   feature skip M43 with a warning instead of failing unrelated dataplane gates.
