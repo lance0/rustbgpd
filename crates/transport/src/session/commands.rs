@@ -3,7 +3,7 @@ use super::{
     RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection, SessionState,
     cease_subcode, debug, info, warn,
 };
-use crate::handle::PeerCommandError;
+use crate::handle::{PeerCommandError, WarmCheckpointSessionState};
 
 struct TcpAoSessionAddOnlyPlan {
     connected_peer: std::net::IpAddr,
@@ -486,6 +486,52 @@ impl PeerSession {
                     last_error: self.last_error.clone(),
                     tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
                     tcp_ao_protected: self.tcp_ao_protected,
+                };
+                let _ = reply.send(state);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::QueryWarmCheckpointState { reply } => {
+                let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
+                let mut negotiated_families = neg
+                    .map(|negotiated| negotiated.negotiated_families.clone())
+                    .unwrap_or_default();
+                negotiated_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                let mut peer_gr_families = neg
+                    .map(|negotiated| {
+                        negotiated
+                            .peer_gr_families
+                            .iter()
+                            .map(|family| (family.afi, family.safi))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                peer_gr_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                let mut add_path_receive_families = neg
+                    .map(|negotiated| {
+                        negotiated
+                            .add_path_families
+                            .iter()
+                            .filter_map(|(family, mode)| {
+                                matches!(
+                                    mode,
+                                    rustbgpd_wire::AddPathMode::Receive
+                                        | rustbgpd_wire::AddPathMode::Both
+                                )
+                                .then_some(*family)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                add_path_receive_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                let state = WarmCheckpointSessionState {
+                    fsm_state: self.fsm.state(),
+                    peer_asn: neg.map(|negotiated| negotiated.peer_asn),
+                    peer_router_id: neg.map(|negotiated| negotiated.peer_router_id),
+                    negotiated_families,
+                    peer_gr_families,
+                    peer_gr_capable: neg.is_some_and(|negotiated| negotiated.peer_gr_capable),
+                    peer_gr_restart_time: neg.map_or(0, |negotiated| negotiated.peer_restart_time),
+                    add_path_receive_families,
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())

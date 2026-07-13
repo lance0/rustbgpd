@@ -427,6 +427,10 @@ fn runtime_state_dir_defaults_to_var_lib() {
         config.gr_restart_marker_path(),
         PathBuf::from("/var/lib/rustbgpd/gr-restart.toml")
     );
+    assert_eq!(
+        config.warm_bundle_dir(),
+        PathBuf::from("/var/lib/rustbgpd/warm-bundle-v1")
+    );
 }
 
 #[test]
@@ -443,6 +447,10 @@ fn runtime_state_dir_override_is_used() {
     assert_eq!(
         config.gr_restart_marker_path(),
         PathBuf::from("/tmp/rustbgpd-test/gr-restart.toml")
+    );
+    assert_eq!(
+        config.warm_bundle_dir(),
+        PathBuf::from("/tmp/rustbgpd-test/warm-bundle-v1")
     );
 }
 
@@ -5393,6 +5401,23 @@ hold_time = 90
     assert!(diff.has_any_changes());
     assert!(diff.global_changed);
     assert!(!diff.rpki_changed);
+}
+
+#[test]
+fn warm_cache_checkpoint_toggle_is_restart_required_and_defaults_off() {
+    let old = parse(valid_toml()).unwrap();
+    assert!(!old.global.warm_cache_checkpoint_on_shutdown);
+    let new_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nwarm_cache_checkpoint_on_shutdown = true\n",
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(new.global.warm_cache_checkpoint_on_shutdown);
+    assert!(diff.global_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(!diff.has_reload_applied_changes());
 }
 
 #[test]

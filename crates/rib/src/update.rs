@@ -2,6 +2,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
@@ -1683,6 +1685,20 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
+    /// Query one actor-consistent, session-fenced Adj-RIB-In snapshot for a
+    /// shutdown warm checkpoint. The caller supplies the exact PM/session
+    /// inventory; any mismatch rejects the complete snapshot.
+    QueryWarmMrtSnapshot {
+        /// Strictly sorted, duplicate-free eligible view inventory.
+        views: Vec<WarmMrtSnapshotView>,
+        /// Cooperative cancellation/deadline and pre-materialization limit.
+        /// The RIB actor checks this while counting and cloning routes so a
+        /// timed-out shutdown query cannot wedge the actor behind a full-table
+        /// synchronous snapshot.
+        budget: WarmMrtSnapshotBudget,
+        /// Response channel. `Err` is a fail-closed checkpoint result.
+        reply: oneshot::Sender<Result<MrtSnapshotData, String>>,
+    },
     /// One bounded chunk of an RFC 9069 Loc-RIB table dump for a
     /// (re)connected BMP collector: synthesize at most one chunk of
     /// UPDATE PDUs (unicast + VPN bests, resumed from `cursor`) with
@@ -1729,4 +1745,73 @@ pub struct MrtSnapshotData {
     /// `RIB_GENERIC` records (AFI 25 / SAFI 70). Empty for non-EVPN
     /// deployments.
     pub evpn_routes: Vec<crate::route::EvpnRibRoute>,
+}
+
+/// Bounded work contract for a shutdown warm snapshot.
+///
+/// `deadline` is checked inside the synchronous RIB actor loop. `cancelled`
+/// additionally lets a caller whose async wait was dropped stop an in-flight
+/// actor query from another runtime worker. `max_materialized_bytes` bounds the
+/// exact owned route-vector storage reserved before any route clone occurs.
+#[derive(Debug, Clone)]
+pub struct WarmMrtSnapshotBudget {
+    /// Monotonic terminal deadline shared with the shutdown coordinator.
+    pub deadline: Instant,
+    /// Set when the waiting coordinator is cancelled or times out.
+    pub cancelled: Arc<AtomicBool>,
+    /// Hard cap for owned snapshot vector storage.
+    pub max_materialized_bytes: usize,
+}
+
+impl WarmMrtSnapshotBudget {
+    /// Fail closed before or during synchronous actor work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded diagnostic when the caller cancelled the query or
+    /// the shared terminal deadline has elapsed.
+    pub fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err("warm checkpoint snapshot was cancelled".to_string());
+        }
+        if Instant::now() >= self.deadline {
+            return Err("warm checkpoint snapshot exceeded its terminal deadline".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// One exact peer/family/session view requested for a warm MRT snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmMrtSnapshotView {
+    /// Configured numbered peer address.
+    pub peer: IpAddr,
+    /// Peer-manager generation of the active session.
+    pub session_id: u64,
+    /// Remote ASN negotiated by that session.
+    pub peer_asn: u32,
+    /// Remote BGP identifier negotiated by that session.
+    pub peer_router_id: Ipv4Addr,
+    /// Exact supported family.
+    pub afi: Afi,
+    /// Exact supported SAFI.
+    pub safi: Safi,
+    /// Whether Add-Path receive/both was negotiated for this view.
+    pub add_path_receive: bool,
+}
+
+impl WarmMrtSnapshotView {
+    /// Stable ordering key independent of enum declaration order.
+    #[must_use]
+    pub fn sort_key(&self) -> (IpAddr, u16, u8, u64, u32, Ipv4Addr, bool) {
+        (
+            self.peer,
+            self.afi as u16,
+            self.safi as u8,
+            self.session_id,
+            self.peer_asn,
+            self.peer_router_id,
+            self.add_path_receive,
+        )
+    }
 }

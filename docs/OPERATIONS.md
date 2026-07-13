@@ -302,14 +302,18 @@ chain, etc.).
 | Neighbor add/delete/modify via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls runtime back if the write is rejected |
 | Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
+| Optional shutdown warm checkpoint | `<runtime_state_dir>/warm-bundle-v1/` | On coordinated shutdown when `warm_cache_checkpoint_on_shutdown = true`; owner-private pre-policy Adj-RIB-In snapshot and manifest, never restored on boot |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
 
-**Not persisted:** routing state (Adj-RIB-In, Loc-RIB, Adj-RIB-Out), policy
-evaluation state, RPKI VRP tables, BMP client state. The ADR-0061 FIB file is
-only an ownership receipt for rows rustbgpd already installed; all route
-selection state is still rebuilt from peers after restart.
+**Not restored:** routing state, policy evaluation state, RPKI VRP tables, and
+BMP client state. The optional warm checkpoint persists only eligible
+pre-policy Adj-RIB-In views as a future-use artifact; the daemon does not load,
+select, install, or advertise any route from it. Loc-RIB and Adj-RIB-Out are
+never checkpointed. The ADR-0061 FIB file is only an ownership receipt for rows
+rustbgpd already installed; all route selection state is rebuilt from peers
+after restart.
 
 ---
 

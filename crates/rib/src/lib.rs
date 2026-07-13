@@ -72,6 +72,6 @@ pub use update::{
     RibCommandError, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
     SelectionDeferralPeerFamilyState, UpdateGroupClassification, UpdateGroupClassifierInput,
     UpdateGroupFamilyImpact, UpdateGroupFingerprint, UpdateGroupImpactPlan,
-    UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
-    route_query_key,
+    UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, WarmMrtSnapshotBudget,
+    WarmMrtSnapshotView, classify_update_group, route_query_key,
 };

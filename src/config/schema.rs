@@ -491,6 +491,16 @@ pub struct Global {
     /// `install_blackhole_discard = true`.
     #[serde(default)]
     pub allow_blackhole_broad_prefixes: bool,
+    /// Publish one durable, daemon-private MRT warm-cache checkpoint during
+    /// coordinated shutdown. Off by default. This tranche only publishes the
+    /// checkpoint and a generation-bound restart marker; boot never loads or
+    /// serves routes from the cache.
+    ///
+    /// The checkpoint directory is fixed at
+    /// `<runtime_state_dir>/warm-bundle-v1`. The setting is read at startup;
+    /// changing it requires a daemon restart.
+    #[serde(default)]
+    pub warm_cache_checkpoint_on_shutdown: bool,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,

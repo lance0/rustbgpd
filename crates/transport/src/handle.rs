@@ -276,6 +276,13 @@ pub enum PeerCommand {
         /// Oneshot channel to receive the session state snapshot.
         reply: oneshot::Sender<PeerSessionState>,
     },
+    /// Query the negotiated identity needed by a coordinated warm checkpoint.
+    /// This is separate from operator state so checkpoint-only fields do not
+    /// silently become a public API contract.
+    QueryWarmCheckpointState {
+        /// Oneshot channel to receive one actor-consistent negotiation view.
+        reply: oneshot::Sender<WarmCheckpointSessionState>,
+    },
     /// Send a ROUTE-REFRESH message to the peer (RFC 2918).
     SendRouteRefresh {
         /// Address Family Identifier.
@@ -482,6 +489,28 @@ pub struct PeerSessionState {
     pub import_policy_routes_permitted: u64,
     /// Import policy evaluations that denied a route.
     pub import_policy_routes_denied: u64,
+}
+
+/// Actor-consistent negotiated session identity used only while publishing a
+/// shutdown warm checkpoint. No route or restore behavior lives here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmCheckpointSessionState {
+    /// Current FSM state; only `Established` is checkpoint-eligible.
+    pub fsm_state: SessionState,
+    /// Peer's ASN learned from the current OPEN exchange.
+    pub peer_asn: Option<u32>,
+    /// Peer's BGP identifier learned from the current OPEN exchange.
+    pub peer_router_id: Option<Ipv4Addr>,
+    /// Address families negotiated on the current session.
+    pub negotiated_families: Vec<(Afi, Safi)>,
+    /// GR families advertised by the current peer OPEN.
+    pub peer_gr_families: Vec<(Afi, Safi)>,
+    /// Whether the current peer OPEN advertised usable GR capability.
+    pub peer_gr_capable: bool,
+    /// Restart time advertised in the current peer GR capability.
+    pub peer_gr_restart_time: u16,
+    /// Families for which this session negotiated Add-Path receive/both.
+    pub add_path_receive_families: Vec<(Afi, Safi)>,
 }
 
 /// Handle for controlling a spawned peer session.
@@ -1238,6 +1267,28 @@ impl PeerHandle {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands
                 .send(PeerCommand::QueryState { reply: reply_tx })
+                .await
+                .ok()?;
+            reply_rx.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Bounded checkpoint-only query for current negotiated GR/Add-Path truth.
+    ///
+    /// Returns `None` on timeout, channel closure, or session exit. Callers
+    /// must reject the complete checkpoint rather than publishing a partial
+    /// peer inventory when any candidate cannot answer.
+    pub async fn query_warm_checkpoint_state_with(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: Duration,
+    ) -> Option<WarmCheckpointSessionState> {
+        tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::QueryWarmCheckpointState { reply: reply_tx })
                 .await
                 .ok()?;
             reply_rx.await.ok()

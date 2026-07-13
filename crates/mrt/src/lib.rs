@@ -29,4 +29,5 @@ pub use warm_bundle::{
     WarmBundleFreshnessV1, WarmBundleIdentityV1, WarmBundleManifestV1, WarmBundlePolicyDigestV1,
     WarmBundlePolicyInputV1, WarmBundleV1, WarmBundleViewKindV1, WarmBundleViewV1,
     load_warm_bundle, resolved_import_policy_digest_v1, write_warm_bundle,
+    write_warm_bundle_bounded,
 };

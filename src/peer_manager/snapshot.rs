@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_api::peer_types::{PeerInfo, PeerKey};
+use rustbgpd_api::peer_types::{PeerInfo, PeerKey, WarmCheckpointCapture, WarmCheckpointSession};
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{PeerHandle, PeerSessionState};
@@ -127,6 +127,145 @@ async fn collect_session_states(
 }
 
 impl PeerManager {
+    /// Capture negotiated truth for every V1 checkpoint candidate.
+    ///
+    /// Static, enabled, numbered, unambiguous peers are queried concurrently.
+    /// A timeout or collision candidate rejects the complete checkpoint rather
+    /// than publishing a partial identity inventory. Sessions that are not
+    /// currently Established with negotiated GR are simply ineligible: their
+    /// routes are excluded by the following RIB-actor query.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one blocked peer-manager turn binds live config, policy, and every bounded session query"
+    )]
+    pub(super) async fn query_warm_checkpoint_capture(
+        &self,
+    ) -> Result<WarmCheckpointCapture, String> {
+        // Capture config identity before awaiting session actors. The peer
+        // manager remains inside this one command while those queries run, so
+        // no reload/config transaction can advance `current_config` or the
+        // resolved policies paired with the returned session generations.
+        let desired_local_asn = self.current_config.global.asn;
+        let desired_local_router_id = self
+            .current_config
+            .global
+            .router_id
+            .parse::<Ipv4Addr>()
+            .map_err(|error| format!("invalid live router ID during warm checkpoint: {error}"))?;
+        // ASN/router-ID changes are restart-required: `current_config` can
+        // legitimately contain the accepted desired values while the running
+        // listener and every live session still use these immutable fields.
+        // A checkpoint digest must never claim the desired identity describes
+        // the captured live routes. Fail closed until the restart applies it.
+        if desired_local_asn != self.local_asn || desired_local_router_id != self.router_id {
+            return Err(format!(
+                "restart-required local identity differs from the live daemon during warm checkpoint (desired ASN/router-ID {desired_local_asn}/{desired_local_router_id}, live {}/{})",
+                self.local_asn, self.router_id
+            ));
+        }
+        let effective_config_toml = self.current_config.effective_redacted_toml()?;
+        let local_asn = self.local_asn;
+        let local_router_id = self.router_id;
+        let restart_time_secs = self
+            .current_config
+            .resolved_neighbors()
+            .map_err(|error| {
+                format!("failed to resolve current neighbors for warm checkpoint: {error}")
+            })?
+            .iter()
+            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
+            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            .filter(|seconds| *seconds > 0)
+            .max();
+        let mut address_counts = HashMap::<IpAddr, usize>::new();
+        for (peer, managed) in &self.peers {
+            if !managed.is_dynamic {
+                *address_counts.entry(peer.address).or_default() += 1;
+            }
+        }
+
+        let mut tasks = Vec::new();
+        for (peer, managed) in &self.peers {
+            if managed.is_dynamic
+                || !managed.enabled
+                || peer.interface.is_some()
+                || address_counts.get(&peer.address).copied() != Some(1)
+                || !managed.transport_config.peer.graceful_restart
+            {
+                continue;
+            }
+            if managed.pending_inbound.is_some() {
+                return Err(format!(
+                    "peer {peer} has an unresolved collision candidate during checkpoint"
+                ));
+            }
+            let canonical_import_policy = match managed.import_policy.as_ref() {
+                Some(policy) => match policy.warm_checkpoint_identity_v1() {
+                    Ok(identity) => identity,
+                    Err(reason) => {
+                        warn!(peer = %peer, reason, "excluding peer from V1 warm checkpoint");
+                        continue;
+                    }
+                },
+                None => b"rustbgpd/policy-chain/warm-checkpoint/v1/implicit-permit\n".to_vec(),
+            };
+            let peer = peer.clone();
+            let session_id = managed.session_id;
+            let commands = managed.handle.commands_sender();
+            tasks.push(tokio::spawn(async move {
+                let state =
+                    PeerHandle::query_warm_checkpoint_state_with(commands, PEER_QUERY_TIMEOUT)
+                        .await;
+                (peer, session_id, canonical_import_policy, state)
+            }));
+        }
+
+        let mut sessions = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let (peer, session_id, canonical_import_policy, state) = task
+                .await
+                .map_err(|error| format!("warm checkpoint session query task failed: {error}"))?;
+            let state = state.ok_or_else(|| {
+                format!("peer {peer} did not answer the bounded checkpoint query")
+            })?;
+            if state.fsm_state != SessionState::Established
+                || !state.peer_gr_capable
+                || state.peer_gr_restart_time == 0
+                || state.peer_gr_families.is_empty()
+            {
+                continue;
+            }
+            let peer_asn = state
+                .peer_asn
+                .filter(|asn| *asn != 0)
+                .ok_or_else(|| format!("Established peer {peer} has no negotiated remote ASN"))?;
+            let peer_router_id = state
+                .peer_router_id
+                .filter(|router_id| !router_id.is_unspecified())
+                .ok_or_else(|| {
+                    format!("Established peer {peer} has no negotiated BGP identifier")
+                })?;
+            sessions.push(WarmCheckpointSession {
+                peer,
+                session_id,
+                peer_asn,
+                peer_router_id,
+                negotiated_families: state.negotiated_families,
+                peer_gr_families: state.peer_gr_families,
+                add_path_receive_families: state.add_path_receive_families,
+                canonical_import_policy,
+            });
+        }
+        sessions.sort_by(|left, right| left.peer.cmp(&right.peer));
+        Ok(WarmCheckpointCapture {
+            local_asn,
+            local_router_id,
+            effective_config_toml,
+            restart_time_secs,
+            sessions,
+        })
+    }
+
     pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {
         let managed = self.peers.get(peer)?;
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;

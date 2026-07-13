@@ -1327,6 +1327,70 @@ impl PolicyChain {
         self.requires_rpki_validation() || self.requires_aspa_validation()
     }
 
+    /// Canonical, redacted V1 identity for durable warm-checkpoint matching.
+    ///
+    /// The byte framing contains only compiled policy semantics and canonical
+    /// set members. It deliberately omits derived hash indexes, hit counters,
+    /// source paths, and live dataset contents. Policies that depend on RPKI,
+    /// ASPA, or external datasets are not representable in V1 because their
+    /// verdicts cannot be reconstructed from the checkpoint alone.
+    ///
+    /// The framing is versioned and intentionally conservative: a compiler IR
+    /// shape change may force a cold boot after an upgrade, which is safer than
+    /// treating two potentially different policy programs as identical.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static reason when the chain depends on external state.
+    pub fn warm_checkpoint_identity_v1(&self) -> Result<Vec<u8>, &'static str> {
+        use std::fmt::Write as _;
+
+        let compiled = self.compiled();
+        if compiled.requires_validation_state() {
+            return Err("import policy depends on RPKI or ASPA validation state");
+        }
+        if !compiled.datasets.is_empty() {
+            return Err("import policy depends on an external dataset");
+        }
+
+        let mut canonical = String::from("rustbgpd/policy-chain/warm-checkpoint/v1\n");
+        writeln!(canonical, "policies={:?}", compiled.policies)
+            .expect("writing canonical policy identity to String cannot fail");
+        for (index, set) in compiled.prefix_sets.iter().enumerate() {
+            writeln!(canonical, "prefix-set[{index}]={:?}", set.entries())
+                .expect("writing canonical policy identity to String cannot fail");
+        }
+        for (index, set) in compiled.community_sets.iter().enumerate() {
+            writeln!(canonical, "community-set[{index}]={:?}", set.criteria())
+                .expect("writing canonical policy identity to String cannot fail");
+        }
+        for (index, set) in compiled.asn_sets.iter().enumerate() {
+            writeln!(canonical, "asn-set[{index}]={:?}", set.asns())
+                .expect("writing canonical policy identity to String cannot fail");
+        }
+        for (index, regex) in compiled.as_path_regexes.iter().enumerate() {
+            writeln!(canonical, "as-path-regex[{index}]={:?}", regex.pattern())
+                .expect("writing canonical policy identity to String cannot fail");
+        }
+        writeln!(
+            canonical,
+            "prefix-set-names={:?}",
+            compiled.prefix_set_names
+        )
+        .expect("writing canonical policy identity to String cannot fail");
+        writeln!(
+            canonical,
+            "community-set-names={:?}",
+            compiled.community_set_names
+        )
+        .expect("writing canonical policy identity to String cannot fail");
+        writeln!(canonical, "asn-set-names={:?}", compiled.asn_set_names)
+            .expect("writing canonical policy identity to String cannot fail");
+        writeln!(canonical, "local-asn={:?}", compiled.local_asn)
+            .expect("writing canonical policy identity to String cannot fail");
+        Ok(canonical.into_bytes())
+    }
+
     /// Whether some compiled guard probes the named external dataset
     /// (LAN-305). Dataset-swap callers use this exactly like the
     /// RPKI/ASPA `requires_*` gates: a content swap refreshes only the

@@ -10,10 +10,12 @@ can preserve a restarting peer's routes. That still leaves a production gap:
 when **rustbgpd itself** restarts, peers immediately withdraw its routes
 unless we advertise restarting-speaker state (`R=1`) in our next OPEN.
 
-The codebase does **not** own or verify the forwarding plane:
+The codebase does **not** own or verify the complete forwarding plane:
 
-1. There is no FIB integration.
-2. There is no persisted RIB snapshot across process restart.
+1. Opt-in unicast FIB integration exists, but it does not cover or prove the
+   complete forwarding plane across every advertised family.
+2. An optional shutdown checkpoint may persist eligible pre-policy
+   Adj-RIB-In views, but startup does not restore or adopt them (ADR-0104).
 3. There is no crash-safe journal.
 
 So a full RFC 4724 “forwarding state preserved” implementation would be
@@ -50,6 +52,10 @@ Implement an honest restarting-speaker mode:
 
 This mode helps peers retain our routes briefly during a planned restart,
 but makes **no claim** that rustbgpd preserved dataplane continuity.
+
+ADR-0104 extends coordinated shutdown with an optional generation-bound
+checkpoint publication. It deliberately does not change the startup behavior
+or the `forwarding_preserved = false` contract defined here.
 
 ## Consequences
 

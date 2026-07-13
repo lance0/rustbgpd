@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Coordinated shutdown can publish a bounded warm checkpoint.** The
+  restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
+  captures eligible established static peers' pre-policy Adj-RIB-In views into
+  an owner-private, content-addressed MRT bundle under
+  `<runtime_state_dir>/warm-bundle-v1`. Publication is deadline-, allocation-,
+  and size-bounded, atomically binds exact live identity/config/policy inputs to
+  restart-marker v2, and falls back to the existing marker-v1 path on failure.
+  Startup does not restore, select, install, or advertise cached routes;
+  `forwarding_preserved` remains false.
+
 - **TCP-AO supports fail-closed add-only live rotation.** SIGHUP can append
   non-preferred successor MKTs to unchanged static-neighbor and direct
   dynamic-prefix owners. One immutable generation is globally preflighted,

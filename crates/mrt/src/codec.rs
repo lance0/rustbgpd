@@ -4,9 +4,14 @@ use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::error::EncodeError as WireEncodeError;
 use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use thiserror::Error;
+const MRT_HEADER_LEN: usize = 12;
 /// MRT message type for `TABLE_DUMP_V2`.
 pub(crate) const TABLE_DUMP_V2: u16 = 13;
 /// `TABLE_DUMP_V2` subtypes.
@@ -40,6 +45,94 @@ pub struct MrtAddPathReceiveProfile {
     /// Subsequent address family.
     pub safi: Safi,
 }
+
+/// Shared hard bound and cooperative cancellation contract for warm encoding.
+///
+/// The same cancellation token and monotonic deadline are used by the shutdown
+/// coordinator, MRT encoder, and durable bundle writer. The byte cap applies to
+/// the complete encoded snapshot and is checked before every output-buffer
+/// reservation, so a rejected checkpoint never materializes an oversized MRT
+/// byte vector.
+#[derive(Debug, Clone)]
+pub struct WarmSnapshotBudget {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+    max_snapshot_bytes: usize,
+}
+
+impl WarmSnapshotBudget {
+    /// Create a bounded warm-snapshot work contract.
+    #[must_use]
+    pub fn new(deadline: Instant, cancelled: Arc<AtomicBool>, max_snapshot_bytes: usize) -> Self {
+        Self {
+            deadline,
+            cancelled,
+            max_snapshot_bytes,
+        }
+    }
+
+    /// Fail closed when the coordinator has gone away or its deadline elapsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WarmSnapshotBudgetError::Cancelled`] or
+    /// [`WarmSnapshotBudgetError::DeadlineExceeded`] as appropriate.
+    pub fn check(&self) -> Result<(), WarmSnapshotBudgetError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(WarmSnapshotBudgetError::Cancelled);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(WarmSnapshotBudgetError::DeadlineExceeded);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_growth(
+        &self,
+        current: usize,
+        additional: usize,
+    ) -> Result<usize, WarmSnapshotBudgetError> {
+        self.check()?;
+        let attempted =
+            current
+                .checked_add(additional)
+                .ok_or(WarmSnapshotBudgetError::SizeLimitExceeded {
+                    attempted: usize::MAX,
+                    cap: self.max_snapshot_bytes,
+                })?;
+        if attempted > self.max_snapshot_bytes {
+            return Err(WarmSnapshotBudgetError::SizeLimitExceeded {
+                attempted,
+                cap: self.max_snapshot_bytes,
+            });
+        }
+        Ok(attempted)
+    }
+
+    fn check_temporary_allocation(&self, bytes: usize) -> Result<(), WarmSnapshotBudgetError> {
+        self.check_growth(0, bytes).map(drop)
+    }
+}
+
+/// Terminal warm-snapshot work-budget failure.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum WarmSnapshotBudgetError {
+    /// The async shutdown coordinator stopped waiting for this work.
+    #[error("warm checkpoint work was cancelled")]
+    Cancelled,
+    /// The shared monotonic shutdown deadline elapsed.
+    #[error("warm checkpoint work exceeded its terminal deadline")]
+    DeadlineExceeded,
+    /// Encoding would exceed the configured complete-snapshot cap.
+    #[error("warm checkpoint encoding would need {attempted} bytes, exceeding the {cap}-byte cap")]
+    SizeLimitExceeded {
+        /// Encoded length that the attempted append would produce.
+        attempted: usize,
+        /// Maximum complete encoded snapshot length.
+        cap: usize,
+    },
+}
+
 /// MRT encoding errors.
 #[derive(Debug, Error)]
 pub enum EncodeError {
@@ -82,28 +175,278 @@ pub enum EncodeError {
         /// Why the route cannot be restored exactly.
         reason: &'static str,
     },
+    /// Warm checkpoint cancellation, deadline, or complete-output cap fired.
+    #[error(transparent)]
+    WarmSnapshotBudget(#[from] WarmSnapshotBudgetError),
+    /// A checked output-buffer reservation failed.
+    #[error("failed to reserve {attempted} bytes for MRT encoding")]
+    AllocationFailed {
+        /// Encoded buffer length requested by the failed append.
+        attempted: usize,
+    },
 }
-/// Encode the 12-byte MRT common header.
+
+/// Checked append-only view over an MRT output vector.
+///
+/// Bounded buffers reserve geometrically, but never beyond the remaining hard
+/// cap. `try_reserve_exact` avoids `Vec`'s ordinary speculative over-allocation
+/// when the buffer is close to that cap.
+struct EncodeBuffer<'a> {
+    bytes: &'a mut Vec<u8>,
+    budget: Option<&'a WarmSnapshotBudget>,
+    accounted_prefix: usize,
+}
+
+impl<'a> EncodeBuffer<'a> {
+    fn new(bytes: &'a mut Vec<u8>, budget: Option<&'a WarmSnapshotBudget>) -> Self {
+        Self {
+            bytes,
+            budget,
+            accounted_prefix: 0,
+        }
+    }
+
+    fn child(
+        bytes: &'a mut Vec<u8>,
+        budget: Option<&'a WarmSnapshotBudget>,
+        accounted_prefix: usize,
+    ) -> Self {
+        Self {
+            bytes,
+            budget,
+            accounted_prefix,
+        }
+    }
+
+    fn check(&self) -> Result<(), EncodeError> {
+        self.budget.map_or(Ok(()), WarmSnapshotBudget::check)?;
+        Ok(())
+    }
+
+    fn reserve_for(&mut self, additional: usize) -> Result<usize, EncodeError> {
+        let local_attempted =
+            self.bytes
+                .len()
+                .checked_add(additional)
+                .ok_or(EncodeError::AllocationFailed {
+                    attempted: usize::MAX,
+                })?;
+        let attempted = if let Some(budget) = self.budget {
+            budget.check_growth(self.effective_len(), additional)?
+        } else {
+            local_attempted
+        };
+        if local_attempted <= self.bytes.capacity() {
+            return Ok(attempted);
+        }
+
+        let target_capacity = if let Some(budget) = self.budget {
+            let doubled = self.bytes.capacity().max(4096).saturating_mul(2);
+            local_attempted.max(doubled).min(
+                budget
+                    .max_snapshot_bytes
+                    .saturating_sub(self.accounted_prefix),
+            )
+        } else {
+            local_attempted
+        };
+        self.bytes
+            .try_reserve_exact(target_capacity.saturating_sub(self.bytes.len()))
+            .map_err(|_| EncodeError::AllocationFailed { attempted })?;
+        // Cancellation can race the allocation itself. Recheck before any
+        // bytes are committed; on failure the caller drops this bounded Vec.
+        self.check()?;
+        Ok(attempted)
+    }
+
+    fn extend_from_slice(&mut self, value: &[u8]) -> Result<(), EncodeError> {
+        self.reserve_for(value.len())?;
+        self.bytes.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn push(&mut self, value: u8) -> Result<(), EncodeError> {
+        self.reserve_for(1)?;
+        self.bytes.push(value);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn effective_len(&self) -> usize {
+        self.accounted_prefix.saturating_add(self.bytes.len())
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.bytes.truncate(len);
+    }
+
+    fn finish_record(&mut self, start: usize) -> Result<(), EncodeError> {
+        let payload_len = self
+            .len()
+            .saturating_sub(start)
+            .saturating_sub(MRT_HEADER_LEN);
+        let length = u32::try_from(payload_len).map_err(|_| EncodeError::FieldTooLarge {
+            field: "MRT payload length",
+            value: payload_len,
+        })?;
+        self.bytes[start + 8..start + MRT_HEADER_LEN].copy_from_slice(&length.to_be_bytes());
+        Ok(())
+    }
+
+    fn patch_u16(&mut self, offset: usize, value: u16) {
+        self.bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+    }
+}
+
+const CANCELLABLE_SORT_RUN: usize = 256;
+
+fn collect_cancellable<T>(
+    values: impl ExactSizeIterator<Item = T>,
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<Vec<T>, EncodeError> {
+    let len = values.len();
+    let allocation_bytes =
+        len.checked_mul(std::mem::size_of::<T>())
+            .ok_or(EncodeError::AllocationFailed {
+                attempted: usize::MAX,
+            })?;
+    if let Some(budget) = budget {
+        budget.check_temporary_allocation(allocation_bytes)?;
+    }
+    let mut collected = Vec::new();
+    collected
+        .try_reserve_exact(len)
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: allocation_bytes,
+        })?;
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
+    for value in values {
+        collected.push(value);
+        // Iterators used here yield borrowed keys in constant time. Checking
+        // after each yield also catches cancellation raised while a key is
+        // being materialized rather than waiting for the later sort.
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+    }
+    Ok(collected)
+}
+
+/// Bottom-up merge sort whose non-cancellable leaf work is capped to a
+/// small fixed run. Warm checkpoint inputs use reference/copy keys, so the one
+/// scratch allocation never duplicates route attributes or encoded records.
+fn sort_cancellable_by<T: Clone>(
+    values: &mut [T],
+    budget: Option<&WarmSnapshotBudget>,
+    compare: impl Fn(&T, &T) -> CmpOrdering + Copy,
+) -> Result<(), EncodeError> {
+    let Some(budget) = budget else {
+        values.sort_by(compare);
+        return Ok(());
+    };
+    if values.len() < 2 {
+        return budget.check().map_err(Into::into);
+    }
+
+    for run in values.chunks_mut(CANCELLABLE_SORT_RUN) {
+        budget.check()?;
+        run.sort_unstable_by(compare);
+        budget.check()?;
+    }
+
+    let scratch_bytes = values.len().checked_mul(std::mem::size_of::<T>()).ok_or(
+        EncodeError::AllocationFailed {
+            attempted: usize::MAX,
+        },
+    )?;
+    budget.check_temporary_allocation(scratch_bytes)?;
+    let mut scratch = Vec::<T>::new();
+    scratch
+        .try_reserve_exact(values.len())
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: scratch_bytes,
+        })?;
+    budget.check()?;
+
+    let mut width = CANCELLABLE_SORT_RUN;
+    while width < values.len() {
+        let step = width.saturating_mul(2);
+        let mut start = 0usize;
+        while start < values.len() {
+            budget.check()?;
+            let middle = start.saturating_add(width).min(values.len());
+            let end = start.saturating_add(step).min(values.len());
+            if middle == end {
+                start = end;
+                continue;
+            }
+            scratch.clear();
+            let mut left = start;
+            let mut right = middle;
+            let mut copied = 0usize;
+            while left < middle && right < end {
+                if copied.is_multiple_of(CANCELLABLE_SORT_RUN) {
+                    budget.check()?;
+                }
+                if compare(&values[left], &values[right]) == CmpOrdering::Greater {
+                    scratch.push(values[right].clone());
+                    right += 1;
+                } else {
+                    scratch.push(values[left].clone());
+                    left += 1;
+                }
+                copied += 1;
+            }
+            while left < middle {
+                if copied.is_multiple_of(CANCELLABLE_SORT_RUN) {
+                    budget.check()?;
+                }
+                scratch.push(values[left].clone());
+                left += 1;
+                copied += 1;
+            }
+            while right < end {
+                if copied.is_multiple_of(CANCELLABLE_SORT_RUN) {
+                    budget.check()?;
+                }
+                scratch.push(values[right].clone());
+                right += 1;
+                copied += 1;
+            }
+            values[start..end].clone_from_slice(&scratch);
+            start = end;
+        }
+        width = step;
+    }
+    budget.check()?;
+    Ok(())
+}
+
+/// Begin an MRT record with a placeholder payload length.
+fn begin_mrt_record(
+    buf: &mut EncodeBuffer<'_>,
+    timestamp: u32,
+    subtype: u16,
+) -> Result<usize, EncodeError> {
+    let start = buf.len();
+    buf.extend_from_slice(&timestamp.to_be_bytes())?;
+    buf.extend_from_slice(&TABLE_DUMP_V2.to_be_bytes())?;
+    buf.extend_from_slice(&subtype.to_be_bytes())?;
+    buf.extend_from_slice(&0u32.to_be_bytes())?;
+    Ok(start)
+}
+
+#[cfg(test)]
 fn encode_mrt_header(buf: &mut Vec<u8>, timestamp: u32, mrt_type: u16, subtype: u16, length: u32) {
     buf.extend_from_slice(&timestamp.to_be_bytes());
     buf.extend_from_slice(&mrt_type.to_be_bytes());
     buf.extend_from_slice(&subtype.to_be_bytes());
     buf.extend_from_slice(&length.to_be_bytes());
-}
-/// Encode a complete MRT record: header + payload.
-fn encode_mrt_record(
-    buf: &mut Vec<u8>,
-    timestamp: u32,
-    subtype: u16,
-    payload: &[u8],
-) -> Result<(), EncodeError> {
-    let length = u32::try_from(payload.len()).map_err(|_| EncodeError::FieldTooLarge {
-        field: "MRT payload length",
-        value: payload.len(),
-    })?;
-    encode_mrt_header(buf, timestamp, TABLE_DUMP_V2, subtype, length);
-    buf.extend_from_slice(payload);
-    Ok(())
 }
 /// Encode the `PEER_INDEX_TABLE` record (subtype 1).
 ///
@@ -120,42 +463,60 @@ pub fn encode_peer_index_table(
     view_name: &str,
     peers: &[MrtPeerEntry],
 ) -> Result<(), EncodeError> {
-    let mut payload = Vec::new();
-    // Collector BGP ID
-    payload.extend_from_slice(&collector_bgp_id.octets());
-    // View name
-    let name_bytes = view_name.as_bytes();
-    let view_name_len =
-        u16::try_from(name_bytes.len()).map_err(|_| EncodeError::FieldTooLarge {
-            field: "PEER_INDEX_TABLE.view_name length",
-            value: name_bytes.len(),
+    let mut output = EncodeBuffer::new(buf, None);
+    encode_peer_index_table_inner(&mut output, timestamp, collector_bgp_id, view_name, peers)
+}
+
+fn encode_peer_index_table_inner(
+    buf: &mut EncodeBuffer<'_>,
+    timestamp: u32,
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+) -> Result<(), EncodeError> {
+    let start = begin_mrt_record(buf, timestamp, PEER_INDEX_TABLE)?;
+    let result = (|| {
+        // Collector BGP ID
+        buf.extend_from_slice(&collector_bgp_id.octets())?;
+        // View name
+        let name_bytes = view_name.as_bytes();
+        let view_name_len =
+            u16::try_from(name_bytes.len()).map_err(|_| EncodeError::FieldTooLarge {
+                field: "PEER_INDEX_TABLE.view_name length",
+                value: name_bytes.len(),
+            })?;
+        buf.extend_from_slice(&view_name_len.to_be_bytes())?;
+        buf.extend_from_slice(name_bytes)?;
+        // Peer count
+        let peer_count = u16::try_from(peers.len()).map_err(|_| EncodeError::FieldTooLarge {
+            field: "PEER_INDEX_TABLE.peer_count",
+            value: peers.len(),
         })?;
-    payload.extend_from_slice(&view_name_len.to_be_bytes());
-    payload.extend_from_slice(name_bytes);
-    // Peer count
-    let peer_count = u16::try_from(peers.len()).map_err(|_| EncodeError::FieldTooLarge {
-        field: "PEER_INDEX_TABLE.peer_count",
-        value: peers.len(),
-    })?;
-    payload.extend_from_slice(&peer_count.to_be_bytes());
-    for peer in peers {
-        // Peer type: bit 0 = IPv6, bit 1 = AS4 (always set)
-        let peer_type: u8 = match peer.peer_addr {
-            IpAddr::V6(_) => 0b11, // IPv6 + AS4
-            IpAddr::V4(_) => 0b10, // AS4 only
-        };
-        payload.push(peer_type);
-        // Peer BGP ID
-        payload.extend_from_slice(&peer.peer_bgp_id.octets());
-        // Peer IP address
-        match peer.peer_addr {
-            IpAddr::V4(v4) => payload.extend_from_slice(&v4.octets()),
-            IpAddr::V6(v6) => payload.extend_from_slice(&v6.octets()),
+        buf.extend_from_slice(&peer_count.to_be_bytes())?;
+        for peer in peers {
+            buf.check()?;
+            // Peer type: bit 0 = IPv6, bit 1 = AS4 (always set)
+            let peer_type: u8 = match peer.peer_addr {
+                IpAddr::V6(_) => 0b11, // IPv6 + AS4
+                IpAddr::V4(_) => 0b10, // AS4 only
+            };
+            buf.push(peer_type)?;
+            // Peer BGP ID
+            buf.extend_from_slice(&peer.peer_bgp_id.octets())?;
+            // Peer IP address
+            match peer.peer_addr {
+                IpAddr::V4(v4) => buf.extend_from_slice(&v4.octets())?,
+                IpAddr::V6(v6) => buf.extend_from_slice(&v6.octets())?,
+            }
+            // Peer AS (always 4 bytes)
+            buf.extend_from_slice(&peer.peer_asn.to_be_bytes())?;
         }
-        // Peer AS (always 4 bytes)
-        payload.extend_from_slice(&peer.peer_asn.to_be_bytes());
+        buf.finish_record(start)
+    })();
+    if result.is_err() {
+        buf.truncate(start);
     }
-    encode_mrt_record(buf, timestamp, PEER_INDEX_TABLE, &payload)
+    result
 }
 /// Synthesize path attributes for MRT encoding from a `Route`.
 ///
@@ -268,47 +629,141 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
 /// Returns [`EncodeError::FieldTooLarge`] if the encoded attribute payload
 /// for the entry exceeds the 16-bit `attribute_length` field.
 fn encode_evpn_rib_generic(
-    buf: &mut Vec<u8>,
+    buf: &mut EncodeBuffer<'_>,
     timestamp: u32,
     seq_num: u32,
     route: &EvpnRibRoute,
     peer_index: u16,
     originated_time: u32,
 ) -> Result<(), EncodeError> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&seq_num.to_be_bytes());
-    payload.extend_from_slice(&(Afi::L2Vpn as u16).to_be_bytes());
-    payload.push(Safi::Evpn as u8);
-    encode_evpn_nlri(std::slice::from_ref(&route.route), &mut payload);
-    payload.extend_from_slice(&1u16.to_be_bytes());
-    let entry = RibEntry {
-        peer_index,
-        originated_time,
-        path_id: 0,
-        attributes: synthesize_evpn_attributes(route),
-    };
-    encode_rib_entry(&mut payload, &entry, false)?;
-    encode_mrt_record(buf, timestamp, RIB_GENERIC, &payload)
+    let start = begin_mrt_record(buf, timestamp, RIB_GENERIC)?;
+    let result = (|| {
+        buf.extend_from_slice(&seq_num.to_be_bytes())?;
+        buf.extend_from_slice(&(Afi::L2Vpn as u16).to_be_bytes())?;
+        buf.push(Safi::Evpn as u8)?;
+        let mut nlri = Vec::new();
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri);
+        buf.extend_from_slice(&nlri)?;
+        buf.extend_from_slice(&1u16.to_be_bytes())?;
+        encode_evpn_route_rib_entry(buf, route, peer_index, originated_time)?;
+        buf.finish_record(start)
+    })();
+    if result.is_err() {
+        buf.truncate(start);
+    }
+    result
 }
 /// Encode a single RIB entry (shared by all RIB_* subtypes).
 fn encode_rib_entry(
-    buf: &mut Vec<u8>,
+    buf: &mut EncodeBuffer<'_>,
     entry: &RibEntry,
     add_path: bool,
 ) -> Result<(), EncodeError> {
     if add_path {
-        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        buf.extend_from_slice(&entry.path_id.to_be_bytes())?;
     }
-    buf.extend_from_slice(&entry.peer_index.to_be_bytes());
-    buf.extend_from_slice(&entry.originated_time.to_be_bytes());
+    buf.extend_from_slice(&entry.peer_index.to_be_bytes())?;
+    buf.extend_from_slice(&entry.originated_time.to_be_bytes())?;
     let mut attr_buf = Vec::new();
-    encode_mrt_rib_attributes(&entry.attributes, &mut attr_buf)?;
+    {
+        let mut checked_attrs = EncodeBuffer::child(
+            &mut attr_buf,
+            buf.budget,
+            buf.effective_len().saturating_add(2),
+        );
+        encode_mrt_rib_attributes(&entry.attributes, &mut checked_attrs)?;
+    }
     let attr_len = u16::try_from(attr_buf.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
         value: attr_buf.len(),
     })?;
-    buf.extend_from_slice(&attr_len.to_be_bytes());
-    buf.extend_from_slice(&attr_buf);
+    // Account for the two-byte length before appending the bounded attribute
+    // buffer. A single RIB entry remains protocol-bounded to u16 bytes.
+    if let Some(budget) = buf.budget {
+        budget.check_growth(buf.effective_len(), 2usize.saturating_add(attr_buf.len()))?;
+    }
+    buf.extend_from_slice(&attr_len.to_be_bytes())?;
+    buf.extend_from_slice(&attr_buf)?;
+    Ok(())
+}
+
+fn encode_route_rib_entry(
+    buf: &mut EncodeBuffer<'_>,
+    route: &Route,
+    peer_index: u16,
+    originated_time: u32,
+    add_path: bool,
+) -> Result<(), EncodeError> {
+    if add_path {
+        buf.extend_from_slice(&route.path_id.to_be_bytes())?;
+    }
+    buf.extend_from_slice(&peer_index.to_be_bytes())?;
+    buf.extend_from_slice(&originated_time.to_be_bytes())?;
+    let attr_len_offset = buf.len();
+    buf.extend_from_slice(&0u16.to_be_bytes())?;
+    let attr_start = buf.len();
+    encode_route_mrt_attributes(route, buf)?;
+    let attr_len = buf.len().saturating_sub(attr_start);
+    let attr_len = u16::try_from(attr_len).map_err(|_| EncodeError::FieldTooLarge {
+        field: "RIB entry attribute length",
+        value: attr_len,
+    })?;
+    buf.patch_u16(attr_len_offset, attr_len);
+    Ok(())
+}
+
+fn encode_evpn_route_rib_entry(
+    buf: &mut EncodeBuffer<'_>,
+    route: &EvpnRibRoute,
+    peer_index: u16,
+    originated_time: u32,
+) -> Result<(), EncodeError> {
+    buf.extend_from_slice(&peer_index.to_be_bytes())?;
+    buf.extend_from_slice(&originated_time.to_be_bytes())?;
+    let attr_len_offset = buf.len();
+    buf.extend_from_slice(&0u16.to_be_bytes())?;
+    let attr_start = buf.len();
+    for attr in route.attributes.iter() {
+        encode_one_mrt_rib_attribute(attr, buf)?;
+    }
+    encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
+    let attr_len = buf.len().saturating_sub(attr_start);
+    let attr_len = u16::try_from(attr_len).map_err(|_| EncodeError::FieldTooLarge {
+        field: "RIB entry attribute length",
+        value: attr_len,
+    })?;
+    buf.patch_u16(attr_len_offset, attr_len);
+    Ok(())
+}
+
+fn encode_route_mrt_attributes(
+    route: &Route,
+    buf: &mut EncodeBuffer<'_>,
+) -> Result<(), EncodeError> {
+    let inject_ipv4_next_hop =
+        matches!(route.prefix, Prefix::V4(_)) && matches!(route.next_hop, IpAddr::V4(_));
+    let mut injected = false;
+    for attr in route.attributes.iter() {
+        if inject_ipv4_next_hop
+            && !injected
+            && !matches!(attr, PathAttribute::Origin(_) | PathAttribute::AsPath(_))
+        {
+            let IpAddr::V4(next_hop) = route.next_hop else {
+                unreachable!("IPv4 next-hop profile checked above")
+            };
+            encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
+            injected = true;
+        }
+        encode_one_mrt_rib_attribute(attr, buf)?;
+    }
+    if inject_ipv4_next_hop && !injected {
+        let IpAddr::V4(next_hop) = route.next_hop else {
+            unreachable!("IPv4 next-hop profile checked above")
+        };
+        encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
+    } else if !inject_ipv4_next_hop {
+        encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
+    }
     Ok(())
 }
 /// Encode path attributes for an MRT RIB entry per RFC 6396 §4.3.4.
@@ -320,20 +775,30 @@ fn encode_rib_entry(
 /// encode identically to a regular BGP UPDATE.
 fn encode_mrt_rib_attributes(
     attrs: &[PathAttribute],
-    buf: &mut Vec<u8>,
+    buf: &mut EncodeBuffer<'_>,
 ) -> Result<(), EncodeError> {
-    let others: Vec<PathAttribute> = attrs
-        .iter()
-        .filter(|a| !matches!(a, PathAttribute::MpReachNlri(_)))
-        .cloned()
-        .collect();
-    encode_path_attributes(&others, buf, true, false)?;
     for attr in attrs {
-        if let PathAttribute::MpReachNlri(mp) = attr {
-            encode_mrt_mp_reach(mp.next_hop, mp.link_local_next_hop, buf);
-        }
+        buf.check()?;
+        encode_one_mrt_rib_attribute(attr, buf)?;
     }
     Ok(())
+}
+
+fn encode_one_mrt_rib_attribute(
+    attr: &PathAttribute,
+    buf: &mut EncodeBuffer<'_>,
+) -> Result<(), EncodeError> {
+    buf.check()?;
+    if let PathAttribute::MpReachNlri(mp) = attr {
+        encode_mrt_mp_reach(mp.next_hop, mp.link_local_next_hop, buf)
+    } else {
+        // The wire encoder is Vec-based. One received BGP attribute is
+        // protocol-bounded to u16 bytes; append it immediately rather than
+        // retaining owned attributes for a complete prefix record.
+        let mut encoded = Vec::new();
+        encode_path_attributes(std::slice::from_ref(attr), &mut encoded, true, false)?;
+        buf.extend_from_slice(&encoded)
+    }
 }
 /// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.
 ///
@@ -347,8 +812,8 @@ fn encode_mrt_rib_attributes(
 fn encode_mrt_mp_reach(
     next_hop: IpAddr,
     link_local: Option<std::net::Ipv6Addr>,
-    buf: &mut Vec<u8>,
-) {
+    buf: &mut EncodeBuffer<'_>,
+) -> Result<(), EncodeError> {
     let mut value: Vec<u8> = Vec::with_capacity(33);
     match (next_hop, link_local) {
         (IpAddr::V4(addr), _) => {
@@ -365,29 +830,31 @@ fn encode_mrt_mp_reach(
             value.extend_from_slice(&addr.octets());
         }
     }
-    buf.push(0x80);
-    buf.push(14);
+    buf.push(0x80)?;
+    buf.push(14)?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "value length is at most 33 bytes"
     )]
-    buf.push(value.len() as u8);
-    buf.extend_from_slice(&value);
+    buf.push(value.len() as u8)?;
+    buf.extend_from_slice(&value)?;
+    Ok(())
 }
 /// Encode a prefix into MRT format: length byte then ceil(len/8) prefix bytes.
-fn encode_prefix_bytes(buf: &mut Vec<u8>, prefix: &Prefix) {
+fn encode_prefix_bytes(buf: &mut EncodeBuffer<'_>, prefix: &Prefix) -> Result<(), EncodeError> {
     match prefix {
         Prefix::V4(v4) => {
-            buf.push(v4.len);
+            buf.push(v4.len)?;
             let byte_len = usize::from(v4.len).div_ceil(8);
-            buf.extend_from_slice(&v4.addr.octets()[..byte_len]);
+            buf.extend_from_slice(&v4.addr.octets()[..byte_len])?;
         }
         Prefix::V6(v6) => {
-            buf.push(v6.len);
+            buf.push(v6.len)?;
             let byte_len = usize::from(v6.len).div_ceil(8);
-            buf.extend_from_slice(&v6.addr.octets()[..byte_len]);
+            buf.extend_from_slice(&v6.addr.octets()[..byte_len])?;
         }
     }
+    Ok(())
 }
 /// Encode a `RIB_IPV4_UNICAST` or `RIB_IPV6_UNICAST` record.
 ///
@@ -405,11 +872,19 @@ pub fn encode_rib_entries(
     entries: &[RibEntry],
 ) -> Result<(), EncodeError> {
     let has_addpath = entries.iter().any(|e| e.path_id != 0);
-    encode_rib_entries_profile(buf, timestamp, seq_num, prefix, entries, has_addpath)
+    let mut output = EncodeBuffer::new(buf, None);
+    encode_rib_entries_profile(
+        &mut output,
+        timestamp,
+        seq_num,
+        prefix,
+        entries,
+        has_addpath,
+    )
 }
 
 fn encode_rib_entries_profile(
-    buf: &mut Vec<u8>,
+    buf: &mut EncodeBuffer<'_>,
     timestamp: u32,
     seq_num: u32,
     prefix: &Prefix,
@@ -422,18 +897,112 @@ fn encode_rib_entries_profile(
         (Prefix::V6(_), false) => RIB_IPV6_UNICAST,
         (Prefix::V6(_), true) => RIB_IPV6_UNICAST_ADDPATH,
     };
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&seq_num.to_be_bytes());
-    encode_prefix_bytes(&mut payload, prefix);
-    let entry_count = u16::try_from(entries.len()).map_err(|_| EncodeError::FieldTooLarge {
-        field: "RIB entry count",
-        value: entries.len(),
-    })?;
-    payload.extend_from_slice(&entry_count.to_be_bytes());
-    for entry in entries {
-        encode_rib_entry(&mut payload, entry, has_addpath)?;
+    let start = begin_mrt_record(buf, timestamp, subtype)?;
+    let result = (|| {
+        buf.extend_from_slice(&seq_num.to_be_bytes())?;
+        encode_prefix_bytes(buf, prefix)?;
+        let entry_count = u16::try_from(entries.len()).map_err(|_| EncodeError::FieldTooLarge {
+            field: "RIB entry count",
+            value: entries.len(),
+        })?;
+        buf.extend_from_slice(&entry_count.to_be_bytes())?;
+        for entry in entries {
+            buf.check()?;
+            encode_rib_entry(buf, entry, has_addpath)?;
+        }
+        buf.finish_record(start)
+    })();
+    if result.is_err() {
+        buf.truncate(start);
     }
-    encode_mrt_record(buf, timestamp, subtype, &payload)
+    result
+}
+
+#[derive(Clone, Copy)]
+enum RouteEntrySelection {
+    All,
+    Legacy,
+    AddPath,
+}
+
+fn route_uses_add_path(
+    route: &Route,
+    profiles: Option<&HashSet<MrtAddPathReceiveProfile>>,
+) -> bool {
+    profiles.is_some_and(|profiles| {
+        let afi = match route.prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        profiles.contains(&MrtAddPathReceiveProfile {
+            peer: route.peer,
+            afi,
+            safi: Safi::Unicast,
+        })
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "borrowed route records need explicit MRT identity, selection, and timing inputs"
+)]
+fn encode_route_entries_profile(
+    buf: &mut EncodeBuffer<'_>,
+    timestamp: u32,
+    seq_num: u32,
+    prefix: &Prefix,
+    routes: &[&Route],
+    peer_index: &HashMap<IpAddr, u16>,
+    profiles: Option<&HashSet<MrtAddPathReceiveProfile>>,
+    selection: RouteEntrySelection,
+    entry_count: u16,
+    add_path: bool,
+    now_secs: u64,
+) -> Result<(), EncodeError> {
+    let subtype = match (prefix, add_path) {
+        (Prefix::V4(_), false) => RIB_IPV4_UNICAST,
+        (Prefix::V4(_), true) => RIB_IPV4_UNICAST_ADDPATH,
+        (Prefix::V6(_), false) => RIB_IPV6_UNICAST,
+        (Prefix::V6(_), true) => RIB_IPV6_UNICAST_ADDPATH,
+    };
+    let start = begin_mrt_record(buf, timestamp, subtype)?;
+    let result = (|| {
+        buf.extend_from_slice(&seq_num.to_be_bytes())?;
+        encode_prefix_bytes(buf, prefix)?;
+        buf.extend_from_slice(&entry_count.to_be_bytes())?;
+        let mut encoded_count = 0u16;
+        for route in routes {
+            buf.check()?;
+            let uses_add_path = route_uses_add_path(route, profiles);
+            let selected = match selection {
+                RouteEntrySelection::All => true,
+                RouteEntrySelection::Legacy => !uses_add_path,
+                RouteEntrySelection::AddPath => uses_add_path,
+            };
+            if !selected {
+                continue;
+            }
+            let peer_index = peer_index
+                .get(&route.peer)
+                .copied()
+                .expect("effective peer inventory includes every route origin");
+            let age = route.received_at.elapsed().as_secs();
+            let originated = u32::try_from(now_secs.saturating_sub(age)).unwrap_or(u32::MAX);
+            encode_route_rib_entry(buf, route, peer_index, originated, add_path)?;
+            encoded_count = encoded_count
+                .checked_add(1)
+                .ok_or(EncodeError::FieldTooLarge {
+                    field: "RIB entry count",
+                    value: usize::from(entry_count).saturating_add(1),
+                })?;
+        }
+        debug_assert_eq!(encoded_count, entry_count);
+        buf.finish_record(start)
+    })();
+    if result.is_err() {
+        buf.truncate(start);
+    }
+    result
 }
 /// Encode a full MRT `TABLE_DUMP_V2` dump from a snapshot.
 ///
@@ -480,6 +1049,7 @@ pub fn encode_snapshot_with_view(
         evpn_routes,
         timestamp,
         None,
+        None,
     )
 }
 
@@ -506,27 +1076,117 @@ pub fn encode_warm_snapshot(
     timestamp: u32,
     add_path_receive: &[MrtAddPathReceiveProfile],
 ) -> Result<Vec<u8>, EncodeError> {
-    if let Some(route) = routes.iter().find(|route| {
-        route.next_hop_scope.is_some()
+    encode_warm_snapshot_inner(
+        collector_bgp_id,
+        view_name,
+        peers,
+        routes,
+        evpn_routes,
+        timestamp,
+        add_path_receive,
+        None,
+    )
+}
+
+/// Encode a warm snapshot under a hard complete-output cap and shared
+/// cancellation/deadline contract.
+///
+/// Unlike [`encode_warm_snapshot`], every reservation of the complete MRT
+/// output is checked before `Vec` growth. The encoder also checks the shared
+/// cancellation token throughout peer, route, prefix, and EVPN traversal.
+///
+/// # Errors
+///
+/// Returns the same profile errors as [`encode_warm_snapshot`], plus
+/// [`EncodeError::WarmSnapshotBudget`] when the cap, cancellation token, or
+/// deadline rejects the work.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bounded warm encoding extends the established snapshot API with one shared work budget"
+)]
+pub fn encode_warm_snapshot_bounded(
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+    add_path_receive: &[MrtAddPathReceiveProfile],
+    budget: &WarmSnapshotBudget,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_warm_snapshot_inner(
+        collector_bgp_id,
+        view_name,
+        peers,
+        routes,
+        evpn_routes,
+        timestamp,
+        add_path_receive,
+        Some(budget),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal wrapper preserves the public snapshot fields plus the optional work budget"
+)]
+fn encode_warm_snapshot_inner(
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+    add_path_receive: &[MrtAddPathReceiveProfile],
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<Vec<u8>, EncodeError> {
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
+    for route in routes {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        if route.next_hop_scope.is_some()
             || route.link_local_next_hop.is_some()
             || is_ipv6_link_local(route.next_hop)
-    }) {
-        return Err(EncodeError::UnsupportedWarmRouteProfile {
-            peer: route.peer,
-            reason: "scoped or link-local next-hop identity",
-        });
+        {
+            return Err(EncodeError::UnsupportedWarmRouteProfile {
+                peer: route.peer,
+                reason: "scoped or link-local next-hop identity",
+            });
+        }
     }
-    if let Some(route) = evpn_routes
-        .iter()
-        .find(|route| route.link_local_next_hop.is_some() || is_ipv6_link_local(route.next_hop))
-    {
-        return Err(EncodeError::UnsupportedWarmRouteProfile {
-            peer: route.peer,
-            reason: "link-local next-hop identity",
-        });
+    for route in evpn_routes {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        if route.link_local_next_hop.is_some() || is_ipv6_link_local(route.next_hop) {
+            return Err(EncodeError::UnsupportedWarmRouteProfile {
+                peer: route.peer,
+                reason: "link-local next-hop identity",
+            });
+        }
     }
-    let mut unique = HashSet::with_capacity(add_path_receive.len());
+    let profile_bytes = add_path_receive
+        .len()
+        .checked_mul(std::mem::size_of::<MrtAddPathReceiveProfile>())
+        .ok_or(EncodeError::AllocationFailed {
+            attempted: usize::MAX,
+        })?;
+    if let Some(budget) = budget {
+        budget.check_temporary_allocation(profile_bytes)?;
+    }
+    let mut unique = HashSet::new();
+    unique
+        .try_reserve(add_path_receive.len())
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: profile_bytes,
+        })?;
     for profile in add_path_receive {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
         if !unique.insert(*profile) {
             return Err(EncodeError::InvalidAddPathProfile {
                 peer: profile.peer,
@@ -535,19 +1195,17 @@ pub fn encode_warm_snapshot(
                 reason: "duplicate profile",
             });
         }
-    }
-    if let Some(profile) = add_path_receive.iter().find(|profile| {
-        !matches!(
+        if !matches!(
             (profile.afi, profile.safi),
             (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)
-        )
-    }) {
-        return Err(EncodeError::InvalidAddPathProfile {
-            peer: profile.peer,
-            afi: profile.afi,
-            safi: profile.safi,
-            reason: "only IPv4/IPv6 unicast Add-Path is supported by TABLE_DUMP_V2",
-        });
+        ) {
+            return Err(EncodeError::InvalidAddPathProfile {
+                peer: profile.peer,
+                afi: profile.afi,
+                safi: profile.safi,
+                reason: "only IPv4/IPv6 unicast Add-Path is supported by TABLE_DUMP_V2",
+            });
+        }
     }
     encode_snapshot_inner(
         collector_bgp_id,
@@ -557,6 +1215,7 @@ pub fn encode_warm_snapshot(
         evpn_routes,
         timestamp,
         Some(&unique),
+        budget,
     )
 }
 
@@ -568,6 +1227,10 @@ fn is_ipv6_link_local(address: IpAddr) -> bool {
     clippy::too_many_lines,
     reason = "Single-pass encoder over peer index, unicast prefix groups, and EVPN RIB_GENERIC records — splitting hides the linear flow"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "snapshot identity, route families, Add-Path profile, and work budget are independent inputs"
+)]
 fn encode_snapshot_inner(
     collector_bgp_id: Ipv4Addr,
     view_name: &str,
@@ -576,13 +1239,67 @@ fn encode_snapshot_inner(
     evpn_routes: &[EvpnRibRoute],
     timestamp: u32,
     add_path_receive: Option<&HashSet<MrtAddPathReceiveProfile>>,
+    budget: Option<&WarmSnapshotBudget>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
+    let mut output = EncodeBuffer::new(&mut buf, budget);
+    output.check()?;
     // 1. Build effective peer list from explicit peers + any route-origin peers.
-    let mut effective_peers: Vec<MrtPeerEntry> = peers.to_vec();
-    let mut seen_peers: HashSet<IpAddr> = effective_peers.iter().map(|p| p.peer_addr).collect();
+    if peers.len() > usize::from(u16::MAX) {
+        return Err(EncodeError::FieldTooLarge {
+            field: "PEER_INDEX_TABLE.peer_count",
+            value: peers.len(),
+        });
+    }
+    let peer_bytes = peers
+        .len()
+        .checked_mul(std::mem::size_of::<MrtPeerEntry>())
+        .ok_or(EncodeError::AllocationFailed {
+            attempted: usize::MAX,
+        })?;
+    if let Some(budget) = budget {
+        budget.check_temporary_allocation(peer_bytes)?;
+    }
+    let mut effective_peers = Vec::<MrtPeerEntry>::new();
+    effective_peers
+        .try_reserve_exact(peers.len())
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: peer_bytes,
+        })?;
+    effective_peers.extend_from_slice(peers);
+    let mut seen_peers = HashSet::<IpAddr>::new();
+    seen_peers
+        .try_reserve(peers.len())
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: peers.len().saturating_mul(std::mem::size_of::<IpAddr>()),
+        })?;
+    seen_peers.extend(effective_peers.iter().map(|peer| peer.peer_addr));
     for route in routes {
-        if seen_peers.insert(route.peer) {
+        output.check()?;
+        if !seen_peers.contains(&route.peer) {
+            if effective_peers.len() == usize::from(u16::MAX) {
+                return Err(EncodeError::FieldTooLarge {
+                    field: "PEER_INDEX_TABLE.peer_count",
+                    value: effective_peers.len().saturating_add(1),
+                });
+            }
+            seen_peers
+                .try_reserve(1)
+                .map_err(|_| EncodeError::AllocationFailed {
+                    attempted: seen_peers
+                        .len()
+                        .saturating_add(1)
+                        .saturating_mul(std::mem::size_of::<IpAddr>()),
+                })?;
+            effective_peers
+                .try_reserve_exact(1)
+                .map_err(|_| EncodeError::AllocationFailed {
+                    attempted: effective_peers
+                        .len()
+                        .saturating_add(1)
+                        .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
+                })?;
+            seen_peers.insert(route.peer);
             effective_peers.push(MrtPeerEntry {
                 peer_addr: route.peer,
                 peer_bgp_id: Ipv4Addr::UNSPECIFIED,
@@ -591,7 +1308,31 @@ fn encode_snapshot_inner(
         }
     }
     for route in evpn_routes {
-        if seen_peers.insert(route.peer) {
+        output.check()?;
+        if !seen_peers.contains(&route.peer) {
+            if effective_peers.len() == usize::from(u16::MAX) {
+                return Err(EncodeError::FieldTooLarge {
+                    field: "PEER_INDEX_TABLE.peer_count",
+                    value: effective_peers.len().saturating_add(1),
+                });
+            }
+            seen_peers
+                .try_reserve(1)
+                .map_err(|_| EncodeError::AllocationFailed {
+                    attempted: seen_peers
+                        .len()
+                        .saturating_add(1)
+                        .saturating_mul(std::mem::size_of::<IpAddr>()),
+                })?;
+            effective_peers
+                .try_reserve_exact(1)
+                .map_err(|_| EncodeError::AllocationFailed {
+                    attempted: effective_peers
+                        .len()
+                        .saturating_add(1)
+                        .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
+                })?;
+            seen_peers.insert(route.peer);
             effective_peers.push(MrtPeerEntry {
                 peer_addr: route.peer,
                 peer_bgp_id: Ipv4Addr::UNSPECIFIED,
@@ -599,179 +1340,182 @@ fn encode_snapshot_inner(
             });
         }
     }
-    effective_peers.sort_by(|a, b| {
-        let a_key = match a.peer_addr {
-            IpAddr::V4(v4) => (0u8, v4.octets().to_vec()),
-            IpAddr::V6(v6) => (1u8, v6.octets().to_vec()),
-        };
-        let b_key = match b.peer_addr {
-            IpAddr::V4(v4) => (0u8, v4.octets().to_vec()),
-            IpAddr::V6(v6) => (1u8, v6.octets().to_vec()),
-        };
-        a_key
-            .cmp(&b_key)
+    sort_cancellable_by(&mut effective_peers, budget, |a, b| {
+        a.peer_addr
+            .cmp(&b.peer_addr)
             .then(a.peer_asn.cmp(&b.peer_asn))
             .then(a.peer_bgp_id.octets().cmp(&b.peer_bgp_id.octets()))
-    });
+    })?;
+    output.check()?;
     // 2. `PEER_INDEX_TABLE`
-    encode_peer_index_table(
-        &mut buf,
+    encode_peer_index_table_inner(
+        &mut output,
         timestamp,
         collector_bgp_id,
         view_name,
         &effective_peers,
     )?;
     // 3. Build peer index lookup
-    let peer_index: HashMap<IpAddr, u16> = effective_peers
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            u16::try_from(i)
-                .map(|idx| (p.peer_addr, idx))
-                .map_err(|_| EncodeError::FieldTooLarge {
-                    field: "peer index",
-                    value: i,
-                })
-        })
-        .collect::<Result<_, _>>()?;
-    // 4. Group routes by prefix
-    let mut by_prefix: HashMap<Prefix, Vec<&Route>> = HashMap::new();
-    for route in routes {
-        by_prefix.entry(route.prefix).or_default().push(route);
+    let mut peer_index = HashMap::<IpAddr, u16>::new();
+    peer_index
+        .try_reserve(effective_peers.len())
+        .map_err(|_| EncodeError::AllocationFailed {
+            attempted: effective_peers
+                .len()
+                .saturating_mul(std::mem::size_of::<(IpAddr, u16)>()),
+        })?;
+    for (index, peer) in effective_peers.iter().enumerate() {
+        output.check()?;
+        let index = u16::try_from(index).map_err(|_| EncodeError::FieldTooLarge {
+            field: "peer index",
+            value: index,
+        })?;
+        peer_index.insert(peer.peer_addr, index);
     }
-    // 5. Encode each prefix group
+    output.check()?;
+    // 4. Order borrowed routes once. No path attributes are cloned or retained
+    // per prefix; record entries are synthesized directly into the checked
+    // output after their profile counts have been preflighted.
+    let mut ordered_routes = collect_cancellable(routes.iter(), budget)?;
+    sort_cancellable_by(&mut ordered_routes, budget, |a, b| {
+        let a_index = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
+        let b_index = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
+        a.prefix
+            .cmp(&b.prefix)
+            .then(a_index.cmp(&b_index))
+            .then(a.path_id.cmp(&b.path_id))
+    })?;
+
+    // 5. Encode each contiguous prefix group.
     let mut seq_num: u32 = 0;
-    // Sort prefixes for deterministic output
-    let mut prefixes: Vec<Prefix> = by_prefix.keys().copied().collect();
-    prefixes.sort_by(|a, b| {
-        let a_bytes = match a {
-            Prefix::V4(v4) => (0u8, v4.addr.octets().to_vec(), v4.len),
-            Prefix::V6(v6) => (1u8, v6.addr.octets().to_vec(), v6.len),
-        };
-        let b_bytes = match b {
-            Prefix::V4(v4) => (0u8, v4.addr.octets().to_vec(), v4.len),
-            Prefix::V6(v6) => (1u8, v6.addr.octets().to_vec(), v6.len),
-        };
-        a_bytes.cmp(&b_bytes)
-    });
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    for prefix in &prefixes {
-        let mut prefix_routes = by_prefix[prefix].clone();
-        prefix_routes.sort_by(|a, b| {
-            let a_idx = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
-            let b_idx = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
-            a_idx
-                .cmp(&b_idx)
-                .then(a.path_id.cmp(&b.path_id))
-                .then(prefix_family_sort_key(a.prefix).cmp(&prefix_family_sort_key(b.prefix)))
-        });
-        let mut legacy_entries: Vec<RibEntry> = Vec::with_capacity(prefix_routes.len());
-        let mut add_path_entries: Vec<RibEntry> = Vec::new();
+    let mut group_start = 0usize;
+    while group_start < ordered_routes.len() {
+        output.check()?;
+        let prefix = ordered_routes[group_start].prefix;
+        let mut group_end = group_start + 1;
+        while group_end < ordered_routes.len() && ordered_routes[group_end].prefix == prefix {
+            if (group_end - group_start).is_multiple_of(CANCELLABLE_SORT_RUN) {
+                output.check()?;
+            }
+            group_end += 1;
+        }
+        let prefix_routes = &ordered_routes[group_start..group_end];
+        if add_path_receive.is_none() {
+            let count =
+                u16::try_from(prefix_routes.len()).map_err(|_| EncodeError::FieldTooLarge {
+                    field: "RIB entry count",
+                    value: prefix_routes.len(),
+                })?;
+            let add_path = prefix_routes.iter().any(|route| route.path_id != 0);
+            encode_route_entries_profile(
+                &mut output,
+                timestamp,
+                seq_num,
+                &prefix,
+                prefix_routes,
+                &peer_index,
+                None,
+                RouteEntrySelection::All,
+                count,
+                add_path,
+                now_secs,
+            )?;
+            seq_num = seq_num.wrapping_add(1);
+            group_start = group_end;
+            continue;
+        }
+
+        let mut legacy_count = 0usize;
+        let mut add_path_count = 0usize;
         for route in prefix_routes {
-            let Some(&idx) = peer_index.get(&route.peer) else {
-                continue;
-            };
-            let age = route.received_at.elapsed().as_secs();
-            let originated_u64 = now_secs.saturating_sub(age);
-            let originated = u32::try_from(originated_u64).unwrap_or(u32::MAX);
-            let entry = RibEntry {
-                peer_index: idx,
-                originated_time: originated,
-                path_id: route.path_id,
-                attributes: synthesize_attributes(route),
-            };
-            let uses_add_path = add_path_receive.is_some_and(|profiles| {
-                let afi = match prefix {
-                    Prefix::V4(_) => Afi::Ipv4,
-                    Prefix::V6(_) => Afi::Ipv6,
-                };
-                profiles.contains(&MrtAddPathReceiveProfile {
-                    peer: route.peer,
-                    afi,
-                    safi: Safi::Unicast,
-                })
-            });
-            if add_path_receive.is_some() && !uses_add_path && route.path_id != 0 {
+            output.check()?;
+            let uses_add_path = route_uses_add_path(route, add_path_receive);
+            if !uses_add_path && route.path_id != 0 {
                 return Err(EncodeError::AddPathProfileMismatch {
                     peer: route.peer,
                     path_id: route.path_id,
                 });
             }
             if uses_add_path {
-                add_path_entries.push(entry);
+                add_path_count = add_path_count.saturating_add(1);
             } else {
-                legacy_entries.push(entry);
+                legacy_count = legacy_count.saturating_add(1);
             }
         }
-        if !legacy_entries.is_empty() {
-            if add_path_receive.is_some() {
-                encode_rib_entries_profile(
-                    &mut buf,
-                    timestamp,
-                    seq_num,
-                    prefix,
-                    &legacy_entries,
-                    false,
-                )?;
-            } else {
-                encode_rib_entries(&mut buf, timestamp, seq_num, prefix, &legacy_entries)?;
-            }
-            seq_num = seq_num.wrapping_add(1);
-        }
-        if !add_path_entries.is_empty() {
-            encode_rib_entries_profile(
-                &mut buf,
+        if legacy_count != 0 {
+            let count = u16::try_from(legacy_count).map_err(|_| EncodeError::FieldTooLarge {
+                field: "RIB entry count",
+                value: legacy_count,
+            })?;
+            encode_route_entries_profile(
+                &mut output,
                 timestamp,
                 seq_num,
-                prefix,
-                &add_path_entries,
-                true,
+                &prefix,
+                prefix_routes,
+                &peer_index,
+                add_path_receive,
+                RouteEntrySelection::Legacy,
+                count,
+                false,
+                now_secs,
             )?;
             seq_num = seq_num.wrapping_add(1);
         }
+        if add_path_count != 0 {
+            let count = u16::try_from(add_path_count).map_err(|_| EncodeError::FieldTooLarge {
+                field: "RIB entry count",
+                value: add_path_count,
+            })?;
+            encode_route_entries_profile(
+                &mut output,
+                timestamp,
+                seq_num,
+                &prefix,
+                prefix_routes,
+                &peer_index,
+                add_path_receive,
+                RouteEntrySelection::AddPath,
+                count,
+                true,
+                now_secs,
+            )?;
+            seq_num = seq_num.wrapping_add(1);
+        }
+        group_start = group_end;
     }
     // 6. Encode EVPN routes as RIB_GENERIC records (RFC 6396 §4.3.5).
     // EVPN does not use Add-Path in this codebase, and EVPN keys are
     // already per-route (RD + ESI + ETag + MAC + IP), so each route maps
     // to a single-entry RIB_GENERIC record. Sort for deterministic output
     // by (peer_index, route).
-    // Sort by (peer_index, encoded EVPN NLRI bytes). EvpnRouteKey doesn't
-    // derive Ord, but the encoded NLRI is a canonical byte representation
-    // and gives a deterministic ordering.
-    let mut sorted_evpn: Vec<(&EvpnRibRoute, Vec<u8>)> = evpn_routes
-        .iter()
-        .map(|route| {
-            let mut nlri_bytes = Vec::new();
-            encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri_bytes);
-            (route, nlri_bytes)
-        })
-        .collect();
-    sorted_evpn.sort_by(|(a, a_bytes), (b, b_bytes)| {
+    // The typed identity key is allocation-free and totally ordered in wire
+    // route-type/field order. Do not retain one encoded NLRI Vec per route.
+    let mut sorted_evpn = collect_cancellable(evpn_routes.iter(), budget)?;
+    sort_cancellable_by(&mut sorted_evpn, budget, |a, b| {
         let a_idx = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
         let b_idx = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
-        a_idx.cmp(&b_idx).then_with(|| a_bytes.cmp(b_bytes))
-    });
-    let sorted_evpn: Vec<&EvpnRibRoute> = sorted_evpn.into_iter().map(|(r, _)| r).collect();
+        a_idx
+            .cmp(&b_idx)
+            .then_with(|| a.route.key().cmp(&b.route.key()))
+    })?;
     for route in sorted_evpn {
+        output.check()?;
         let Some(&idx) = peer_index.get(&route.peer) else {
             continue;
         };
         let age = route.received_at.elapsed().as_secs();
         let originated_u64 = now_secs.saturating_sub(age);
         let originated = u32::try_from(originated_u64).unwrap_or(u32::MAX);
-        encode_evpn_rib_generic(&mut buf, timestamp, seq_num, route, idx, originated)?;
+        encode_evpn_rib_generic(&mut output, timestamp, seq_num, route, idx, originated)?;
         seq_num = seq_num.wrapping_add(1);
     }
+    output.check()?;
     Ok(buf)
-}
-fn prefix_family_sort_key(prefix: Prefix) -> (u8, Vec<u8>, u8) {
-    match prefix {
-        Prefix::V4(v4) => (0u8, v4.addr.octets().to_vec(), v4.len),
-        Prefix::V6(v6) => (1u8, v6.addr.octets().to_vec(), v6.len),
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -782,7 +1526,8 @@ mod tests {
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
     fn make_peer(addr: IpAddr, asn: u32) -> MrtPeerEntry {
         let bgp_id = match addr {
             IpAddr::V4(v4) => v4,
@@ -818,6 +1563,197 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
+    }
+
+    #[test]
+    fn bounded_buffer_rejects_before_vec_growth_and_stops_after_cancellation() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::clone(&cancelled),
+            16,
+        );
+        let mut bytes = Vec::new();
+        let mut output = EncodeBuffer::new(&mut bytes, Some(&budget));
+        output.extend_from_slice(&[0; 16]).unwrap();
+        assert_eq!(output.len(), 16);
+        assert!(output.bytes.capacity() <= 16);
+
+        assert!(matches!(
+            output.push(1),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::SizeLimitExceeded {
+                    attempted: 17,
+                    cap: 16
+                }
+            ))
+        ));
+        assert_eq!(output.len(), 16, "cap failure must happen before growth");
+        assert!(output.bytes.capacity() <= 16);
+
+        output.truncate(8);
+        cancelled.store(true, Ordering::Release);
+        assert!(matches!(
+            output.push(1),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::Cancelled
+            ))
+        ));
+        assert_eq!(output.len(), 8, "cancellation must happen before growth");
+        assert!(output.bytes.capacity() <= 16);
+    }
+
+    #[test]
+    fn warm_snapshot_complete_output_cap_fails_closed() {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let prefix = Prefix::V4(Ipv4Prefix {
+            addr: Ipv4Addr::new(198, 51, 100, 0),
+            len: 24,
+        });
+        let peers = [make_peer(peer, 64_501)];
+        let routes = [make_route(prefix, peer, peer)];
+        let unbounded = encode_warm_snapshot(
+            Ipv4Addr::new(10, 0, 0, 1),
+            "generation-1",
+            &peers,
+            &routes,
+            &[],
+            1_700_000_000,
+            &[],
+        )
+        .unwrap();
+        let cap = unbounded.len() - 1;
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(false)),
+            cap,
+        );
+
+        assert!(matches!(
+            encode_warm_snapshot_bounded(
+                Ipv4Addr::new(10, 0, 0, 1),
+                "generation-1",
+                &peers,
+                &routes,
+                &[],
+                1_700_000_000,
+                &[],
+                &budget,
+            ),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::SizeLimitExceeded { attempted, cap: actual_cap }
+            )) if attempted > actual_cap && actual_cap == cap
+        ));
+    }
+
+    #[test]
+    fn cancellable_sort_stops_within_one_bounded_run() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::clone(&cancelled),
+            2 * 1024 * 1024,
+        );
+        let comparisons = AtomicUsize::new(0);
+        let mut values: Vec<_> = (0..100_000usize).rev().collect();
+        let result = sort_cancellable_by(&mut values, Some(&budget), |left, right| {
+            if comparisons.fetch_add(1, Ordering::Relaxed) == 1_000 {
+                cancelled.store(true, Ordering::Release);
+            }
+            left.cmp(right)
+        });
+
+        assert!(matches!(
+            result,
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::Cancelled
+            ))
+        ));
+        assert!(
+            comparisons.load(Ordering::Relaxed) < 2_000,
+            "cancellation must stop before another unbounded sort phase"
+        );
+    }
+
+    #[test]
+    fn cancellation_during_key_materialization_stops_before_sorting() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::clone(&cancelled),
+            2 * 1024 * 1024,
+        );
+        let materialized = AtomicUsize::new(0);
+        let values: Vec<_> = (0..100_000usize).collect();
+        let keys = values.iter().enumerate().map(|(index, value)| {
+            materialized.fetch_add(1, Ordering::Relaxed);
+            if index == 1_000 {
+                cancelled.store(true, Ordering::Release);
+            }
+            value
+        });
+
+        assert!(matches!(
+            collect_cancellable(keys, Some(&budget)),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::Cancelled
+            ))
+        ));
+        assert_eq!(materialized.load(Ordering::Relaxed), 1_001);
+    }
+
+    #[test]
+    fn large_same_prefix_attributes_hit_cap_without_owned_entry_staging() {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let prefix = Prefix::V4(Ipv4Prefix {
+            addr: Ipv4Addr::new(198, 51, 100, 0),
+            len: 24,
+        });
+        let attributes = Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::Communities(vec![0x000a_000b; 2_048]),
+        ]);
+        let routes: Vec<_> = (1..=2_048u32)
+            .map(|path_id| {
+                let mut route = make_route(prefix, peer, peer);
+                route.path_id = path_id;
+                route.attributes = Arc::clone(&attributes);
+                route
+            })
+            .collect();
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(false)),
+            128 * 1024,
+        );
+
+        assert!(matches!(
+            encode_warm_snapshot_bounded(
+                Ipv4Addr::new(10, 0, 0, 1),
+                "generation-large-prefix",
+                &[make_peer(peer, 64_501)],
+                &routes,
+                &[],
+                1_700_000_000,
+                &[MrtAddPathReceiveProfile {
+                    peer,
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                }],
+                &budget,
+            ),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::SizeLimitExceeded { cap: 131_072, .. }
+            ))
+        ));
+        assert_eq!(
+            Arc::strong_count(&attributes),
+            routes.len() + 1,
+            "borrowed encoding must retain the shared route attributes"
+        );
     }
     #[test]
     fn mrt_header_encoding() {
@@ -1265,6 +2201,45 @@ mod tests {
             &payload[7..7 + expected_nlri.len()],
             expected_nlri.as_slice()
         );
+    }
+
+    #[test]
+    fn large_evpn_inventory_hits_cap_without_owned_encoded_sort_keys() {
+        use rustbgpd_wire::{EvpnRoute, MacAddress};
+
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut routes = Vec::new();
+        routes.try_reserve_exact(4_096).unwrap();
+        for suffix in 0..4_096u16 {
+            let mut route = make_evpn_macip(peer_addr, peer_addr);
+            let EvpnRoute::MacIp(mac_ip) = &mut route.route else {
+                unreachable!("helper always returns MAC/IP routes")
+            };
+            let [high, low] = suffix.to_be_bytes();
+            mac_ip.mac = MacAddress([0x02, 0, 0, 0, high, low]);
+            routes.push(route);
+        }
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(false)),
+            64 * 1024,
+        );
+
+        assert!(matches!(
+            encode_warm_snapshot_bounded(
+                Ipv4Addr::new(1, 2, 3, 4),
+                "generation-large-evpn",
+                &[make_peer(peer_addr, 65_002)],
+                &[],
+                &routes,
+                1_700_000_000,
+                &[],
+                &budget,
+            ),
+            Err(EncodeError::WarmSnapshotBudget(
+                WarmSnapshotBudgetError::SizeLimitExceeded { cap: 65_536, .. }
+            ))
+        ));
     }
     /// Walk a serialized BGP attribute block and return the value bytes
     /// of the first attribute matching `type_code`. Used by the
