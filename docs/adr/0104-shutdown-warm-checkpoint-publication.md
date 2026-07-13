@@ -34,8 +34,13 @@ weaken the existing marker-v1 restart path.
 4. The fixed `<runtime_state_dir>/warm-bundle-v1` directory is owner-verified
    and descriptor-pinned. Filesystem operations reject symlinks and unsafe
    ownership/modes. A content-addressed MRT artifact is durably committed
-   before atomic `manifest.json` replacement; failure restores the prior
-   committed directory image.
+   before atomic `manifest.json` replacement; any failure through the manifest
+   rename and parent-directory fsync restores the prior committed directory
+   image. Only after that commit point, a descriptor-relative sweep removes
+   superseded `snapshot-<sha256>.mrt` files and recognizable atomic temporary
+   files. It never selects `manifest.json` or the exact snapshot named by the
+   current manifest. Cleanup failure is warned and leaves the new generation
+   committed; no background collector or directory-size policy is introduced.
 5. A successful publication writes restart marker v2 with the exact checkpoint
    generation. Failure writes the established marker-v1 form instead. Marker
    and bundle operations remain independently fail-closed.
@@ -53,6 +58,10 @@ weaken the existing marker-v1 restart path.
   protected as sensitive daemon state.
 - Shutdown may spend up to 30 seconds attempting publication. Failure is
   visible in logs but preserves the normal Graceful Restart marker fallback.
+- A successful checkpoint normally leaves one manifest and its one current
+  snapshot. Unknown files are not garbage-collected. A post-commit cleanup
+  warning means the new checkpoint remains committed but stale private bundle
+  entries may need operator inspection or removal.
 - The V1 format intentionally excludes dynamic/scoped peers, ambiguous static
   addresses, unsupported families, and EVPN Add-Path receive rather than
   serializing an incomplete or ambiguous view.

@@ -150,6 +150,11 @@ the exact effective configuration, resolved import policies, live peer/family
 identity, and restart-marker generation, and is readable only through the
 daemon-private runtime-state directory. If capture or publication fails, the
 daemon falls back to the existing marker-v1 Graceful Restart behavior.
+After a new manifest is durably committed, rustbgpd removes superseded
+content-addressed snapshots and recognizable interrupted-write temporary
+files from that pinned private directory. Cleanup failure is logged but does
+not invalidate the current manifest or its snapshot; unknown files are left
+untouched.
 
 This option does **not** make startup restore routes: no cached route is loaded,
 selected, installed, or advertised. A successful checkpoint only causes the GR

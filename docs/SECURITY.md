@@ -229,7 +229,11 @@ the daemon account, and do not expose or back it up as a public MRT feed.
 Publication is descriptor-relative beneath an owner-verified directory that is
 not group/world-writable. Bundle files are owner-only, symlink traversal is
 rejected, content is size-bounded and hashed, and `manifest.json` is the atomic
-commit point. Startup does not load the checkpoint, so a stale or tampered
+commit point. A descriptor-relative post-commit sweep removes only canonical
+superseded snapshot names and recognizable atomic temporary names; it preserves
+the manifest's exact current snapshot and ignores unknown entries. Cleanup
+failure is logged without invalidating the committed generation. Startup does
+not load the checkpoint, so a stale or tampered
 bundle cannot currently inject, select, install, or advertise a route. The GR
 marker carries only an opaque generation and retains the existing marker-v1
 fallback if publication fails.

@@ -20,6 +20,10 @@ crates/policy/fuzz/corpus/
 crates/policy/fuzz/target/
 crates/policy/fuzz/Cargo.lock
 crates/policy/fuzz/artifacts/
+crates/mrt/fuzz/corpus/
+crates/mrt/fuzz/target/
+crates/mrt/fuzz/Cargo.lock
+crates/mrt/fuzz/artifacts/
 
 # Profiling artifacts
 dhat-heap*.json
