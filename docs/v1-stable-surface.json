@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "contract": "rustbgpd-rs-rr-v1",
+  "baseline_release": "v0.51.0",
+  "scope": "Narrow route-server and route-reflector product contract; unlisted surfaces are not stable by implication.",
+  "roles": [
+    {
+      "id": "route-server-unicast",
+      "classification": "stable",
+      "families": ["ipv4_unicast", "ipv6_unicast"],
+      "constraints": ["control-plane-only", "route_server_client=true"]
+    },
+    {
+      "id": "route-reflector-unicast",
+      "classification": "stable",
+      "families": ["ipv4_unicast", "ipv6_unicast"],
+      "constraints": ["control-plane-only", "route_reflector_client=true"]
+    },
+    {
+      "id": "route-reflector-bgp-ls",
+      "classification": "scoped_rr_only",
+      "families": ["bgp_ls", "bgp_ls_vpn"],
+      "constraints": ["receive-reflect-query", "no-local-topology-origination"]
+    },
+    {
+      "id": "route-reflector-l3vpn",
+      "classification": "scoped_rr_only",
+      "families": ["vpnv4_unicast", "vpnv6_unicast"],
+      "constraints": ["rr-or-controller-feed", "no-pe-vrf-or-mpls-forwarding"]
+    },
+    {
+      "id": "route-reflector-labeled-unicast",
+      "classification": "scoped_rr_only",
+      "families": ["ipv4_labeled_unicast", "ipv6_labeled_unicast"],
+      "constraints": ["receive-reflect-query", "no-label-forwarding"]
+    },
+    {
+      "id": "route-reflector-rtc",
+      "classification": "scoped_rr_only",
+      "families": ["rtc"],
+      "constraints": ["receive-reflect-query"]
+    },
+    {
+      "id": "evpn",
+      "classification": "alpha",
+      "families": ["l2vpn_evpn"],
+      "constraints": ["rr-vtep-irb-surfaces-remain-outside-v1"]
+    },
+    {
+      "id": "linux-dataplane",
+      "classification": "alpha",
+      "families": ["ipv4_unicast", "ipv6_unicast"],
+      "constraints": ["fib-and-managed-netdev-surfaces-remain-outside-v1"]
+    },
+    {
+      "id": "paths-limit",
+      "classification": "experimental",
+      "families": ["ipv4_unicast", "ipv6_unicast"],
+      "constraints": ["draft-capability", "not-part-of-v1"]
+    }
+  ],
+  "config": {
+    "stable_fields": [
+      {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "cf2c088e239c7c702dc6ffdaf091da236f71b096d67a763df6fcd17bffa8546d"},
+      {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry", "worker_threads"], "schema_sha256": "9fd97ffb69887facf9767d9e336b3e7ccb05840c6c9583b26d6b2c817ce62724"},
+      {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "4b31fcd11e509152529af2fefd2e3375c3165f7e925bbaa4e274089db2ca5e48"},
+      {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "76fbc02339d17fcc33ad5093ac5b079804bd2da7d35a9dc6a9f06ea27d2d961d"},
+      {"definition": "GrpcUdsListenerConfig", "fields": ["access_mode", "enabled", "max_tier", "mode", "path", "principal", "token_file"], "schema_sha256": "319c0857d0a28c3ed728a72661cb364250c6e675bae7c36eb9e3651e6b952b51"},
+      {"definition": "SecurityConfig", "fields": ["grpc"], "schema_sha256": "a7a4d20d0e1070d773844264acdba7534a2fcae789a31d0685c472e024b14c14"},
+      {"definition": "GrpcSecurityConfig", "fields": ["enforcement", "roles"], "schema_sha256": "3de5cc7a421f87f8e64f867e3d4f7b116ffa6aea50b42ef54004c2f02481837b"},
+      {"definition": "Neighbor", "fields": ["add_path", "address", "description", "disable_ipv4_unicast", "export_policy", "export_policy_chain", "families", "gr_restart_time", "gr_stale_routes_time", "graceful_restart", "hold_time", "import_policy", "import_policy_chain", "llgr_stale_time", "local_ipv6_nexthop", "max_prefixes", "md5_password", "orr_vantage", "peer_group", "per_client_best", "prefix_orf_receive", "remote_asn", "remove_private_as", "role", "route_reflector_client", "route_server_client", "send_hold_time", "strict_role", "ttl_security"], "schema_sha256": "05a5598b6f2c4cf27fd4717d5087530faedd2b2adbf333d8f3d2d2838f6eb8b3"},
+      {"definition": "PeerGroupConfig", "fields": ["add_path", "disable_ipv4_unicast", "export_policy", "export_policy_chain", "families", "gr_restart_time", "gr_stale_routes_time", "graceful_restart", "hold_time", "import_policy", "import_policy_chain", "llgr_stale_time", "local_ipv6_nexthop", "max_prefixes", "md5_password", "orr_vantage", "per_client_best", "prefix_orf_receive", "remove_private_as", "role", "route_reflector_client", "route_server_client", "send_hold_time", "strict_role", "ttl_security"], "schema_sha256": "da84236d17d055eeb3b64c44b4f758fcb00845effa3eaa908745baae8fc84498"},
+      {"definition": "AddPathConfig", "fields": ["receive", "send", "send_max"], "schema_sha256": "fcc9563e80d1a2ac3232f3c774c569698d8493a25498cf5379bea0e033de7e8e"},
+      {"definition": "DynamicNeighborConfig", "fields": ["description", "peer_group", "prefix", "remote_asn"], "schema_sha256": "f2901b16697e8615f679d60ef4a30e6df4919ae346272b88642a7f164365a287"},
+      {"definition": "PolicyConfig", "fields": ["datasets", "definitions", "explain", "export_chain", "import_chain", "neighbor_sets", "rpol_files", "rpol_roots"], "schema_sha256": "375b5f8f36c3f01bf7c66c642d4b2a441547f9d1c66f8c4ed5ad81239b43ac6d"},
+      {"definition": "DatasetFileConfig", "fields": ["path"], "schema_sha256": "df5e7a05e564b0b26c7bf2037c1e36fd76d3f53a38406607c7421f69d8a1c2d2"},
+      {"definition": "NeighborSetConfig", "fields": ["addresses", "peer_groups", "remote_asns"], "schema_sha256": "a183dc9fc723d482d912fbc856fd0ed0ad5f17997df0315eb4d1ee283c7afe53"},
+      {"definition": "PolicyExplainConfig", "fields": ["cache_size", "enabled"], "schema_sha256": "d17f7d9757abd0657aaa25beed71e0ca2f5f30813798848f5d430d4dc4d57d9b"},
+      {"definition": "NamedPolicyConfig", "fields": ["default_action", "statements"], "schema_sha256": "0eb864347e3689a02632e41e7169d4412ae615913425c7d33cd3f8ff90f5d136"},
+      {"definition": "PolicyStatementConfig", "fields": ["action", "ge", "le", "match_as_path", "match_as_path_length_ge", "match_as_path_length_le", "match_aspa_validation", "match_community", "match_local_pref_ge", "match_local_pref_le", "match_med_ge", "match_med_le", "match_neighbor_set", "match_next_hop", "match_route_type", "match_rpki_validation", "prefix", "set_as_path_prepend", "set_community_add", "set_community_remove", "set_local_pref", "set_med", "set_next_hop"], "schema_sha256": "a8dc52b8ce1739dd675773ff20ef44b5bd1e4f8e5dd4a011ae9fe667fab3f1fc"},
+      {"definition": "AsPathPrependConfig", "fields": ["asn", "count"], "schema_sha256": "2807db7207b824c1075cabcd5d7605ad8f8f9dede1c56ba0e1bc0e068ef9f34d"},
+      {"definition": "RpkiConfig", "fields": ["cache_servers"], "schema_sha256": "b35230faf8918962416ab8837f9f97f1d316d7178beb5f636dc0bf707b0cb929"},
+      {"definition": "CacheServer", "fields": ["address", "expire_interval", "refresh_interval", "retry_interval"], "schema_sha256": "7f8512eed178d2ac16002c35609d602e923adb54d6f78e5302d432420ef8cd42"},
+      {"definition": "BmpConfig", "fields": ["collectors", "sys_descr", "sys_name"], "schema_sha256": "886e81e086dccd39ef6d47f70f3523277dd1fe4cd1e7e8580e5337e3628c6904"},
+      {"definition": "BmpCollector", "fields": ["address", "monitor", "reconnect_interval"], "schema_sha256": "1575f3f64012e08152b083990b291994973075b9a294a5d7788065da11aa588b"},
+      {"definition": "MrtConfig", "fields": ["compress", "dump_interval", "file_prefix", "output_dir"], "schema_sha256": "19c7ee133e77e2306a8f56ae6ef7050eb375e7051714355d40585cf2a1ff87f6"},
+      {"definition": "EventHistoryConfig", "fields": ["batch_interval_ms", "batch_size", "enabled", "max_bytes", "max_events", "overflow", "path", "queue_capacity", "required", "synchronous"], "schema_sha256": "c2f4b0b37b9fc3fea683e82ca11595a8bdcdc5ff835a2bdea1ff0485e21b76d0"}
+    ],
+    "stable_types": [
+      {"definition": "BgpRoleConfig", "schema_sha256": "33acb141838f6612e3cff7273c7936e30683836d7ef8b56d09012215f745f183"},
+      {"definition": "BmpMonitorView", "schema_sha256": "dec0dcdce7c5514ca4be543940f036bbe33e9223f12404ca66fc5d82b552ba16"},
+      {"definition": "GrpcAccessModeConfig", "schema_sha256": "83c96eb88d57e5c0b689443bb415086df4ed403fae8e5ccc77a5dd0fe7b7c577"},
+      {"definition": "GrpcEnforcementConfig", "schema_sha256": "415423dc03b1b0cf515a7b36391a6d6062ad3464e350c1937cec95989668a754"},
+      {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
+      {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"}
+    ],
+    "explicitly_unstable_roots": [
+      {"path": "AddPathConfig.receive_max", "classification": "experimental"},
+      {"path": "Config.apply_bum_enforcement", "classification": "alpha"},
+      {"path": "Config.bfd_profiles", "classification": "outside_v1"},
+      {"path": "Config.ethernet_segments", "classification": "alpha"},
+      {"path": "Config.evpn_instances", "classification": "alpha"},
+      {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
+      {"path": "Config.fib_tables", "classification": "alpha"},
+      {"path": "Config.managed_netdevs", "classification": "alpha"},
+      {"path": "Neighbor.bfd", "classification": "outside_v1"},
+      {"path": "Neighbor.interface", "classification": "outside_v1"},
+      {"path": "Neighbor.tcp_ao", "classification": "outside_v1"},
+      {"path": "PeerGroupConfig.bfd", "classification": "outside_v1"}
+    ]
+  },
+  "grpc": {
+    "proto": "proto/rustbgpd.proto",
+    "stable_method_sets": [
+      {"service": "GlobalService", "methods": ["GetGlobal"], "signature_sha256": "8a308253bef28e75326be5eeac7554554b51d950ea5e52dd9dd8e4b1afdd6a56", "message_graph_sha256": "fc2bf5a19da05ddb703ae3a7cefd9465cac934d1b1890e0ff9ee7c78968214d7"},
+      {"service": "ConfigService", "methods": ["DiffRuntimeConfig", "PlanConfigTransaction", "ApplyConfigTransaction", "ConfirmConfigTransaction", "AbortConfigTransaction", "GetConfigTransactionStatus", "GetEffectiveConfig"], "signature_sha256": "492da5fb3c49fbea39162a43b48b8184ea73554a313eab1abcbbe55b69938fb2", "message_graph_sha256": "012e55e57bbce378e414950a24d3bb562975ef8ff98f9260b90a1907bda62841"},
+      {"service": "NeighborService", "methods": ["AddNeighbor", "DeleteNeighbor", "ListNeighbors", "GetNeighborState", "EnableNeighbor", "DisableNeighbor", "SoftResetIn", "ListDynamicNeighbors", "AddDynamicNeighbor", "DeleteDynamicNeighbor", "SetGracefulShutdown"], "signature_sha256": "163653e24819f41324aef7cb82ba495be5130317d732642b3538dfd5f4f8b000", "message_graph_sha256": "c2191944123465abb8485e494636d1ff87f74b07664c728265b5395c063f85c3"},
+      {"service": "PolicyService", "methods": ["ListPolicies", "GetPolicy", "SetPolicy", "DeletePolicy", "ListNeighborSets", "GetNeighborSet", "SetNeighborSet", "DeleteNeighborSet", "GetGlobalPolicyChains", "SetGlobalImportChain", "SetGlobalExportChain", "ClearGlobalImportChain", "ClearGlobalExportChain", "GetNeighborPolicyChains", "SetNeighborImportChain", "SetNeighborExportChain", "ClearNeighborImportChain", "ClearNeighborExportChain", "ExplainImportPolicy", "TestPolicy", "GetPolicyStats"], "signature_sha256": "c119c0087b1dcaca56e21842eaedfc5154fee5c8a5f2fd9f9cd64463a723f8e3", "message_graph_sha256": "175a62378c3bd1bc241b4025775066785b6f47597eb8253677f8f1691eaba039"},
+      {"service": "PeerGroupService", "methods": ["ListPeerGroups", "GetPeerGroup", "SetPeerGroup", "DeletePeerGroup", "SetNeighborPeerGroup", "ClearNeighborPeerGroup"], "signature_sha256": "069596cd50a6a472ad3ca3e1fa81e634219ede2b2e7fda99118d4ca7765b4106", "message_graph_sha256": "2ff875f22130511d28a4a461cf3047a399c0e46080b093b148283651bca6fd27"},
+      {"service": "RibService", "methods": ["ListReceivedRoutes", "ListBestRoutes", "ListAdvertisedRoutes", "ExplainAdvertisedRoute", "ExplainBestPath", "ListRouteEvents", "WatchRoutes", "WatchRouteEvents"], "signature_sha256": "42511f37929b2462e2f9113b2c6fe3d5f6ed5b4d0f984ce4f7f36a88c3d98b59", "message_graph_sha256": "bf535f44fd5eca1a1fe97e5643676debbb1670e6510c022ffd615d4e44eff3aa"},
+      {"service": "EventService", "methods": ["WatchEvents", "ListSessionEvents", "ListPolicyEvents", "SubscribeFromEvent"], "signature_sha256": "26d5bc69120c05e728a2343cade242865705dd0e26f3e7e9b21dc521fe1a7ca3", "message_graph_sha256": "1863ad8e212cf17c311f2a4c438129303459170294022482f6f519f4480761fc"},
+      {"service": "InjectionService", "methods": ["AddPath", "DeletePath"], "signature_sha256": "1a056ee6bee35c4e0bab0624c5e31a3ca49252eba179aecc0ca3e3fa613d1a5c", "message_graph_sha256": "da6ff0b6137ed7dc4fb8709ea3d8dd263f18dc0081d798895848c5c46243f42a"},
+      {"service": "ControlService", "methods": ["Shutdown", "GetHealth", "GetMetrics", "TriggerMrtDump"], "signature_sha256": "2b1392bf21a2783f5829a0b7838af9285c10f2a59dc90f6d58083c35c5aaa684", "message_graph_sha256": "4495cd5ccf21ddb5d3f4cd79328bf118f9b458d28c2f78e24b62b0499b09bb50"}
+    ],
+    "scoped_rr_only_method_sets": [
+      {"service": "RibService", "methods": ["ListBgpLsRoutes", "ListVpnRoutes", "ListLabeledRoutes", "ListRtcRoutes", "ListTopologyNodes", "ListTopologyLinks", "ListOrrStatus"], "signature_sha256": "6e4fc15d26b9de73655759d98c31cf68e25b0e5fca712e676d59c01c710fe290", "message_graph_sha256": "53e84ecef4708a9f117f839732bd564c07b6c37905173d36583ec203cc92de4d"}
+    ],
+    "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
+    "explicitly_outside_v1": ["gnmi.gNMI", "BfdService", "EvpnService", "InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.ListFlowSpecRoutes", "EventService.ListEvpnEvents"]
+  },
+  "cli": {
+    "stable_command_paths": ["config abort", "config apply", "config confirm", "config diff", "config effective", "config plan", "config status", "doctor", "dynamic-neighbor", "events", "global", "gshut", "health", "metrics", "mrt-dump", "neighbor", "neighbor-set", "peer-group", "policy check", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown", "watch"],
+    "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
+    "versioned_json_contracts": [
+      {"id": "rbgp-ribdiff/1", "source": "crates/cli/src/ribdiff.rs", "evolution": "additive_fields_only"},
+      {"id": "rbgp-ribsnap/1", "source": "crates/cli/src/commands/diff.rs", "evolution": "additive_fields_only"}
+    ],
+    "test_pinned_json_contracts": [
+      {"id": "neighbor-detail-v1", "source": "crates/cli/src/output.rs", "test": "test_json_neighbor_detail_serializes_dynamic_peer_fields", "evolution": "additive_fields_only_except_explicitly_experimental_fields"},
+      {"id": "support-bundle-manifest/2", "source": "crates/cli/src/commands/doctor.rs", "test": "doctor_bundle_has_v2_layout_and_manifest", "evolution": "additive_fields_only"}
+    ]
+  },
+  "compatibility": {
+    "protobuf": "Existing stable RPC names, streaming modes, request/response types, field numbers, field types, and enum numeric values do not change in v1. Additive fields and RPCs are allowed; removed numbers and names remain reserved.",
+    "config": "Stable fields may gain optional siblings with documented defaults. Removal, rename, type change, or default change requires deprecation and migration under the support window.",
+    "rpol": "Grammar additions must preserve parsing and decisions for the pinned corpus. Changing an existing program's accept/reject result or modification set is breaking.",
+    "metrics": "Stable metric names, types, and existing label meanings do not change. New metrics and bounded labels are additive; label removal or reinterpretation is breaking.",
+    "events": "Stable event kinds and existing JSON/protobuf fields retain meaning. New optional fields and event kinds are additive; field removal, rename, or semantic reuse is breaking.",
+    "deprecation_window": {"minimum_minor_releases": 2, "minimum_days": 90},
+    "migration_support": "A breaking stable-surface change requires a new contract major, CHANGELOG entry, migration guide, and a consecutive-release fixture accepted by the new release. Current and immediately previous minor release migrations are supported."
+  },
+  "mutation": {
+    "canonical": "ConfigService PlanConfigTransaction/ApplyConfigTransaction with snapshot token and commit-confirmed confirm/abort lifecycle",
+    "file_compatibility": "SIGHUP reconciles the configured file through the same planner where supported, but is not an atomic compound-mutation API; unsupported or mixed changes follow the reload matrix and may require restart."
+  },
+  "upgrade_exercises": [
+    {
+      "from_release": "v0.50.0",
+      "to_release": "v0.51.0",
+      "fixture": "examples/route-server/config.toml",
+      "semantic_toml_sha256": "064865a2dd6cf266d674a62f2f1dec70bf08b7cc01e81e742878a44440621626",
+      "validation_test": "config::tests::config_examples_parse",
+      "result": "accepted_without_config_migration"
+    }
+  ]
+}

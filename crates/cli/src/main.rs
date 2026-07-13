@@ -2817,6 +2817,34 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn v1_stable_cli_command_inventory_matches_clap_tree() {
+        let inventory_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/v1-stable-surface.json"
+        );
+        let inventory: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
+        let command = Cli::command();
+        for class in ["stable_command_paths", "scoped_rr_only_command_paths"] {
+            for path in inventory["cli"][class]
+                .as_array()
+                .unwrap_or_else(|| panic!("{class} are an array"))
+            {
+                let path = path.as_str().expect("inventoried command path is a string");
+                let mut current = &command;
+                for segment in path.split_whitespace() {
+                    current = current
+                        .get_subcommands()
+                        .find(|subcommand| subcommand.get_name() == segment)
+                        .unwrap_or_else(|| {
+                            panic!("inventoried v1 CLI command path disappeared: {path}")
+                        });
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_rbgp_command_renders_rbgp_usage() {
         let mut command = cli_command(BINARY_NAME);
         let help = command.render_long_help().to_string();

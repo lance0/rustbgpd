@@ -1,0 +1,129 @@
+# Narrow v1 route-server / route-reflector contract
+
+rustbgpd remains a public-alpha project overall. This document defines a much
+narrower compatibility promise for deployments that use rustbgpd as an IPv4 /
+IPv6 unicast route server or route reflector. It does not make every protocol,
+configuration key, RPC, CLI command, or Linux dataplane role stable.
+
+The machine-readable source of truth is
+[`v1-stable-surface.json`](v1-stable-surface.json). CI checks its config fields
+against the generated JSON Schema, its RPC and top-level request/response
+signatures against the protobuf, its RPC membership against the authorization
+inventory, its CLI paths against the Clap tree, and its consecutive-release
+upgrade receipt. A surface absent from that file is outside the v1 promise.
+
+## Role matrix
+
+| Classification | Role / family | Supported boundary |
+|---|---|---|
+| **Stable** | `route-server-unicast` — IPv4/IPv6 unicast route server | Control-plane route-server operation, RFC 7947 transparency, Add-Path and proven per-client-best path-hiding mitigation, RPKI/ASPA policy, Roles/OTC, policy explain/test/stats, and the inventoried management/observability surfaces. |
+| **Stable** | `route-reflector-unicast` — IPv4/IPv6 unicast route reflector | Control-plane reflection, Add-Path where negotiated, ORR where configured, policy, and the inventoried management/observability surfaces. |
+| **Scoped RR-only** | `route-reflector-bgp-ls` — BGP-LS / BGP-LS VPN | Receive, reflect, query, and ORR topology input. No local topology origination or general link-state controller promise. |
+| **Scoped RR-only** | `route-reflector-l3vpn` — VPNv4/VPNv6 | Route reflection and controller-feed use only. No PE VRF import, CE attachment, MPLS forwarding, or dataplane programming promise. |
+| **Scoped RR-only** | `route-reflector-labeled-unicast` — IPv4/IPv6 labeled-unicast | Receive, reflect, and query. Labels are not installed in a forwarding plane. |
+| **Scoped RR-only** | `route-reflector-rtc` — RT-Constrain | Receive, reflect, query, and VPN export membership within the RR boundary. |
+| **Alpha** | `evpn` — EVPN RR, VTEP, IRB, multi-homing | Functional and interop-tested slices exist, but EVPN remains outside this v1 compatibility promise, including RR-only EVPN. |
+| **Alpha** | `linux-dataplane` — Linux FIB and managed netdev roles | Opt-in and tested, but not part of the control-plane RS/RR v1 contract. |
+| **Experimental** | `paths-limit` — Paths-Limit | Draft capability; semantics and wire assignments are not stable. |
+
+FlowSpec, BFD, gNMI, TCP-AO runtime lifecycle, BGP unnumbered, and other
+unlisted features continue to follow the project-wide alpha posture even when
+individual slices are interoperable. In particular, “shipped” or “tested” does
+not automatically mean “v1 stable.”
+
+## Stable surfaces
+
+The inventory pins individual config fields rather than whole structs. This is
+intentional: for example, core `Neighbor` route-server and route-reflector
+fields are stable while `Neighbor.tcp_ao`, `Neighbor.bfd`, and
+`Neighbor.interface` remain outside v1. The same rule applies to RPCs: the
+inventory pins the native gRPC method name, request type, response type, and
+streaming mode. Nested protobuf evolution follows the compatibility rules
+below. The message-graph digest is a review tripwire, not an implicit promotion:
+experimental fields such as Paths-Limit are explicitly excluded in the
+inventory and may evolve under their experimental contract after review. The
+new update-group impact projection and alpha EVPN/BFD/dataplane event payloads
+are excluded the same way even though they are reachable through otherwise
+stable transaction or event envelopes.
+
+The stable CLI set is also explicit. Its versioned machine formats currently
+include `rbgp-ribdiff/1` and `rbgp-ribsnap/1`; adding fields is compatible, but
+removing or reinterpreting existing fields is not. The neighbor-detail JSON and
+support-bundle manifest v2 are pinned to their serializer contract tests.
+Human-readable output may improve without a compatibility promise unless the
+command or field is pinned in the inventory or an existing golden test.
+
+Prometheus metrics and structured event payloads used by the stable roles are
+covered by semantic rules rather than a promise that no new metric, event kind,
+or optional field will appear. Consumers must ignore unknown additive fields
+and series.
+
+## Compatibility rules
+
+- **Protobuf:** stable RPC names, streaming modes, top-level request/response
+  types, existing field numbers/types, and enum numeric values do not change in
+  v1. Additive optional fields and new RPCs are allowed. Removed field numbers
+  and names stay reserved.
+- **Config:** a stable field may gain optional siblings with documented safe
+  defaults. Removing, renaming, changing the type, or changing the effective
+  default of a stable field is breaking.
+- **rpol:** grammar additions must keep existing v1 programs parseable and
+  preserve the golden decision corpus. A change to an existing program's
+  accept/reject result or emitted modifications is breaking even if it still
+  parses.
+- **Metrics:** stable names and metric types remain; existing label names and
+  meanings are not removed or reinterpreted. New bounded labels and metrics
+  are additive.
+- **Events / JSON:** existing event kinds and fields retain their meaning. New
+  optional fields and event kinds are additive. Consumers must ignore unknown
+  fields.
+
+Breaking changes to the inventoried surface require a new contract major, a
+CHANGELOG entry, a migration guide, and a consecutive-release fixture accepted
+by the new release. A deprecation remains available for at least two minor
+releases and 90 days, whichever is longer. Migration support covers the current
+and immediately previous minor release.
+
+## Mutation and reload model
+
+The canonical live-mutation path is:
+
+1. `PlanConfigTransaction` against the current runtime snapshot token.
+2. `ApplyConfigTransaction` with that token.
+3. For commit-confirmed changes, `ConfirmConfigTransaction` or
+   `AbortConfigTransaction` before the deadline.
+
+`rbgp config plan/apply/confirm/abort/status` is the operator CLI for this
+lifecycle. Mutation-specific RPCs may remain for focused automation, but they
+do not bypass validation, persistence, or the daemon's single-writer planning
+boundary.
+
+SIGHUP remains the file-driven compatibility/reconcile path. It uses the same
+planner for supported changes, but it is not a general atomic compound-mutation
+API: the reload matrix decides which changes hot-apply, reset sessions, require
+restart, or are rejected. Operators that need snapshot fencing and
+commit-confirmed rollback must use the transaction path.
+
+## Upgrade receipt
+
+The first pinned exercise is the byte-independent semantic shape of the
+v0.50.0 route-server example loaded by v0.51.0/current code. The TOML fixture is
+unchanged semantically across those consecutive releases, and the current
+example parser also loads and runs its referenced rpol policy. The inventory
+records the source/target releases, semantic TOML digest, validation test, and
+result. Future stable-surface migrations add a new consecutive-release fixture
+rather than overwriting this receipt.
+
+## Release gate
+
+Run:
+
+```bash
+python3 scripts/check-v1-stable-surface.py
+cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
+cargo test -p rustbgpd config_examples_parse
+```
+
+Updating a digest is not a mechanical fix. Review the compatibility policy,
+classify the change as additive or breaking, and add the required deprecation
+or migration evidence first.

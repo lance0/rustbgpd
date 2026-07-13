@@ -12,6 +12,10 @@ These run on every push and PR (`.github/workflows/ci.yml`,
 
 - [ ] `cargo fmt --check`
 - [ ] `python3 scripts/check-clippy-reasons.py`
+- [ ] `python3 scripts/check-v1-stable-surface.py` — stable config fields,
+      native gRPC signatures/messages, CLI paths/JSON contracts, role
+      classifications, compatibility floor, and the consecutive-release
+      upgrade receipt still match their machine sources.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `cargo doc --workspace --lib --no-deps` (warning denial comes from
@@ -53,6 +57,28 @@ convention in `CONTRIBUTING.md`:
       docs, and tests all move together.
 - [ ] Process-only documentation changes intentionally omit CHANGELOG entries
       unless they affect users or operators.
+
+## Narrow v1 RS/RR compatibility gate
+
+The project remains public alpha outside the explicit
+[`rustbgpd-rs-rr-v1`](v1-stable-contract.md) inventory. Before tagging:
+
+- [ ] Review every change to `docs/v1-stable-surface.json` as a product
+      compatibility decision, not a checksum refresh. No shipped alpha or
+      experimental feature becomes stable merely because it exists.
+- [ ] Stable protobuf changes are additive; removed numbers/names remain
+      reserved. Any changed stable service-signature digest has an explicit
+      compatibility review.
+- [ ] Stable config changes preserve names, types, and effective defaults, or
+      carry the documented deprecation and migration window.
+- [ ] rpol golden decision compatibility, stable metric names/types/label
+      meanings, and stable event/JSON field meanings remain intact.
+- [ ] The transaction path remains canonical for live compound mutation.
+      SIGHUP wording remains file-driven reconcile with reload-matrix behavior,
+      not an atomic compound-mutation guarantee.
+- [ ] At least one consecutive-release upgrade fixture is accepted by the new
+      release. Add a new receipt for a real migration; do not overwrite older
+      evidence.
 
 ## gRPC authorization surface (per-release gate)
 

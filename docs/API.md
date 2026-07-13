@@ -29,6 +29,12 @@ address = "127.0.0.1:50051"
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
+The project-wide API remains alpha outside the explicit native-gRPC methods
+listed in the narrow [v1 route-server / route-reflector contract](v1-stable-contract.md).
+That machine inventory pins method names, streaming modes, and top-level
+request/response messages; a service or RPC existing in this reference does
+not by itself make it v1-stable.
+
 ## Authentication and TLS
 
 The daemon supports three deployment patterns for the gRPC surface:

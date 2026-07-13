@@ -15,10 +15,12 @@ For deeper references:
 
 ## Status & expectations
 
-rustbgpd is **public alpha**. The TOML config format and the gRPC API
-are not yet frozen — breaking changes are possible between minor
-versions. See [`CHANGELOG.md`](../CHANGELOG.md) for migration notes per
-release and run `rustbgpd --check <new config>` against the new binary
+rustbgpd is **public alpha overall**. The exception is the narrow,
+machine-pinned [v1 route-server / route-reflector contract](v1-stable-contract.md),
+which covers only its listed config fields, native gRPC signatures, CLI/JSON
+contracts, and control-plane roles. Unlisted TOML and API surfaces can still
+change between minor versions. See [`CHANGELOG.md`](../CHANGELOG.md) for
+migration notes and run `rustbgpd --check <new config>` against the new binary
 before swapping it in.
 
 It runs on Linux. Other platforms are not tested.

@@ -4,6 +4,11 @@ rustbgpd is a public alpha. It is suitable for lab, data-center fabric pilots,
 IX route-server pilots, and programmable control-plane deployments where the
 operator is comfortable with an evolving config and gRPC API.
 
+The exception is the deliberately narrow, machine-inventoried
+[v1 route-server / route-reflector contract](v1-stable-contract.md). That
+promise applies only to the listed IPv4/IPv6 unicast RS/RR and scoped RR-only
+surfaces; it does not promote the rest of the project out of alpha.
+
 ## Routing role
 
 - Linux FIB integration is opt-in and scoped. RFC 7999 BLACKHOLE discard routes
