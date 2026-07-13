@@ -1,0 +1,10 @@
+# flood clients=1000 prefixes=100000 secs=20
+rss_established_mib 15
+cold_staged_s 6.372
+cold_drained_s 6.372
+rss_converged_mib 326
+sustained_blocks 4
+sustained_window_s 25.028
+mgr_cpu_s 25.010
+mgr_busy_frac 0.999
+rss_end_mib 921

@@ -25,6 +25,14 @@ Two measurements the July perf arc left open, both taken at commit
 > a replacement table must pin one measured source SHA and archive the
 > checksummed artifacts produced from that exact checkout.
 
+> **Replacement published:** the revision-pinned rerun at
+> [`rib-rebaseline-2026-07-13.md`](rib-rebaseline-2026-07-13.md) measures the
+> production exact export encoder and archives all eight raw CPU profiles, the
+> deterministic DHAT derivative, same-process sanitized bgperf row, exact
+> config/image provenance, load gates, and checksums. Its numbers supersede the
+> CPU and memory tables below; this document remains historical design and
+> decision context only.
+
 ## Environment
 
 | Field | Value |

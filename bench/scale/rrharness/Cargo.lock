@@ -799,6 +799,7 @@ dependencies = [
  "pprof",
  "rustbgpd-rib",
  "rustbgpd-telemetry",
+ "rustbgpd-transport",
  "rustbgpd-wire",
  "tokio",
 ]
@@ -813,6 +814,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rustbgpd-fsm"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "rustbgpd-wire",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -870,6 +880,29 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rustbgpd-transport"
+version = "0.51.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "lru",
+ "prometheus",
+ "rustbgpd-bmp",
+ "rustbgpd-fsm",
+ "rustbgpd-policy",
+ "rustbgpd-rib",
+ "rustbgpd-rpki",
+ "rustbgpd-telemetry",
+ "rustbgpd-wire",
+ "rustc-hash",
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1429,6 +1462,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zmij"
