@@ -680,7 +680,7 @@ fn encode_rib_entry(
     // Account for the two-byte length before appending the bounded attribute
     // buffer. A single RIB entry remains protocol-bounded to u16 bytes.
     if let Some(budget) = buf.budget {
-        budget.check_growth(buf.len(), 2usize.saturating_add(attr_buf.len()))?;
+        budget.check_growth(buf.effective_len(), 2usize.saturating_add(attr_buf.len()))?;
     }
     buf.extend_from_slice(&attr_len.to_be_bytes())?;
     buf.extend_from_slice(&attr_buf)?;
