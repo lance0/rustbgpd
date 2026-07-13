@@ -322,6 +322,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   readiness probes with zero 200 ms timeouts, including while one session
   policy command is independently stalled.
 
+- **Authoritative export-policy fallbacks no longer multiply one RIB actor
+  stall by peer count.** An ineligible or invalidated clean transition now
+  returns a typed, fail-closed handoff after releasing writer permits and
+  removing every uncommitted destination. PeerManager applies one ordinary RIB
+  replacement at a time, keeps readiness live while awaiting each existing
+  five-second reply, and preserves newest-first session/RIB rollback without a
+  second session hot-apply. A 65,536-route stop-gate receipt records 104.25 ms
+  for one peer; a 64-peer lower-level reference retains roughly 4.29 seconds of
+  total RIB work while splitting it into individual operations whose first
+  warm-up maximum was 108.819 ms.
+
 - **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
   Ordinary grouped members whose exact probes all succeed no longer rebuild
   candidate keys or walk and allocate the group's prior advertised set; that

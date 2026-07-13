@@ -626,7 +626,8 @@ pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 ///
 /// The batch command is an optimization hint, not a weaker contract: the RIB
 /// may use a shared clean-group transition only after proving every member is
-/// compatible, and otherwise runs the authoritative per-peer path.
+/// compatible, and otherwise returns a fail-closed handoff for the caller to
+/// run through the authoritative per-peer path.
 #[derive(Clone)]
 pub struct PeerExportPolicyReplacement {
     /// The target peer.
@@ -1586,11 +1587,12 @@ pub enum RibUpdate {
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Replace a cohort of peer export policies in one RIB actor turn.
+    /// Replace a cohort of peer export policies as one optimized RIB transaction.
     ///
     /// Clean, equivalent grouped-to-grouped unicast members may share one
     /// transition inventory and exact-probe plan. Every unsupported or
-    /// ambiguous batch falls back wholesale before its first emission.
+    /// ambiguous batch returns a wholesale per-peer handoff before its first
+    /// emission.
     ReplacePeerExportPolicies {
         /// Replacements in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,
