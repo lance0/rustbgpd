@@ -1,11 +1,12 @@
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig, PolicyDatasetStatusRow, PolicyEvent, SESSION_EVENT_HISTORY_CAPACITY,
-    SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
+    PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
+    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, StageConfigSnapshotError,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -79,6 +80,11 @@ const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 /// fixed cross-peer cap prevents the daemon's shutdown time from growing as
 /// `peer_count * PEER_LIFECYCLE_COMMAND_TIMEOUT` under transport back-pressure.
 const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
+
+/// Readiness requests serviced after each bounded policy-transaction step.
+/// A small fixed budget prevents probe traffic from starving forward policy
+/// progress while still keeping the unchanged 200 ms end-to-end deadline.
+const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 8;
 
 /// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
 /// actor (export-policy swap, per-peer outbound refresh). Generous — the
@@ -227,6 +233,10 @@ pub struct PeerManager {
     /// link-local peers can share the same address on different interfaces.
     session_index: HashMap<u64, PeerKey>,
     rx: mpsc::Receiver<PeerManagerCommand>,
+    /// Dedicated read-only lane drained only at safe actor seams. Mutation
+    /// commands remain on `rx` and therefore stay ordered behind a policy
+    /// transaction until it either commits or rolls back.
+    readiness_rx: Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
     internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
     local_asn: u32,
     router_id: Ipv4Addr,
@@ -403,6 +413,80 @@ impl PeerManager {
         )
     }
 
+    /// Install the dedicated read-only readiness-query receiver.
+    #[must_use]
+    pub fn with_readiness_queries(
+        mut self,
+        readiness_rx: mpsc::Receiver<PeerManagerReadinessQuery>,
+    ) -> Self {
+        self.readiness_rx = Some(readiness_rx);
+        self
+    }
+
+    /// Service a bounded number of live readiness snapshots at a transaction
+    /// seam. `try_recv` is deliberate: when no probe is waiting this does not
+    /// introduce an async suspension point or let ordinary commands bypass the
+    /// transaction.
+    async fn drain_readiness_queries(&mut self) {
+        for _ in 0..READINESS_QUERY_BUDGET_PER_POLICY_STEP {
+            let query = match self.readiness_rx.as_mut() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(query) => query,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.readiness_rx = None;
+                        break;
+                    }
+                },
+                None => break,
+            };
+            self.handle_readiness_query(query).await;
+        }
+    }
+
+    async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
+        match query {
+            PeerManagerReadinessQuery::ListPeers { reply } => {
+                let infos = self.list_peers().await;
+                let _ = reply.send(infos);
+            }
+        }
+    }
+
+    /// Drive one owned transaction step while servicing at most one read-only
+    /// readiness query at a time. The transaction future is biased first, so a
+    /// probe flood cannot delay a completed apply/rollback step.
+    async fn await_with_readiness<F>(&mut self, future: F) -> F::Output
+    where
+        F: Future,
+    {
+        tokio::pin!(future);
+        loop {
+            let Some(readiness_rx) = self.readiness_rx.as_mut() else {
+                return future.await;
+            };
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                query = readiness_rx.recv() => {
+                    match query {
+                        Some(query) => self.handle_readiness_query(query).await,
+                        None => self.readiness_rx = None,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn receive_readiness_query(
+        readiness_rx: &mut Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
+    ) -> Option<PeerManagerReadinessQuery> {
+        match readiness_rx {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub fn new_with_config(
         rx: mpsc::Receiver<PeerManagerCommand>,
@@ -426,6 +510,7 @@ impl PeerManager {
             peers: HashMap::new(),
             session_index: HashMap::new(),
             rx,
+            readiness_rx: None,
             internal_rx,
             local_asn,
             router_id,
@@ -643,6 +728,12 @@ impl PeerManager {
 
         loop {
             tokio::select! {
+                query = Self::receive_readiness_query(&mut self.readiness_rx) => {
+                    match query {
+                        Some(query) => self.handle_readiness_query(query).await,
+                        None => self.readiness_rx = None,
+                    }
+                }
                 cmd = self.rx.recv() => {
                     let Some(cmd) = cmd else {
                         debug!("peer manager channel closed");

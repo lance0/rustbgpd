@@ -600,6 +600,11 @@ fn page_routes<'a>(
     }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
+/// Maximum route identities processed before the strict shared policy
+/// transition services the existing priority-query lane.
+pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize = 1_024;
+/// Maximum member commits between shared transition query drains.
+pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 
@@ -1141,6 +1146,25 @@ impl RibManager {
             };
             self.handle_update(query);
         }
+    }
+
+    /// Close one explicit policy-transition actor slice, record benchmark/test
+    /// evidence, then service only the existing priority-query lane. Normal RIB
+    /// mutations remain queued on `rx`, so no route or policy mutation can
+    /// interleave with the all-or-nothing preflight/commit transaction.
+    pub(in crate::manager) fn finish_policy_transition_slice(
+        &mut self,
+        started: &mut std::time::Instant,
+    ) {
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            self.policy_transition_stats.max_actor_slice = self
+                .policy_transition_stats
+                .max_actor_slice
+                .max(started.elapsed());
+        }
+        self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+        *started = std::time::Instant::now();
     }
 
     fn drain_ready_updates(&mut self) -> bool {

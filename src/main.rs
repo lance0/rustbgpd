@@ -88,7 +88,7 @@ use crate::reload::{
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
-    WarmCheckpointCapture, WarmCheckpointSession,
+    PeerManagerReadinessQuery, WarmCheckpointCapture, WarmCheckpointSession,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
@@ -2415,6 +2415,8 @@ async fn run<T>(
         tokio::sync::watch::channel(rustbgpd_rpki::ValidationSnapshot::default());
 
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+    let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
+        mpsc::channel::<PeerManagerReadinessQuery>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
 
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
@@ -2545,6 +2547,7 @@ async fn run<T>(
         Some(validation_watch_rx),
         config.clone(),
     )
+    .with_readiness_queries(peer_mgr_readiness_rx)
     .with_event_history(event_history_handle.clone())
     .with_transport_event_sink(event_history_handle.clone().map(|handle| {
         rustbgpd_api::event_history_sinks::make_transport_event_sink(handle, metrics.clone())
@@ -3341,6 +3344,7 @@ async fn run<T>(
         listen_port: u32::from(config.global.listen_port),
         metrics: metrics.clone(),
         start_time,
+        peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
         mrt_trigger_tx,
         evpn_originated_local_mac_count: {
             let counts = evpn_originated_local_mac_counts.clone();
@@ -3693,8 +3697,9 @@ async fn run<T>(
         let metrics_clone = metrics.clone();
         let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
             peer_mgr_tx.clone(),
-            rib_tx.clone(),
+            rib_query_tx.clone(),
         )
+        .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
         .with_gate(daemon_gate.clone());
         tokio::spawn(async move {
             metrics_server::serve_metrics(prometheus_addr, metrics_clone, readiness_probe).await;

@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::health_probe::CoreReadinessProbe;
-use crate::peer_types::PeerManagerCommand;
+use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::RibUpdate;
@@ -25,6 +25,7 @@ pub struct ControlService {
     start_time: tokio::time::Instant,
     metrics: BgpMetrics,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    peer_mgr_readiness_tx: Option<mpsc::Sender<PeerManagerReadinessQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     shutdown_tx: watch::Sender<bool>,
     mrt_trigger_tx: Option<MrtTriggerTx>,
@@ -49,10 +50,22 @@ impl ControlService {
             start_time,
             metrics,
             peer_mgr_tx,
+            peer_mgr_readiness_tx: None,
             rib_tx,
             shutdown_tx,
             mrt_trigger_tx,
         }
+    }
+
+    /// Route health snapshots through the peer manager's read-only readiness
+    /// lane while retaining the ordinary sender for shutdown.
+    #[must_use]
+    pub fn with_peer_manager_readiness(
+        mut self,
+        peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    ) -> Self {
+        self.peer_mgr_readiness_tx = Some(peer_mgr_readiness_tx);
+        self
     }
 }
 
@@ -64,7 +77,11 @@ impl proto::control_service_server::ControlService for ControlService {
     ) -> Result<Response<proto::HealthResponse>, Status> {
         let uptime = self.start_time.elapsed().as_secs();
 
-        let snapshot = CoreReadinessProbe::new(self.peer_mgr_tx.clone(), self.rib_tx.clone())
+        let mut probe = CoreReadinessProbe::new(self.peer_mgr_tx.clone(), self.rib_tx.clone());
+        if let Some(readiness_tx) = &self.peer_mgr_readiness_tx {
+            probe = probe.with_peer_manager_readiness(readiness_tx.clone());
+        }
+        let snapshot = probe
             .snapshot()
             .await
             .map_err(|error| Status::internal(error.to_string()))?;

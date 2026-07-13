@@ -6976,6 +6976,111 @@ async fn export_only_snapshot_uses_one_batched_rib_commit_and_preserves_priors()
     rib_task.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
+    use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
+
+    let peers = (1..=16)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 33, 0, last)))
+        .collect::<Vec<_>>();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let (readiness_tx, readiness_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    for peer in peers.iter().copied() {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&attempts), None),
+            false,
+        );
+    }
+    let manager_task = tokio::spawn(manager.run());
+
+    let (apply_reply, mut apply_response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+            targets: peers
+                .iter()
+                .copied()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(deny_policy_chain()),
+                })
+                .collect(),
+            reply: apply_reply,
+        })
+        .await
+        .unwrap();
+    let RibUpdate::ReplacePeerExportPolicies {
+        reply: rib_reply, ..
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected cohort RIB command");
+    };
+
+    let (mutation_reply, mut mutation_response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::SyncExplainConfig {
+            enabled: false,
+            cache_size: 17,
+            reply: mutation_reply,
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..8 {
+        let (readiness_reply, readiness_response) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::ListPeers {
+                reply: readiness_reply,
+            })
+            .await
+            .unwrap();
+        let infos = tokio::time::timeout(
+            rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+            readiness_response,
+        )
+        .await
+        .expect("live readiness must stay inside the unchanged 200ms deadline")
+        .unwrap();
+        assert_eq!(infos.len(), peers.len());
+    }
+    assert!(
+        matches!(
+            mutation_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "ordinary mutation lane must stay blocked behind the policy transaction"
+    );
+    assert!(
+        matches!(
+            apply_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "readiness must not fabricate cohort completion"
+    );
+
+    rib_reply.send(Ok(())).unwrap();
+    apply_response.await.unwrap().unwrap();
+    mutation_response.await.unwrap();
+    command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn export_only_snapshot_restores_newest_first_after_session_failure() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;

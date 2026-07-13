@@ -50,7 +50,10 @@ impl crate::update::ExactExportSnapshot for CohortExactSnapshot {
                     matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
                 }) =>
             {
-                256
+                match route.prefix {
+                    Prefix::V4(prefix) if prefix.addr.octets()[2].is_multiple_of(2) => 256,
+                    _ => 192,
+                }
             }
             _ => 64,
         };
@@ -78,7 +81,8 @@ impl crate::update::ExactExportSnapshot for CohortExactSnapshot {
         if source.profile != self.profile {
             return None;
         }
-        self.reuses.fetch_add(1, Ordering::Relaxed);
+        self.reuses
+            .fetch_add(encoded_lengths.len(), Ordering::Relaxed);
         Some(
             encoded_lengths
                 .iter()
@@ -953,7 +957,11 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         ROUTE_COUNT,
         "full exact probes scale with routes times compatible wire profiles"
     );
-    assert_eq!(reuses.load(Ordering::Relaxed), MEMBER_COUNT - 1);
+    assert_eq!(
+        reuses.load(Ordering::Relaxed),
+        MEMBER_COUNT - 1,
+        "each compatible member must recheck only the cohort maximum length"
+    );
 
     let (stats_reply, stats_response) = oneshot::channel();
     tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })

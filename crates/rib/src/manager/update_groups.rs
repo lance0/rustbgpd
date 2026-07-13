@@ -999,12 +999,10 @@ impl RibManager {
     /// source flip, denial residue, dirty state, or VPN participation rejects
     /// the optimization before a member is moved or an envelope is emitted.
     pub(in crate::manager) fn clean_policy_transition_inventory(
-        &self,
+        &mut self,
         source: usize,
         destination: usize,
     ) -> Option<CleanPolicyTransitionInventory> {
-        let old = self.group_ribs.get(&source)?;
-        let new = self.group_ribs.get(&destination)?;
         let clean = |group: &GroupRibOut| {
             group.dirty_members.is_empty()
                 && group.tombstones.is_empty()
@@ -1014,36 +1012,53 @@ impl RibManager {
                 && group.vpn_policy_denied.is_empty()
                 && group.otc_blocked.is_empty()
         };
-        if !clean(old) || !clean(new) || old.table.len() != new.table.len() {
-            return None;
-        }
+        let mut slice_started = std::time::Instant::now();
+        let keys = {
+            let old = self.group_ribs.get(&source)?;
+            let new = self.group_ribs.get(&destination)?;
+            if !clean(old) || !clean(new) || old.table.len() != new.table.len() {
+                return None;
+            }
+            new.table
+                .iter()
+                .map(|route| (route.prefix, route.path_id))
+                .collect::<Vec<_>>()
+        };
+        self.finish_policy_transition_slice(&mut slice_started);
 
         let mut announce = Vec::new();
         let mut next_hop_override = Vec::new();
         let mut permit_totals: HashMap<Option<String>, u64> = HashMap::new();
         let mut permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>> = HashMap::new();
-        for route in new.table.iter() {
-            let key = (route.prefix, route.path_id);
-            let prior = old.table.get(&route.prefix, route.path_id)?;
-            // A policy edit cannot safely reuse one member-source exclusion
-            // if it changes the selected source identity. Keep that matrix on
-            // the authoritative regroup path.
-            if prior.peer != route.peer {
-                return None;
-            }
-            let next_hop = new.nh_override(key);
-            if !routes_equal(prior, route) || old.nh_override(key) != next_hop {
-                announce.push(route.clone());
-                next_hop_override.push(next_hop);
-            }
+        for chunk in keys.chunks(super::POLICY_TRANSITION_ROUTE_SLICE) {
+            {
+                let old = self.group_ribs.get(&source)?;
+                let new = self.group_ribs.get(&destination)?;
+                for &(prefix, path_id) in chunk {
+                    let route = new.table.get(&prefix, path_id)?;
+                    let key = (prefix, path_id);
+                    let prior = old.table.get(&prefix, path_id)?;
+                    // A policy edit cannot safely reuse one member-source
+                    // exclusion if it changes the selected source identity.
+                    if prior.peer != route.peer {
+                        return None;
+                    }
+                    let next_hop = new.nh_override(key);
+                    if !routes_equal(prior, route) || old.nh_override(key) != next_hop {
+                        announce.push(route.clone());
+                        next_hop_override.push(next_hop);
+                    }
 
-            let label = new.staged_labels.get(&key).cloned().unwrap_or(None);
-            *permit_totals.entry(label.clone()).or_default() += 1;
-            *permit_by_source
-                .entry(route.peer)
-                .or_default()
-                .entry(label)
-                .or_default() += 1;
+                    let label = new.staged_labels.get(&key).cloned().unwrap_or(None);
+                    *permit_totals.entry(label.clone()).or_default() += 1;
+                    *permit_by_source
+                        .entry(route.peer)
+                        .or_default()
+                        .entry(label)
+                        .or_default() += 1;
+                }
+            }
+            self.finish_policy_transition_slice(&mut slice_started);
         }
 
         Some(CleanPolicyTransitionInventory {
@@ -2245,6 +2260,11 @@ impl RibManager {
     }
 
     fn leave_group(&mut self, gid: usize, peer: IpAddr) {
+        self.leave_group_without_gauge_refresh(gid, peer);
+        self.refresh_group_residue_gauge();
+    }
+
+    fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: IpAddr) {
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
@@ -2258,7 +2278,6 @@ impl RibManager {
         if group.members.is_empty() {
             self.group_ribs.remove(&gid);
         }
-        self.refresh_group_residue_gauge();
     }
 
     /// Drop a departing peer's membership and group state (the
@@ -2391,9 +2410,20 @@ impl RibManager {
             self.loc_rib.len(),
         );
         self.group_ribs.insert(gid, group);
-        let prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|route| route.prefix).collect();
+        let prefixes = self
+            .loc_rib
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut memo = super::distribution::ExportMemo::default();
-        let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+        let mut slice_started = std::time::Instant::now();
+        for chunk in prefixes.chunks(super::POLICY_TRANSITION_ROUTE_SLICE) {
+            let chunk = chunk.iter().copied().collect::<HashSet<_>>();
+            let _ = self.stage_group_prefixes(gid, &chunk, &mut memo);
+            self.finish_policy_transition_slice(&mut slice_started);
+        }
     }
 
     /// Commit a preflighted clean transition after every writer slot and exact
@@ -2408,7 +2438,7 @@ impl RibManager {
         export_policy: Option<PolicyChain>,
     ) {
         self.peer_export_policies.insert(peer, export_policy);
-        self.leave_group(source, peer);
+        self.leave_group_without_gauge_refresh(source, peer);
         self.update_groups
             .members
             .insert(peer, GroupMembership::Grouped(destination));
@@ -2418,6 +2448,12 @@ impl RibManager {
             group.recompute_vpn_member_counts(peer, filter.as_ref());
         }
         self.metrics.record_update_group_regroup();
+    }
+
+    /// Publish cohort-wide gauges once after the synchronous membership commit.
+    /// Refreshing them per member is both unobservable (queries cannot
+    /// interleave in the commit section) and quadratic for large cohorts.
+    pub(in crate::manager) fn finish_clean_policy_transition_commit(&mut self) {
         self.refresh_update_group_gauges();
         self.refresh_group_residue_gauge();
     }

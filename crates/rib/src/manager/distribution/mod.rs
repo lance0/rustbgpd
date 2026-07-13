@@ -124,6 +124,29 @@ impl SharedUnicastProbeCache {
             })
     }
 
+    /// Prove one strict all-success transition cohort against only its largest
+    /// source message. The snapshot contract still proves wire equivalence;
+    /// admitting the largest encoded length proves every shorter route fits
+    /// the target ceiling without allocating `routes * peers` result vectors.
+    fn reuse_grouped_exact_export_maximum(
+        &self,
+        group_id: usize,
+        announce: &Arc<[crate::route::Route]>,
+        next_hop_override: &Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        target: &dyn crate::update::ExactExportSnapshot,
+    ) -> Option<Result<crate::update::ExactExportResult, crate::update::ExactExportError>> {
+        self.groups
+            .get(&group_id)?
+            .iter()
+            .filter(|entry| Self::entry_matches_payload(entry, announce, next_hop_override))
+            .find_map(|entry| {
+                let maximum = entry.encoded_lengths.iter().copied().max().unwrap_or(0);
+                let mut results =
+                    target.reuse_successful_probes(entry.source_snapshot.as_ref(), &[maximum])?;
+                (results.len() == 1).then(|| results.pop().expect("one result validated above"))
+            })
+    }
+
     fn store(
         &mut self,
         group_id: usize,
@@ -887,11 +910,12 @@ impl RibManager {
     }
 
     fn prepare_clean_policy_transition_members(
-        &self,
+        &mut self,
         destination: usize,
         replacements: &[PeerExportPolicyReplacement],
         inventory: &super::update_groups::CleanPolicyTransitionInventory,
     ) -> Option<(Vec<PreparedCleanPolicyTransitionPeer>, usize)> {
+        let mut slice_started = std::time::Instant::now();
         let candidates = inventory
             .announce
             .iter()
@@ -903,6 +927,7 @@ impl RibManager {
                 },
             )
             .collect::<Vec<_>>();
+        self.finish_policy_transition_slice(&mut slice_started);
         let mut probe_cache = SharedUnicastProbeCache::default();
         let mut prepared = Vec::with_capacity(replacements.len());
         let mut full_probe_count = 0usize;
@@ -930,18 +955,25 @@ impl RibManager {
                 if snapshot.owner_id() != encoder.owner_id() {
                     return None;
                 }
-                let results = if let Some(results) = probe_cache.reuse_grouped_exact_export_ceiling(
+                let results = if let Some(maximum) = probe_cache.reuse_grouped_exact_export_maximum(
                     destination,
                     &inventory.announce,
                     &inventory.next_hop_override,
                     snapshot.as_ref(),
                 ) {
-                    (results.len() == candidates.len()).then_some(results)?
+                    self.finish_policy_transition_slice(&mut slice_started);
+                    maximum.ok()?;
+                    Vec::new()
                 } else {
-                    let (results, cardinality_correct) =
-                        probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
-                    if !cardinality_correct || results.iter().any(Result::is_err) {
-                        return None;
+                    let mut results = Vec::with_capacity(candidates.len());
+                    for chunk in candidates.chunks(super::POLICY_TRANSITION_ROUTE_SLICE) {
+                        let (chunk_results, cardinality_correct) =
+                            probe_exact_export_announcements(peer, snapshot.as_ref(), chunk);
+                        if !cardinality_correct || chunk_results.iter().any(Result::is_err) {
+                            return None;
+                        }
+                        results.extend(chunk_results);
+                        self.finish_policy_transition_slice(&mut slice_started);
                     }
                     full_probe_count = full_probe_count.saturating_add(results.len());
                     let encoded_lengths = results
@@ -978,25 +1010,25 @@ impl RibManager {
                 snapshot,
                 permit,
             });
+            self.finish_policy_transition_slice(&mut slice_started);
         }
 
         // Revalidate owner/generation and active-session identity after the
         // potentially expensive shared preflight, still before any mutation.
-        prepared
-            .iter()
-            .all(|member| {
-                self.outbound_session_ids.get(&member.peer).copied() == Some(member.session_id)
-                    && member.snapshot.as_ref().is_none_or(|snapshot| {
-                        self.peer_export_encoders
-                            .get(&member.peer)
-                            .is_some_and(|encoder| {
-                                let current = encoder.snapshot();
-                                current.owner_id() == snapshot.owner_id()
-                                    && current.generation() == snapshot.generation()
-                            })
-                    })
-            })
-            .then_some((prepared, full_probe_count))
+        let all_current = prepared.iter().all(|member| {
+            self.outbound_session_ids.get(&member.peer).copied() == Some(member.session_id)
+                && member.snapshot.as_ref().is_none_or(|snapshot| {
+                    self.peer_export_encoders
+                        .get(&member.peer)
+                        .is_some_and(|encoder| {
+                            let current = encoder.snapshot();
+                            current.owner_id() == snapshot.owner_id()
+                                && current.generation() == snapshot.generation()
+                        })
+                })
+        });
+        self.finish_policy_transition_slice(&mut slice_started);
+        all_current.then_some((prepared, full_probe_count))
     }
 
     /// Attempt the strict clean grouped-to-grouped unicast transition.
@@ -1010,8 +1042,7 @@ impl RibManager {
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
     ) -> bool {
-        #[cfg(any(test, feature = "bench-internals"))]
-        let actor_slice_started = std::time::Instant::now();
+        let mut actor_slice_started = std::time::Instant::now();
         if replacements.len() < 2 {
             return false;
         }
@@ -1033,10 +1064,17 @@ impl RibManager {
                 return false;
             }
             transition = Some(pair);
+            if seen
+                .len()
+                .is_multiple_of(super::POLICY_TRANSITION_MEMBER_SLICE)
+            {
+                self.finish_policy_transition_slice(&mut actor_slice_started);
+            }
         }
         let Some((source, destination)) = transition else {
             return false;
         };
+        self.finish_policy_transition_slice(&mut actor_slice_started);
 
         // Keep the staged destination on a failed fast-path preflight: the
         // authoritative per-peer fallback immediately consumes the same
@@ -1056,6 +1094,7 @@ impl RibManager {
         else {
             return false;
         };
+        actor_slice_started = std::time::Instant::now();
 
         let materialized_routes = inventory.announce.len();
         for member in prepared {
@@ -1083,6 +1122,12 @@ impl RibManager {
                 gauge_val(advertised),
             );
         }
+        // Membership mutation and reserved-permit sends are one synchronous,
+        // infallible commit section. Priority queries are deliberately not
+        // drained inside it: they observe either the old membership or the
+        // complete committed cohort, never a half-applied transaction.
+        self.finish_clean_policy_transition_commit();
+        self.finish_policy_transition_slice(&mut actor_slice_started);
         debug!(
             source_group = source,
             destination_group = destination,
@@ -1103,10 +1148,6 @@ impl RibManager {
                 .policy_transition_stats
                 .route_shell_materializations
                 .saturating_add(materialized_routes);
-            self.policy_transition_stats.max_actor_slice = self
-                .policy_transition_stats
-                .max_actor_slice
-                .max(actor_slice_started.elapsed());
         }
         true
     }

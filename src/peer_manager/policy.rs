@@ -287,18 +287,23 @@ impl PeerManager {
         // Establishment is part of the fast-path preflight. The ordinary path
         // remains authoritative for reconnecting or query-stalled sessions.
         for peer_key in &peer_keys {
-            let managed = self
+            let commands = self
                 .peers
                 .get(peer_key)
-                .expect("cohort peer existed during local preflight");
-            let established = managed
+                .expect("cohort peer existed during local preflight")
                 .handle
-                .query_state_timeout(PEER_QUERY_TIMEOUT)
+                .commands_sender();
+            let established = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
                 .await
                 .is_some_and(|state| state.fsm_state == SessionState::Established);
             if !established {
                 return None;
             }
+            self.drain_readiness_queries().await;
         }
 
         let mut captured = Vec::with_capacity(targets.len());
@@ -320,29 +325,37 @@ impl PeerManager {
                     forward_completed: false,
                 }
             };
-            let apply_result = self
+            let commands = self
                 .peers
                 .get(peer_key)
                 .expect("cohort peer existed before export hot-apply")
                 .handle
-                .update_export_policy_timeout(
+                .commands_sender();
+            let apply_result = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::update_export_policy_with(
+                    commands,
                     target.export_policy.clone(),
                     PEER_POLICY_UPDATE_TIMEOUT,
-                )
+                ))
                 .await;
             if let Err(error) = apply_result {
                 // A failed session command is not proof that the session kept
                 // its prior chain (the reply may fail after a partial local
                 // apply). Reassert the failing peer's prior chain first, then
                 // unwind the already-acknowledged peers newest-first.
-                let failing_restore = self
+                let restore_commands = self
                     .peers
                     .get(peer_key)
                     .expect("cohort peer existed while restoring failed export hot-apply")
                     .handle
-                    .update_export_policy_timeout(
-                        prior.policy.export_policy.clone(),
-                        PEER_POLICY_UPDATE_TIMEOUT,
+                    .commands_sender();
+                let failing_restore = self
+                    .await_with_readiness(
+                        rustbgpd_transport::PeerHandle::update_export_policy_with(
+                            restore_commands,
+                            prior.policy.export_policy.clone(),
+                            PEER_POLICY_UPDATE_TIMEOUT,
+                        ),
                     )
                     .await
                     .map_err(|restore_error| {
@@ -373,6 +386,7 @@ impl PeerManager {
                 .export_policy
                 .clone_from(&target.export_policy);
             captured.push(prior);
+            self.drain_readiness_queries().await;
         }
 
         let replacements = targets
@@ -392,14 +406,7 @@ impl PeerManager {
             .await;
         let rib_result = match send_result {
             Err(_) => Err("RIB manager unavailable".to_string()),
-            Ok(()) => match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                Err(_) => Err(format!(
-                    "RIB manager did not reply within {:?} while updating export policy cohort",
-                    super::RIB_REPLY_TIMEOUT
-                )),
-                Ok(Err(_)) => Err("RIB manager dropped cohort reply".to_string()),
-                Ok(Ok(result)) => result,
-            },
+            Ok(()) => self.await_export_policy_cohort_rib_reply(reply_rx).await,
         };
         if let Err(error) = rib_result {
             let rollback = self.restore_resolved_policies(captured).await;
@@ -420,6 +427,29 @@ impl PeerManager {
             .into_iter()
             .map(|captured| captured.policy)
             .collect()))
+    }
+
+    /// Await the cohort RIB reply while admitting only the dedicated
+    /// read-only readiness lane. The ordinary command receiver stays owned by
+    /// the run loop and is not polled, so mutations remain strictly behind the
+    /// transaction. Dropping the transaction caller does not cancel a
+    /// partially applied policy: this actor still drives commit or rollback to
+    /// completion before returning to the normal lane.
+    async fn await_export_policy_cohort_rib_reply(
+        &mut self,
+        reply_rx: oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), String> {
+        match self
+            .await_with_readiness(tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx))
+            .await
+        {
+            Err(_) => Err(format!(
+                "RIB manager did not reply within {:?} while updating export policy cohort",
+                super::RIB_REPLY_TIMEOUT
+            )),
+            Ok(Err(_)) => Err("RIB manager dropped cohort reply".to_string()),
+            Ok(Ok(result)) => result,
+        }
     }
 
     /// Apply a live-impact transaction that may include static neighbors and
