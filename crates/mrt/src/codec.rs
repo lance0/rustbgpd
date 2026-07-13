@@ -29,6 +29,17 @@ pub struct RibEntry {
     /// BGP path attributes for this RIB entry.
     pub attributes: Vec<PathAttribute>,
 }
+
+/// One peer/family for which the warm snapshot must use RFC 8050 framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MrtAddPathReceiveProfile {
+    /// Peer transport address.
+    pub peer: IpAddr,
+    /// Address family.
+    pub afi: Afi,
+    /// Subsequent address family.
+    pub safi: Safi,
+}
 /// MRT encoding errors.
 #[derive(Debug, Error)]
 pub enum EncodeError {
@@ -43,6 +54,34 @@ pub enum EncodeError {
     /// A BGP path attribute could not be encoded.
     #[error("path attribute encode failed: {0}")]
     AttributeEncode(#[from] WireEncodeError),
+    /// Add-Path profile contained duplicates or an unsupported family.
+    #[error("invalid MRT Add-Path receive profile for {peer} ({afi:?}/{safi:?}): {reason}")]
+    InvalidAddPathProfile {
+        /// Peer in the invalid profile.
+        peer: IpAddr,
+        /// Address family in the invalid profile.
+        afi: Afi,
+        /// Subsequent address family in the invalid profile.
+        safi: Safi,
+        /// Why the profile cannot be encoded.
+        reason: &'static str,
+    },
+    /// A non-Add-Path profile carried a nonzero path identifier.
+    #[error("route from {peer} has path_id {path_id} but its MRT profile is not Add-Path")]
+    AddPathProfileMismatch {
+        /// Advertising peer.
+        peer: IpAddr,
+        /// Unexpected nonzero path identifier.
+        path_id: u32,
+    },
+    /// A route depends on identity that V1 cannot recover exactly.
+    #[error("route from {peer} cannot be used in a V1 warm snapshot: {reason}")]
+    UnsupportedWarmRouteProfile {
+        /// Advertising peer.
+        peer: IpAddr,
+        /// Why the route cannot be restored exactly.
+        reason: &'static str,
+    },
 }
 /// Encode the 12-byte MRT common header.
 fn encode_mrt_header(buf: &mut Vec<u8>, timestamp: u32, mrt_type: u16, subtype: u16, length: u32) {
@@ -366,6 +405,17 @@ pub fn encode_rib_entries(
     entries: &[RibEntry],
 ) -> Result<(), EncodeError> {
     let has_addpath = entries.iter().any(|e| e.path_id != 0);
+    encode_rib_entries_profile(buf, timestamp, seq_num, prefix, entries, has_addpath)
+}
+
+fn encode_rib_entries_profile(
+    buf: &mut Vec<u8>,
+    timestamp: u32,
+    seq_num: u32,
+    prefix: &Prefix,
+    entries: &[RibEntry],
+    has_addpath: bool,
+) -> Result<(), EncodeError> {
     let subtype = match (prefix, has_addpath) {
         (Prefix::V4(_), false) => RIB_IPV4_UNICAST,
         (Prefix::V4(_), true) => RIB_IPV4_UNICAST_ADDPATH,
@@ -394,16 +444,138 @@ pub fn encode_rib_entries(
 /// Returns [`EncodeError::FieldTooLarge`] if any encoded MRT field exceeds its
 /// wire-size bounds (for example peer index, record payload, or attribute
 /// lengths).
-#[expect(
-    clippy::too_many_lines,
-    reason = "Single-pass encoder over peer index, unicast prefix groups, and EVPN RIB_GENERIC records — splitting hides the linear flow"
-)]
 pub fn encode_snapshot(
     collector_bgp_id: Ipv4Addr,
     peers: &[MrtPeerEntry],
     routes: &[Route],
     evpn_routes: &[EvpnRibRoute],
     timestamp: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_snapshot_with_view(collector_bgp_id, "", peers, routes, evpn_routes, timestamp)
+}
+
+/// Encode a full MRT snapshot with an explicit `PEER_INDEX_TABLE` view name.
+///
+/// Warm checkpoints use the view name as a caller-issued generation and bind
+/// it into the warm-bundle identity. Periodic dumps should continue to use
+/// [`encode_snapshot`], whose view name remains empty for compatibility.
+///
+/// # Errors
+///
+/// Returns [`EncodeError::FieldTooLarge`] if the view name or another encoded
+/// MRT field exceeds its wire-size bound.
+pub fn encode_snapshot_with_view(
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_snapshot_inner(
+        collector_bgp_id,
+        view_name,
+        peers,
+        routes,
+        evpn_routes,
+        timestamp,
+        None,
+    )
+}
+
+/// Encode a warm snapshot with an exact per-peer Add-Path receive profile.
+///
+/// Entries for one prefix are split into separate Add-Path and legacy RIB
+/// records when peers negotiated different profiles. This preserves a zero
+/// path identifier as an Add-Path entry and gives the warm loader an exact
+/// record-subtype identity to validate.
+///
+/// # Errors
+///
+/// Returns [`EncodeError::InvalidAddPathProfile`] for duplicate or non-unicast
+/// profiles, [`EncodeError::AddPathProfileMismatch`] when a route with a
+/// nonzero path ID is assigned to a legacy profile, and
+/// [`EncodeError::UnsupportedWarmRouteProfile`] when next-hop scope cannot be
+/// recovered exactly.
+pub fn encode_warm_snapshot(
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+    add_path_receive: &[MrtAddPathReceiveProfile],
+) -> Result<Vec<u8>, EncodeError> {
+    if let Some(route) = routes.iter().find(|route| {
+        route.next_hop_scope.is_some()
+            || route.link_local_next_hop.is_some()
+            || is_ipv6_link_local(route.next_hop)
+    }) {
+        return Err(EncodeError::UnsupportedWarmRouteProfile {
+            peer: route.peer,
+            reason: "scoped or link-local next-hop identity",
+        });
+    }
+    if let Some(route) = evpn_routes
+        .iter()
+        .find(|route| route.link_local_next_hop.is_some() || is_ipv6_link_local(route.next_hop))
+    {
+        return Err(EncodeError::UnsupportedWarmRouteProfile {
+            peer: route.peer,
+            reason: "link-local next-hop identity",
+        });
+    }
+    let mut unique = HashSet::with_capacity(add_path_receive.len());
+    for profile in add_path_receive {
+        if !unique.insert(*profile) {
+            return Err(EncodeError::InvalidAddPathProfile {
+                peer: profile.peer,
+                afi: profile.afi,
+                safi: profile.safi,
+                reason: "duplicate profile",
+            });
+        }
+    }
+    if let Some(profile) = add_path_receive.iter().find(|profile| {
+        !matches!(
+            (profile.afi, profile.safi),
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)
+        )
+    }) {
+        return Err(EncodeError::InvalidAddPathProfile {
+            peer: profile.peer,
+            afi: profile.afi,
+            safi: profile.safi,
+            reason: "only IPv4/IPv6 unicast Add-Path is supported by TABLE_DUMP_V2",
+        });
+    }
+    encode_snapshot_inner(
+        collector_bgp_id,
+        view_name,
+        peers,
+        routes,
+        evpn_routes,
+        timestamp,
+        Some(&unique),
+    )
+}
+
+fn is_ipv6_link_local(address: IpAddr) -> bool {
+    matches!(address, IpAddr::V6(address) if address.segments()[0] & 0xffc0 == 0xfe80)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Single-pass encoder over peer index, unicast prefix groups, and EVPN RIB_GENERIC records — splitting hides the linear flow"
+)]
+fn encode_snapshot_inner(
+    collector_bgp_id: Ipv4Addr,
+    view_name: &str,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+    add_path_receive: Option<&HashSet<MrtAddPathReceiveProfile>>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
     // 1. Build effective peer list from explicit peers + any route-origin peers.
@@ -442,7 +614,13 @@ pub fn encode_snapshot(
             .then(a.peer_bgp_id.octets().cmp(&b.peer_bgp_id.octets()))
     });
     // 2. `PEER_INDEX_TABLE`
-    encode_peer_index_table(&mut buf, timestamp, collector_bgp_id, "", &effective_peers)?;
+    encode_peer_index_table(
+        &mut buf,
+        timestamp,
+        collector_bgp_id,
+        view_name,
+        &effective_peers,
+    )?;
     // 3. Build peer index lookup
     let peer_index: HashMap<IpAddr, u16> = effective_peers
         .iter()
@@ -490,7 +668,8 @@ pub fn encode_snapshot(
                 .then(a.path_id.cmp(&b.path_id))
                 .then(prefix_family_sort_key(a.prefix).cmp(&prefix_family_sort_key(b.prefix)))
         });
-        let mut entries: Vec<RibEntry> = Vec::with_capacity(prefix_routes.len());
+        let mut legacy_entries: Vec<RibEntry> = Vec::with_capacity(prefix_routes.len());
+        let mut add_path_entries: Vec<RibEntry> = Vec::new();
         for route in prefix_routes {
             let Some(&idx) = peer_index.get(&route.peer) else {
                 continue;
@@ -498,15 +677,59 @@ pub fn encode_snapshot(
             let age = route.received_at.elapsed().as_secs();
             let originated_u64 = now_secs.saturating_sub(age);
             let originated = u32::try_from(originated_u64).unwrap_or(u32::MAX);
-            entries.push(RibEntry {
+            let entry = RibEntry {
                 peer_index: idx,
                 originated_time: originated,
                 path_id: route.path_id,
                 attributes: synthesize_attributes(route),
+            };
+            let uses_add_path = add_path_receive.is_some_and(|profiles| {
+                let afi = match prefix {
+                    Prefix::V4(_) => Afi::Ipv4,
+                    Prefix::V6(_) => Afi::Ipv6,
+                };
+                profiles.contains(&MrtAddPathReceiveProfile {
+                    peer: route.peer,
+                    afi,
+                    safi: Safi::Unicast,
+                })
             });
+            if add_path_receive.is_some() && !uses_add_path && route.path_id != 0 {
+                return Err(EncodeError::AddPathProfileMismatch {
+                    peer: route.peer,
+                    path_id: route.path_id,
+                });
+            }
+            if uses_add_path {
+                add_path_entries.push(entry);
+            } else {
+                legacy_entries.push(entry);
+            }
         }
-        if !entries.is_empty() {
-            encode_rib_entries(&mut buf, timestamp, seq_num, prefix, &entries)?;
+        if !legacy_entries.is_empty() {
+            if add_path_receive.is_some() {
+                encode_rib_entries_profile(
+                    &mut buf,
+                    timestamp,
+                    seq_num,
+                    prefix,
+                    &legacy_entries,
+                    false,
+                )?;
+            } else {
+                encode_rib_entries(&mut buf, timestamp, seq_num, prefix, &legacy_entries)?;
+            }
+            seq_num = seq_num.wrapping_add(1);
+        }
+        if !add_path_entries.is_empty() {
+            encode_rib_entries_profile(
+                &mut buf,
+                timestamp,
+                seq_num,
+                prefix,
+                &add_path_entries,
+                true,
+            )?;
             seq_num = seq_num.wrapping_add(1);
         }
     }
@@ -715,6 +938,72 @@ mod tests {
         encode_rib_entries(&mut buf, 1_700_000_000, 0, &prefix, &[entry]).unwrap();
         // subtype = 8 (RIB_IPV4_UNICAST_ADDPATH)
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 8);
+    }
+
+    #[test]
+    fn warm_snapshot_splits_mixed_profiles_and_preserves_zero_addpath_id() {
+        let prefix = Prefix::V4(Ipv4Prefix {
+            addr: Ipv4Addr::new(198, 51, 100, 0),
+            len: 24,
+        });
+        let add_peer_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let plain_peer_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let peers = vec![
+            make_peer(add_peer_addr, 64_501),
+            make_peer(plain_peer_addr, 64_502),
+        ];
+        let routes = vec![
+            make_route(prefix, add_peer_addr, add_peer_addr),
+            make_route(prefix, plain_peer_addr, plain_peer_addr),
+        ];
+        let snapshot = encode_warm_snapshot(
+            Ipv4Addr::new(10, 0, 0, 1),
+            "generation-1",
+            &peers,
+            &routes,
+            &[],
+            1_700_000_000,
+            &[MrtAddPathReceiveProfile {
+                peer: add_peer_addr,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            }],
+        )
+        .unwrap();
+        let reader = crate::reader::SnapshotReader::new(&snapshot).unwrap();
+        assert_eq!(reader.view_name(), "generation-1");
+        let entries: Vec<_> = reader.map(Result::unwrap).collect();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.peer.peer_addr == add_peer_addr && entry.add_path && entry.path_id == 0
+        }));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.peer.peer_addr == plain_peer_addr && !entry.add_path)
+        );
+    }
+
+    #[test]
+    fn warm_snapshot_rejects_link_local_next_hop_before_encoding() {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let prefix = Prefix::V6(Ipv6Prefix {
+            addr: "2001:db8::".parse().unwrap(),
+            len: 64,
+        });
+        let route = make_route(prefix, peer, "fe80::1".parse().unwrap());
+        assert!(matches!(
+            encode_warm_snapshot(
+                Ipv4Addr::new(10, 0, 0, 1),
+                "generation-1",
+                &[make_peer(peer, 64_501)],
+                &[route],
+                &[],
+                1_700_000_000,
+                &[],
+            ),
+            Err(EncodeError::UnsupportedWarmRouteProfile { .. })
+        ));
     }
     #[test]
     fn synthesize_ipv4_next_hop() {
