@@ -1,12 +1,17 @@
 phase	samples	share_percent
-ingest + Adj-RIB-In insert	40	40.000000
-recompute	2	2.000000
-group-table commit	20	20.000000
-member-emit	10	10.000000
-distribute residual	4	4.000000
-event-publish	5	5.000000
-staging walk	3	3.000000
-staging eval	10	10.000000
-shared-emit build	5	5.000000
-other	1	1.000000
-TOTAL	100	100.000000
+ingest + Adj-RIB-In insert	40	38.095238
+recompute	2	1.904762
+group-table commit	20	19.047619
+member-emit	10	9.523810
+exact encode	1	0.952381
+ceiling reuse	1	0.952381
+overlay reconciliation	1	0.952381
+group-prior materialization	1	0.952381
+channel enqueue	1	0.952381
+distribute residual	4	3.809524
+event-publish	5	4.761905
+staging walk	3	2.857143
+staging eval	10	9.523810
+shared-emit build	5	4.761905
+other	1	0.952381
+TOTAL	105	100.000000

@@ -65,6 +65,25 @@ pub(in crate::manager) struct SharedUnicastProbeCache {
     groups: HashMap<usize, Vec<SharedUnicastProbeCacheEntry>>,
 }
 
+/// Deferred advertised-state input for the ordinary clean grouped path.
+///
+/// The group delta walk is needed only when an exact-export probe rejects an
+/// announcement and the member may therefore be owed a withdrawal. Keeping
+/// the borrowed stage here lets the all-success path avoid both this walk and
+/// the per-route key set it would otherwise allocate.
+#[derive(Clone, Copy)]
+pub(in crate::manager) struct LazyCleanGroupPrior<'a> {
+    pub(in crate::manager) peer: IpAddr,
+    pub(in crate::manager) deltas: &'a [super::update_groups::GroupDelta],
+}
+
+/// One-pass state shared by ordinary clean members of an update group.
+pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
+    pub(in crate::manager) group_id: usize,
+    pub(in crate::manager) probe_cache: &'a mut SharedUnicastProbeCache,
+    pub(in crate::manager) lazy_group_prior: Option<LazyCleanGroupPrior<'a>>,
+}
+
 struct SharedUnicastProbeCacheEntry {
     announce: Arc<[crate::route::Route]>,
     next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
@@ -82,7 +101,8 @@ impl SharedUnicastProbeCache {
             && Arc::ptr_eq(&entry.next_hop_override, next_hop_override)
     }
 
-    fn recheck(
+    #[inline(never)]
+    fn reuse_grouped_exact_export_ceiling(
         &self,
         group_id: usize,
         announce: &Arc<[crate::route::Route]>,
@@ -122,6 +142,107 @@ impl SharedUnicastProbeCache {
             encoded_lengths,
         });
     }
+}
+
+#[inline(never)]
+fn probe_exact_export_announcements(
+    peer: IpAddr,
+    snapshot: &dyn crate::update::ExactExportSnapshot,
+    candidates: &[crate::update::ExactExportCandidate<'_>],
+) -> (
+    Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>,
+    bool,
+) {
+    let batch_results = snapshot.probe_announcements(candidates);
+    let cardinality_correct = batch_results.len() == candidates.len();
+    if cardinality_correct {
+        return (batch_results, true);
+    }
+    warn!(
+        %peer,
+        expected = candidates.len(),
+        actual = batch_results.len(),
+        "exact export batch probe violated its result cardinality contract — falling back to fail-closed scalar probes"
+    );
+    (
+        candidates
+            .iter()
+            .copied()
+            .map(|candidate| snapshot.probe_announcement(candidate))
+            .collect(),
+        false,
+    )
+}
+
+#[inline(never)]
+fn materialize_clean_group_prior(
+    lazy: LazyCleanGroupPrior<'_>,
+) -> HashSet<crate::update::ExactExportKey> {
+    lazy.deltas
+        .iter()
+        .filter_map(|delta| {
+            delta
+                .old_source
+                .is_some_and(|source| source != lazy.peer)
+                .then_some(crate::update::ExactExportKey::Unicast(
+                    delta.prefix,
+                    delta.path_id,
+                ))
+        })
+        .collect()
+}
+
+struct ExactExportOverlayDecision {
+    keep: Vec<bool>,
+    owed_withdrawals: HashSet<crate::update::ExactExportKey>,
+    new_rejections: Vec<(
+        crate::update::ExactExportKey,
+        crate::update::ExactExportError,
+    )>,
+}
+
+#[inline(never)]
+fn reconcile_exact_export_overlay(
+    rejected: &mut HashSet<crate::update::ExactExportKey>,
+    candidate_keys: Vec<crate::update::ExactExportKey>,
+    probe_results: Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>,
+    previously_advertised: &HashSet<crate::update::ExactExportKey>,
+) -> ExactExportOverlayDecision {
+    let mut owed_withdrawals = HashSet::new();
+    let mut new_rejections = Vec::new();
+    let keep = candidate_keys
+        .into_iter()
+        .zip(probe_results)
+        .map(|(key, result)| match result {
+            Ok(_) => {
+                rejected.remove(&key);
+                true
+            }
+            Err(error) => {
+                let newly_rejected = rejected.insert(key.clone());
+                if newly_rejected && previously_advertised.contains(&key) {
+                    owed_withdrawals.insert(key.clone());
+                }
+                if newly_rejected {
+                    new_rejections.push((key, error));
+                }
+                false
+            }
+        })
+        .collect();
+    ExactExportOverlayDecision {
+        keep,
+        owed_withdrawals,
+        new_rejections,
+    }
+}
+
+#[inline(never)]
+fn enqueue_outbound_update(
+    permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
+    update: OutboundRouteUpdate,
+) {
+    permit.send(update);
 }
 
 #[cfg(test)]
@@ -237,7 +358,7 @@ mod shared_unicast_probe_cache_tests {
         };
         assert!(
             cache
-                .recheck(7, &announce, &next_hop_override, &target)
+                .reuse_grouped_exact_export_ceiling(7, &announce, &next_hop_override, &target)
                 .is_none()
         );
         assert_eq!(
@@ -247,7 +368,7 @@ mod shared_unicast_probe_cache_tests {
         );
         assert!(
             cache
-                .recheck(100, &announce, &next_hop_override, &target)
+                .reuse_grouped_exact_export_ceiling(100, &announce, &next_hop_override, &target,)
                 .is_none()
         );
         assert_eq!(
@@ -789,7 +910,7 @@ impl RibManager {
         mut rtc_announce: Vec<crate::route::RtcRibRoute>,
         mut rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
         group_prior: HashSet<crate::update::ExactExportKey>,
-        mut shared_unicast_probe_cache: Option<(usize, &mut SharedUnicastProbeCache)>,
+        mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
     ) -> bool {
         let gated = announce
             .iter()
@@ -960,9 +1081,6 @@ impl RibManager {
         if let Some(snapshot) = exact_export_snapshot.as_ref() {
             use crate::update::{ExactExportCandidate, ExactExportKey};
 
-            let mut previously_advertised = group_prior;
-            let mut owed_withdrawals = HashSet::new();
-            let mut new_rejections = Vec::new();
             debug_assert_eq!(announce.len(), next_hop_override.len());
             let family_lengths = [
                 announce.len(),
@@ -973,229 +1091,217 @@ impl RibManager {
                 labeled_announce.len(),
                 rtc_announce.len(),
             ];
-            let (candidate_keys, probe_results) = {
-                let candidates = announce
-                    .iter()
-                    .zip(next_hop_override.iter())
-                    .map(|(route, next_hop)| ExactExportCandidate::Unicast {
-                        route,
-                        next_hop_override: next_hop.as_ref(),
+            let candidates = announce
+                .iter()
+                .zip(next_hop_override.iter())
+                .map(|(route, next_hop)| ExactExportCandidate::Unicast {
+                    route,
+                    next_hop_override: next_hop.as_ref(),
+                })
+                .chain(flowspec_announce.iter().map(ExactExportCandidate::FlowSpec))
+                .chain(evpn_announce.iter().map(ExactExportCandidate::Evpn))
+                .chain(bgpls_announce.iter().map(ExactExportCandidate::BgpLs))
+                .chain(vpn_announce.iter().map(ExactExportCandidate::Vpn))
+                .chain(labeled_announce.iter().map(ExactExportCandidate::Labeled))
+                .chain(rtc_announce.iter().map(ExactExportCandidate::Rtc))
+                .collect::<Vec<_>>();
+            // Ordinary clean update-group members receive Arc clones of one
+            // shared unicast payload. Reuse a prior member's successful
+            // encoded lengths only when the concrete target snapshot proves
+            // it can safely recheck them. Mixed-family envelopes stay on the
+            // ordinary exact batch path so result ordering remains unchanged.
+            let has_non_unicast_payload = !flowspec_announce.is_empty()
+                || !flowspec_withdraw.is_empty()
+                || !evpn_announce.is_empty()
+                || !evpn_withdraw.is_empty()
+                || !bgpls_announce.is_empty()
+                || !bgpls_withdraw.is_empty()
+                || !vpn_announce.is_empty()
+                || !vpn_withdraw.is_empty()
+                || !labeled_announce.is_empty()
+                || !labeled_withdraw.is_empty()
+                || !rtc_announce.is_empty()
+                || !rtc_withdraw.is_empty();
+            let cache_eligible = !announce.is_empty()
+                && candidates.len() == announce.len()
+                && !has_non_unicast_payload
+                && shared_unicast_precommit.is_some();
+            let reused_results = cache_eligible
+                .then(|| {
+                    shared_unicast_precommit.as_mut().and_then(|precommit| {
+                        precommit.probe_cache.reuse_grouped_exact_export_ceiling(
+                            precommit.group_id,
+                            &announce,
+                            &next_hop_override,
+                            snapshot.as_ref(),
+                        )
                     })
-                    .chain(flowspec_announce.iter().map(ExactExportCandidate::FlowSpec))
-                    .chain(evpn_announce.iter().map(ExactExportCandidate::Evpn))
-                    .chain(bgpls_announce.iter().map(ExactExportCandidate::BgpLs))
-                    .chain(vpn_announce.iter().map(ExactExportCandidate::Vpn))
-                    .chain(labeled_announce.iter().map(ExactExportCandidate::Labeled))
-                    .chain(rtc_announce.iter().map(ExactExportCandidate::Rtc))
-                    .collect::<Vec<_>>();
+                })
+                .flatten();
+            let probe_results = if let Some(results) = reused_results {
+                debug_assert_eq!(results.len(), candidates.len());
+                results
+            } else {
+                let (results, cardinality_correct) =
+                    probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
+                if cache_eligible && cardinality_correct && results.iter().all(Result::is_ok) {
+                    let encoded_lengths = results
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok().map(|result| result.encoded_len))
+                        .collect();
+                    if let Some(precommit) = shared_unicast_precommit.as_mut() {
+                        precommit.probe_cache.store(
+                            precommit.group_id,
+                            Arc::clone(&announce),
+                            Arc::clone(&next_hop_override),
+                            Arc::clone(snapshot),
+                            encoded_lengths,
+                        );
+                    }
+                }
+                results
+            };
+
+            // The common grouped path is deliberately keyless: when every
+            // exact probe succeeds and there is no sparse rejection overlay,
+            // no candidate can be owed a withdrawal and no overlay entry can
+            // need reconciliation. The immutable target snapshot remains on
+            // the outbound envelope for transport's owner/generation fence.
+            let fast_path = !candidates.is_empty()
+                && shared_unicast_precommit
+                    .as_ref()
+                    .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
+                && probe_results.iter().all(Result::is_ok)
+                && !self.peer_unexportable.contains_key(&peer);
+
+            if !fast_path {
+                // Keys and prior advertised state are fallback-only. A clean
+                // grouped member materializes its staged prior at most once,
+                // and only when a failed probe can actually owe a withdrawal.
                 let candidate_keys = candidates
                     .iter()
                     .map(ExactExportCandidate::key)
                     .collect::<Vec<_>>();
-                // Ordinary clean update-group members receive Arc clones of
-                // one shared unicast payload. Reuse a prior member's
-                // successful encoded lengths only when the concrete target
-                // snapshot proves it can safely recheck them. Mixed-family
-                // envelopes stay on the ordinary exact batch path so result
-                // ordering remains unchanged.
-                let has_non_unicast_payload = !flowspec_announce.is_empty()
-                    || !flowspec_withdraw.is_empty()
-                    || !evpn_announce.is_empty()
-                    || !evpn_withdraw.is_empty()
-                    || !bgpls_announce.is_empty()
-                    || !bgpls_withdraw.is_empty()
-                    || !vpn_announce.is_empty()
-                    || !vpn_withdraw.is_empty()
-                    || !labeled_announce.is_empty()
-                    || !labeled_withdraw.is_empty()
-                    || !rtc_announce.is_empty()
-                    || !rtc_withdraw.is_empty();
-                let cache_eligible = !announce.is_empty()
-                    && candidates.len() == announce.len()
-                    && !has_non_unicast_payload
-                    && shared_unicast_probe_cache.is_some();
-                let reused_results = cache_eligible
-                    .then(|| {
-                        shared_unicast_probe_cache
-                            .as_mut()
-                            .and_then(|(group_id, cache)| {
-                                cache.recheck(
-                                    *group_id,
-                                    &announce,
-                                    &next_hop_override,
-                                    snapshot.as_ref(),
-                                )
-                            })
-                    })
-                    .flatten();
-                let results = if let Some(results) = reused_results {
-                    debug_assert_eq!(results.len(), candidates.len());
-                    results
-                } else {
-                    let batch_results = snapshot.probe_announcements(&candidates);
-                    let cardinality_correct = batch_results.len() == candidates.len();
-                    let results = if cardinality_correct {
-                        batch_results
-                    } else {
-                        warn!(
-                            %peer,
-                            expected = candidates.len(),
-                            actual = batch_results.len(),
-                            "exact export batch probe violated its result cardinality contract — falling back to fail-closed scalar probes"
+                let has_probe_failure = probe_results.iter().any(Result::is_err);
+                let mut previously_advertised = group_prior;
+                if has_probe_failure {
+                    if let Some(lazy) = shared_unicast_precommit
+                        .as_ref()
+                        .and_then(|precommit| precommit.lazy_group_prior)
+                    {
+                        previously_advertised.extend(materialize_clean_group_prior(lazy));
+                    }
+                    if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                        previously_advertised.extend(
+                            candidate_keys
+                                .iter()
+                                .filter(|key| adj_rib_out_contains_exact_key(rib_out, key))
+                                .cloned(),
                         );
-                        candidates
-                            .iter()
-                            .copied()
-                            .map(|candidate| snapshot.probe_announcement(candidate))
-                            .collect()
-                    };
-                    if cache_eligible && cardinality_correct && results.iter().all(Result::is_ok) {
-                        let encoded_lengths = results
-                            .iter()
-                            .filter_map(|result| {
-                                result.as_ref().ok().map(|result| result.encoded_len)
-                            })
-                            .collect();
-                        if let Some((group_id, cache)) = shared_unicast_probe_cache.as_mut() {
-                            cache.store(
-                                *group_id,
-                                Arc::clone(&announce),
-                                Arc::clone(&next_hop_override),
-                                Arc::clone(snapshot),
-                                encoded_lengths,
-                            );
-                        }
                     }
-                    results
-                };
-                (candidate_keys, results)
-            };
-            if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                previously_advertised.extend(
-                    candidate_keys
-                        .iter()
-                        .filter(|key| adj_rib_out_contains_exact_key(rib_out, key))
-                        .cloned(),
+                }
+
+                let decision = reconcile_exact_export_overlay(
+                    self.peer_unexportable.entry(peer).or_default(),
+                    candidate_keys,
+                    probe_results,
+                    &previously_advertised,
                 );
-            }
+                let keep = decision.keep;
 
-            let keep = {
-                let rejected = self.peer_unexportable.entry(peer).or_default();
-                candidate_keys
-                    .iter()
-                    .cloned()
-                    .zip(probe_results)
-                    .map(|(key, result)| match result {
-                        Ok(_) => {
-                            rejected.remove(&key);
-                            true
-                        }
-                        Err(error) => {
-                            let newly_rejected = rejected.insert(key.clone());
-                            if newly_rejected && previously_advertised.contains(&key) {
-                                owed_withdrawals.insert(key.clone());
+                let mut offset = 0;
+                let unicast_keep = &keep[offset..offset + family_lengths[0]];
+                offset += family_lengths[0];
+                if unicast_keep.iter().any(|keep| !keep) {
+                    let permitted_routes = announce
+                        .iter()
+                        .cloned()
+                        .zip(unicast_keep.iter().copied())
+                        .filter_map(|(route, keep)| keep.then_some(route))
+                        .collect::<Vec<_>>();
+                    let permitted_next_hops = next_hop_override
+                        .iter()
+                        .cloned()
+                        .zip(unicast_keep.iter().copied())
+                        .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
+                        .collect::<Vec<_>>();
+                    announce = permitted_routes.into();
+                    next_hop_override = permitted_next_hops.into();
+                }
+
+                let mut flowspec_keep = keep[offset..offset + family_lengths[1]].iter().copied();
+                flowspec_announce.retain(|_| flowspec_keep.next().unwrap_or(false));
+                offset += family_lengths[1];
+                let mut evpn_keep = keep[offset..offset + family_lengths[2]].iter().copied();
+                evpn_announce.retain(|_| evpn_keep.next().unwrap_or(false));
+                offset += family_lengths[2];
+                let mut bgpls_keep = keep[offset..offset + family_lengths[3]].iter().copied();
+                bgpls_announce.retain(|_| bgpls_keep.next().unwrap_or(false));
+                offset += family_lengths[3];
+                let mut vpn_keep = keep[offset..offset + family_lengths[4]].iter().copied();
+                vpn_announce.retain(|_| vpn_keep.next().unwrap_or(false));
+                offset += family_lengths[4];
+                let mut labeled_keep = keep[offset..offset + family_lengths[5]].iter().copied();
+                labeled_announce.retain(|_| labeled_keep.next().unwrap_or(false));
+                offset += family_lengths[5];
+                let mut rtc_keep = keep[offset..offset + family_lengths[6]].iter().copied();
+                rtc_announce.retain(|_| rtc_keep.next().unwrap_or(false));
+                debug_assert_eq!(offset + family_lengths[6], keep.len());
+
+                for key in decision.owed_withdrawals {
+                    match key {
+                        ExactExportKey::Unicast(prefix, path_id) => {
+                            if !withdraw.contains(&(prefix, path_id)) {
+                                withdraw.push((prefix, path_id));
                             }
-                            if newly_rejected {
-                                new_rejections.push((key, error));
+                        }
+                        ExactExportKey::FlowSpec(key) => {
+                            if !flowspec_withdraw.contains(&key) {
+                                flowspec_withdraw.push(key);
                             }
-                            false
                         }
-                    })
-                    .collect::<Vec<_>>()
-            };
-
-            let mut offset = 0;
-            let unicast_keep = &keep[offset..offset + family_lengths[0]];
-            offset += family_lengths[0];
-            if unicast_keep.iter().any(|keep| !keep) {
-                let permitted_routes = announce
-                    .iter()
-                    .cloned()
-                    .zip(unicast_keep.iter().copied())
-                    .filter_map(|(route, keep)| keep.then_some(route))
-                    .collect::<Vec<_>>();
-                let permitted_next_hops = next_hop_override
-                    .iter()
-                    .cloned()
-                    .zip(unicast_keep.iter().copied())
-                    .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
-                    .collect::<Vec<_>>();
-                announce = permitted_routes.into();
-                next_hop_override = permitted_next_hops.into();
-            }
-
-            let mut flowspec_keep = keep[offset..offset + family_lengths[1]].iter().copied();
-            flowspec_announce.retain(|_| flowspec_keep.next().unwrap_or(false));
-            offset += family_lengths[1];
-            let mut evpn_keep = keep[offset..offset + family_lengths[2]].iter().copied();
-            evpn_announce.retain(|_| evpn_keep.next().unwrap_or(false));
-            offset += family_lengths[2];
-            let mut bgpls_keep = keep[offset..offset + family_lengths[3]].iter().copied();
-            bgpls_announce.retain(|_| bgpls_keep.next().unwrap_or(false));
-            offset += family_lengths[3];
-            let mut vpn_keep = keep[offset..offset + family_lengths[4]].iter().copied();
-            vpn_announce.retain(|_| vpn_keep.next().unwrap_or(false));
-            offset += family_lengths[4];
-            let mut labeled_keep = keep[offset..offset + family_lengths[5]].iter().copied();
-            labeled_announce.retain(|_| labeled_keep.next().unwrap_or(false));
-            offset += family_lengths[5];
-            let mut rtc_keep = keep[offset..offset + family_lengths[6]].iter().copied();
-            rtc_announce.retain(|_| rtc_keep.next().unwrap_or(false));
-            debug_assert_eq!(offset + family_lengths[6], keep.len());
-
-            for key in owed_withdrawals {
-                match key {
-                    ExactExportKey::Unicast(prefix, path_id) => {
-                        if !withdraw.contains(&(prefix, path_id)) {
-                            withdraw.push((prefix, path_id));
+                        ExactExportKey::Evpn(key) => {
+                            if !evpn_withdraw.contains(&key) {
+                                evpn_withdraw.push(key);
+                            }
                         }
-                    }
-                    ExactExportKey::FlowSpec(key) => {
-                        if !flowspec_withdraw.contains(&key) {
-                            flowspec_withdraw.push(key);
+                        ExactExportKey::BgpLs(key) => {
+                            if !bgpls_withdraw.contains(&key) {
+                                bgpls_withdraw.push(key);
+                            }
                         }
-                    }
-                    ExactExportKey::Evpn(key) => {
-                        if !evpn_withdraw.contains(&key) {
-                            evpn_withdraw.push(key);
+                        ExactExportKey::Vpn(key) => {
+                            if !vpn_withdraw.contains(&key) {
+                                vpn_withdraw.push(key);
+                            }
                         }
-                    }
-                    ExactExportKey::BgpLs(key) => {
-                        if !bgpls_withdraw.contains(&key) {
-                            bgpls_withdraw.push(key);
+                        ExactExportKey::Labeled(key) => {
+                            if !labeled_withdraw.contains(&key) {
+                                labeled_withdraw.push(key);
+                            }
                         }
-                    }
-                    ExactExportKey::Vpn(key) => {
-                        if !vpn_withdraw.contains(&key) {
-                            vpn_withdraw.push(key);
-                        }
-                    }
-                    ExactExportKey::Labeled(key) => {
-                        if !labeled_withdraw.contains(&key) {
-                            labeled_withdraw.push(key);
-                        }
-                    }
-                    ExactExportKey::Rtc(key) => {
-                        if !rtc_withdraw.contains(&key) {
-                            rtc_withdraw.push(key);
+                        ExactExportKey::Rtc(key) => {
+                            if !rtc_withdraw.contains(&key) {
+                                rtc_withdraw.push(key);
+                            }
                         }
                     }
                 }
-            }
-            for (key, error) in new_rejections {
-                self.metrics.record_exact_export_rejection(
-                    &peer.to_string(),
-                    key.family_label(),
-                    error.code().reason(),
-                );
-                warn!(
-                    %peer,
-                    identity = %key.bounded_log_identity(),
-                    reason = error.code().as_str(),
-                    detail = error.detail(),
-                    profile_generation = snapshot.generation(),
-                    "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable"
-                );
+                for (key, error) in decision.new_rejections {
+                    self.metrics.record_exact_export_rejection(
+                        &peer.to_string(),
+                        key.family_label(),
+                        error.code().reason(),
+                    );
+                    warn!(
+                        %peer,
+                        identity = %key.bounded_log_identity(),
+                        reason = error.code().as_str(),
+                        detail = error.detail(),
+                        profile_generation = snapshot.generation(),
+                        "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable"
+                    );
+                }
             }
         }
 
@@ -1315,28 +1421,31 @@ impl RibManager {
             );
         }
 
-        permit.send(OutboundRouteUpdate {
-            exact_export_snapshot,
-            announce,
-            withdraw,
-            end_of_rib,
-            refresh_markers,
-            next_hop_override,
-            flowspec_announce,
-            flowspec_withdraw,
-            evpn_announce,
-            evpn_withdraw,
-            bgpls_announce,
-            bgpls_withdraw,
-            vpn_announce,
-            vpn_withdraw,
-            labeled_announce,
-            labeled_withdraw,
-            rtc_announce,
-            rtc_withdraw,
-            otc_blocked,
-            request_refresh_all_negotiated: false,
-        });
+        enqueue_outbound_update(
+            permit,
+            OutboundRouteUpdate {
+                exact_export_snapshot,
+                announce,
+                withdraw,
+                end_of_rib,
+                refresh_markers,
+                next_hop_override,
+                flowspec_announce,
+                flowspec_withdraw,
+                evpn_announce,
+                evpn_withdraw,
+                bgpls_announce,
+                bgpls_withdraw,
+                vpn_announce,
+                vpn_withdraw,
+                labeled_announce,
+                labeled_withdraw,
+                rtc_announce,
+                rtc_withdraw,
+                otc_blocked,
+                request_refresh_all_negotiated: false,
+            },
+        );
         true
     }
 
@@ -2890,6 +2999,28 @@ impl RibManager {
                 };
                 let announced_count = announce.len();
                 let withdrawn_count = withdraw.len();
+                let has_non_unicast_route_payload = !fs_announce.is_empty()
+                    || !fs_withdraw.is_empty()
+                    || !evpn_announce.is_empty()
+                    || !evpn_withdraw.is_empty()
+                    || !bgpls_announce.is_empty()
+                    || !bgpls_withdraw.is_empty()
+                    || !vpn_announce.is_empty()
+                    || !vpn_withdraw.is_empty()
+                    || !labeled_announce.is_empty()
+                    || !labeled_withdraw.is_empty()
+                    || !rtc_announce.is_empty()
+                    || !rtc_withdraw.is_empty();
+                // Only the ordinary, clean, shared-unicast path may defer
+                // its advertised-state delta walk. Every exception/resync,
+                // regroup, overlay, VPN-bearing, or mixed-family envelope
+                // retains the existing eager prior and authoritative slow
+                // path.
+                let defer_clean_group_prior = !resync
+                    && shared_unicast_cache_group.is_some()
+                    && !has_non_unicast_route_payload
+                    && !self.pending_regroup_baseline.contains_key(&peer)
+                    && !self.peer_unexportable.contains_key(&peer);
                 let group_prior = if let Some(gid) = member_of {
                     let mut prior = HashSet::new();
                     if is_dirty {
@@ -2915,7 +3046,7 @@ impl RibManager {
                                 .then_some(key)
                             }));
                         }
-                    } else if let Some(stage) = group_stage.get(&gid) {
+                    } else if !defer_clean_group_prior && let Some(stage) = group_stage.get(&gid) {
                         let rejected = self.peer_unexportable.get(&peer);
                         prior.extend(stage.deltas.iter().filter_map(|delta| {
                             let key =
@@ -2954,6 +3085,17 @@ impl RibManager {
                 } else {
                     HashSet::new()
                 };
+                let lazy_group_prior = defer_clean_group_prior.then(|| {
+                    let gid = shared_unicast_cache_group
+                        .expect("deferred clean prior requires a shared update group");
+                    LazyCleanGroupPrior {
+                        peer,
+                        deltas: &group_stage
+                            .get(&gid)
+                            .expect("shared update-group payload requires staged deltas")
+                            .deltas,
+                    }
+                });
                 if self.try_send_and_commit_outbound_update_with_group_prior(
                     peer,
                     nh_override_flags,
@@ -2974,7 +3116,11 @@ impl RibManager {
                     rtc_announce,
                     rtc_withdraw,
                     group_prior,
-                    shared_unicast_cache_group.map(|gid| (gid, &mut shared_unicast_probe_cache)),
+                    shared_unicast_cache_group.map(|group_id| SharedUnicastPrecommit {
+                        group_id,
+                        probe_cache: &mut shared_unicast_probe_cache,
+                        lazy_group_prior,
+                    }),
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,
