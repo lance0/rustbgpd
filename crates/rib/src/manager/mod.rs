@@ -1229,7 +1229,10 @@ impl RibManager {
     /// Record one real state-machine poll. Production yields immediately after
     /// each call; the benchmark driver invokes the same advance seam
     /// synchronously and records identical phase boundaries.
-    #[allow(clippy::unused_self)]
+    #[allow(
+        clippy::unused_self,
+        reason = "the shared production seam records state only in test and benchmark builds"
+    )]
     pub(in crate::manager) fn record_policy_transition_poll(
         &mut self,
         kind: distribution::CleanPolicyTransitionPollKind,
