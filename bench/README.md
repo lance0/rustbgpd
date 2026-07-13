@@ -59,8 +59,8 @@ Use the paired driver for retained comparisons:
 
 ```bash
 bench/compare-route-paging.sh \
-  --base 5f6dd2960933c356eeda53625caf7f8b91f77a7c \
-  --head ef0b6260313638e126d57c847f7990da991faa16 \
+  --base 50399dac696507a827480be4a9dcfef49e1682b3 \
+  --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
   --repetitions 2 \
@@ -86,20 +86,62 @@ match its pinned SHA-256, so extra edits inside an otherwise allowed
 implementation file are rejected. After the shared overlays, all tracked Cargo
 manifests and lockfiles, build scripts, Cargo config, and optional Rust
 toolchain selector files must be byte-identical; dirty production files are
-never measured.
+never measured. Retained comparisons also require a clean invoking checkout
+and an exclusive, nonblocking lock on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}`; lock contention
+exits 75 before either pinned tree is built. The driver prebuilds both trees
+with `cargo bench --locked --no-run` into separate target directories and
+retains one build log per side. Prebuilds use one Cargo job so the driver's own
+compile phase does not manufacture a high one-minute load immediately before
+the first sample. Each cell launches its side's resolved prebuilt executable
+directly, so Cargo cannot rebuild between the idle preflight and the sample;
+metadata retains both executable hashes.
+
+Immediately before every fresh-process cell, the driver polls for at most 30
+seconds and requires all of the following at the same point-in-time check: the
+one-minute load average is below 2.0, no other `cargo`, `rustc`, `rrharness`, or
+`route_paging` process is running, and the selected CPU reports the
+`performance` governor. Every polling attempt, including a timeout, is retained
+with UTC, load, governor, and matching process snapshot in
+`cell-preflight.tsv`. The lock excludes only cooperating rustbgpd bench/soak
+runners, and the process/load checks are a noise fence rather than a claim that
+the whole host is isolated.
+Retained metadata records the lock's default/override policy and a path digest,
+not the host username or absolute home directory.
+
 Each per-process CSV is retained under the comparison artifact's `raw/`
 directory. The exact overlaid harness, bench-support module, comparison driver,
 baseline/optimized production paging sources, and common Cargo/build inputs are
 retained under `measurement-sources/` with verified manifests, and an
 explicitly selected output directory must be empty.
+On successful validation, a top-level `SHA256SUMS` covers the combined/raw
+CSVs, logs, preflight evidence, metadata, and nested measurement-source
+manifest.
+
+`--no-taskset` marks the output `mechanics-only` and is never retained as
+comparison evidence. A dirty checkout is rejected by default; the explicit
+`--allow-dirty-mechanics --no-taskset` combination exists only to exercise the
+driver while editing it. Metadata records the invoking HEAD, dirty flag and
+status hash, evidence class, lock policy/digest, preflight thresholds, and exact driver,
+harness, bench-support, compile-input-manifest, and measurement-source-manifest
+hashes.
 
 For a quick single-process mechanics check, invoke the bench target directly
 with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publish
 that output as comparison evidence.
 
-Requirements: `bash`, `git`, `cargo`, `python3`, and `taskset` from
-util-linux. Use `--no-taskset` only for a quick mechanics check; results from
-an unpinned run should be treated as directional.
+Requirements: `bash`, `git`, `cargo`, `python3`, `flock`, and `taskset` from
+util-linux, plus Linux `/proc/loadavg` and per-CPU cpufreq governor reporting.
+Use `--no-taskset` only for a quick mechanics check; its output is not
+performance evidence.
+
+The no-build driver guard test covers dirty-source rejection, the
+mechanics-only override, host-lock contention/exit 75, and lock/prebuild/
+preflight ordering:
+
+```bash
+bench/tests/test-route-paging-driver.sh
+```
 
 Example:
 

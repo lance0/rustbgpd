@@ -14,8 +14,8 @@ pinned matrix completes on an otherwise idle host.
 
 | Variant | Commit | Behavior |
 |---|---|---|
-| Baseline | `5f6dd2960933c356eeda53625caf7f8b91f77a7c` | Committed rewritten manager-level benchmark baseline, with repeated scan + grouped full materialization |
-| Borrowed grouped view | `ef0b6260313638e126d57c847f7990da991faa16` | The grouped page scans the filtered group iterator directly; legacy full-snapshot/refresh callers still materialize |
+| Baseline | `50399dac696507a827480be4a9dcfef49e1682b3` | Committed rewritten manager-level benchmark baseline, with repeated scan + grouped full materialization |
+| Borrowed grouped view | `d12cbaae37a9779ccc58617189253450b57c8fa4` | The grouped page scans the filtered group iterator directly; legacy full-snapshot/refresh callers still materialize |
 
 The paired driver accepts only the full baseline and candidate commit IDs in
 the table above. It overlays one canonical benchmark and bench-support source
@@ -40,6 +40,21 @@ include the workspace profiles in the root `Cargo.toml` and the RIB benchmark
 declaration in `crates/rib/Cargo.toml`. Uncommitted production changes are
 deliberately excluded. The driver also refuses a nonempty output directory so
 retained evidence cannot mix runs.
+
+A retained run also requires a clean invoking checkout and acquires the shared
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` nonblockingly
+before it creates either build. Contention exits 75. Both pinned worktrees are
+prebuilt with `cargo bench --locked --no-run` into separate target directories,
+one Cargo job at a time, and the two build logs are retained. Immediately before
+each fresh-process cell, the driver directly launches the resolved prebuilt
+executable and records its SHA-256; Cargo cannot rebuild after the idle check.
+The driver polls for at most 30 seconds until the one-minute load is below 2.0,
+no other `cargo`, `rustc`, `rrharness`, or `route_paging` process is visible,
+and pinned CPU 5 reports the `performance` governor. It writes every attempt's
+UTC, load, governor, process count/snapshot, and pass/wait state to
+`cell-preflight.tsv`; a timeout exits 75 rather than producing a partial result
+that looks authoritative. The cooperative host lock and point-in-time
+preflight reduce known interference but do not prove whole-host isolation.
 
 Each process constructs a real `RibManager`, two identical RR-client update-
 group members, and a 100k- or 400k-route group table outside the timed region.
@@ -71,7 +86,7 @@ leaving the repeated table scan for a measured continuation tranche.
 
 | Field | Value |
 |---|---|
-| Host | `lancebox`, to be otherwise idle during retained samples |
+| Host | `lancebox`; cooperating rustbgpd soak/bench work excluded by the shared host lock |
 | Kernel | Linux `6.17.0-35-generic` x86_64 |
 | CPU | AMD Ryzen Threadripper 7970X 32-Cores, 64 logical CPUs, one NUMA node |
 | Pinned core | `5` |
@@ -81,8 +96,8 @@ leaving the repeated table scan for a measured continuation tranche.
 
 ```bash
 bench/compare-route-paging.sh \
-  --base 5f6dd2960933c356eeda53625caf7f8b91f77a7c \
-  --head ef0b6260313638e126d57c847f7990da991faa16 \
+  --base 50399dac696507a827480be4a9dcfef49e1682b3 \
+  --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
   --repetitions 2 \
@@ -91,11 +106,19 @@ bench/compare-route-paging.sh \
 
 The driver records the exact refs, pinned commits, normalized production-diff
 hash, canonical harness hash, individual source hashes, compile-input manifest
-hash, CPU pinning, pair order, and every one-row-per-process raw output under
-`raw/` beside the combined CSV. The exact harness, bench-support module,
-driver, baseline/optimized production paging sources, and common Cargo/build
-inputs used for the run are retained under `measurement-sources/` with checked
-hash manifests.
+hash, invoking HEAD and dirty state, evidence class, lock policy/digest, idle thresholds,
+CPU pinning, pair order, and every one-row-per-process raw output under `raw/`
+beside the combined CSV. It also retains the separate baseline/optimized build
+logs and per-cell preflight TSV. The exact harness, bench-support module,
+driver, invoking status snapshot, baseline/optimized production paging sources,
+and common Cargo/build inputs used for the run are retained under
+`measurement-sources/` with checked hash manifests. `--no-taskset` is explicitly
+mechanics-only; a dirty checkout requires the additional
+`--allow-dirty-mechanics` override and cannot produce retained evidence.
+The lock record does not retain the host username or absolute home directory.
+A successful matrix finishes by checking a top-level `SHA256SUMS` over the
+CSVs, build/execution logs, per-cell preflight, metadata, and nested source
+manifest.
 
 ## Results
 

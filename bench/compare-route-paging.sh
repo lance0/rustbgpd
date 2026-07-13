@@ -15,6 +15,11 @@ Usage: bench/compare-route-paging.sh [options]
   --core N            CPU core for taskset (default: 5)
   --output-dir DIR    Retained logs/raw/combined CSV directory (must be empty)
   --no-taskset        Do not pin execution (mechanics only)
+  --allow-dirty-mechanics
+                      Allow a dirty invoking checkout only with --no-taskset;
+                      the output is marked mechanics-only
+  --preflight-wait-seconds N
+                      Maximum idle-preflight polling time per cell (default: 30)
   -h, --help          Show this help
 
 The invoking checkout's route_paging.rs and benchmark-support module are copied
@@ -22,12 +27,16 @@ byte-for-byte into both detached worktrees. The script refuses to run if those
 measurement sources differ. REF values must resolve to the exact reviewed
 baseline/candidate commits. The normalized production patch and all Cargo/build
 inputs must match the pinned hashes; benchmark, test, and documentation overlays
-remain auditable. Uncommitted production changes are intentionally never measured.
+remain auditable. Retained comparisons require a clean invoking checkout,
+exclusive host lock, selected-core performance governor, one-minute load below
+2.0, and no competing cargo/rustc/rrharness/route_paging process immediately
+before every cell. Uncommitted production changes are intentionally never
+measured.
 EOF
 }
 
-readonly expected_base_commit=5f6dd2960933c356eeda53625caf7f8b91f77a7c
-readonly expected_head_commit=ef0b6260313638e126d57c847f7990da991faa16
+readonly expected_base_commit=50399dac696507a827480be4a9dcfef49e1682b3
+readonly expected_head_commit=d12cbaae37a9779ccc58617189253450b57c8fa4
 readonly expected_production_diff_sha256=558cf2ebc9101ca722b3d733a4dc2f4a91859a08e16ab6c7258844e99930ec87
 
 base_ref=
@@ -38,6 +47,10 @@ repetitions=2
 core=5
 output_dir=
 use_taskset=1
+allow_dirty_mechanics=0
+preflight_wait_seconds=30
+readonly load_one_max=2.0
+readonly required_governor=performance
 
 while (($#)); do
   case "$1" in
@@ -49,6 +62,11 @@ while (($#)); do
     --core) core=${2:?--core requires a value}; shift 2 ;;
     --output-dir) output_dir=${2:?--output-dir requires a path}; shift 2 ;;
     --no-taskset) use_taskset=0; shift ;;
+    --allow-dirty-mechanics) allow_dirty_mechanics=1; shift ;;
+    --preflight-wait-seconds)
+      preflight_wait_seconds=${2:?--preflight-wait-seconds requires a value}
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -79,6 +97,12 @@ positive_integer "$repetitions" --repetitions
   printf '%s must be a non-negative integer, got %s\n' --core "$core" >&2
   exit 2
 }
+positive_integer "$preflight_wait_seconds" --preflight-wait-seconds
+if ((allow_dirty_mechanics && use_taskset)); then
+  printf '%s requires %s; dirty output cannot be retained as evidence\n' \
+    --allow-dirty-mechanics --no-taskset >&2
+  exit 2
+fi
 IFS=, read -r -a routes <<<"$routes_csv"
 IFS=, read -r -a page_sizes <<<"$page_sizes_csv"
 ((${#routes[@]} > 0 && ${#page_sizes[@]} > 0)) || {
@@ -89,6 +113,65 @@ for value in "${routes[@]}"; do positive_integer "$value" --routes; done
 for value in "${page_sizes[@]}"; do positive_integer "$value" --page-sizes; done
 
 repo_root=$(git rev-parse --show-toplevel)
+invoking_head=$(git -C "$repo_root" rev-parse --verify HEAD)
+invoking_status=$(git -C "$repo_root" status --porcelain --untracked-files=normal)
+if [[ -n $invoking_status ]]; then
+  invoking_dirty=1
+else
+  invoking_dirty=0
+fi
+if ((invoking_dirty && !allow_dirty_mechanics)); then
+  printf 'invoking checkout is dirty; commit/stash changes or use %s with %s\n' \
+    --allow-dirty-mechanics --no-taskset >&2
+  exit 1
+fi
+if ((use_taskset)); then
+  evidence_class=retained
+else
+  evidence_class=mechanics-only
+fi
+
+for required_command in \
+  awk cargo cmp find flock git ps python3 realpath rustc sha256sum sort tail tr wc xargs; do
+  command -v "$required_command" >/dev/null 2>&1 || {
+    printf 'required command not found: %s\n' "$required_command" >&2
+    exit 1
+  }
+done
+if ((use_taskset)); then
+  command -v taskset >/dev/null 2>&1 || {
+    printf 'taskset not found; install util-linux or use %s for mechanics only\n' \
+      --no-taskset >&2
+    exit 1
+  }
+  taskset -c "$core" true >/dev/null 2>&1 || {
+    printf 'selected CPU cannot be used by taskset: %s\n' "$core" >&2
+    exit 1
+  }
+fi
+
+# Exclude cooperating soak and performance workloads before creating worktrees,
+# compiling, or executing a benchmark. Exit 75 (EX_TEMPFAIL) lets unattended
+# callers retry a busy host without treating contention as a benchmark failure.
+if [[ -n ${RUSTBGPD_HOST_LOCK+x} ]]; then
+  host_lock=$RUSTBGPD_HOST_LOCK
+  host_lock_source=environment-override
+else
+  host_lock="${HOME}/.local/state/rustbgpd-host.lock"
+  host_lock_source=default-user-state
+fi
+host_lock_sha256=$(printf '%s' "$host_lock" | sha256sum | awk '{print $1}')
+mkdir -p "$(dirname "$host_lock")"
+touch "$host_lock"
+# shellcheck disable=SC1083 # bash dynamic file descriptor syntax is intentional.
+exec {host_lock_fd}>"$host_lock"
+if ! flock -n "$host_lock_fd"; then
+  printf 'error: %s is held by another process (soak or bench)\n' "$host_lock" >&2
+  printf '       wait for it to finish; the driver did not build or run\n' >&2
+  exit 75
+fi
+printf 'acquired host lock: %s\n' "$host_lock"
+
 canonical_harness="$repo_root/crates/rib/benches/route_paging.rs"
 canonical_bench_support="$repo_root/crates/rib/src/manager/bench_support.rs"
 driver_path=$0
@@ -212,6 +295,8 @@ fi
 output_dir=$(cd "$output_dir" && pwd)
 raw_dir="$output_dir/raw"
 mkdir "$raw_dir"
+build_log_dir="$output_dir/build-logs"
+mkdir "$build_log_dir"
 source_dir="$output_dir/measurement-sources"
 mkdir "$source_dir"
 cp "$canonical_harness" "$source_dir/route_paging.rs"
@@ -220,6 +305,8 @@ cp "$canonical_driver" "$source_dir/compare-route-paging.sh"
 cmp --silent "$canonical_harness" "$source_dir/route_paging.rs"
 cmp --silent "$canonical_bench_support" "$source_dir/bench_support.rs"
 cmp --silent "$canonical_driver" "$source_dir/compare-route-paging.sh"
+printf '%s' "$invoking_status" >"$source_dir/invoking-status.txt"
+invoking_status_sha256=$(sha256sum "$source_dir/invoking-status.txt" | awk '{print $1}')
 mkdir "$source_dir/baseline-production" "$source_dir/optimized-production"
 for production_source in \
   crates/rib/src/manager/mod.rs \
@@ -233,6 +320,8 @@ done
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/rustbgpd-route-paging.XXXXXX")
 base_tree="$scratch/base"
 head_tree="$scratch/head"
+base_target_dir="$scratch/target-base"
+head_target_dir="$scratch/target-head"
 cleanup() {
   git -C "$repo_root" worktree remove --force "$base_tree" >/dev/null 2>&1 || true
   git -C "$repo_root" worktree remove --force "$head_tree" >/dev/null 2>&1 || true
@@ -242,6 +331,7 @@ trap cleanup EXIT INT TERM
 
 git -C "$repo_root" worktree add --detach "$base_tree" "$base_commit" >/dev/null
 git -C "$repo_root" worktree add --detach "$head_tree" "$head_commit" >/dev/null
+mkdir "$base_target_dir" "$head_target_dir"
 cp "$canonical_harness" "$base_tree/crates/rib/benches/route_paging.rs"
 cp "$canonical_harness" "$head_tree/crates/rib/benches/route_paging.rs"
 cp "$canonical_bench_support" "$base_tree/crates/rib/src/manager/bench_support.rs"
@@ -325,7 +415,7 @@ compile_input_count=${#base_compile_inputs[@]}
 source_manifest_tmp="$scratch/measurement-source-SHA256SUMS"
 (
   cd "$source_dir"
-  find . -type f ! -name SHA256SUMS -print0 \
+  find . -type f ! -path ./SHA256SUMS -print0 \
     | sort -z \
     | xargs -0 sha256sum >"$source_manifest_tmp"
   mv "$source_manifest_tmp" SHA256SUMS
@@ -334,6 +424,12 @@ source_manifest_tmp="$scratch/measurement-source-SHA256SUMS"
 measurement_source_manifest_sha256=$(sha256sum "$source_dir/SHA256SUMS" | awk '{print $1}')
 
 cat >"$output_dir/metadata.txt" <<EOF
+run_utc_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+evidence_class=$evidence_class
+invoking_head=$invoking_head
+invoking_dirty=$invoking_dirty
+allow_dirty_mechanics=$allow_dirty_mechanics
+invoking_status_sha256=$invoking_status_sha256
 base_ref=$base_ref
 base_commit=$base_commit
 expected_base_commit=$expected_base_commit
@@ -354,9 +450,73 @@ page_sizes=$page_sizes_csv
 repetitions=$repetitions
 core=$core
 taskset=$use_taskset
+host_lock_source=$host_lock_source
+host_lock_path_sha256=$host_lock_sha256
+host_lock_acquired=1
+load_one_max=$load_one_max
+preflight_wait_seconds=$preflight_wait_seconds
+preflight_poll_seconds=1
+required_governor=$required_governor
+governor_path=/sys/devices/system/cpu/cpu${core}/cpufreq/scaling_governor
+load_source=/proc/loadavg
+competing_process_names=cargo,rustc,rrharness,route_paging
+build_mode=cargo_bench_no_run_locked_jobs_1_separate_target_dirs
+build_log_baseline=build-logs/baseline.log
+build_log_optimized=build-logs/optimized.log
+cell_preflight_tsv=cell-preflight.tsv
 uname=$(uname -srvmo)
 rustc=$(rustc --version)
+cargo=$(cargo --version)
 EOF
+
+prebuild_variant() {
+  local variant=$1 tree=$2 target_dir=$3
+  local build_log="$build_log_dir/${variant}.log"
+  {
+    printf 'utc_start=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'variant=%s\n' "$variant"
+    printf 'tree_commit=%s\n' "$(git -C "$tree" rev-parse HEAD)"
+    printf 'command=CARGO_TARGET_DIR=%s cargo bench -p rustbgpd-rib --features bench-internals --bench route_paging --locked --no-run --jobs 1\n' \
+      "$target_dir"
+  } >"$build_log"
+  (
+    cd "$tree"
+    CARGO_TARGET_DIR="$target_dir" \
+      cargo bench -p rustbgpd-rib --features bench-internals \
+        --bench route_paging --locked --no-run --jobs 1
+  ) >>"$build_log" 2>&1
+  printf 'utc_finish=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$build_log"
+}
+
+# Compile both pinned trees before the first timed cell. Separate target
+# directories prevent Cargo from reusing a same-named artifact across refs.
+prebuild_variant baseline "$base_tree" "$base_target_dir"
+prebuild_variant optimized "$head_tree" "$head_target_dir"
+
+locate_benchmark_binary() {
+  local target_dir=$1
+  local -a candidates
+  mapfile -t candidates < <(
+    find "$target_dir/release/deps" -maxdepth 1 -type f -perm -u+x \
+      -name 'route_paging-*' -print | sort
+  )
+  [[ ${#candidates[@]} -eq 1 ]] || {
+    printf 'expected one prebuilt route_paging executable under %s, found %s\n' \
+      "$target_dir/release/deps" "${#candidates[@]}" >&2
+    return 1
+  }
+  printf '%s\n' "${candidates[0]}"
+}
+
+base_benchmark_binary=$(locate_benchmark_binary "$base_target_dir")
+head_benchmark_binary=$(locate_benchmark_binary "$head_target_dir")
+base_benchmark_binary_sha256=$(sha256sum "$base_benchmark_binary" | awk '{print $1}')
+head_benchmark_binary_sha256=$(sha256sum "$head_benchmark_binary" | awk '{print $1}')
+{
+  printf 'baseline_benchmark_binary_sha256=%s\n' "$base_benchmark_binary_sha256"
+  printf 'optimized_benchmark_binary_sha256=%s\n' "$head_benchmark_binary_sha256"
+  printf 'cell_launch=direct_prebuilt_executable\n'
+} >>"$output_dir/metadata.txt"
 
 results="$output_dir/route-paging.csv"
 printf '%s\n' \
@@ -364,14 +524,101 @@ printf '%s\n' \
   >"$results"
 execution_log="$output_dir/execution.log"
 : >"$execution_log"
+preflight_log="$output_dir/cell-preflight.tsv"
+printf 'cell_id\tattempt\tutc\tload_1m\tload_1m_max\tgovernor\trequired_governor\tcompeting_process_count\tcompeting_processes\tstatus\n' \
+  >"$preflight_log"
+
+read_selected_governor() {
+  if ((!use_taskset)); then
+    printf 'not-required-mechanics-only\n'
+    return
+  fi
+  local governor_path="/sys/devices/system/cpu/cpu${core}/cpufreq/scaling_governor"
+  if [[ ! -r $governor_path ]]; then
+    printf 'unavailable\n'
+    return
+  fi
+  tr -d '\n' <"$governor_path"
+  printf '\n'
+}
+
+competing_process_snapshot() {
+  # Linux comm names are sufficient for cargo/rustc and include the stable
+  # prefix of hashed benchmark executable names. The current shell is `bash`,
+  # so no special self exemption is needed beyond the defensive PID check.
+  ps -eo pid=,comm=,args= --no-headers \
+    | awk -v self="$$" '
+        $1 != self &&
+        ($2 == "cargo" || $2 == "rustc" ||
+         $2 ~ /^rrharness($|-)/ || $2 ~ /^route_paging($|-)/) {
+          print
+        }
+      '
+}
+
+preflight_cell() {
+  local cell_id=$1 attempt=0
+  local deadline=$((SECONDS + preflight_wait_seconds))
+  local utc load_one governor process_lines process_count process_summary status timed_out
+  while true; do
+    ((attempt += 1))
+    utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    load_one=$(awk '{print $1}' /proc/loadavg)
+    governor=$(read_selected_governor)
+    process_lines=$(competing_process_snapshot)
+    if [[ -n $process_lines ]]; then
+      process_count=$(wc -l <<<"$process_lines")
+      process_summary=$(printf '%s' "$process_lines" | tr '\t\n' '  ' | tr -s ' ')
+    else
+      process_count=0
+      process_summary=none
+    fi
+
+    status=pass
+    if ! awk -v observed="$load_one" -v maximum="$load_one_max" \
+      'BEGIN { exit !(observed + 0 < maximum + 0) }'; then
+      status=wait-load
+    elif ((use_taskset)) && [[ $governor != "$required_governor" ]]; then
+      status=wait-governor
+    elif ((process_count != 0)); then
+      status=wait-processes
+    fi
+
+    timed_out=0
+    if [[ $status != pass ]] && ((SECONDS >= deadline)); then
+      status=${status/wait-/timeout-}
+      timed_out=1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$cell_id" "$attempt" "$utc" "$load_one" "$load_one_max" \
+      "$governor" "$required_governor" "$process_count" "$process_summary" \
+      "$status" >>"$preflight_log"
+    if [[ $status == pass ]]; then
+      return
+    fi
+    if ((timed_out)); then
+      printf 'cell preflight timed out after %ss: %s (load=%s governor=%s processes=%s)\n' \
+        "$preflight_wait_seconds" "$cell_id" "$load_one" "$governor" \
+        "$process_summary" >&2
+      return 75
+    fi
+    sleep 1
+  done
+}
 
 run_cell() {
   local variant=$1 tree=$2 commit=$3 scope=$4 route_count=$5 page_size=$6
   local repetition=$7 pair_order=$8 run_position=$9
   local cell_output="$raw_dir/${variant}-${scope}-${route_count}-${page_size}-rep${repetition}-${pair_order}-${run_position}.csv"
+  local cell_id="${variant}-${scope}-${route_count}-${page_size}-rep${repetition}-${pair_order}-${run_position}"
+  local benchmark_binary
+  case "$variant" in
+    baseline) benchmark_binary=$base_benchmark_binary ;;
+    optimized) benchmark_binary=$head_benchmark_binary ;;
+    *) printf 'unknown benchmark variant: %s\n' "$variant" >&2; exit 2 ;;
+  esac
   local -a command=(
-    cargo bench -p rustbgpd-rib --features bench-internals
-    --bench route_paging --
+    "$benchmark_binary"
     --routes "$route_count"
     --page-size "$page_size"
     --scope "$scope"
@@ -384,6 +631,7 @@ run_cell() {
   printf 'run variant=%s scope=%s routes=%s page=%s repetition=%s order=%s position=%s\n' \
     "$variant" "$scope" "$route_count" "$page_size" "$repetition" \
     "$pair_order" "$run_position" >>"$execution_log"
+  preflight_cell "$cell_id"
   (
     cd "$tree"
     RUSTBGPD_ROUTE_PAGING_VARIANT=$variant \
@@ -485,5 +733,23 @@ for key, seen in orders.items():
 
 print(f"validated {len(pairs)} paired cells with identical route/page checksums")
 PY
+
+{
+  printf 'run_utc_finish=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'matrix_complete=1\n'
+} >>"$output_dir/metadata.txt"
+
+artifact_manifest_tmp="$scratch/artifact-SHA256SUMS"
+(
+  cd "$output_dir"
+  find . -type f ! -path ./SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum
+) >"$artifact_manifest_tmp"
+mv "$artifact_manifest_tmp" "$output_dir/SHA256SUMS"
+(
+  cd "$output_dir"
+  sha256sum --check SHA256SUMS >/dev/null
+)
 
 printf 'route paging comparison written to %s\n' "$output_dir"
