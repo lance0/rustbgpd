@@ -120,6 +120,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
   separately pins the exact workspace patch version.
 
+- **Planned-restart deferral remains bounded across backward clock steps.**
+  Marker-backed startup now clamps the persisted marker's remaining lifetime to
+  the maximum effective `gr_restart_time`, so a wall-clock correction cannot
+  extend restarting-speaker signaling or route-selection deferral beyond the
+  configured window. Expired markers still produce an immediate cold start.
+
 - **Unexportable routes now fail before Adj-RIB-Out commit.** Every
   route-bearing envelope carries one immutable snapshot of the session's exact
   encoder and negotiated message ceiling. The RIB probes the final one-route
