@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed validators for the LAN-393 full-daemon receipt."""
+"""Fail-closed validators for the event-history producer full-daemon receipt."""
 
 from __future__ import annotations
 
@@ -148,8 +148,8 @@ def validate_image(args: argparse.Namespace) -> None:
             "sha256:", 1
         )[1],
         "org.rustbgpd.bgperf2.rust-toolchain": "1.95",
-        "org.rustbgpd.lan393.profile-phase": args.phase,
-        "org.rustbgpd.lan393.event-history-mode": args.mode,
+        "org.rustbgpd.event-history.profile-phase": args.phase,
+        "org.rustbgpd.event-history.mode": args.mode,
     }
     for name, expected in expected_labels.items():
         require_equal(labels.get(name), expected, f"OCI label {name}")
@@ -338,7 +338,7 @@ def validate_bird_tester_logs(
     BIRD timeout detector; its CSV timeout field is therefore compatibility
     data, not timeout evidence.
     """
-    expected_bench_name = f"lan393-{args.phase}-{args.mode}"
+    expected_bench_name = f"event-history-{args.phase}-{args.mode}"
     require_equal(args.bench_name, expected_bench_name, "bgperf bench name")
     require_equal(
         args.run_receipt_dir.name,

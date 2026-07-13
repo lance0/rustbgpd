@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify sanitized LAN-393 full-daemon perf stacks and apply the proceed gate."""
+"""Classify sanitized event-history producer full-daemon perf stacks and apply the proceed gate."""
 
 from __future__ import annotations
 

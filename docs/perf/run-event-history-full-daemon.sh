@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible LAN-393 full-daemon baseline/candidate profile receipt.
+# Reproducible event-history producer full-daemon baseline/candidate profile receipt.
 set -euo pipefail
 
 usage() {
@@ -20,14 +20,14 @@ RUSTBGPD_SOURCE=${RUSTBGPD_SOURCE:-$PWD}
 ARTIFACT_DIR=${ARTIFACT_DIR:-$RUSTBGPD_SOURCE/docs/perf/artifacts/event-history-producer-2026-07}
 BGPERF2_REMOTE=https://github.com/lance0/bgperf2.git
 BGPERF2_COMMIT=fe4fdab9f7efb56e2e98ad6e6bcffeda047761a9
-BGPERF2_DIR=${BGPERF2_DIR:-/tmp/lan393-bgperf2-$BGPERF2_COMMIT}
-BGPERF_RUN_DIR=${BGPERF_RUN_DIR:-/tmp/lan393-bgperf-$PROFILE}
-BENCH_NAME=lan393-$PROFILE
-PROFILE_IMAGE=${PROFILE_IMAGE:-bgperf/rustbgpd:lan393-$PROFILE-prof}
+BGPERF2_DIR=${BGPERF2_DIR:-/tmp/event-history-bgperf2-$BGPERF2_COMMIT}
+BGPERF_RUN_DIR=${BGPERF_RUN_DIR:-/tmp/event-history-bgperf-$PROFILE}
+BENCH_NAME=event-history-$PROFILE
+PROFILE_IMAGE=${PROFILE_IMAGE:-bgperf/rustbgpd:event-history-$PROFILE-prof}
 TARGET_CONTAINER=${TARGET_CONTAINER:-bgperf_rustbgpd_target}
-VALIDATOR=$RUSTBGPD_SOURCE/docs/perf/validate-lan393-receipt.py
+VALIDATOR=$RUSTBGPD_SOURCE/docs/perf/validate-event-history-receipt.py
 WRAPPER=$RUSTBGPD_SOURCE/docs/perf/bgperf-rustbgpd-ehm-wrapper.sh
-HOST_FENCE=$RUSTBGPD_SOURCE/docs/perf/lan393-host-fence.sh
+HOST_FENCE=$RUSTBGPD_SOURCE/docs/perf/event-history-host-fence.sh
 PREFIX=$ARTIFACT_DIR/full-daemon-$PROFILE
 BASELINE_ENV=$ARTIFACT_DIR/microbench-baseline-environment.txt
 CANDIDATE_ENV=$ARTIFACT_DIR/microbench-candidate-environment.txt
@@ -36,7 +36,7 @@ DEBIAN_RUNTIME_IMAGE='debian:bookworm-slim@sha256:60eac759739651111db372c07be678
 BUILD_CONTEXT=''
 BGPERF_PID=''
 TARGET_PID=''
-PRIVATE_PERF_DIR=${LAN393_PRIVATE_PERF_DIR:-$RUSTBGPD_SOURCE/target/lan393-private-perf}
+PRIVATE_PERF_DIR=${EVENT_HISTORY_PERF_PRIVATE_DIR:-$RUSTBGPD_SOURCE/target/event-history-private-perf}
 PRIVATE_PERF_DATA=$PRIVATE_PERF_DIR/full-daemon-$PROFILE.perf.data
 PRIVATE_PROFILE_READY=$PRIVATE_PERF_DIR/full-daemon-$PROFILE.profile-ready
 
@@ -94,8 +94,8 @@ write_host_toolchain() {
 
 compare_provenance_without_source_commit() {
     local reference=$1 candidate=$2 label=$3 left right
-    left=$(mktemp /tmp/lan393-provenance-reference.XXXXXX)
-    right=$(mktemp /tmp/lan393-provenance-candidate.XXXXXX)
+    left=$(mktemp /tmp/event-history-provenance-reference.XXXXXX)
+    right=$(mktemp /tmp/event-history-provenance-candidate.XXXXXX)
     sed '/^rustbgpd_commit=/d' "$reference" >"$left"
     sed '/^rustbgpd_commit=/d' "$candidate" >"$right"
     if ! cmp --silent "$left" "$right"; then
@@ -262,11 +262,11 @@ fi
 
 require_clean_source
 require_new_phase_receipt
-# shellcheck source=docs/perf/lan393-host-fence.sh
+# shellcheck source=docs/perf/event-history-host-fence.sh
 source "$HOST_FENCE"
-lan393_acquire_host_lock
+event_history_acquire_host_lock
 HOST_PREFLIGHT=$PREFIX-host-preflight.tsv
-lan393_init_host_preflight_log "$HOST_PREFLIGHT"
+event_history_init_host_preflight_log "$HOST_PREFLIGHT"
 HOST_FINGERPRINT=$PREFIX-host-fingerprint.txt
 HOST_TOOLCHAIN=$PREFIX-host-toolchain.txt
 write_host_fingerprint "$HOST_FINGERPRINT"
@@ -281,7 +281,7 @@ if [[ "$PROFILE" != baseline-enabled ]]; then
         exit 1
     }
 fi
-lan393_wait_for_idle "$PROFILE-before-build" "$HOST_PREFLIGHT"
+event_history_wait_for_idle "$PROFILE-before-build" "$HOST_PREFLIGHT"
 rm -rf "$BGPERF_RUN_DIR"
 
 # Criterion establishes each exact source archive. Every full-daemon profile
@@ -336,9 +336,9 @@ fi
 
 # Docker and the receipt validator consume only the retained exact-commit
 # archive. The mutable checkout is identity input, never build input.
-BUILD_CONTEXT=$(mktemp -d /tmp/lan393-rustbgpd-build.XXXXXX)
+BUILD_CONTEXT=$(mktemp -d /tmp/event-history-rustbgpd-build.XXXXXX)
 tar -xzf "$BUILD_ARCHIVE" -C "$BUILD_CONTEXT"
-VALIDATOR=$BUILD_CONTEXT/docs/perf/validate-lan393-receipt.py
+VALIDATOR=$BUILD_CONTEXT/docs/perf/validate-event-history-receipt.py
 [[ -x "$VALIDATOR" ]] || {
     printf 'archived validator is not executable: %s\n' "$VALIDATOR" >&2
     exit 1
@@ -441,9 +441,9 @@ LABEL org.opencontainers.image.base.name="$DEBIAN_RUNTIME_IMAGE"
 LABEL org.opencontainers.image.base.digest="${DEBIAN_RUNTIME_IMAGE##*sha256:}"
 LABEL org.rustbgpd.bgperf2.builder-base.digest="${RUST_BUILDER_IMAGE##*sha256:}"
 LABEL org.rustbgpd.bgperf2.rust-toolchain="1.95"
-LABEL org.rustbgpd.lan393.profile-phase="\$PROFILE_PHASE"
-LABEL org.rustbgpd.lan393.event-history-mode="\$EVENT_HISTORY_MODE"
-ENV LAN393_EVENT_HISTORY_MODE="\$EVENT_HISTORY_MODE"
+LABEL org.rustbgpd.event-history.profile-phase="\$PROFILE_PHASE"
+LABEL org.rustbgpd.event-history.mode="\$EVENT_HISTORY_MODE"
+ENV EVENT_HISTORY_PERF_MODE="\$EVENT_HISTORY_MODE"
 WORKDIR /root
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
@@ -522,12 +522,12 @@ PROFILE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$PROFILE_IMAGE")
     printf 'host_lock_policy=rustbgpd-shared-user-lock\n'
     printf 'host_lock_acquired=1\n'
     printf 'host_preflight=%s\n' "$(basename "$HOST_PREFLIGHT")"
-    printf 'load_one_max=%s\n' "$LAN393_REQUIRED_LOAD_ONE_MAX"
-    printf 'preflight_wait_seconds=%s\n' "${LAN393_PREFLIGHT_WAIT_SECONDS:-120}"
+    printf 'load_one_max=%s\n' "$EVENT_HISTORY_PERF_REQUIRED_LOAD_ONE_MAX"
+    printf 'preflight_wait_seconds=%s\n' "${EVENT_HISTORY_PERF_PREFLIGHT_WAIT_SECONDS:-120}"
     printf 'required_governor=performance\n'
 } >"$PREFIX-environment.txt"
 
-lan393_wait_for_idle "$PROFILE-before-bgperf" "$HOST_PREFLIGHT"
+event_history_wait_for_idle "$PROFILE-before-bgperf" "$HOST_PREFLIGHT"
 (
     cd "$BGPERF2_DIR"
     env -u RUSTBGPD_EVENT_HISTORY \
@@ -582,7 +582,7 @@ mkdir -p "$PRIVATE_PERF_DIR"
     exit 1
 }
 docker cp \
-    "$TARGET_CONTAINER:/root/config/lan393-profile-ready" \
+    "$TARGET_CONTAINER:/root/config/event-history-profile-ready" \
     "$PRIVATE_PROFILE_READY"
 python3 "$VALIDATOR" barrier \
     --raw "$PRIVATE_PROFILE_READY" \
@@ -710,7 +710,7 @@ for line in sys.stdin:
     line=re.sub(r"/(?:home|Users)/[^ /)]+", "<host-home>", line)
     sys.stdout.write(line)' \
     >"$PREFIX-perf-script.txt"
-python3 "$BUILD_CONTEXT/docs/perf/validate-lan393-perf.py" \
+python3 "$BUILD_CONTEXT/docs/perf/validate-event-history-perf.py" \
     --input "$PREFIX-perf-script.txt" \
     --phase "$SOURCE_PHASE" \
     --mode "$EHM_MODE" \
@@ -736,7 +736,7 @@ privacy_check
 } >"$PREFIX-completion.txt"
 
 if [[ "$EHM_MODE" == disabled ]]; then
-    python3 "$BUILD_CONTEXT/docs/perf/validate-lan393-full-comparison.py" \
+    python3 "$BUILD_CONTEXT/docs/perf/validate-event-history-full-comparison.py" \
         --artifact-dir "$ARTIFACT_DIR" \
         --phase "$SOURCE_PHASE" \
         --output "$PREFIX-overall-verdict.json" \

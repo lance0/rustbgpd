@@ -1,13 +1,13 @@
-//! LAN-393 measurement gate for RIB-produced durable events.
+//! Event-history producer measurement gate for RIB-produced durable events.
 //!
-//! The `lan393_manager_self_time` group times only the synchronous
+//! The `event_history_manager_self_time` group times only the synchronous
 //! `RibManager::publish_*` phase. It compares the default no-op sink with the
 //! real EHM sink. All no-op cases finish before EHM is started, and each EHM
 //! sample starts only after the preceding sample reaches EHM's committed
 //! high-water mark. Commit fences and health checks run in Criterion setup and
 //! are therefore outside the timed region.
 //!
-//! The `lan393_sqlite_end_to_end` group starts at the same manager publish
+//! The `event_history_sqlite_end_to_end` group starts at the same manager publish
 //! helper and ends when every event is observed on EHM's post-commit broadcast.
 //! It therefore includes conversion, prost encoding, the bounded queue, SQLite
 //! commit, cursor allocation, and committed-event delivery.
@@ -113,11 +113,11 @@ impl EhmHarness {
     fn new(subscribe_to_commits: bool) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("lan393-ehm")
+            .thread_name("event-history-ehm")
             .enable_all()
             .build()
-            .expect("LAN-393 benchmark runtime");
-        let dir = tempfile::tempdir().expect("LAN-393 benchmark tempdir");
+            .expect("event-history producer benchmark runtime");
+        let dir = tempfile::tempdir().expect("event-history producer benchmark tempdir");
         let metrics = BgpMetrics::new();
         let history = runtime
             .block_on(EventHistoryManager::start(EventHistoryConfig {
@@ -134,7 +134,7 @@ impl EhmHarness {
                 sidecar_flush_interval_batches: u64::MAX,
                 metrics: Some(metrics.clone()),
             }))
-            .expect("start LAN-393 benchmark EHM");
+            .expect("start event-history producer benchmark EHM");
         let handle = history.handle();
         let sender = handle.sender();
         let committed_rx = subscribe_to_commits.then(|| handle.subscribe_live());
@@ -333,7 +333,7 @@ fn assert_healthy(state: &Arc<EhmState>, metrics: &BgpMetrics) {
 }
 
 fn manager_self_time(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lan393_manager_self_time");
+    let mut group = c.benchmark_group("event_history_manager_self_time");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
@@ -403,7 +403,7 @@ fn manager_self_time(c: &mut Criterion) {
 }
 
 fn sqlite_end_to_end(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lan393_sqlite_end_to_end");
+    let mut group = c.benchmark_group("event_history_sqlite_end_to_end");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
