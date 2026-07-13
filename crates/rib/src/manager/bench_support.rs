@@ -17,14 +17,32 @@ use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::RibManager;
 use crate::adj_rib_in::AdjRibIn;
 use crate::route::Route;
-use crate::update::{ExactExportEncoder, OutboundRouteUpdate};
+use crate::update::{
+    ExactExportEncoder, OutboundRouteUpdate, RoutePage, RouteQueryKey, RouteQueryScope,
+};
 
 impl RibManager {
+    /// Synthetic peer address used by [`Self::bench_register_peers`].
+    ///
+    /// Keeping address construction in one helper lets paging benchmarks
+    /// query a real grouped member without duplicating the registration
+    /// scheme.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`, far beyond a useful benchmark.
+    #[must_use]
+    pub fn bench_peer_address(index: usize) -> IpAddr {
+        let idx = u32::try_from(index).expect("bench peer index fits in u32");
+        let [_, b1, b2, b3] = idx.to_be_bytes();
+        IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3))
+    }
+
     /// Register `n_peers` synthetic iBGP outbound peers (`10.a.b.c`), each
     /// cloning `export_policy` and advertising IPv4 unicast. Returns the peer
     /// receivers; the caller MUST hold them so the bounded channels stay open —
@@ -57,8 +75,7 @@ impl RibManager {
             // Unique peer address `10.b1.b2.b3` from the index; the high byte is
             // dropped (n_peers far below 2^24 for any bench).
             let idx = u32::try_from(i).expect("bench peer count fits in u32");
-            let [_, b1, b2, b3] = idx.to_be_bytes();
-            let peer = IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3));
+            let peer = Self::bench_peer_address(i);
             let session_id = u64::from(idx) + 1;
             let (tx, mut rx) = mpsc::channel(channel_capacity);
             self.pending_peer_export_encoders
@@ -116,5 +133,27 @@ impl RibManager {
     /// no-Add-Path peers, best-changed and affected are the same set.
     pub fn bench_distribute(&mut self, changed: &HashSet<Prefix>) {
         self.distribute_changes(changed, changed);
+    }
+
+    /// Drive the production paged-query handler synchronously and return its
+    /// reply. The benchmark deliberately includes the oneshot boundary while
+    /// excluding async task scheduling noise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the production handler stops replying synchronously; that
+    /// would invalidate this benchmark's actor-occupancy measurement model.
+    #[must_use]
+    pub fn bench_query_route_page(
+        &mut self,
+        scope: RouteQueryScope,
+        after: Option<RouteQueryKey>,
+        page_size: usize,
+    ) -> RoutePage {
+        let (reply, mut response) = oneshot::channel();
+        self.handle_query_routes_page(scope, None, after, page_size, reply);
+        response
+            .try_recv()
+            .expect("route page handler replies synchronously")
     }
 }

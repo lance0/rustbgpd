@@ -46,6 +46,24 @@ with both runs pinned to one CPU core through `taskset`. It writes a Markdown
 summary, command logs, environment metadata, and raw Criterion artifacts under
 `target/bench-compare/`.
 
+`route_paging` is a manager-level custom harness for the long-running LAN-391
+complete-traversal shape. It reports one CSV row per traversal plus per-page
+actor-occupancy p50/p99/max; unlike Criterion it does not multiply the 400k
+route/page-size 100 repeated-scan baseline by a minimum sample count:
+
+```bash
+RUSTBGPD_ROUTE_PAGING_VARIANT=baseline \
+RUSTBGPD_ROUTE_PAGING_COMMIT="$(git rev-parse HEAD)" \
+taskset -c 5 cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench route_paging -- \
+  --routes 100000,400000 --page-sizes 100,1000 \
+  --repetitions 1 --output /tmp/route-paging.csv
+```
+
+Run the identical command at each pinned comparison commit with different
+`VARIANT`/`COMMIT` values. The harness validates row totals, strict cursor
+order, page bounds, and complete traversal while it measures.
+
 Requirements: `bash`, `git`, `cargo`, `python3`, and `taskset` from
 util-linux. Use `--no-taskset` only for a quick mechanics check; results from
 an unpinned run should be treated as directional.
