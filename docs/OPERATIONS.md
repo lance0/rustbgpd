@@ -745,6 +745,15 @@ owned-state.
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
 | `bgp_gr_stale_routes` | Routes currently marked stale |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
+| `bgp_selection_deferral_active{afi_safi}` | Planned-restart family selection gate (1 = active) |
+| `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking selection for the family |
+| `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor` or `timer` |
+| `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
+
+For active gates, `rbgp neighbor <address>` and
+`NeighborService.GetNeighborState` also show the peer's waiter state, stamped
+session, blocking-waiter count, and remaining time. A released row retains its
+reason for the daemon lifetime.
 
 ### BFD
 

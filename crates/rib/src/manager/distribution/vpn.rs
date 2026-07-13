@@ -675,7 +675,12 @@ impl RibManager {
         &mut self,
         affected: &HashSet<VpnRibRouteKey>,
     ) {
-        let affected_nlri: HashSet<VpnRouteKey> = affected.iter().map(|key| key.nlri_key).collect();
+        self.record_deferred_vpn(affected);
+        let affected_nlri: HashSet<VpnRouteKey> = affected
+            .iter()
+            .filter(|key| !self.selection_deferred(key.afi_safi()))
+            .map(|key| key.nlri_key)
+            .collect();
 
         let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
         for key in &affected_nlri {

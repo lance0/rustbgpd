@@ -11,6 +11,77 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
         .map_or(0.0, |metric| metric.get_counter().value())
 }
 
+/// A still-gated BGP-LS family must not influence already-released unicast
+/// ORR selection. The topology becomes visible only when the BGP-LS gate
+/// itself releases.
+#[tokio::test]
+async fn selection_deferral_hides_bgpls_topology_until_family_release() {
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    let feed_peer = IpAddr::V4(feed);
+    let family = (Afi::BgpLs, Safi::BgpLs);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(1),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: feed_peer,
+                families: vec![family],
+            }],
+        });
+    let handle = tokio::spawn(manager.run());
+
+    feed_square_topology(&tx, feed).await;
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    let gated = query_orr_status(&tx).await;
+    assert_eq!(gated.topology_nodes, 0);
+    assert!(!gated.vantages[0].resolved);
+
+    tx.send(RibUpdate::SetPeerGracefulRestartContext {
+        peer: feed_peer,
+        session_id: 1,
+        peer_restart_state: false,
+        peer_gr_families: vec![family],
+    })
+    .await
+    .unwrap();
+    let (feed_tx, _feed_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 1,
+        peer: feed_peer,
+        peer_asn: 65000,
+        peer_router_id: feed,
+        outbound_tx: feed_tx,
+        export_policy: None,
+        sendable_families: vec![family],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        peer: feed_peer,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    })
+    .await
+    .unwrap();
+
+    let released = query_orr_status(&tx).await;
+    assert_eq!(released.topology_nodes, 4);
+    assert!(released.vantages[0].resolved);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// `PeerUp` with an `orr_vantage` registers the vantage (visible through
 /// `QueryOrrStatus` and the topology gauges); tearing the peer down
 /// clears the registry and empties the cached state again.

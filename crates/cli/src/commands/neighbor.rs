@@ -1,7 +1,8 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
-    self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonTcpAoKeyState, JsonTcpAoState,
+    self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonSelectionDeferralFamily,
+    JsonTcpAoKeyState, JsonTcpAoState,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -170,6 +171,20 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             export_policy_routes_permitted: n.export_policy_routes_permitted,
             export_policy_routes_denied: n.export_policy_routes_denied,
             update_group: n.update_group.clone(),
+            selection_deferral: n
+                .selection_deferral
+                .iter()
+                .map(|row| JsonSelectionDeferralFamily {
+                    afi: row.afi,
+                    safi: row.safi,
+                    active: row.active,
+                    waiter_state: row.waiter_state.clone(),
+                    waiter_session_id: row.waiter_session_id,
+                    blocking_waiters: row.blocking_waiters,
+                    remaining_millis: row.remaining_millis,
+                    release_reason: row.release_reason.clone(),
+                })
+                .collect(),
         };
         output::print_json_pretty(&out)?;
     } else {
@@ -329,6 +344,30 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         );
         if !n.update_group.is_empty() {
             println!("Update Group:          {}", n.update_group);
+        }
+        if !n.selection_deferral.is_empty() {
+            println!("Selection Deferral:");
+            for row in &n.selection_deferral {
+                let state = if row.active {
+                    format!(
+                        "active; waiter={}; session={}; blocking={}; remaining={}ms",
+                        row.waiter_state,
+                        row.waiter_session_id
+                            .map_or_else(|| "none".to_string(), |id| id.to_string()),
+                        row.blocking_waiters,
+                        row.remaining_millis
+                    )
+                } else {
+                    format!(
+                        "released={}; waiter={}; session={}",
+                        row.release_reason,
+                        row.waiter_state,
+                        row.waiter_session_id
+                            .map_or_else(|| "none".to_string(), |id| id.to_string())
+                    )
+                };
+                println!("  AFI {}/SAFI {} — {state}", row.afi, row.safi);
+            }
         }
         println!("Flap Count:            {}", n.flap_count);
         if !n.last_error.is_empty() {

@@ -199,6 +199,11 @@ impl RibManager {
     ) {
         use crate::route::RtcRibRoute;
 
+        self.record_deferred_rtc(affected);
+        if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+            return;
+        }
+
         let mut changed_keys: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
         for key in affected {
             let candidates: Vec<RtcRibRoute> = self

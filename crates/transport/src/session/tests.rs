@@ -592,6 +592,10 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerExportEncoder { .. }
     ));
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerGracefulRestartContext { .. }
+    ));
     rib_rx.recv().await.unwrap()
 }
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.

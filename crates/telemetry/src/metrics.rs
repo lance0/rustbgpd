@@ -171,6 +171,10 @@ pub struct BgpMetrics {
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
     gr_timer_expired: IntCounterVec,
+    selection_deferral_active: IntGaugeVec,
+    selection_deferral_waiters: IntGaugeVec,
+    selection_deferral_releases: IntCounterVec,
+    selection_deferral_timeouts: IntCounterVec,
 
     // ── RPKI ───────────────────────────────────────────────────
     rpki_vrp_count: IntGaugeVec,
@@ -879,6 +883,42 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let selection_deferral_active = IntGaugeVec::new(
+            Opts::new(
+                "bgp_selection_deferral_active",
+                "Whether RFC 4724 restarting-speaker route selection is deferred for an address family.",
+            ),
+            &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let selection_deferral_waiters = IntGaugeVec::new(
+            Opts::new(
+                "bgp_selection_deferral_waiters",
+                "Startup-frozen peers whose current-session End-of-RIB is still required before selecting an address family.",
+            ),
+            &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let selection_deferral_releases = IntCounterVec::new(
+            Opts::new(
+                "bgp_selection_deferral_releases_total",
+                "RFC 4724 selection-deferral releases by address family and bounded reason.",
+            ),
+            &["afi_safi", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let selection_deferral_timeouts = IntCounterVec::new(
+            Opts::new(
+                "bgp_selection_deferral_timeouts_total",
+                "RFC 4724 selection-deferral timer expirations by address family.",
+            ),
+            &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
         let rpki_vrp_count = IntGaugeVec::new(
             Opts::new(
                 "bgp_rpki_vrp_count",
@@ -1569,6 +1609,18 @@ impl BgpMetrics {
             .register(Box::new(gr_timer_expired.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(selection_deferral_active.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(selection_deferral_waiters.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(selection_deferral_releases.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(selection_deferral_timeouts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rpki_vrp_count.clone()))
             .expect("metric not already registered");
         registry
@@ -1818,6 +1870,10 @@ impl BgpMetrics {
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
+            selection_deferral_active,
+            selection_deferral_waiters,
+            selection_deferral_releases,
+            selection_deferral_timeouts,
             rpki_vrp_count,
             aspa_records,
             validation_import_refreshes,
@@ -2679,6 +2735,34 @@ impl BgpMetrics {
     /// Record a GR timer expiration for a peer.
     pub fn record_gr_timer_expired(&self, peer: &str) {
         self.gr_timer_expired.with_label_values(&[peer]).inc();
+    }
+
+    /// Set whether restarting-speaker route selection is deferred for a family.
+    pub fn set_selection_deferral_active(&self, afi_safi: &str, active: bool) {
+        self.selection_deferral_active
+            .with_label_values(&[afi_safi])
+            .set(i64::from(active));
+    }
+
+    /// Set the number of startup-frozen peers still blocking a family.
+    pub fn set_selection_deferral_waiters(&self, afi_safi: &str, count: i64) {
+        self.selection_deferral_waiters
+            .with_label_values(&[afi_safi])
+            .set(count);
+    }
+
+    /// Record release of one family gate (`all_eor` or `timer`).
+    pub fn record_selection_deferral_release(&self, afi_safi: &str, reason: &str) {
+        self.selection_deferral_releases
+            .with_label_values(&[afi_safi, reason])
+            .inc();
+    }
+
+    /// Record expiry of one family `Selection_Deferral_Timer`.
+    pub fn record_selection_deferral_timeout(&self, afi_safi: &str) {
+        self.selection_deferral_timeouts
+            .with_label_values(&[afi_safi])
+            .inc();
     }
 
     /// Set RPKI VRP count by address family.

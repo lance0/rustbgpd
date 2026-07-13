@@ -52,6 +52,7 @@ pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use event_sink::{NoopRibEventSink, RibEventSink};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
+pub use manager::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
@@ -69,7 +70,8 @@ pub use update::{
     ExportGateStep, ExportGateVerdict, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
     OrrExplainCandidate, OutboundRouteUpdate, PeerOutboundState, PlannedGroupability,
     RibCommandError, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
-    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupFamilyImpact,
-    UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
-    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group, route_query_key,
+    SelectionDeferralPeerFamilyState, UpdateGroupClassification, UpdateGroupClassifierInput,
+    UpdateGroupFamilyImpact, UpdateGroupFingerprint, UpdateGroupImpactPlan,
+    UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
+    route_query_key,
 };

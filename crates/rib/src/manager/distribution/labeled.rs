@@ -436,7 +436,12 @@ impl RibManager {
         &mut self,
         affected: &HashSet<LabeledRibRouteKey>,
     ) {
-        let affected_nlri: HashSet<Prefix> = affected.iter().map(|key| key.prefix).collect();
+        self.record_deferred_labeled(affected);
+        let affected_nlri: HashSet<Prefix> = affected
+            .iter()
+            .filter(|key| !self.selection_deferred(key.afi_safi()))
+            .map(|key| key.prefix)
+            .collect();
 
         let mut changed_keys: HashSet<Prefix> = HashSet::new();
         for key in &affected_nlri {

@@ -97,6 +97,9 @@ impl RibManager {
         }
         // The active session went down. Prune it; if another live session
         // remains the registration fails over to it.
+        if let Some(selection) = self.selection_deferral.as_mut() {
+            selection.session_down(peer, session_id, &self.metrics);
+        }
         let survivor_remains = {
             let sessions = self.live_sessions.entry(peer).or_default();
             sessions.retain(|s| s.session_id != session_id);
@@ -262,6 +265,8 @@ impl RibManager {
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_export_encoders
+            .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_gr_context
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.clear_policy_filtered_routes_for_peer(peer);
         if self.gr_peers.remove(&peer).is_some() {
@@ -462,6 +467,7 @@ impl RibManager {
         self.gr_deferred_eor.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
+        self.selection_deferred_refresh.remove(&peer);
         // Purge the peer's queued route batches. This upholds the
         // "peer rib must exist before chunk processing" expectation in
         // the distribution chunk handlers: `enqueue_routes_received`
@@ -527,6 +533,11 @@ impl RibManager {
         // held stale for a restarting peer stay put — deadline-bounded
         // and swept on End-of-RIB, exactly as on a plain GR reconnect.
         if self.outbound_peers.contains_key(&peer) {
+            if let Some(previous_session_id) = self.outbound_session_ids.get(&peer).copied()
+                && let Some(selection) = self.selection_deferral.as_mut()
+            {
+                selection.session_down(peer, previous_session_id, &self.metrics);
+            }
             warn!(
                 %peer,
                 session_id,
@@ -551,6 +562,7 @@ impl RibManager {
         let exact_export_encoder = self
             .pending_peer_export_encoders
             .remove(&(peer, session_id));
+        let gr_context = self.pending_peer_gr_context.remove(&(peer, session_id));
 
         let record = LiveSessionRecord {
             session_id,
@@ -568,6 +580,7 @@ impl RibManager {
             add_path_send_max,
             negotiated_orf_recv,
             negotiated_llgr_families,
+            gr_context,
             exact_export_encoder,
         };
         let sessions = self.live_sessions.entry(peer).or_default();
@@ -594,6 +607,10 @@ impl RibManager {
     /// initial table dump. Shared by `handle_peer_up` and the
     /// registration failover; the caller has already cleared any prior
     /// registration's state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "active-session registration installs every negotiated outbound capability"
+    )]
     fn register_active_session(&mut self, peer: IpAddr) {
         let Some(record) = self
             .live_sessions
@@ -618,6 +635,7 @@ impl RibManager {
         let add_path_send_max = record.add_path_send_max;
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let negotiated_llgr_families = record.negotiated_llgr_families.clone();
+        let gr_context = record.gr_context.clone();
         let exact_export_encoder = record.exact_export_encoder.clone();
         #[cfg(test)]
         let exact_export_encoder =
@@ -698,6 +716,30 @@ impl RibManager {
             // inherit its predecessor's filter (not-negotiated ⇒ unfiltered).
             self.set_rt_membership(peer, None);
         }
+
+        // Classify only the startup-frozen waiter already present for this
+        // peer. This runs before outbound registration, so if exclusion of
+        // the final waiter releases a family, existing peers receive the
+        // converged table and this peer receives it once in its normal
+        // initial dump below.
+        let released = if let Some(gr_context) = gr_context {
+            let peer_gr_families: HashSet<_> =
+                gr_context.peer_gr_families.iter().copied().collect();
+            self.selection_deferral
+                .as_mut()
+                .map_or_else(Vec::new, |selection| {
+                    selection.classify_session(
+                        peer,
+                        session_id,
+                        gr_context.peer_restart_state,
+                        &peer_gr_families,
+                        &self.metrics,
+                    )
+                })
+        } else {
+            Vec::new()
+        };
+        self.release_selection_families(&released, "all current waiters excluded");
 
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();
@@ -853,9 +895,16 @@ impl RibManager {
         let export_pol = self
             .export_policy_for(peer)
             .map(rustbgpd_policy::PolicyChain::share);
-        let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let negotiated_sendable = self.peer_sendable_families.get(&peer).cloned();
+        let sendable = negotiated_sendable.as_ref().map(|families| {
+            families
+                .iter()
+                .copied()
+                .filter(|family| !self.selection_deferred(*family))
+                .collect::<Vec<_>>()
+        });
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-        let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
+        let rtc_filter = self.rtc_vpn_filter(peer, negotiated_sendable.as_ref());
         // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
         // for families still awaiting the peer's first ROUTE-REFRESH. For a
         // non-GR peer the EoR is still emitted (an honest "empty table so
@@ -909,7 +958,7 @@ impl RibManager {
         let mut vpn_group_replayed = false;
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             for route in group.table.iter() {
-                if route.peer == peer {
+                if route.peer == peer || self.selection_deferred(prefix_family(&route.prefix)) {
                     continue;
                 }
                 nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
@@ -924,6 +973,7 @@ impl RibManager {
                 vpn_group_replayed = true;
                 for route in group.table.iter_vpn() {
                     if route.peer == peer
+                        || self.selection_deferred(route.afi_safi())
                         || !super::update_groups::rt_passes(rtc_filter.as_ref(), route)
                     {
                         continue;
@@ -1344,11 +1394,7 @@ impl RibManager {
         }
 
         // Determine EoR families from this peer's sendable families
-        let mut eor_families = self
-            .peer_sendable_families
-            .get(&peer)
-            .cloned()
-            .unwrap_or_default();
+        let mut eor_families = sendable.clone().unwrap_or_default();
         // RFC 4724: a GR RESTARTER takes our EoR as "this peer's initial
         // update is complete", proceeds with route selection, and sweeps the
         // stale routes it retained from our previous session. For an

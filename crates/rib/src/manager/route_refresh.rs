@@ -592,6 +592,14 @@ impl RibManager {
     )]
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let family = (afi, safi);
+        if self.selection_deferred(family) {
+            self.selection_deferred_refresh
+                .entry(peer)
+                .or_default()
+                .insert(family);
+            debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 selection gate");
+            return;
+        }
         // RFC 5291 §6: a ROUTE-REFRESH (plain or ORF-carrying) for this family
         // lifts the initial-advertisement gate, so this response is the first
         // advertisement of the family — filtered through any installed ORF.
@@ -1216,19 +1224,25 @@ impl RibManager {
         let Some(families) = self.pending_eor.remove(&peer) else {
             return;
         };
-        if families.is_empty() {
+        let (blocked, ready): (HashSet<_>, HashSet<_>) = families
+            .into_iter()
+            .partition(|family| self.selection_deferred(*family));
+        if !blocked.is_empty() {
+            self.pending_eor.entry(peer).or_default().extend(blocked);
+        }
+        if ready.is_empty() {
             return;
         }
         let Some(tx) = self.outbound_peers.get(&peer) else {
             return;
         };
         let eor = OutboundRouteUpdate {
-            end_of_rib: families.iter().copied().collect(),
+            end_of_rib: ready.iter().copied().collect(),
             ..OutboundRouteUpdate::default()
         };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
-            self.pending_eor.insert(peer, families);
+            self.pending_eor.entry(peer).or_default().extend(ready);
             self.mark_outbound_dirty(peer);
         }
     }

@@ -454,13 +454,30 @@ fn grpc_principal_roles(config: &Config) -> BTreeMap<String, rustbgpd_api::authz
         .collect()
 }
 
-fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
+fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
     config
         .neighbors
         .iter()
         .filter(|neighbor| neighbor.graceful_restart.unwrap_or(true))
         .map(|neighbor| u64::from(neighbor.gr_restart_time.unwrap_or(120)))
         .max()
+}
+
+fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
+    match config.resolved_neighbors() {
+        Ok(neighbors) => neighbors
+            .iter()
+            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
+            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            .max(),
+        Err(error) => {
+            warn!(
+                %error,
+                "failed to resolve effective neighbors while computing the planned-restart window; falling back to raw neighbor GR settings"
+            );
+            raw_max_gr_restart_time_secs(config)
+        }
+    }
 }
 
 fn marker_expires_at(marker: &GrRestartMarker) -> Result<SystemTime, String> {
@@ -1483,6 +1500,14 @@ async fn run<T>(
         );
         process::exit(1);
     });
+    // Resolve the complete static-peer set before the RIB actor or any BGP
+    // session starts. RFC 4724 restarting-speaker deferral must freeze this
+    // roster up front; discovering peers incrementally after the first EoR
+    // can release selection prematurely in a multi-peer topology.
+    let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
+        error!("invalid policy configuration: {e}");
+        process::exit(1);
+    });
 
     // ── ADR-0072: Durable event outbox (EventHistoryManager) ───────
     //
@@ -1670,6 +1695,26 @@ async fn run<T>(
         cluster_id,
         metrics.clone(),
     );
+    if let Some(deadline) = local_gr_restart_until {
+        let waiters = peer_configs
+            .iter()
+            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
+            .map(|neighbor| rustbgpd_rib::SelectionDeferralWaiterConfig {
+                peer: neighbor.transport_config.remote_addr.ip(),
+                families: neighbor
+                    .transport_config
+                    .peer
+                    .effective_families()
+                    .into_iter()
+                    .filter(|family| rustbgpd_fsm::graceful_restart_preserves_family(*family))
+                    .collect(),
+            })
+            .collect();
+        rib_manager = rib_manager.with_selection_deferral(rustbgpd_rib::SelectionDeferralConfig {
+            timeout: deadline.saturating_duration_since(StdInstant::now()),
+            waiters,
+        });
+    }
     if let Some(tx) = bmp_loc_rib_tx {
         rib_manager = rib_manager.with_bmp_tx(tx);
     }
@@ -2820,10 +2865,6 @@ async fn run<T>(
         .await;
     });
 
-    let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
-        error!("invalid policy configuration: {e}");
-        process::exit(1);
-    });
     // Spawn BGP inbound TCP listener. The current daemon opens one
     // listener socket from `Config::listen_addr()`; only install TCP-AO
     // MKTs whose peer family can match that socket. Outbound active-open
@@ -3761,5 +3802,15 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));
+
+        let mut unresolved = config.clone();
+        unresolved.neighbors[0].address = "fe80::1".to_string();
+        unresolved.neighbors[0].interface = Some("rbgp-definitely-missing0".to_string());
+        assert!(unresolved.resolved_neighbors().is_err());
+        assert_eq!(
+            max_gr_restart_time_secs(&unresolved),
+            Some(180),
+            "resolution failure must retain the previous raw-config marker fallback"
+        );
     }
 }
