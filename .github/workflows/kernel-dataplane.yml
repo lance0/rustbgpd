@@ -299,7 +299,7 @@ jobs:
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m43:
-    name: M43 — ADR-0062 TCP-AO protected session (BIRD 3.2.1)
+    name: M43 — ADR-0062 TCP-AO two-key startup ring (BIRD 3.2.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -333,6 +333,32 @@ jobs:
           if [ "$supported" = "false" ]; then
             echo "::warning::M43 skipped: $(uname -r) does not advertise CONFIG_TCP_AO=y"
           fi
+
+      - name: Install Rust 1.95 for the direct GET_KEYS receipt
+        if: steps.tcp_ao.outputs.supported == 'true'
+        uses: dtolnay/rust-toolchain@1.95
+
+      - name: Cache direct GET_KEYS receipt build
+        if: steps.tcp_ao.outputs.supported == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: m43-tcp-ao-get-keys
+
+      - name: Run overlapping-owner TCP-AO GET_KEYS kernel receipt
+        if: steps.tcp_ao.outputs.supported == 'true'
+        run: |
+          set -euo pipefail
+          receipt='listener::tests::overlapping_tcp_ao_owned_union_kernel_receipt'
+          test_count="$({
+            cargo test -p rustbgpd-transport --lib -- --list
+          } | awk -v target="${receipt}:" \
+            '$1 == target && $2 == "test" { count++ } END { print count + 0 }')"
+          if [ "$test_count" -ne 1 ]; then
+            echo "error: expected exactly one kernel receipt named $receipt; found $test_count" >&2
+            exit 1
+          fi
+          cargo test -p rustbgpd-transport --lib "$receipt" -- \
+            --ignored --exact --nocapture
 
       # Buildx GHA layer cache (LAN-252): the bird.nic.cz tarball fetch and
       # the full BIRD source build live in layers keyed on the Dockerfile

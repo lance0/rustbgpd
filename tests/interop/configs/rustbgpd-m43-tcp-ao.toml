@@ -15,7 +15,10 @@ address = "10.0.43.2"
 remote_asn = 65043
 description = "bird3-tcp-ao"
 hold_time = 90
-tcp_ao = { key = "interop-secret-m43", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }
+tcp_ao = [
+  { key = "interop-old-secret-m43", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "interop-next-secret-m43", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true },
+]
 
 [security.grpc]
 enforcement = "legacy"
