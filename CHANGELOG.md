@@ -310,8 +310,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory, and probe bodies process at most 1,024 route identities per poll;
   the preceding Loc-RIB prefix snapshot and destination-key inventory snapshot
   remain two explicit, measured O(table) actor polls with no extrapolated hard
-  bound. Live readiness uses dedicated read-only PeerManager and RIB query
-  lanes. Ordinary mutations remain ordered behind the transaction, while
+  bound. Live readiness uses dedicated type-narrow PeerManager and RIB lanes;
+  general RIB queries now remain queued with ordinary mutations behind the
+  transaction instead of extending its fence. The process-global
+  `bgp_rib_policy_transition_in_progress` and retained terminal-duration gauges,
+  a five-second warning, and a shipped one-minute alert make unexpectedly slow
+  transitions visible without turning bounded progress into a readiness
+  failure. Later readiness can overtake queued general queries, although an
+  already-running O(table) query remains non-preemptible. Meanwhile,
   membership and reserved writer sends still commit as one synchronous
   section. A successfully enqueued cohort RIB reply remains transaction-owned
   past the ordinary five-second per-peer timeout, preventing a forward/rollback

@@ -12,6 +12,21 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+/// Type-narrow readiness queries serviced independently of the general RIB
+/// query lane.
+///
+/// Keeping this channel separate lets the actor prove liveness while an
+/// atomic policy transition deliberately fences every ordinary query and
+/// mutation behind its terminal commit or fail-closed fallback handoff.
+#[derive(Debug)]
+pub enum RibReadinessQuery {
+    /// Return the current Loc-RIB best-path count.
+    LocRibCount {
+        /// Response channel.
+        reply: oneshot::Sender<usize>,
+    },
+}
+
 /// Canonical, side-effect-free input to update-group eligibility.
 #[expect(
     clippy::struct_excessive_bools,

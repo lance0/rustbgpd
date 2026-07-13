@@ -31,9 +31,9 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibUpdate, RoutePage,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
-    route_query_key,
+    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibReadinessQuery,
+    RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget,
+    WarmMrtSnapshotView, route_query_key,
 };
 
 use helpers::{
@@ -399,12 +399,14 @@ pub struct RibManager {
     rx: mpsc::Receiver<RibUpdate>,
     /// Priority channel for read-only queries (gRPC).
     query_rx: mpsc::Receiver<RibUpdate>,
+    /// Dedicated type-narrow lane used only by core readiness.
+    readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
     /// One explicit shared policy transition advanced by the actor itself.
-    /// While present, only bounded read-only priority queries may interleave;
-    /// primary mutations and timers remain ordered behind the final commit or
-    /// authoritative fallback.
+    /// While present, only the dedicated type-narrow readiness lane may
+    /// interleave; general queries, primary mutations, and timers remain
+    /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
     /// Withdrawn NLRI identities accumulated across the currently-draining
     /// batch. Retired only after distribution so the exact overlay can
@@ -478,6 +480,10 @@ pub struct RibManager {
 /// emitter. When exceeded, the OLDEST (most-superseded) record is dropped
 /// — its eventual `PeerDown` is then discarded as stale.
 const MAX_LIVE_SESSIONS_PER_PEER: usize = 2;
+
+/// A transition exceeding the former cohort wait budget is still allowed to
+/// complete, but deserves an operator-visible warning and metric investigation.
+const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Registration material for one live transport session of a peer
 /// address, captured at `PeerUp`. Held in `RibManager::live_sessions` so
@@ -1002,6 +1008,7 @@ impl RibManager {
             metrics,
             rx,
             query_rx,
+            readiness_rx: None,
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
             pending_exact_export_withdrawals: HashSet::new(),
@@ -1009,6 +1016,16 @@ impl RibManager {
             pending_distribute_affected: HashSet::new(),
             test_ingest_stall,
         }
+    }
+
+    /// Install the dedicated type-narrow RIB readiness-query receiver.
+    #[must_use]
+    pub fn with_readiness_queries(
+        mut self,
+        readiness_rx: mpsc::Receiver<RibReadinessQuery>,
+    ) -> Self {
+        self.readiness_rx = Some(readiness_rx);
+        self
     }
 
     /// Test-only ADR-0078 fault injection: sleep before handling a
@@ -1166,67 +1183,48 @@ impl RibManager {
         }
     }
 
-    fn is_read_only_priority_query(update: &RibUpdate) -> bool {
-        let production_query = matches!(
-            update,
-            RibUpdate::QueryReceivedRoutes { .. }
-                | RibUpdate::QueryRoutesPage { .. }
-                | RibUpdate::QueryBestRoutes { .. }
-                | RibUpdate::QueryFibInstallCandidates { .. }
-                | RibUpdate::QueryPeerGroups { .. }
-                | RibUpdate::QueryAdvertisedRoutes { .. }
-                | RibUpdate::ExplainBestPath { .. }
-                | RibUpdate::ExplainAdvertisedRoute { .. }
-                | RibUpdate::SubscribeRouteEvents { .. }
-                | RibUpdate::QueryRouteEventHistory { .. }
-                | RibUpdate::SubscribeEvpnRouteEvents { .. }
-                | RibUpdate::QueryEvpnRouteEventHistory { .. }
-                | RibUpdate::QueryLocRibCount { .. }
-                | RibUpdate::QueryAdjRibOutCounts { .. }
-                | RibUpdate::QueryAdvertisedCount { .. }
-                | RibUpdate::QueryNeighborPolicyStats { .. }
-                | RibUpdate::QueryPeerUpdateGroup { .. }
-                | RibUpdate::QueryPeerOutboundState { .. }
-                | RibUpdate::QueryUpdateGroupSnapshot { .. }
-                | RibUpdate::QueryExportPolicyTermHits { .. }
-                | RibUpdate::QueryFlowSpecRoutes { .. }
-                | RibUpdate::QueryEvpnRoutes { .. }
-                | RibUpdate::QueryBgpLsRoutes { .. }
-                | RibUpdate::QueryVpnRoutes { .. }
-                | RibUpdate::QueryLabeledRoutes { .. }
-                | RibUpdate::QueryRtcRoutes { .. }
-                | RibUpdate::QueryOrrTopology { .. }
-                | RibUpdate::QueryOrrStatus { .. }
-                | RibUpdate::QueryMrtSnapshot { .. }
-                | RibUpdate::QueryWarmMrtSnapshot { .. }
-                | RibUpdate::QueryBmpLocRibDump { .. }
-                | RibUpdate::QueryBmpLocRibStats { .. }
-        );
-        #[cfg(test)]
-        let test_query = matches!(
-            update,
-            RibUpdate::TestQueryVpnAdvertised { .. }
-                | RibUpdate::TestQueryOutboundHealth { .. }
-                | RibUpdate::TestQueryPolicyTransitionStats { .. }
-        );
-        #[cfg(not(test))]
-        let test_query = false;
-        production_query || test_query
+    /// Preserve the policy-transition ownership fence when a primary update
+    /// acquires it: the post-update fairness drain must not admit general
+    /// queries until that transition is terminal.
+    fn drain_general_queries_if_unfenced(&mut self) {
+        if self.pending_clean_policy_transition.is_none() {
+            self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+        }
     }
 
-    /// Service only the explicitly enumerated read side while a policy
-    /// transaction owns the actor. A mutation on the query sender is an
-    /// internal wiring violation and fails closed rather than bypassing FIFO.
-    fn drain_policy_transition_queries(&mut self, limit: usize) {
-        for _ in 0..limit {
-            let Ok(query) = self.query_rx.try_recv() else {
-                break;
+    fn handle_readiness_query(&self, query: RibReadinessQuery) {
+        match query {
+            RibReadinessQuery::LocRibCount { reply } => {
+                let _ = reply.send(self.loc_rib.len());
+            }
+        }
+    }
+
+    /// Service a bounded number of type-narrow readiness probes at an actor
+    /// seam without admitting any ordinary query or mutation.
+    fn drain_readiness_queries(&mut self) {
+        for _ in 0..QUERY_BUDGET_PER_CHUNK {
+            let query = match self.readiness_rx.as_mut() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(query) => query,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.readiness_rx = None;
+                        break;
+                    }
+                },
+                None => break,
             };
-            assert!(
-                Self::is_read_only_priority_query(&query),
-                "mutation routed onto RIB priority-query lane"
-            );
-            self.handle_update(query);
+            self.handle_readiness_query(query);
+        }
+    }
+
+    async fn receive_readiness_query(
+        readiness_rx: &mut Option<mpsc::Receiver<RibReadinessQuery>>,
+    ) -> Option<RibReadinessQuery> {
+        match readiness_rx {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
         }
     }
 
@@ -1266,6 +1264,35 @@ impl RibManager {
         let _ = (kind, elapsed);
     }
 
+    fn finish_policy_transition_observability(
+        &self,
+        outcome: &'static str,
+        member_count: usize,
+        elapsed: std::time::Duration,
+    ) {
+        self.metrics.set_rib_policy_transition_in_progress(false);
+        self.metrics
+            .set_rib_policy_transition_last_duration(elapsed);
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        info!(
+            outcome,
+            member_count, elapsed_ms, "RIB export-policy transition completed"
+        );
+    }
+
+    fn warn_if_policy_transition_slow(
+        pending: &mut distribution::PendingCleanPolicyTransition,
+        member_count: usize,
+    ) {
+        if let Some(elapsed) = pending.take_slow_warning(SLOW_POLICY_TRANSITION) {
+            warn!(
+                member_count,
+                elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                "RIB export-policy transition remains in progress"
+            );
+        }
+    }
+
     fn drain_ready_updates(&mut self) -> bool {
         let mut drained = false;
         // Route batches are actor-deferred for fairness. During a timer race,
@@ -1280,7 +1307,7 @@ impl RibManager {
             if self.pending_clean_policy_transition.is_some() {
                 // The accepted cohort command now owns FIFO. Leave every
                 // later primary update queued until its atomic finalize or
-                // authoritative fallback completes.
+                // fail-closed fallback handoff completes.
                 break;
             }
             while self.process_next_route_chunk() {
@@ -4106,35 +4133,58 @@ impl RibManager {
             self.metrics
                 .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
 
-            if let Some(pending) = self.pending_clean_policy_transition.take() {
-                // Queries admitted here are explicitly read-only and observe
-                // the old committed membership until the single atomic
-                // `Finalize` poll. Primary updates, route chunks, timers, and
-                // resync work are deliberately not polled in this branch.
-                self.drain_policy_transition_queries(QUERY_BUDGET_PER_CHUNK);
+            if let Some(mut pending) = self.pending_clean_policy_transition.take() {
+                // Only the type-narrow readiness lane may interleave here.
+                // General queries, primary updates, route chunks, timers, and
+                // resync work remain queued until terminal commit or the
+                // fail-closed fallback handoff.
+                let member_count = pending.member_count();
+                Self::warn_if_policy_transition_slow(&mut pending, member_count);
+                self.drain_readiness_queries();
                 let kind = pending.poll_kind();
                 let started = std::time::Instant::now();
                 match self.advance_clean_policy_transition(pending) {
-                    distribution::CleanPolicyTransitionAdvance::Continue(next) => {
+                    distribution::CleanPolicyTransitionAdvance::Continue(mut next) => {
                         self.record_policy_transition_poll(kind, started.elapsed());
+                        let member_count = next.member_count();
+                        Self::warn_if_policy_transition_slow(&mut next, member_count);
                         self.pending_clean_policy_transition = Some(next);
                     }
-                    distribution::CleanPolicyTransitionAdvance::Committed(done) => {
+                    distribution::CleanPolicyTransitionAdvance::Committed(mut done) => {
                         self.record_policy_transition_poll(kind, started.elapsed());
+                        let member_count = done.member_count();
+                        Self::warn_if_policy_transition_slow(&mut done, member_count);
+                        self.finish_policy_transition_observability(
+                            "committed",
+                            done.member_count(),
+                            done.elapsed(),
+                        );
                         drop(done);
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
                         let cleanup = failed.discard_uncommitted_transition(&mut self);
                         self.record_policy_transition_poll(kind, started.elapsed());
+                        let member_count = failed.member_count();
+                        Self::warn_if_policy_transition_slow(&mut failed, member_count);
+                        let outcome = if cleanup.is_ok() {
+                            "fallback_handoff"
+                        } else {
+                            "fallback_cleanup_error"
+                        };
+                        self.finish_policy_transition_observability(
+                            outcome,
+                            member_count,
+                            failed.elapsed(),
+                        );
                         if let Some(reply) = failed.take_reply() {
-                            let outcome = cleanup.map(|()| {
+                            let result = cleanup.map(|()| {
                                 crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
                             });
-                            let _ = reply.send(outcome);
+                            let _ = reply.send(result);
                         }
                     }
                 }
-                self.drain_policy_transition_queries(QUERY_BUDGET_PER_CHUNK);
+                self.drain_readiness_queries();
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -4246,10 +4296,17 @@ impl RibManager {
             }
 
             if self.process_next_route_chunk() {
+                self.drain_readiness_queries();
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
             } else if needs_timers {
                 tokio::select! {
+                    readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
+                        match readiness {
+                            Some(query) => self.handle_readiness_query(query),
+                            None => self.readiness_rx = None,
+                        }
+                    }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
                             Some(q) => self.handle_update(q),
@@ -4261,7 +4318,7 @@ impl RibManager {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
                                 self.handle_update(update);
-                                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                                self.drain_general_queries_if_unfenced();
                             }
                             None => break,
                         }
@@ -4322,6 +4379,12 @@ impl RibManager {
             } else {
                 // No timers needed — wait for a route update or query.
                 tokio::select! {
+                    readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
+                        match readiness {
+                            Some(query) => self.handle_readiness_query(query),
+                            None => self.readiness_rx = None,
+                        }
+                    }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
                             Some(q) => self.handle_update(q),
@@ -4333,7 +4396,7 @@ impl RibManager {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
                                 self.handle_update(update);
-                                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                                self.drain_general_queries_if_unfenced();
                             }
                             None => break,
                         }

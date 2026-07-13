@@ -134,6 +134,8 @@ pub struct BgpMetrics {
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_ingest_channel_depth: IntGauge,
+    rib_policy_transition_in_progress: IntGauge,
+    rib_policy_transition_last_duration_milliseconds: IntGauge,
 
     // ── Update groups (shadow-mode fingerprint registry) ────────
     update_groups: IntGauge,
@@ -625,6 +627,18 @@ impl BgpMetrics {
             "Queued RibUpdate messages in the RIB manager ingest channel, sampled \
              once per manager loop iteration. Pegged at the channel capacity means \
              producers (sessions, local originators) are parked on backpressure.",
+        )
+        .expect("valid metric definition");
+
+        let rib_policy_transition_in_progress = IntGauge::new(
+            "bgp_rib_policy_transition_in_progress",
+            "Whether the RIB actor currently owns an atomic export-policy transition (1 = in progress, 0 = idle). General RIB queries and mutations remain queued while this is 1; the dedicated readiness lane stays live.",
+        )
+        .expect("valid metric definition");
+
+        let rib_policy_transition_last_duration_milliseconds = IntGauge::new(
+            "bgp_rib_policy_transition_last_duration_milliseconds",
+            "Monotonic elapsed duration in milliseconds of the most recently completed actor-owned export-policy transition.",
         )
         .expect("valid metric definition");
 
@@ -1532,6 +1546,14 @@ impl BgpMetrics {
             .register(Box::new(rib_ingest_channel_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_policy_transition_in_progress.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(
+                rib_policy_transition_last_duration_milliseconds.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_groups.clone()))
             .expect("metric not already registered");
         registry
@@ -1854,6 +1876,8 @@ impl BgpMetrics {
             rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_ingest_channel_depth,
+            rib_policy_transition_in_progress,
+            rib_policy_transition_last_duration_milliseconds,
             update_groups,
             update_group_members,
             update_group_regroups,
@@ -2837,6 +2861,20 @@ impl BgpMetrics {
         self.route_refresh_in_progress
             .with_label_values(&[peer, afi_safi])
             .set(i64::from(active));
+    }
+
+    /// Set whether the RIB actor currently owns an atomic export-policy
+    /// transition.
+    pub fn set_rib_policy_transition_in_progress(&self, active: bool) {
+        self.rib_policy_transition_in_progress
+            .set(i64::from(active));
+    }
+
+    /// Retain the monotonic elapsed duration of the most recently completed
+    /// export-policy transition.
+    pub fn set_rib_policy_transition_last_duration(&self, duration: std::time::Duration) {
+        self.rib_policy_transition_last_duration_milliseconds
+            .set(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX));
     }
 
     /// Set how many entries are still awaiting replacement in an inbound
@@ -4018,6 +4056,25 @@ mod tests {
         assert!(text.contains("bgp_route_refresh_in_progress"));
         assert!(text.contains("bgp_route_refresh_stale_entries"));
         assert!(text.contains(r#"afi_safi="ipv4_unicast""#));
+    }
+
+    #[test]
+    fn policy_transition_gauges_are_process_global_and_retain_terminal_duration() {
+        let m = BgpMetrics::new();
+        m.set_rib_policy_transition_in_progress(true);
+        assert_eq!(m.rib_policy_transition_in_progress.get(), 1);
+
+        m.set_rib_policy_transition_last_duration(std::time::Duration::from_millis(1_234));
+        m.set_rib_policy_transition_in_progress(false);
+        assert_eq!(m.rib_policy_transition_in_progress.get(), 0);
+        assert_eq!(
+            m.rib_policy_transition_last_duration_milliseconds.get(),
+            1_234
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_rib_policy_transition_in_progress 0"));
+        assert!(text.contains("bgp_rib_policy_transition_last_duration_milliseconds 1234"));
     }
 
     #[test]
