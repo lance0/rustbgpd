@@ -7,7 +7,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::{PeerExportPolicyReplacement, RibUpdate};
+use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyReplacement, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -389,7 +389,7 @@ impl PeerManager {
             self.drain_readiness_queries().await;
         }
 
-        let replacements = targets
+        let replacements: Vec<_> = targets
             .iter()
             .map(|target| PeerExportPolicyReplacement {
                 peer: target.address,
@@ -400,13 +400,21 @@ impl PeerManager {
         let send_result = self
             .rib_tx
             .send(RibUpdate::ReplacePeerExportPolicies {
-                replacements,
+                replacements: replacements.clone(),
                 reply: reply_tx,
             })
             .await;
-        let rib_result = match send_result {
+        let cohort_result = match send_result {
             Err(_) => Err("RIB manager unavailable".to_string()),
             Ok(()) => self.await_export_policy_cohort_rib_reply(reply_rx).await,
+        };
+        let rib_result = match cohort_result {
+            Ok(ExportPolicyCohortOutcome::Committed) => Ok(()),
+            Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply) => {
+                self.apply_export_policy_replacements_authoritatively(&replacements)
+                    .await
+            }
+            Err(error) => Err(error),
         };
         if let Err(error) = rib_result {
             let rollback = self.restore_resolved_policies(captured).await;
@@ -437,11 +445,73 @@ impl PeerManager {
     /// completion before returning to the normal lane.
     async fn await_export_policy_cohort_rib_reply(
         &mut self,
-        reply_rx: oneshot::Receiver<Result<(), String>>,
-    ) -> Result<(), String> {
+        reply_rx: oneshot::Receiver<Result<ExportPolicyCohortOutcome, String>>,
+    ) -> Result<ExportPolicyCohortOutcome, String> {
         match self.await_with_readiness(reply_rx).await {
             Err(_) => Err("RIB manager dropped cohort reply".to_string()),
             Ok(result) => result,
+        }
+    }
+
+    /// Complete a cohort handoff through the ordinary authoritative RIB seam.
+    ///
+    /// Session chains were already applied during cohort setup. Sending one
+    /// ordinary RIB replacement at a time avoids a second session hot-apply,
+    /// keeps the next peer out of the RIB queue until the prior peer replies,
+    /// and admits the dedicated readiness lane throughout each send/reply.
+    async fn apply_export_policy_replacements_authoritatively(
+        &mut self,
+        replacements: &[PeerExportPolicyReplacement],
+    ) -> Result<(), String> {
+        for replacement in replacements {
+            if let Err(error) = self
+                .replace_peer_export_policy_in_rib(
+                    replacement.peer,
+                    replacement.export_policy.clone(),
+                )
+                .await
+            {
+                return Err(format!("{}: {error}", replacement.peer));
+            }
+            self.drain_readiness_queries().await;
+        }
+        Ok(())
+    }
+
+    /// Run one ordinary RIB export-policy replacement while servicing the
+    /// dedicated readiness lane and enforcing the existing five-second reply
+    /// deadline.
+    async fn replace_peer_export_policy_in_rib(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<PolicyChain>,
+    ) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let rib_tx = self.rib_tx.clone();
+        if self
+            .await_with_readiness(rib_tx.send(RibUpdate::ReplacePeerExportPolicy {
+                peer,
+                export_policy,
+                reply: reply_tx,
+            }))
+            .await
+            .is_err()
+        {
+            return Err("RIB manager unavailable".to_string());
+        }
+        match tokio::time::timeout(
+            super::RIB_REPLY_TIMEOUT,
+            self.await_with_readiness(reply_rx),
+        )
+        .await
+        {
+            Err(_) => Err(format!(
+                "RIB manager did not reply within {:?} while updating export policy",
+                super::RIB_REPLY_TIMEOUT
+            )),
+            Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
+            Ok(Ok(Err(error))) => Err(format!("failed to update export policy: {error}")),
+            Ok(Ok(Ok(()))) => Ok(()),
         }
     }
 
@@ -1007,30 +1077,9 @@ impl PeerManager {
             // evaluating (and counting term hits) on the old instance
             // while the stats query snapshots the fresh one, freezing
             // the reported counters.
-            let (reply_tx, reply_rx) = oneshot::channel();
-            let send_outcome = self
-                .rib_tx
-                .send(RibUpdate::ReplacePeerExportPolicy {
-                    peer: address,
-                    export_policy,
-                    reply: reply_tx,
-                })
+            let rib_outcome = self
+                .replace_peer_export_policy_in_rib(address, export_policy)
                 .await;
-            let rib_outcome: Result<(), String> = match send_outcome {
-                Err(_) => Err("RIB manager unavailable".to_string()),
-                // Bounded: a wedged RIB task must not park the
-                // peer-manager actor (and the SIGHUP reload / gRPC
-                // apply driving this policy change) forever.
-                Ok(()) => match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                    Err(_) => Err(format!(
-                        "RIB manager did not reply within {:?} while updating export policy",
-                        super::RIB_REPLY_TIMEOUT
-                    )),
-                    Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
-                    Ok(Ok(Err(e))) => Err(format!("failed to update export policy: {e}")),
-                    Ok(Ok(Ok(()))) => Ok(()),
-                },
-            };
             if let Err(error) = rib_outcome {
                 if needs_refresh && let Some(managed) = self.peers.get_mut(&peer_key) {
                     managed.pending_refresh = true;

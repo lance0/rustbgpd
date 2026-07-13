@@ -51,6 +51,10 @@ struct PolicyTransitionStats {
     max_actor_slice: std::time::Duration,
     max_prefix_snapshot_poll: std::time::Duration,
     max_finalize_poll: std::time::Duration,
+    #[cfg(feature = "bench-internals")]
+    authoritative_peer_applies: usize,
+    #[cfg(feature = "bench-internals")]
+    max_authoritative_peer_apply: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -1676,6 +1680,15 @@ impl RibManager {
                     stats.max_actor_slice.as_nanos(),
                     stats.actor_polls,
                 ));
+            }
+            #[cfg(test)]
+            RibUpdate::TestQueryUncommittedPolicyTransitionGroups { reply } => {
+                let count = self
+                    .group_ribs
+                    .values()
+                    .filter(|group| group.members.is_empty())
+                    .count();
+                let _ = reply.send(count);
             }
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
@@ -4111,17 +4124,13 @@ impl RibManager {
                         drop(done);
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+                        let cleanup = failed.discard_uncommitted_transition(&mut self);
                         self.record_policy_transition_poll(kind, started.elapsed());
-                        failed.cleanup_incomplete_destination(&mut self);
-                        let replacements = failed.take_replacements();
-                        let result = replacements.into_iter().try_for_each(|replacement| {
-                            self.replace_peer_export_policy_synchronously(
-                                replacement.peer,
-                                replacement.export_policy,
-                            )
-                        });
                         if let Some(reply) = failed.take_reply() {
-                            let _ = reply.send(result);
+                            let outcome = cleanup.map(|()| {
+                                crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+                            });
+                            let _ = reply.send(outcome);
                         }
                     }
                 }

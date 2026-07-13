@@ -1,0 +1,6 @@
+source_sha=536cd63bc798523a4f3ddbb19229f29d1ade57cb
+receipt_scope=first_warmup_invocation_only
+
+policy_transition_receipt peers=1 fast=false plans=0 full_exact_probes=0 route_shell_materializations=0 actor_polls=1 max_actor_poll_ns=601 max_prefix_snapshot_poll_ns=0 max_finalize_poll_ns=0 authoritative_peer_applies=1 max_authoritative_peer_apply_ns=106507810 max_uninterrupted_work_ns=106507810
+
+policy_transition_receipt peers=64 fast=false plans=0 full_exact_probes=0 route_shell_materializations=0 actor_polls=0 max_actor_poll_ns=0 max_prefix_snapshot_poll_ns=0 max_finalize_poll_ns=0 authoritative_peer_applies=64 max_authoritative_peer_apply_ns=108818679 max_uninterrupted_work_ns=108818679

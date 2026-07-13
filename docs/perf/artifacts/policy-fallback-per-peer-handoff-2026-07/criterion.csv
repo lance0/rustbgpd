@@ -1,0 +1,3 @@
+source_sha,statistic,scenario,routes,peers,lower_ns,estimate_ns,upper_ns
+536cd63bc798523a4f3ddbb19229f29d1ade57cb,mean,fallback_decision_and_one_rib_apply,65536,1,102732644.95,104254109.9,106017195.05
+536cd63bc798523a4f3ddbb19229f29d1ade57cb,mean,synthetic_sequential_rib_reference,65536,64,4253575570.3,4292987777.9,4327553106.4

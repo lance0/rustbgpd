@@ -626,13 +626,28 @@ pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 ///
 /// The batch command is an optimization hint, not a weaker contract: the RIB
 /// may use a shared clean-group transition only after proving every member is
-/// compatible, and otherwise runs the authoritative per-peer path.
+/// compatible, and otherwise returns a fail-closed handoff for the caller to
+/// run through the authoritative per-peer path.
 #[derive(Clone)]
 pub struct PeerExportPolicyReplacement {
     /// The target peer.
     pub peer: IpAddr,
     /// New effective export policy (`None` = permit-all/global fallback resolved already).
     pub export_policy: Option<PolicyChain>,
+}
+
+/// Result of attempting an optimized export-policy cohort transition.
+///
+/// A handoff is fail-closed: the RIB has removed every uncommitted destination
+/// and has not changed any peer policy, group membership, counter, or wire
+/// state. The caller must then apply the replacements through ordinary
+/// [`RibUpdate::ReplacePeerExportPolicy`] commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportPolicyCohortOutcome {
+    /// The cohort transition committed atomically.
+    Committed,
+    /// The optimized transition was ineligible or became stale before commit.
+    RequiresAuthoritativePerPeerApply,
 }
 
 /// Routes to be sent outbound to a peer.
@@ -1547,6 +1562,12 @@ pub enum RibUpdate {
         /// poll in nanoseconds, and actual state-machine poll count.
         reply: oneshot::Sender<(usize, usize, usize, u128, usize)>,
     },
+    /// TEST ONLY: prospective destination groups that have no committed member.
+    #[cfg(test)]
+    TestQueryUncommittedPolicyTransitionGroups {
+        /// Response channel for the number of still-unowned group RIBs.
+        reply: oneshot::Sender<usize>,
+    },
     /// Query: snapshot the live per-term guard-hit counters of the
     /// installed export chains (ADR-0096 Decision 3.3). Counters
     /// accumulate since a chain instance was installed and reset when
@@ -1566,16 +1587,17 @@ pub enum RibUpdate {
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Replace a cohort of peer export policies in one RIB actor turn.
+    /// Replace a cohort of peer export policies as one optimized RIB transaction.
     ///
     /// Clean, equivalent grouped-to-grouped unicast members may share one
     /// transition inventory and exact-probe plan. Every unsupported or
-    /// ambiguous batch falls back wholesale before its first emission.
+    /// ambiguous batch returns a wholesale per-peer handoff before its first
+    /// emission.
     ReplacePeerExportPolicies {
         /// Replacements in caller transaction order.
         replacements: Vec<PeerExportPolicyReplacement>,
-        /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Response channel for failure or the committed/per-peer-handoff outcome.
+        reply: oneshot::Sender<Result<ExportPolicyCohortOutcome, String>>,
     },
     /// Force re-emission of all currently-advertised routes to a peer
     /// without changing policy. Used when an outbound *attribute*

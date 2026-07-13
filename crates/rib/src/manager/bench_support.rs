@@ -42,6 +42,9 @@ pub struct PolicyTransitionBenchReceipt {
     pub max_actor_poll: std::time::Duration,
     pub max_prefix_snapshot_poll: std::time::Duration,
     pub max_finalize_poll: std::time::Duration,
+    pub authoritative_peer_applies: usize,
+    pub max_authoritative_peer_apply: std::time::Duration,
+    pub max_uninterrupted_work: std::time::Duration,
 }
 
 impl RibManager {
@@ -233,13 +236,36 @@ impl RibManager {
         let fast = self.try_clean_group_policy_transition(&replacements);
         if !fast {
             for replacement in replacements {
-                self.replace_peer_export_policy_synchronously(
+                self.bench_apply_authoritative_export_policy(
                     replacement.peer,
                     replacement.export_policy,
-                )
-                .expect("synthetic peer remains registered");
+                );
             }
         }
+        self.bench_maybe_print_policy_transition_receipt(n_peers, fast);
+        fast
+    }
+
+    fn bench_apply_authoritative_export_policy(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<PolicyChain>,
+    ) {
+        let started = std::time::Instant::now();
+        self.replace_peer_export_policy_synchronously(peer, export_policy)
+            .expect("synthetic peer remains registered");
+        let elapsed = started.elapsed();
+        self.policy_transition_stats.authoritative_peer_applies = self
+            .policy_transition_stats
+            .authoritative_peer_applies
+            .saturating_add(1);
+        self.policy_transition_stats.max_authoritative_peer_apply = self
+            .policy_transition_stats
+            .max_authoritative_peer_apply
+            .max(elapsed);
+    }
+
+    fn bench_maybe_print_policy_transition_receipt(&self, n_peers: usize, fast: bool) {
         if std::env::var_os("RUSTBGPD_POLICY_TRANSITION_RECEIPT").is_some()
             && !POLICY_TRANSITION_RECEIPT_PRINTED.swap(true, Ordering::Relaxed)
         {
@@ -247,7 +273,9 @@ impl RibManager {
             eprintln!(
                 "policy_transition_receipt peers={n_peers} fast={fast} plans={} \
                  full_exact_probes={} route_shell_materializations={} actor_polls={} \
-                 max_actor_poll_ns={} max_prefix_snapshot_poll_ns={} max_finalize_poll_ns={}",
+                 max_actor_poll_ns={} max_prefix_snapshot_poll_ns={} max_finalize_poll_ns={} \
+                 authoritative_peer_applies={} max_authoritative_peer_apply_ns={} \
+                 max_uninterrupted_work_ns={}",
                 receipt.plan_builds,
                 receipt.full_exact_probes,
                 receipt.route_shell_materializations,
@@ -255,9 +283,11 @@ impl RibManager {
                 receipt.max_actor_poll.as_nanos(),
                 receipt.max_prefix_snapshot_poll.as_nanos(),
                 receipt.max_finalize_poll.as_nanos(),
+                receipt.authoritative_peer_applies,
+                receipt.max_authoritative_peer_apply.as_nanos(),
+                receipt.max_uninterrupted_work.as_nanos(),
             );
         }
-        fast
     }
 
     /// Authoritative old path for A/B policy-regroup measurements.
@@ -271,13 +301,14 @@ impl RibManager {
         n_peers: usize,
         export_policy: &PolicyChain,
     ) {
+        self.policy_transition_stats = super::PolicyTransitionStats::default();
         for index in 0..n_peers {
-            self.replace_peer_export_policy_synchronously(
+            self.bench_apply_authoritative_export_policy(
                 Self::bench_peer_address(index),
                 Some(export_policy.clone()),
-            )
-            .expect("synthetic peer remains registered");
+            );
         }
+        self.bench_maybe_print_policy_transition_receipt(n_peers, false);
     }
 
     /// Production state-machine instrumentation from the most recent shared
@@ -293,6 +324,11 @@ impl RibManager {
             max_actor_poll: stats.max_actor_slice,
             max_prefix_snapshot_poll: stats.max_prefix_snapshot_poll,
             max_finalize_poll: stats.max_finalize_poll,
+            authoritative_peer_applies: stats.authoritative_peer_applies,
+            max_authoritative_peer_apply: stats.max_authoritative_peer_apply,
+            max_uninterrupted_work: stats
+                .max_actor_slice
+                .max(stats.max_authoritative_peer_apply),
         }
     }
 
