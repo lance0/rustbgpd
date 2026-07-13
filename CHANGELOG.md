@@ -260,8 +260,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   site customization, tracks authoritative current per-prefix marker state and
   measurement windows through post-reload quiesce, and fails closed on source,
   build, runtime, liveness, parsing, and scenario defects, including incomplete
-  ordinary live `/proc` records. It emits a validator-checked durable bundle
-  for the pending acceptance rerun. The daemon-side scenario generator
+  ordinary live `/proc` records. Its exact extracted process scanner runs in a
+  digest-pinned, networkless, read-only Docker container with host-PID
+  `SYS_PTRACE` visibility; rewritten whitespace-bearing `argv[0]` process
+  titles are not misclassified as filesystem paths. It emits a
+  validator-checked durable bundle for the pending acceptance rerun. The
+  daemon-side scenario generator
   is committed at `bench/scale/reloadstall/gen-scenario.py`.
 
 ## [0.51.0] — 2026-07-11

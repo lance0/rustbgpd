@@ -115,6 +115,14 @@ def argument_path(process: Process, argument: str) -> str:
     return ""
 
 
+def argv0_path(process: Process) -> str:
+    """Return argv[0] only when it is a path, not a rewritten process title."""
+
+    if not process.argv or any(character.isspace() for character in process.argv[0]):
+        return ""
+    return argument_path(process, process.argv[0])
+
+
 def direct_reason(process: Process, roots: tuple[str, ...]) -> str | None:
     names = {process.comm, normalized_name(process.comm)}
     names.update(normalized_name(argument) for argument in process.argv[:2])
@@ -128,7 +136,7 @@ def direct_reason(process: Process, roots: tuple[str, ...]) -> str | None:
     # case when procfs hides the executable symlink.
     executable_paths = [process.exe]
     if process.argv:
-        executable_paths.append(argument_path(process, process.argv[0]))
+        executable_paths.append(argv0_path(process))
     for normalized in executable_paths:
         if not normalized:
             continue
@@ -151,7 +159,7 @@ def direct_reason(process: Process, roots: tuple[str, ...]) -> str | None:
 
     # An unfamiliar binary launched from a Cargo target directory in one of
     # the exact source/build roots is still benchmark load and must fail closed.
-    argv_path = argument_path(process, process.argv[0]) if process.argv else ""
+    argv_path = argv0_path(process)
     if argv_path and is_within(argv_path, roots) and TARGET_BINARY_RE.search(argv_path):
         return "source-target-binary"
     return None
@@ -192,12 +200,7 @@ def is_system_init_identity(
 ) -> bool:
     """Return whether procfs proves the host's systemd init identity."""
 
-    return (
-        pid == 1
-        and ppid == 0
-        and comm == "systemd"
-        and argv[:1] == ("/sbin/init",)
-    )
+    return pid == 1 and ppid == 0 and comm == "systemd" and argv[:1] == ("/sbin/init",)
 
 
 def read_process(pid: int, proc_root: Path = Path("/proc")) -> Process | None:
@@ -327,6 +330,15 @@ def ancestry(pid: int, records: Iterable[Process]) -> set[int]:
     return result
 
 
+def required_ancestry(pid: int, records: Iterable[Process]) -> set[int]:
+    """Return a live runner ancestry or fail rather than ignore an unknown PID."""
+
+    materialized = tuple(records)
+    if not any(process.pid == pid for process in materialized):
+        raise ProcessScanError(f"runner pid {pid} is absent from procfs")
+    return ancestry(pid, materialized)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", action="append", default=[])
@@ -336,13 +348,19 @@ def main() -> int:
         default=Path("/proc"),
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--runner-pid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.runner_pid is not None and args.runner_pid <= 0:
+        parser.error("--runner-pid must be positive")
     try:
         records = scan_processes(args.proc_root)
+        ignored_pids = ancestry(os.getpid(), records)
+        if args.runner_pid is not None:
+            ignored_pids.update(required_ancestry(args.runner_pid, records))
     except ProcessScanError as exc:
         print(f"error: {exc}", file=os.sys.stderr)
         return 2
-    competitors = find_competitors(records, ancestry(os.getpid(), records), args.root)
+    competitors = find_competitors(records, ignored_pids, args.root)
     for process, reason in competitors:
         print(f"{reason}\t{process.pid}\t{process.command}")
     return int(bool(competitors))

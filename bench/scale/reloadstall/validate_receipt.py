@@ -71,6 +71,28 @@ PYTHON_INVOCATION = [
     "-I",
     "-S",
 ]
+PROCESS_FENCE_IMAGE_DIGEST = (
+    "sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3"
+)
+PROCESS_FENCE_IMAGE = f"rust:1.95-trixie@{PROCESS_FENCE_IMAGE_DIGEST}"
+PROCESS_FENCE_IMAGE_ID = PROCESS_FENCE_IMAGE_DIGEST
+PROCESS_FENCE_REPO_DIGEST = f"rust@{PROCESS_FENCE_IMAGE_DIGEST}"
+PROCESS_FENCE_ENVIRONMENT = {
+    "architecture": "amd64",
+    "image": PROCESS_FENCE_IMAGE,
+    "image_id": PROCESS_FENCE_IMAGE_ID,
+    "os": "linux",
+    "repo_digest": PROCESS_FENCE_REPO_DIGEST,
+}
+DOCKER_INVOCATION = [
+    "/usr/bin/env",
+    "-i",
+    "LC_ALL=C",
+    "TZ=UTC",
+    "HOME=/nonexistent",
+    "PATH=/usr/bin:/bin",
+    "/usr/bin/docker",
+]
 COMMUNITY_VALUES = tuple(
     (int(community.split(":")[0]) << 16) | int(community.split(":")[1])
     for community in COMMUNITIES
@@ -924,7 +946,7 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     )
     require_exact(
         invocation.get("process_fence_environment"),
-        {**PYTHON_ENVIRONMENT, "isolated": True, "no_site": True},
+        PROCESS_FENCE_ENVIRONMENT,
         "invocation.process_fence_environment",
     )
     require_exact(
@@ -1011,8 +1033,36 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     require_exact(
         commands["process_fence"],
         [
-            *PYTHON_INVOCATION,
-            f"{SOURCE_ROOT}/bench/scale/reloadstall/process_fence.py",
+            *DOCKER_INVOCATION,
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network",
+            "none",
+            "--pid",
+            "host",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "SYS_PTRACE",
+            "--security-opt",
+            "apparmor=unconfined",
+            "--security-opt",
+            "no-new-privileges",
+            "--mount",
+            "type=bind,src=/proc,dst=/host-proc,readonly",
+            "--mount",
+            f"type=bind,src={SOURCE_ROOT}/bench/scale/reloadstall/process_fence.py,dst=/process_fence.py,readonly",
+            PROCESS_FENCE_IMAGE,
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "/process_fence.py",
+            "--proc-root",
+            "/host-proc",
+            "--runner-pid",
+            "<RUNNER_PID>",
             "--root",
             REPO_ROOT,
             "--root",
@@ -1156,6 +1206,18 @@ def validate_invocation(root: Path, manifest: dict[str, Any]) -> None:
     ):
         if required not in rendered:
             fail(f"provenance.txt is missing {required!r}")
+    expected_process_fence_values = {
+        "process_fence_image": PROCESS_FENCE_IMAGE,
+        "process_fence_image_id": PROCESS_FENCE_IMAGE_ID,
+        "process_fence_image_repo_digest": PROCESS_FENCE_REPO_DIGEST,
+        "process_fence_image_os": "linux",
+        "process_fence_image_architecture": "amd64",
+    }
+    for name, expected_value in expected_process_fence_values.items():
+        matches = re.findall(rf"^{name}=(\S+)$", rendered, re.M)
+        if len(matches) != 1:
+            fail(f"provenance.txt must contain one exact {name}")
+        require_exact(matches[0], expected_value, f"provenance.txt {name}")
     toolchain_root = f"<RUSTUP_HOME>/toolchains/{REQUIRED_TOOLCHAIN}"
     expected_tool_values = {
         "cargo_command": f"{toolchain_root}/bin/cargo",

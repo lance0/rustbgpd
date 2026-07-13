@@ -319,6 +319,12 @@ def make_receipt(root: Path) -> None:
             "RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n"
             "python_environment=env -i LC_ALL=C TZ=UTC HOME=/nonexistent "
             "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S\n"
+            f"process_fence_image={validator.PROCESS_FENCE_IMAGE}\n"
+            f"process_fence_image_id={validator.PROCESS_FENCE_IMAGE_ID}\n"
+            "process_fence_image_repo_digest="
+            f"{validator.PROCESS_FENCE_REPO_DIGEST}\n"
+            "process_fence_image_os=linux\n"
+            "process_fence_image_architecture=amd64\n"
             "daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n"
             "harness_environment=env -i LC_ALL=C TZ=UTC\n"
             "health_environment=env -i LC_ALL=C TZ=UTC\n"
@@ -408,9 +414,7 @@ def make_receipt(root: Path) -> None:
             "external_cargo_configs": "rejected",
         },
         "process_fence_environment": {
-            **validator.PYTHON_ENVIRONMENT,
-            "isolated": True,
-            "no_site": True,
+            **validator.PROCESS_FENCE_ENVIRONMENT,
         },
         "runtime_environments": {
             "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
@@ -521,8 +525,36 @@ def make_receipt(root: Path) -> None:
                 "1790",
             ],
             "process_fence": [
-                *validator.PYTHON_INVOCATION,
-                f"{SOURCE}/bench/scale/reloadstall/process_fence.py",
+                *validator.DOCKER_INVOCATION,
+                "run",
+                "--rm",
+                "--pull=never",
+                "--network",
+                "none",
+                "--pid",
+                "host",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--cap-add",
+                "SYS_PTRACE",
+                "--security-opt",
+                "apparmor=unconfined",
+                "--security-opt",
+                "no-new-privileges",
+                "--mount",
+                "type=bind,src=/proc,dst=/host-proc,readonly",
+                "--mount",
+                f"type=bind,src={SOURCE}/bench/scale/reloadstall/process_fence.py,dst=/process_fence.py,readonly",
+                validator.PROCESS_FENCE_IMAGE,
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "/process_fence.py",
+                "--proc-root",
+                "/host-proc",
+                "--runner-pid",
+                "<RUNNER_PID>",
                 "--root",
                 REPO,
                 "--root",
@@ -1095,14 +1127,40 @@ class ReceiptValidatorTests(unittest.TestCase):
         )
         self.assert_invalid("invocation.build_environment")
 
-    def test_process_fence_python_environment_mismatch_fails(self) -> None:
+    def test_process_fence_container_identity_mismatch_fails(self) -> None:
         self.mutate_json(
             "invocation.json",
             lambda value: value["process_fence_environment"].update(
-                PYTHONPATH="/tmp/shadow"
+                image="rust:1.95-trixie"
             ),
         )
         self.assert_invalid("invocation.process_fence_environment")
+
+    def test_process_fence_container_security_mismatch_fails(self) -> None:
+        def mutate(value) -> None:
+            command = value["commands"]["process_fence"]
+            command[command.index("none")] = "host"
+
+        self.mutate_json("invocation.json", mutate)
+        self.assert_invalid("commands.process_fence")
+
+    def test_process_fence_image_provenance_mismatch_fails(self) -> None:
+        self.mutate_text(
+            "provenance.txt",
+            f"process_fence_image_id={validator.PROCESS_FENCE_IMAGE_ID}",
+            f"process_fence_image_id=sha256:{'0' * 64}",
+        )
+        self.assert_invalid("provenance.txt process_fence_image_id")
+
+    def test_process_fence_image_provenance_duplicate_fails(self) -> None:
+        provenance = self.root / "provenance.txt"
+        provenance.write_text(
+            provenance.read_text(encoding="utf-8")
+            + f"process_fence_image_id={validator.PROCESS_FENCE_IMAGE_ID}\n",
+            encoding="utf-8",
+        )
+        resign(self.root)
+        self.assert_invalid("must contain one exact process_fence_image_id")
 
     def test_python_provenance_mismatch_fails(self) -> None:
         self.mutate_text(

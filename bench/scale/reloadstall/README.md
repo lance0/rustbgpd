@@ -41,6 +41,11 @@ bench/scale/reloadstall/run-receipt.sh \
   --output-dir target/reloadstall-receipt/<unique-run-id>
 ```
 
+The runner requires local Docker access and the already-present image
+`rust:1.95-trixie@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3`.
+It verifies that image's ID, repository digest, OS, and architecture and uses
+`--pull=never`; an absent or mismatched image fails before the build.
+
 `run-receipt.sh` owns the shared host lock, exact-source release builds, short
 UDS-safe runtime directory, daemon and health-probe lifecycle, and a timestamped
 final load/process/all-governor snapshot immediately before daemon start. It
@@ -79,13 +84,14 @@ is the invoking account's regular, non-symlinked, owner-safe
 `env -i`, and Cargo/rustc/rustdoc must resolve to owner-safe absolute binaries
 inside the exact `1.95.0-x86_64-unknown-linux-gnu` toolchain. Builds use fresh
 empty home and Cargo-home directories plus the literal `/usr/bin:/bin` search
-path. Every receipt-authority Python path uses `/usr/bin/python3 -I -S` under
-an exact `env -i` whitelist, so ambient `PYTHONPATH`, `PYTHONSTARTUP`, user-site
-packages, and `sitecustomize` cannot alter build/process fences, scenario
-generation, receipt construction, or validation. Provenance records that
-interpreter contract plus the resolved Rust tool paths and hashes, rustup,
-toolchain, sysroot, and host platform. This is a
-controlled and provenance-bound host build, not a hermetic container build.
+path. Host-side receipt-authority Python uses `/usr/bin/python3 -I -S` under an
+exact `env -i` whitelist, so ambient `PYTHONPATH`, `PYTHONSTARTUP`, user-site
+packages, and `sitecustomize` cannot alter build fences, scenario generation,
+receipt construction, or validation. The process fence runs its exact extracted
+script with `/usr/bin/python3 -I -S` in the pinned image. Provenance records both
+interpreter contracts, the image identity, the resolved Rust tool paths and
+hashes, rustup, toolchain, sysroot, and host platform. The measured binaries are
+still a controlled and provenance-bound host build, not a container build.
 Daemon, harness, and health probes run
 under `env -i` with only `LC_ALL=C`, `TZ=UTC`, and daemon-only `RUST_LOG=info`.
 Every
@@ -94,8 +100,14 @@ invocation, and provenance included) normalizes host paths, hostname, and
 the daemon PID to stable placeholders while preserving the exact source
 commit/tree/archive and binary hashes. Unexpected extra artifacts fail
 validation rather than escaping that publication-safety contract. The final
-host fence inspects process argv, cwd, executable, state, and descendants,
-including interpreted benchmarks and Cargo target binaries. Missing cwd/exe
+host fence runs with no network, the host PID namespace, a read-only root,
+all capabilities dropped except `SYS_PTRACE`, AppArmor unconfined, and
+no-new-privileges. Its only explicit host mounts are read-only `/proc` and the
+read-only extracted `process_fence.py`. It inspects process argv, cwd,
+executable, state, and descendants, including interpreted benchmarks and Cargo
+target binaries. The runner passes its exact host PID so the container can
+ignore only the same verified runner ancestry that the native scanner ignored;
+an absent runner PID fails closed. Missing cwd/exe
 links are accepted only for a `/proc/<pid>/stat`-proven zombie or kernel thread;
 the same stat-proven identities may have permission-hidden links. That narrow
 permission exception also covers only the stat/comm/cmdline-proven PID 1

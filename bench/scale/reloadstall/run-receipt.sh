@@ -39,8 +39,15 @@ export LC_ALL=C
 export TZ=UTC
 readonly runner_path=/usr/bin:/bin
 export PATH=$runner_path
+readonly docker_command=/usr/bin/docker
 readonly git_command=/usr/bin/git
 readonly python_command=/usr/bin/python3
+readonly process_fence_image_digest='sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3'
+readonly process_fence_image="rust:1.95-trixie@$process_fence_image_digest"
+readonly process_fence_image_id=$process_fence_image_digest
+readonly process_fence_image_repo_digest="rust@$process_fence_image_digest"
+readonly process_fence_image_os=linux
+readonly process_fence_image_architecture=amd64
 readonly source_remote=https://github.com/lance0/rustbgpd.git
 readonly canonical_baseline_commit=aacb3a89527759b610bead421c80612f04d04826
 readonly canonical_baseline_context_ref=refs/heads/main
@@ -56,6 +63,9 @@ python_environment=(
   PYTHONDONTWRITEBYTECODE=1
 )
 python_invocation=("${python_environment[@]}" "$python_command" -I -S)
+docker_environment=(
+  /usr/bin/env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH="$runner_path"
+)
 
 usage() {
   cat <<'EOF'
@@ -154,6 +164,38 @@ done
     "$python_command" >&2
   exit 1
 }
+[[ -x $docker_command ]] || {
+  printf 'error: required absolute Docker client is missing: %s\n' \
+    "$docker_command" >&2
+  exit 1
+}
+if ! process_fence_image_inspect=$("${docker_environment[@]}" \
+  "$docker_command" image inspect \
+  --format '{{.Id}} {{.Os}} {{.Architecture}} {{join .RepoDigests ","}}' \
+  "$process_fence_image"); then
+  printf 'error: pinned process-fence image is unavailable locally: %s\n' \
+    "$process_fence_image" >&2
+  exit 1
+fi
+read -r process_fence_image_id_actual process_fence_image_os_actual \
+  process_fence_image_architecture_actual process_fence_image_repo_digests_actual \
+  <<<"$process_fence_image_inspect"
+[[ $process_fence_image_id_actual == "$process_fence_image_id" \
+    && $process_fence_image_os_actual == "$process_fence_image_os" \
+    && $process_fence_image_architecture_actual == \
+      "$process_fence_image_architecture" ]] || {
+  printf 'error: pinned process-fence image identity mismatch: %s\n' \
+    "$process_fence_image_inspect" >&2
+  exit 1
+}
+case ",$process_fence_image_repo_digests_actual," in
+  *",$process_fence_image_repo_digest,"*) ;;
+  *)
+    printf 'error: pinned process-fence image lacks repo digest: %s\n' \
+      "$process_fence_image_repo_digest" >&2
+    exit 1
+    ;;
+esac
 
 repo_root=$("${git_environment[@]}" "$git_command" rev-parse --show-toplevel)
 cd "$repo_root"
@@ -694,8 +736,13 @@ capture_governors() {
 capture_governors "$scratch/governors.initial.tsv"
 
 process_fence=(
-  "${python_invocation[@]}"
-  "$source_root/bench/scale/reloadstall/process_fence.py"
+  "${docker_environment[@]}" "$docker_command" run --rm --pull=never
+  --network none --pid host --read-only --cap-drop ALL --cap-add SYS_PTRACE
+  --security-opt apparmor=unconfined --security-opt no-new-privileges
+  --mount "type=bind,src=/proc,dst=/host-proc,readonly"
+  --mount "type=bind,src=$source_root/bench/scale/reloadstall/process_fence.py,dst=/process_fence.py,readonly"
+  "$process_fence_image" /usr/bin/python3 -I -S /process_fence.py
+  --proc-root /host-proc --runner-pid "$$"
   --root "$repo_root" --root "$source_root" --root "$build_target"
 )
 capture_busy() {
@@ -793,6 +840,15 @@ python = [
     "PATH=/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
     "/usr/bin/python3", "-I", "-S",
 ]
+docker = [
+    "/usr/bin/env", "-i", "LC_ALL=C", "TZ=UTC", "HOME=/nonexistent",
+    "PATH=/usr/bin:/bin", "/usr/bin/docker",
+]
+process_fence_image = (
+    "rust:1.95-trixie@"
+    "sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3"
+)
+process_fence_image_id = process_fence_image.split("@", 1)[1]
 payload = {
     "source_commit": os.environ["SOURCE_COMMIT"],
     "build_cwd": source,
@@ -811,13 +867,11 @@ payload = {
         "external_cargo_configs": "rejected",
     },
     "process_fence_environment": {
-        "HOME": "/nonexistent",
-        "LC_ALL": "C",
-        "PATH": "/usr/bin:/bin",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "TZ": "UTC",
-        "isolated": True,
-        "no_site": True,
+        "architecture": "amd64",
+        "image": process_fence_image,
+        "image_id": process_fence_image_id,
+        "os": "linux",
+        "repo_digest": f"rust@{process_fence_image_id}",
     },
     "runtime_environments": {
         "daemon": {"LC_ALL": "C", "TZ": "UTC", "RUST_LOG": "info"},
@@ -870,7 +924,15 @@ payload = {
             runtime, "1790",
         ],
         "process_fence": [
-            *python, f"{source}/bench/scale/reloadstall/process_fence.py",
+            *docker, "run", "--rm", "--pull=never", "--network", "none",
+            "--pid", "host", "--read-only", "--cap-drop", "ALL",
+            "--cap-add", "SYS_PTRACE", "--security-opt", "apparmor=unconfined",
+            "--security-opt", "no-new-privileges", "--mount",
+            "type=bind,src=/proc,dst=/host-proc,readonly", "--mount",
+            f"type=bind,src={source}/bench/scale/reloadstall/process_fence.py,dst=/process_fence.py,readonly",
+            process_fence_image, "/usr/bin/python3", "-I", "-S",
+            "/process_fence.py", "--proc-root", "/host-proc",
+            "--runner-pid", "<RUNNER_PID>",
             "--root", "<REPO_ROOT>", "--root", source, "--root", target,
         ],
         "daemon": [
@@ -1128,6 +1190,13 @@ health_failures=$(awk -F '\t' 'NR > 1 && $3 != 0 { failures++ } END { print fail
   printf 'build_environment=env -i LC_ALL=C TZ=UTC HOME=<BUILD_HOME> CARGO_HOME=<CARGO_HOME> RUSTUP_HOME=<RUSTUP_HOME> PATH=/usr/bin:/bin RUSTUP_TOOLCHAIN=%s CARGO_TARGET_DIR=<BUILD_TARGET> RUSTC=<RUSTC_COMMAND> RUSTDOC=<RUSTDOC_COMMAND>\n' \
     "$required_toolchain"
   printf 'python_environment=env -i LC_ALL=C TZ=UTC HOME=/nonexistent PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I -S\n'
+  printf 'process_fence_image=%s\n' "$process_fence_image"
+  printf 'process_fence_image_id=%s\n' "$process_fence_image_id_actual"
+  printf 'process_fence_image_repo_digest=%s\n' \
+    "$process_fence_image_repo_digest"
+  printf 'process_fence_image_os=%s\n' "$process_fence_image_os_actual"
+  printf 'process_fence_image_architecture=%s\n' \
+    "$process_fence_image_architecture_actual"
   printf 'daemon_environment=env -i LC_ALL=C TZ=UTC RUST_LOG=info\n'
   printf 'harness_environment=env -i LC_ALL=C TZ=UTC\n'
   printf 'health_environment=env -i LC_ALL=C TZ=UTC\n'

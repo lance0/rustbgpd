@@ -17,6 +17,7 @@ from process_fence import (
     find_competitors,
     is_system_init_identity,
     read_process,
+    required_ancestry,
 )
 
 
@@ -126,6 +127,45 @@ class ProcessFenceTests(unittest.TestCase):
         )
         self.assertEqual(found[0][1], "rustbgpd-root-executable")
 
+    def test_rewritten_argv0_process_title_is_not_inferred_as_a_path(self) -> None:
+        found = self.competitors(
+            process(
+                20,
+                1,
+                "npm exec @play",
+                "npm exec @playwright/mcp@latest",
+                cwd=ROOT,
+                exe="/usr/bin/node",
+            )
+        )
+        self.assertEqual(found, [])
+
+    def test_native_exe_still_catches_rewritten_argv0(self) -> None:
+        found = self.competitors(
+            process(
+                20,
+                1,
+                "worker",
+                "rewritten process/title",
+                cwd=ROOT,
+                exe=f"{ROOT}/target/release/worker",
+            )
+        )
+        self.assertEqual(found[0][1], "rustbgpd-root-executable")
+
+    def test_interpreted_script_path_may_contain_whitespace(self) -> None:
+        found = self.competitors(
+            process(
+                20,
+                1,
+                "python3",
+                "python3",
+                f"{ROOT}/bench/scale/new benchmark.py",
+                exe="/usr/bin/python3",
+            )
+        )
+        self.assertEqual(found[0][1], "interpreted-rustbgpd-benchmark")
+
     def test_descendant_of_competitor_is_detected(self) -> None:
         found = self.competitors(
             process(20, 1, "cargo", "cargo", "bench"),
@@ -155,6 +195,16 @@ class ProcessFenceTests(unittest.TestCase):
             ignored={10, 11},
         )
         self.assertEqual(found, [])
+
+    def test_required_runner_ancestry_is_exact_and_fails_when_absent(self) -> None:
+        records = (
+            process(1, 0, "systemd", "/sbin/init"),
+            process(10, 1, "bash", "bash", "run-receipt.sh"),
+            process(11, 10, "docker", "docker", "run"),
+        )
+        self.assertEqual(required_ancestry(11, records), {1, 10, 11})
+        with self.assertRaisesRegex(ProcessScanError, "runner pid 12 is absent"):
+            required_ancestry(12, records)
 
     def test_benign_python_and_editor_are_not_detected(self) -> None:
         found = self.competitors(

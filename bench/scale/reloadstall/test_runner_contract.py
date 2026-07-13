@@ -249,6 +249,32 @@ class RunnerContractTests(unittest.TestCase):
         self.assertNotIn("\npython3 ", self.source)
         self.assertNotIn("\n  python3 ", self.source)
 
+    def test_process_fence_uses_only_the_pinned_restricted_container(self) -> None:
+        for fragment in (
+            "readonly docker_command=/usr/bin/docker",
+            "readonly process_fence_image_digest='sha256:"
+            "f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3'",
+            'readonly process_fence_image="rust:1.95-trixie@$process_fence_image_digest"',
+            "readonly process_fence_image_id=$process_fence_image_digest",
+            '"$docker_command" image inspect',
+            "pinned process-fence image is unavailable locally",
+            "pinned process-fence image identity mismatch",
+            '"${docker_environment[@]}" "$docker_command" run --rm --pull=never',
+            "--network none --pid host --read-only --cap-drop ALL --cap-add SYS_PTRACE",
+            "--security-opt apparmor=unconfined --security-opt no-new-privileges",
+            '--mount "type=bind,src=/proc,dst=/host-proc,readonly"',
+            "dst=/process_fence.py,readonly",
+            '"$process_fence_image" /usr/bin/python3 -I -S /process_fence.py',
+            "--proc-root /host-proc",
+            '--runner-pid "$$"',
+        ):
+            self.assertIn(fragment, self.source)
+        process_fence = self.source.split("process_fence=(", 1)[1].split(
+            ")\ncapture_busy()", 1
+        )[0]
+        self.assertEqual(process_fence.count("--mount"), 2)
+        self.assertNotIn("docker pull", self.source)
+
     def test_sitecustomize_cannot_bypass_authority_commands(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reloadstall-sitecustomize-") as raw:
             root = Path(raw)

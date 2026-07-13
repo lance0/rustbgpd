@@ -311,6 +311,10 @@ bench/scale/reloadstall/run-receipt.sh \
   --output-dir target/reloadstall-receipt/<unique-run-id>
 ```
 
+The exact process scanner requires Docker access and the already-present pinned
+`rust:1.95-trixie@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3`
+image. The wrapper verifies its identity and uses `--pull=never`.
+
 The wrapper acquires the shared host lock and fetches the declared baseline and
 requested source SHA directly from the hard-coded public GitHub remote into a
 fresh repository. It does not trust a mutable branch tip or the invoking object
@@ -335,7 +339,12 @@ the exact 700-neighbor inputs from that
 extraction, then
 takes a timestamped final snapshot of every CPU-frequency governor, one-minute
 load below 2.0, and the argv/cwd/process-tree-checked empty competing-process set
-immediately before daemon start. It runs the daemon, health probe, and
+immediately before daemon start. The exact extracted process scanner runs in
+that pinned image with no network, host PID visibility, a read-only root, only
+`SYS_PTRACE`, no-new-privileges, and only read-only `/proc` plus scanner-script
+host mounts. An exact host runner PID preserves the native scanner's verified
+runner-ancestry exclusion and fails closed if it is absent. It runs the daemon,
+health probe, and
 alternating-marker harness, then retains publication-safe normalized output,
 the daemon run-window log, inputs, invocations, provenance, archive, and complete
 checksums. Its exact-source validator reconstructs the archive's Git tree and
@@ -369,6 +378,7 @@ cd bench/scale/reloadstall && cargo build --release
 
 after a load-gated daemon start. A manual run is not acceptance evidence because
 it does not create or validate the complete retained artifact set. The durable
-runner also invokes every Python build/process fence, generator, receipt
-constructor, and validator through that absolute `env -i` / `-I -S` contract;
-ambient Python startup configuration is not receipt authority.
+runner invokes each host-side Python build fence, generator, receipt constructor,
+and validator through that absolute `env -i` / `-I -S` contract. The container
+process fence separately invokes `/usr/bin/python3 -I -S` from the pinned image;
+ambient Python startup configuration is not receipt authority in either path.
