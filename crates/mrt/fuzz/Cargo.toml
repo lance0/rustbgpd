@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+tempfile = "3"
 
 [dependencies.rustbgpd-mrt]
 path = ".."
@@ -16,6 +17,12 @@ path = ".."
 [[bin]]
 name = "snapshot_reader_drain"
 path = "fuzz_targets/snapshot_reader_drain.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "warm_bundle_manifest"
+path = "fuzz_targets/warm_bundle_manifest.rs"
 test = false
 doc = false
 

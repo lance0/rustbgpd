@@ -48,13 +48,36 @@ jobs:
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
             cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=8192
           done
-      - name: Fuzz MRT snapshot reader (2 minutes per target)
+      - name: Fuzz EVPN parsers (2 minutes per target)
+        run: |
+          cd crates/evpn
+          # Keep target discovery fail-closed as new EVPN parsers are added.
+          targets=$(cargo +nightly fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          if ! grep -Fxq parse_rt <<<"$targets"; then
+            echo "required EVPN fuzz target parse_rt is missing" >&2
+            exit 1
+          fi
+          for t in $targets; do
+            mkdir -p "fuzz/corpus/$t"
+            seeds=""
+            [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
+            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=1024
+          done
+      - name: Fuzz MRT snapshot and warm-bundle readers (2 minutes per target)
         run: |
           cd crates/mrt
           # Keep target discovery fail-closed as new MRT parsers are added.
           targets=$(cargo +nightly fuzz list)
           if [ -z "$targets" ]; then
             echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          if ! grep -Fxq warm_bundle_manifest <<<"$targets"; then
+            echo "required MRT fuzz target warm_bundle_manifest is missing" >&2
             exit 1
           fi
           for t in $targets; do
@@ -71,4 +94,5 @@ jobs:
           path: |
             crates/wire/fuzz/artifacts/
             crates/policy/fuzz/artifacts/
+            crates/evpn/fuzz/artifacts/
             crates/mrt/fuzz/artifacts/

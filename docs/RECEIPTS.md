@@ -176,7 +176,7 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 | [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate |
 | [`interop.yml`](../.github/workflows/interop.yml) | every PR / push | The PR-gated M-series table above, one containerlab job per milestone |
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, nightly 07:00 UTC | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
-| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + PR smoke | libFuzzer wire-decode harnesses |
+| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC | libFuzzer wire, policy, EVPN route-target, MRT snapshot, and warm-bundle manifest harnesses |
 | [`bench-nightly.yml`](../.github/workflows/bench-nightly.yml) | nightly 05:00 UTC | Benchmark tracking on the bench runner |
 | [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |
 | [`privileged-interop.yml`](../.github/workflows/privileged-interop.yml) | manual dispatch | Direct-`cargo` privileged netns suites |
