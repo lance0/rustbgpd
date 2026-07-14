@@ -22,12 +22,13 @@ answer ROUTE_REFRESH by re-sending their base slice. It reports per-observer
 max-gap / completion percentiles, samples delivered communities to verify which
 policy generation is live, and reads daemon RSS from `/proc/<pid>`. In mixed
 mode, completion is measured only for changed observers, while max-gap and
-session-health checks still cover the full fleet. Every stable observer must
-receive a post-SIGHUP announced UPDATE carrying the `stable-out` community
-marker; steady churn supplies that independent proof. A reload is rejected
-before its CSV row if any session is down, fresh stable-marker evidence is
-missing, or a daemon UPDATE fails to decode. Each valid reload emits a
-`reloadstall_csv` record for durable raw receipts.
+session-health checks still cover the full fleet. After every changed observer
+has completed the new generation, the harness resets its evidence threshold;
+every stable observer must then receive a fresh announced UPDATE carrying the
+`stable-out` community marker. Steady churn supplies that independent proof. A
+reload is rejected before its CSV row if any session is down, post-completion
+stable-marker evidence is missing, or a daemon UPDATE fails to decode. Each
+valid reload emits a `reloadstall_csv` record for durable raw receipts.
 
 Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 

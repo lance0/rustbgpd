@@ -814,22 +814,15 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            // Marker evidence must arrive after successful signal delivery;
-            // an in-flight churn UPDATE received between the metric timestamp
-            // and kill(2) is not proof of post-reload stable behavior.
-            let marker_since_us = now_us(&ctx);
             // Completion is intentionally scoped to observers whose effective
-            // export chain changed. Stable observers still participate in the
-            // all-observer stall and session-health checks below.
+            // export chain changed. Stable proof starts only after every
+            // changed observer has the new generation, below.
             let deadline = Instant::now() + Duration::from_secs(900);
             let mut ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let stable_marker_peers =
-                    stable_marker_peers_since(&ctx, changed_peers, marker_since_us);
-                let done = (0..changed_peers as usize)
-                    .all(|i| completion_us(&ctx, i).is_some())
-                    && stable_marker_peers == expected_stable;
+                let done =
+                    (0..changed_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
                 }
@@ -838,20 +831,47 @@ fn main() {
                     let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    eprintln!(
-                        "reload {r} progress: complete={sat}/{changed_peers} stable_markers={stable_marker_peers}/{expected_stable}"
-                    );
+                    eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
                 if Instant::now() > deadline {
                     println!("reload {r} TIMEOUT waiting for re-advertisement");
                     let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
+                    eprintln!("reload {r} observers_complete {sat}/{changed_peers}");
+                    std::process::exit(1);
+                }
+            }
+            let reload_end_us = (0..changed_peers as usize)
+                .filter_map(|i| completion_us(&ctx, i))
+                .max()
+                .expect("changed_peers is non-zero and every observer completed");
+            // Reset the evidence threshold only after the changed cohort has
+            // fully received the target generation. Fresh stable-marker churn
+            // after this point proves stable observers retained stable-out
+            // through the completed transition, rather than merely sampling
+            // an UPDATE queued before or during it.
+            let marker_since_us = now_us(&ctx);
+            let mut stable_ticks = 0u32;
+            loop {
+                let stable_marker_peers =
+                    stable_marker_peers_since(&ctx, changed_peers, marker_since_us);
+                if stable_marker_peers == expected_stable {
+                    break;
+                }
+                if Instant::now() > deadline {
                     eprintln!(
-                        "reload {r} observers_complete {sat}/{changed_peers} stable_markers={stable_marker_peers}/{expected_stable}"
+                        "reload {r} TIMEOUT waiting for post-completion stable markers: {stable_marker_peers}/{expected_stable}"
                     );
                     std::process::exit(1);
                 }
+                stable_ticks += 1;
+                if stable_ticks.is_multiple_of(20) {
+                    eprintln!(
+                        "reload {r} post-completion stable markers: {stable_marker_peers}/{expected_stable}"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             // Changed-observer completion and gap metrics preserve the
             // historical measurement. The all-observer gap extends through
@@ -860,10 +880,8 @@ fn main() {
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
-            let mut reload_end_us = t_hup;
             for i in 0..changed_peers as usize {
                 if let Some(tc) = completion_us(&ctx, i) {
-                    reload_end_us = reload_end_us.max(tc);
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
                     // Leading stall: SIGHUP -> first UPDATE of any kind.
@@ -1018,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_marker_freshness_rejects_missing_and_pre_reload_evidence() {
+    fn stable_marker_freshness_rejects_missing_and_pre_threshold_evidence() {
         assert!(!stable_marker_is_fresh(0, 100));
         assert!(!stable_marker_is_fresh(99, 100));
         assert!(stable_marker_is_fresh(100, 100));
