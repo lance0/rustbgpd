@@ -76,6 +76,12 @@ Identical peer-group or peer-group-membership mutations are treated as runtime
 no-ops: they return success without publishing a policy event or rebuilding
 sessions.
 
+For grouped export-only changes,
+[ADR-0105](adr/0105-grouped-export-policy-transition.md) documents the
+single-owner transaction, its one-cohort-plus-remainder partition, the
+RIB-local atomic commit boundary, and the compensating rollback used across
+session and RIB actors.
+
 ## `[[neighbors]]`
 
 The diff key is the `(address, interface)` pair. Changing either is

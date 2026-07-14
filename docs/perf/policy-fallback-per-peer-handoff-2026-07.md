@@ -37,11 +37,12 @@ partitioning, and resumable per-route fallback remain separate work.
 - Workload: 65,536 IPv4-unicast routes whose export policy changes one
   community; real exact-export encoders remain installed.
 
-The one-peer stop gate exercises the same clean-transition fallback decision
-and cleanup path as production plus one authoritative RIB replacement. The
-benchmark seam reports the decision directly; it does not send the typed reply
-through PeerManager. Deterministic tests, rather than this timing seam, prove
-the typed outcome and serial PeerManager handoff:
+The one-peer stop gate exercises production's early one-member ineligibility
+decision plus one authoritative RIB replacement. It does not create a staged
+destination and therefore does not exercise destination cleanup. The benchmark
+seam reports the decision directly; it does not send the typed reply through
+PeerManager. Deterministic tests, rather than this timing seam, prove the typed
+outcome, cleanup, and serial PeerManager handoff:
 
 ```console
 RUSTBGPD_POLICY_TRANSITION_RECEIPT=1 \

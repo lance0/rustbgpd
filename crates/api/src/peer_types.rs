@@ -743,11 +743,13 @@ pub enum PeerManagerCommand {
     /// neighbor-set / peer-group / global-chain edits that reshape existing
     /// peers' resolved policy. Each target's prior chains are captured before the
     /// new ones are hot-applied through the same per-peer path SIGHUP uses. The
-    /// command is atomic at the peer-manager layer: on the first per-peer apply
-    /// failure it restores the peers it already changed (reverse order) and
-    /// returns `Err` with nothing left mutated. On success it returns the
-    /// captured priors; the executor replays them through this same command to
-    /// roll back after a later persistence failure. Targets not currently live
+    /// command is rollback-capable at the peer-manager layer: on the first
+    /// per-peer apply failure it attempts to restore the peers it already
+    /// changed (reverse order). A successful restore leaves nothing mutated; a
+    /// compound rollback failure is included in the returned `Err` and may
+    /// leave per-peer retry intent armed. On success it returns the captured
+    /// priors; the executor replays them through this same command to roll back
+    /// after a later persistence failure. Targets not currently live
     /// (e.g. a dynamic peer that disconnected) are skipped and absent from the
     /// returned priors. Never mutates `current_config` — snapshot staging owns
     /// that, keeping a single token-advance point.
@@ -764,7 +766,8 @@ pub enum PeerManagerCommand {
     /// `dynamic_ranges` are expanded inside the peer-manager actor against live
     /// dynamic peers whose stored accepted-range attribution matches the target.
     /// The expanded concrete target set is then committed through the same
-    /// atomic apply/restore path as [`PeerManagerCommand::ApplyResolvedPolicySnapshot`].
+    /// rollback-capable apply/restore path as
+    /// [`PeerManagerCommand::ApplyResolvedPolicySnapshot`].
     ApplyPolicyImpactSnapshot {
         /// Concrete static-neighbor targets.
         static_targets: Vec<ResolvedPeerPolicy>,
@@ -994,7 +997,7 @@ pub enum PeerManagerCommand {
     /// (SIGHUP reload of `[policy] rpol_files` or of a referenced
     /// file's content) and re-resolve every live peer's chains
     /// through it. Route Refresh fires for peers whose import chain
-    /// materially changed, via the same atomic resolved-policy
+    /// materially changed, via the same rollback-capable resolved-policy
     /// snapshot path as `[policy.definitions]` edits.
     SyncRpolPolicies {
         /// New `[policy] rpol_files` list (paths already absolute).

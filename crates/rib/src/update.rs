@@ -640,12 +640,12 @@ pub trait ExactExportEncoder: Send + Sync {
 /// the RFC 8671 BMP stat type 15/17 source.
 pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
 
-/// One peer's export-policy replacement inside an atomic RIB batch.
+/// One peer's export-policy replacement inside a grouped RIB batch.
 ///
-/// The batch command is an optimization hint, not a weaker contract: the RIB
-/// may use a shared clean-group transition only after proving every member is
-/// compatible, and otherwise returns a fail-closed handoff for the caller to
-/// run through the authoritative per-peer path.
+/// A compatible clean cohort commits atomically inside the RIB actor. An
+/// ineligible or stale batch instead returns a cleaned-up handoff; the caller's
+/// subsequent ordinary per-peer applies are rollback-capable, but are not
+/// fleet-wide observationally atomic.
 #[derive(Clone)]
 pub struct PeerExportPolicyReplacement {
     /// The target peer.
