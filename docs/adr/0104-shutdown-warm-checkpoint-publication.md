@@ -12,7 +12,8 @@ bound to the exact live session, configuration, and policy identity at clean
 shutdown. Publishing that input is useful independently; adopting it on boot
 would require a separate fail-closed selection and reconciliation design.
 
-The artifact contains sensitive, potentially large pre-policy routing data.
+The artifact contains sensitive, potentially large post-import-policy routing
+data.
 Publication must therefore be private, bounded, transactional, and unable to
 weaken the existing generationless restart-marker path.
 
@@ -24,7 +25,7 @@ weaken the existing generationless restart-marker path.
    and EVPN applies.
 2. One peer-manager capture binds the live local ASN/router ID, redacted
    effective configuration, resolved import-policy identities, and current
-   static numbered sessions. The RIB supplies only eligible pre-policy
+   static numbered sessions. The RIB supplies only eligible post-import-policy
    Adj-RIB-In views for negotiated Graceful Restart families. V1 supports IPv4
    and IPv6 unicast, plus EVPN without Add-Path receive.
 3. Encoding, validation, hashing, and storage share a 30-second monotonic
@@ -41,6 +42,12 @@ weaken the existing generationless restart-marker path.
    files. It never selects `manifest.json` or the exact snapshot named by the
    current manifest. Cleanup failure is warned and leaves the new generation
    committed; no background collector or directory-size policy is introduced.
+   Startup reuses the bounded cleanup engine before publication is armed. A
+   missing manifest permits canonical orphan cleanup; a structurally valid,
+   byte-stable manifest protects its exact selected snapshot; and a corrupt,
+   unsafe, oversized, or changed manifest deletes nothing. Entry-local unlink
+   failures are aggregated without suppressing later candidates, while scan,
+   guard, bound, and durability failures abort the pass.
 5. A successful publication binds the exact checkpoint generation into the
    restart marker. Marker v3 normally carries that binding plus a complete
    Linux boottime clock domain; if clock-domain sampling or representation is
@@ -58,8 +65,8 @@ weaken the existing generationless restart-marker path.
 
 - Operators can opt into a durable, identity-bound shutdown artifact without
   changing current restart convergence or forwarding claims.
-- The checkpoint contains pre-policy routing and topology data and must be
-  protected as sensitive daemon state.
+- The checkpoint contains post-import-policy routing and topology data and must
+  be protected as sensitive daemon state.
 - Shutdown may spend up to 30 seconds attempting publication. Failure is
   visible in logs but preserves the normal generationless Graceful Restart
   marker fallback.
@@ -73,3 +80,7 @@ weaken the existing generationless restart-marker path.
 - Restore, adoption, route selection, and forwarding-state validation remain
   deferred; the presence of a valid bundle is not evidence that any route will
   be used after restart.
+- Every concurrently running daemon requires a distinct `runtime_state_dir`.
+  Cross-process sharing is unsupported for the marker, warm bundle, FIB
+  receipt, and Unix socket as a whole; this decision does not add a misleading
+  warm-only lock.

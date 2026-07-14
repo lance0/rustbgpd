@@ -302,7 +302,7 @@ chain, etc.).
 | Neighbor add/delete/modify via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls runtime back if the write is rejected |
 | Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
-| Optional shutdown warm checkpoint | `<runtime_state_dir>/warm-bundle-v1/` | On coordinated shutdown when `warm_cache_checkpoint_on_shutdown = true`; owner-private pre-policy Adj-RIB-In snapshot and manifest, never restored on boot |
+| Optional shutdown warm checkpoint | `<runtime_state_dir>/warm-bundle-v1/` | On coordinated shutdown when `warm_cache_checkpoint_on_shutdown = true`; owner-private post-import-policy Adj-RIB-In snapshot and manifest, never restored on boot |
 | General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
@@ -318,13 +318,23 @@ warning when clock-domain sampling, checked arithmetic, or TOML's signed
 integer range forces a complete v1/v2 fallback; partial v3 markers are never
 published.
 
+Each concurrently running daemon requires its own `runtime_state_dir`.
+Sharing the directory across live daemon processes is unsupported: its restart
+marker, optional warm bundle, FIB ownership receipt, and Unix socket all assume
+one writer. At startup, an enabled warm checkpoint runs a bounded cleanup of
+canonical orphan snapshots and interrupted-write temporary files. A valid
+byte-stable manifest protects its selected snapshot; an absent manifest allows
+orphan cleanup; and an invalid or changed manifest deletes nothing. Cleanup
+errors are warnings and do not disable the next coordinated-shutdown
+publication attempt.
+
 **Not restored:** routing state, policy evaluation state, RPKI VRP tables, and
 BMP client state. The optional warm checkpoint persists only eligible
-pre-policy Adj-RIB-In views as a future-use artifact; the daemon does not load,
-select, install, or advertise any route from it. Loc-RIB and Adj-RIB-Out are
-never checkpointed. The ADR-0061 FIB file is only an ownership receipt for rows
-rustbgpd already installed; all route selection state is rebuilt from peers
-after restart.
+post-import-policy Adj-RIB-In views as a future-use artifact; the daemon does
+not load, select, install, or advertise any route from it. Loc-RIB and
+Adj-RIB-Out are never checkpointed. The ADR-0061 FIB file is only an ownership
+receipt for rows rustbgpd already installed; all route selection state is
+rebuilt from peers after restart.
 
 ---
 

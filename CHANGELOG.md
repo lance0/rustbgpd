@@ -23,8 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Coordinated shutdown can publish a bounded warm checkpoint.** The
   restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
-  captures eligible established static peers' pre-policy Adj-RIB-In views into
-  an owner-private, content-addressed MRT bundle under
+  captures eligible established static peers' post-import-policy Adj-RIB-In
+  views into an owner-private, content-addressed MRT bundle under
   `<runtime_state_dir>/warm-bundle-v1`. Publication is deadline-, allocation-,
   and size-bounded, atomically binds exact live identity/config/policy inputs to
   a generation-bound restart marker, and falls back to a generationless marker
@@ -154,8 +154,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   new `manifest.json` rename and directory fsync establish the commit point,
   publication removes superseded content-addressed snapshots and recognizable
   crash-leaked temporary files through the pinned bundle directory. Cleanup
+  continues past entry-local unlink failures and preserves the primary
+  publication error when rollback also fails. Startup performs the same bounded
+  descriptor-relative scavenging without opening or adopting route snapshots:
+  absent manifests permit orphan cleanup, valid byte-stable manifests protect
+  their selection, and invalid or changed manifests delete nothing. Cleanup
   failure is warned but cannot roll back or delete the manifest's current
-  snapshot.
+  snapshot or disable later publication. Concurrent daemons must use distinct
+  `runtime_state_dir` values.
 
 - **The v1 stable-surface release gate now supports patch and major releases.**
   Upgrade exercises remain a contiguous, fail-closed chain of adjacent release

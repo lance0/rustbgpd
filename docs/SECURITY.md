@@ -231,11 +231,12 @@ per-socket inspection remain deferred.
 
 ## Shutdown warm-checkpoint confidentiality
 
-The optional shutdown warm checkpoint contains pre-policy Adj-RIB-In routing
-data, peer identity, and digests of the effective configuration and resolved
-import policies. Treat `<runtime_state_dir>/warm-bundle-v1` as sensitive
-control-plane state: keep `runtime_state_dir` on local trusted storage, owned by
-the daemon account, and do not expose or back it up as a public MRT feed.
+The optional shutdown warm checkpoint contains post-import-policy Adj-RIB-In
+routing data, peer identity, and digests of the effective configuration and
+resolved import policies. Treat `<runtime_state_dir>/warm-bundle-v1` as
+sensitive control-plane state: keep `runtime_state_dir` on local trusted
+storage, owned by the daemon account, and do not expose or back it up as a
+public MRT feed.
 
 Publication is descriptor-relative beneath an owner-verified directory that is
 not group/world-writable. Bundle files are owner-only, symlink traversal is
@@ -243,9 +244,13 @@ rejected, content is size-bounded and hashed, and `manifest.json` is the atomic
 commit point. A descriptor-relative post-commit sweep removes only canonical
 superseded snapshot names and recognizable atomic temporary names; it preserves
 the manifest's exact current snapshot and ignores unknown entries. Cleanup
-failure is logged without invalidating the committed generation. Startup does
-not load the checkpoint, so a stale or tampered
-bundle cannot currently inject, select, install, or advertise a route. The GR
+continues past entry-local unlink failures in deterministic filename order.
+Startup runs the same bounded cleanup, but deletes nothing unless the manifest
+is absent or structurally valid and byte-stable through the deletion guard.
+Cleanup failure is logged without invalidating the committed generation or
+disabling later shutdown publication. Startup does not load the checkpoint, so
+a stale or tampered bundle cannot currently inject, select, install, or
+advertise a route. The GR
 marker carries only an opaque checkpoint generation plus restart-deadline clock
 metadata. Marker v3 includes the kernel boot ID and time-namespace
 device/inode/offset, which can fingerprint a host or container clock domain;
@@ -254,6 +259,10 @@ contains key material, routes, or configuration. Checkpoint publication
 failure retains a generationless restart marker, while unavailable clock
 metadata degrades to a complete wall-only marker rather than publishing a
 partial clock identity.
+
+Use a separate `runtime_state_dir` for every concurrently running daemon.
+The directory is single-writer state for the marker, checkpoint, FIB receipt,
+and Unix socket; owner-only permissions do not make cross-process sharing safe.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 

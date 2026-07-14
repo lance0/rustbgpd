@@ -1762,9 +1762,10 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
-    /// Query one actor-consistent, session-fenced Adj-RIB-In snapshot for a
-    /// shutdown warm checkpoint. The caller supplies the exact PM/session
-    /// inventory; any mismatch rejects the complete snapshot.
+    /// Query one actor-consistent, session-fenced post-import-policy
+    /// Adj-RIB-In snapshot for a shutdown warm checkpoint. The caller supplies
+    /// the exact PM/session inventory; any mismatch rejects the complete
+    /// snapshot.
     QueryWarmMrtSnapshot {
         /// Strictly sorted, duplicate-free eligible view inventory.
         views: Vec<WarmMrtSnapshotView>,
@@ -1816,11 +1817,11 @@ pub struct MrtPeerEntry {
 pub struct MrtSnapshotData {
     /// All known peers for the `PEER_INDEX_TABLE`.
     pub peers: Vec<MrtPeerEntry>,
-    /// All Adj-RIB-In unicast routes across all peers.
+    /// All post-import-policy Adj-RIB-In unicast routes across all peers.
     pub routes: Vec<Route>,
-    /// All Adj-RIB-In EVPN routes across all peers. Encoded as RFC 6396
-    /// `RIB_GENERIC` records (AFI 25 / SAFI 70). Empty for non-EVPN
-    /// deployments.
+    /// All post-import-policy Adj-RIB-In EVPN routes across all peers. Encoded
+    /// as RFC 6396 `RIB_GENERIC` records (AFI 25 / SAFI 70). Empty for
+    /// non-EVPN deployments.
     pub evpn_routes: Vec<crate::route::EvpnRibRoute>,
 }
 

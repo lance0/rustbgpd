@@ -1519,7 +1519,7 @@ fn build_warm_checkpoint_plan(
                 continue;
             }
             let view = WarmBundleViewV1 {
-                kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+                kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
                 peer,
                 peer_asn: session.peer_asn,
                 peer_router_id: session.peer_router_id,
@@ -2537,6 +2537,34 @@ async fn run<T>(
             .and_then(|directory| directory.prepare_warm_bundle())
         {
             Ok(directory) => {
+                match directory.scavenge_owned_entries() {
+                    Ok(report) if report.failed() > 0 => {
+                        warn!(
+                            path = %warm_bundle_path.display(),
+                            removed = report.removed(),
+                            failed = report.failed(),
+                            first_error = %report
+                                .first_failure()
+                                .expect("failed cleanup has a first error"),
+                            "warm checkpoint startup cleanup left some stale entries"
+                        );
+                    }
+                    Ok(report) if report.removed() > 0 => {
+                        info!(
+                            path = %warm_bundle_path.display(),
+                            removed = report.removed(),
+                            "removed stale warm checkpoint entries at startup"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            path = %warm_bundle_path.display(),
+                            %error,
+                            "warm checkpoint startup cleanup was skipped; shutdown publication remains available"
+                        );
+                    }
+                }
                 info!(
                     path = %warm_bundle_path.display(),
                     "prepared daemon-private warm checkpoint directory"
@@ -5948,6 +5976,10 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     fn warm_checkpoint_plan_intersects_gr_with_negotiated_family() {
         let plan = build_warm_checkpoint_plan(&[checkpoint_plan_session()]).unwrap();
         assert_eq!(plan.views.len(), 1);
+        assert_eq!(
+            plan.views[0].kind,
+            WarmBundleViewKindV1::AdjRibInPostImportPolicy
+        );
         assert_eq!(plan.views[0].family, WarmBundleFamilyV1::Ipv4Unicast);
         assert!(plan.views[0].add_path_receive);
         assert_eq!(plan.rib_views[0].session_id, 41);

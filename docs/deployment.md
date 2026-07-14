@@ -610,6 +610,10 @@ a field rename, edit the config file by hand.
 
 Everything in `runtime_state_dir` (default `/var/lib/rustbgpd`):
 
+Assign a distinct `runtime_state_dir` to every concurrently running rustbgpd
+daemon. The directory is single-writer runtime state; sharing it between live
+processes is unsupported even when their configuration files differ.
+
 | File | Purpose | Survives restart |
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
@@ -618,7 +622,7 @@ Everything in `runtime_state_dir` (default `/var/lib/rustbgpd`):
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 
 Routing state is **not restored**. The optional shutdown checkpoint contains
-only eligible pre-policy Adj-RIB-In views for future use; Loc-RIB,
+only eligible post-import-policy Adj-RIB-In views for future use; Loc-RIB,
 Adj-RIB-Out, and policy evaluation state are not checkpointed, and the current
 startup path loads none of it. Routing state rebuilds from peer routes after
 restart. GR and checkpoint state support bounded control-plane restart

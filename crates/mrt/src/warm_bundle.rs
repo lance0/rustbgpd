@@ -20,10 +20,12 @@
 //! never invalidates or rolls back the newly committed generation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +65,7 @@ pub const MAX_WARM_BUNDLE_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 
 const MAX_OPAQUE_GENERATION_BYTES: usize = 128;
 const MAX_PIT_VIEW_BYTES: usize = u16::MAX as usize;
+const MAX_CLEANUP_CANDIDATES: usize = 65_536;
 const STREAM_BUFFER_BYTES: usize = 16 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -80,10 +83,13 @@ pub enum WarmBundleFamilyV1 {
 
 /// Semantic route view carried by a warm checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum WarmBundleViewKindV1 {
-    /// Routes received from the peer before import policy.
-    AdjRibInPrePolicy,
+    /// Routes accepted from the peer after import-policy permit/modification.
+    #[serde(
+        rename = "adj-rib-in-post-import-policy",
+        alias = "adj-rib-in-pre-policy"
+    )]
+    AdjRibInPostImportPolicy,
 }
 
 /// Exact eligible peer/family view identity bound by the snapshot.
@@ -123,6 +129,35 @@ pub struct WarmBundlePolicyInputV1 {
     pub canonical_policy: Vec<u8>,
 }
 
+/// Frozen view projection used only by the V1 policy-digest framing.
+///
+/// Early V1 manifests mislabeled the already post-import-policy RIB view as
+/// `adj-rib-in-pre-policy`. Correcting the public manifest spelling must not
+/// invalidate the resolved-policy digest of already published generations, so
+/// the V1 digest deliberately retains that legacy token and field order.
+#[derive(Serialize)]
+struct WarmBundlePolicyDigestViewV1 {
+    kind: &'static str,
+    peer: IpAddr,
+    peer_asn: u32,
+    peer_router_id: Ipv4Addr,
+    family: WarmBundleFamilyV1,
+    add_path_receive: bool,
+}
+
+impl From<&WarmBundleViewV1> for WarmBundlePolicyDigestViewV1 {
+    fn from(view: &WarmBundleViewV1) -> Self {
+        Self {
+            kind: "adj-rib-in-pre-policy",
+            peer: view.peer,
+            peer_asn: view.peer_asn,
+            peer_router_id: view.peer_router_id,
+            family: view.family,
+            add_path_receive: view.add_path_receive,
+        }
+    }
+}
+
 /// Deterministically digest strictly sorted resolved import-policy inputs.
 ///
 /// The framing includes a domain/version prefix and length-prefixes both the
@@ -143,7 +178,8 @@ pub fn resolved_import_policy_digest_v1(
     digest.update(b"rustbgpd/warm-bundle/resolved-import-policy\0");
     digest.update(WARM_BUNDLE_POLICY_DIGEST_VERSION.to_be_bytes());
     for input in inputs {
-        let view = serde_json::to_vec(&input.view).map_err(WarmBundleError::CorruptManifest)?;
+        let legacy_view = WarmBundlePolicyDigestViewV1::from(&input.view);
+        let view = serde_json::to_vec(&legacy_view).map_err(WarmBundleError::CorruptManifest)?;
         update_len_prefixed(&mut digest, &view);
         update_len_prefixed(&mut digest, &input.canonical_policy);
     }
@@ -313,6 +349,52 @@ impl WarmBundleDirectory {
         validate_owner_mode(&file, &display_path, "directory", true)?;
         Ok(Self { file, display_path })
     }
+
+    /// Remove only recognizable orphaned warm-bundle entries at startup.
+    ///
+    /// A missing manifest permits cleanup of canonical snapshot and temporary
+    /// names. A present manifest must be structurally valid and remain
+    /// byte-identical through the deletion guard; its selected snapshot is
+    /// always preserved. Snapshot contents are never opened, hashed, decoded,
+    /// or adopted by this storage-only pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without deleting anything when the manifest is
+    /// corrupt, unsafe, oversized, or changes before deletion, or when the
+    /// directory scan or candidate bound fails. A durability-sync error can be
+    /// reported after canonical stale entries were already removed.
+    pub fn scavenge_owned_entries(&self) -> Result<WarmBundleCleanupReport, WarmBundleError> {
+        scavenge_owned_entries_inner(self, FaultPoint::None)
+    }
+}
+
+/// Outcome of one guarded warm-bundle cleanup pass.
+#[derive(Debug)]
+pub struct WarmBundleCleanupReport {
+    removed: u64,
+    failed: u64,
+    first_failure: Option<WarmBundleError>,
+}
+
+impl WarmBundleCleanupReport {
+    /// Number of canonical stale entries removed durably by the pass.
+    #[must_use]
+    pub const fn removed(&self) -> u64 {
+        self.removed
+    }
+
+    /// Number of entry-local unlink failures skipped by the pass.
+    #[must_use]
+    pub const fn failed(&self) -> u64 {
+        self.failed
+    }
+
+    /// First entry-local unlink failure, in deterministic bytewise name order.
+    #[must_use]
+    pub const fn first_failure(&self) -> Option<&WarmBundleError> {
+        self.first_failure.as_ref()
+    }
 }
 
 /// Warm-bundle storage or validation failure.
@@ -326,6 +408,21 @@ pub enum WarmBundleError {
         /// Underlying filesystem error.
         #[source]
         source: io::Error,
+    },
+    /// A primary publication failure was followed by a rollback or cleanup
+    /// failure. The primary error remains first and is never replaced.
+    #[error("{primary}; recovery also failed: {recovery}")]
+    RecoveryFailed {
+        /// Error that caused publication to fail.
+        primary: Box<WarmBundleError>,
+        /// Later rollback or cleanup error.
+        recovery: Box<WarmBundleError>,
+    },
+    /// A cleanup pass exceeded its bounded candidate inventory.
+    #[error("warm bundle cleanup found more than {cap} canonical candidates")]
+    CleanupCandidateLimitExceeded {
+        /// Maximum candidate count accepted before any deletion.
+        cap: usize,
     },
     /// Directory/file ownership or permissions were unsafe.
     #[error("warm bundle {role} has unsafe owner or mode: {path}")]
@@ -579,15 +676,27 @@ fn write_warm_bundle_inner(
         fault,
         budget,
     ) {
-        if artifact_publication == AtomicPublication::Created {
-            remove_committed_destination(directory, &manifest.snapshot.path)?;
+        if artifact_publication == AtomicPublication::Created
+            && let Err(recovery) =
+                remove_committed_destination(directory, &manifest.snapshot.path, fault)
+        {
+            return Err(recovery_failed(error, recovery));
         }
         return Err(error);
     }
     match cleanup_committed_bundle(directory, &manifest.snapshot.path, &encoded, fault, budget) {
-        Ok(removed) if removed > 0 => {
+        Ok(report) if report.failed() > 0 => {
+            warn!(
+                removed = report.removed(),
+                failed = report.failed(),
+                first_error = %report.first_failure().expect("failed cleanup has a first error"),
+                current_snapshot = %manifest.snapshot.path,
+                "warm bundle remains committed but some stale entries could not be removed"
+            );
+        }
+        Ok(report) if report.removed() > 0 => {
             debug!(
-                removed,
+                removed = report.removed(),
                 current_snapshot = %manifest.snapshot.path,
                 "removed superseded warm-bundle entries after commit"
             );
@@ -613,18 +722,186 @@ fn cleanup_committed_bundle(
     committed_manifest: &[u8],
     #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
     budget: Option<&WarmSnapshotBudget>,
-) -> Result<u64, WarmBundleError> {
-    #[cfg(test)]
-    fail_if(fault, FaultPoint::CleanupScan)
-        .map_err(|source| io_error(&directory.display_path, source))?;
-    verify_existing_entry(
+) -> Result<WarmBundleCleanupReport, WarmBundleError> {
+    cleanup_owned_candidates(
+        directory,
+        CleanupManifestGuard::Exact {
+            bytes: committed_manifest,
+            current_snapshot,
+        },
+        fault,
+        budget,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CleanupManifestGuard<'a> {
+    Missing,
+    Exact {
+        bytes: &'a [u8],
+        current_snapshot: &'a str,
+    },
+}
+
+fn scavenge_owned_entries_inner(
+    directory: &WarmBundleDirectory,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
+) -> Result<WarmBundleCleanupReport, WarmBundleError> {
+    let manifest_bytes = match read_entry_bounded(
         directory,
         WARM_BUNDLE_MANIFEST_FILE,
         "manifest",
-        committed_manifest,
-        budget,
-    )?;
+        MAX_WARM_BUNDLE_MANIFEST_BYTES,
+    ) {
+        Ok(bytes) => Some(bytes),
+        Err(WarmBundleError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
 
+    match manifest_bytes.as_deref() {
+        Some(bytes) => {
+            let manifest: WarmBundleManifestV1 =
+                serde_json::from_slice(bytes).map_err(WarmBundleError::CorruptManifest)?;
+            validate_manifest_structure(&manifest)?;
+            cleanup_owned_candidates(
+                directory,
+                CleanupManifestGuard::Exact {
+                    bytes,
+                    current_snapshot: &manifest.snapshot.path,
+                },
+                fault,
+                None,
+            )
+        }
+        None => cleanup_owned_candidates(directory, CleanupManifestGuard::Missing, fault, None),
+    }
+}
+
+fn cleanup_owned_candidates(
+    directory: &WarmBundleDirectory,
+    guard: CleanupManifestGuard<'_>,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<WarmBundleCleanupReport, WarmBundleError> {
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::CleanupScan)
+        .map_err(|source| io_error(&directory.display_path, source))?;
+
+    let current_snapshot = match guard {
+        CleanupManifestGuard::Missing => None,
+        CleanupManifestGuard::Exact {
+            current_snapshot, ..
+        } => Some(current_snapshot.as_bytes()),
+    };
+    let candidates = collect_cleanup_candidates(directory, current_snapshot, budget)?;
+
+    if !candidates.is_empty() {
+        #[cfg(test)]
+        match fault {
+            FaultPoint::CleanupReplaceManifestAfterScan => std::fs::write(
+                directory.display_path.join(WARM_BUNDLE_MANIFEST_FILE),
+                b"changed after cleanup scan",
+            )
+            .map_err(|source| io_error(&directory.display_path, source))?,
+            FaultPoint::CleanupCreateManifestAfterScan => std::fs::write(
+                directory.display_path.join(WARM_BUNDLE_MANIFEST_FILE),
+                b"appeared after cleanup scan",
+            )
+            .map_err(|source| io_error(&directory.display_path, source))?,
+            _ => {}
+        }
+        verify_cleanup_manifest_guard(directory, guard, budget)?;
+    }
+
+    let mut removed = 0_u64;
+    let mut failed = 0_u64;
+    let mut first_failure = None;
+    let mut pending_error = None;
+    for name in candidates {
+        #[cfg(test)]
+        if removed > 0 && matches!(fault, FaultPoint::CleanupBudgetAfterFirstUnlinkAndDirSync) {
+            pending_error = Some(WarmSnapshotBudgetError::Cancelled.into());
+            break;
+        }
+        if let Some(budget) = budget
+            && let Err(error) = budget.check()
+        {
+            pending_error = Some(error.into());
+            break;
+        }
+        let display = directory.display_path.join(&name);
+
+        #[cfg(test)]
+        let injected_error = (fault == FaultPoint::CleanupUnlink && removed == 0 && failed == 0)
+            .then(|| io::Error::other("injected cleanup unlink failure"));
+        #[cfg(not(test))]
+        let injected_error: Option<io::Error> = None;
+        let result = injected_error.map_or_else(
+            || {
+                unlinkat(
+                    &directory.file,
+                    name.as_os_str(),
+                    UnlinkatFlags::NoRemoveDir,
+                )
+                .map_err(errno_io)
+            },
+            Err,
+        );
+        match result {
+            Ok(()) => {
+                removed = removed.saturating_add(1);
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                failed = failed.saturating_add(1);
+                if first_failure.is_none() {
+                    first_failure = Some(io_error(&display, source));
+                }
+            }
+        }
+    }
+    if pending_error.is_none()
+        && let Some(budget) = budget
+        && let Err(error) = budget.check()
+    {
+        pending_error = Some(error.into());
+    }
+    if removed > 0
+        && let Err(sync_error) = sync_cleanup_directory(directory, fault)
+    {
+        return Err(match pending_error.take() {
+            Some(primary) => recovery_failed(primary, sync_error),
+            None => sync_error,
+        });
+    }
+    if let Some(error) = pending_error {
+        return Err(error);
+    }
+    Ok(WarmBundleCleanupReport {
+        removed,
+        failed,
+        first_failure,
+    })
+}
+
+fn sync_cleanup_directory(
+    directory: &WarmBundleDirectory,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
+) -> Result<(), WarmBundleError> {
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::CleanupDirSync)
+        .map_err(|source| io_error(&directory.display_path, source))?;
+    directory
+        .file
+        .sync_all()
+        .map_err(|source| io_error(&directory.display_path, source))
+}
+
+fn collect_cleanup_candidates(
+    directory: &WarmBundleDirectory,
+    current_snapshot: Option<&[u8]>,
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<Vec<OsString>, WarmBundleError> {
     let cloned = directory
         .file
         .try_clone()
@@ -632,7 +909,7 @@ fn cleanup_committed_bundle(
     let owned: OwnedFd = cloned.into();
     let mut entries =
         Dir::from_fd(owned).map_err(|source| nix_io(&directory.display_path, source))?;
-    let mut removed = 0_u64;
+    let mut candidates = Vec::<OsString>::new();
     for entry in entries.iter() {
         if let Some(budget) = budget {
             budget.check()?;
@@ -640,40 +917,61 @@ fn cleanup_committed_bundle(
         let entry = entry.map_err(|source| nix_io(&directory.display_path, source))?;
         let name = entry.file_name();
         let bytes = name.to_bytes();
-        if bytes == current_snapshot.as_bytes()
+        if current_snapshot == Some(bytes)
             || (!is_content_addressed_snapshot(bytes) && !is_atomic_temp_name(bytes))
         {
             continue;
         }
-        let display = directory
-            .display_path
-            .join(String::from_utf8_lossy(bytes).into_owned());
+        if candidates.len() == MAX_CLEANUP_CANDIDATES {
+            return Err(WarmBundleError::CleanupCandidateLimitExceeded {
+                cap: MAX_CLEANUP_CANDIDATES,
+            });
+        }
+        candidates
+            .try_reserve(1)
+            .map_err(|_| WarmBundleError::AllocationFailed {
+                role: "cleanup candidate inventory",
+                requested: u64::try_from(candidates.len().saturating_add(1)).unwrap_or(u64::MAX),
+            })?;
+        candidates.push(OsString::from_vec(bytes.to_vec()));
+    }
+    candidates.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(candidates)
+}
 
-        #[cfg(test)]
-        fail_if(fault, FaultPoint::CleanupUnlink).map_err(|source| io_error(&display, source))?;
-        match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
-            Ok(()) => {
-                removed = removed.saturating_add(1);
+fn verify_cleanup_manifest_guard(
+    directory: &WarmBundleDirectory,
+    guard: CleanupManifestGuard<'_>,
+    budget: Option<&WarmSnapshotBudget>,
+) -> Result<(), WarmBundleError> {
+    match guard {
+        CleanupManifestGuard::Exact { bytes, .. } => verify_existing_entry(
+            directory,
+            WARM_BUNDLE_MANIFEST_FILE,
+            "manifest",
+            bytes,
+            budget,
+        ),
+        CleanupManifestGuard::Missing => match open_entry(
+            directory,
+            WARM_BUNDLE_MANIFEST_FILE,
+            "manifest",
+            OFlag::O_RDONLY,
+            Mode::empty(),
+        ) {
+            Err(WarmBundleError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                Ok(())
             }
-            Err(Errno::ENOENT) => {}
-            Err(source) => {
-                return Err(io_error(&display, errno_io(source)));
-            }
-        }
+            Ok(_) => Err(io_error(
+                &directory.display_path.join(WARM_BUNDLE_MANIFEST_FILE),
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "manifest appeared during cleanup",
+                ),
+            )),
+            Err(error) => Err(error),
+        },
     }
-    if removed > 0 {
-        if let Some(budget) = budget {
-            budget.check()?;
-        }
-        #[cfg(test)]
-        fail_if(fault, FaultPoint::CleanupDirSync)
-            .map_err(|source| io_error(&directory.display_path, source))?;
-        directory
-            .file
-            .sync_all()
-            .map_err(|source| io_error(&directory.display_path, source))?;
-    }
-    Ok(removed)
 }
 
 fn is_content_addressed_snapshot(name: &[u8]) -> bool {
@@ -803,6 +1101,17 @@ fn validate_manifest(
     expected: &WarmBundleExpectedV1,
     freshness: WarmBundleFreshnessV1,
 ) -> Result<(), WarmBundleError> {
+    validate_manifest_structure(manifest)?;
+    compare_identity(&manifest.identity, expected)?;
+    validate_freshness(manifest.identity.created_at_utc_seconds, freshness)
+}
+
+/// Validate only self-contained V1 manifest structure.
+///
+/// Startup scavenging uses this to prove which canonical snapshot name must be
+/// preserved. It deliberately does not compare current boot identity, enforce
+/// freshness, or open/hash/decode the selected snapshot.
+fn validate_manifest_structure(manifest: &WarmBundleManifestV1) -> Result<(), WarmBundleError> {
     if manifest.format_version != WARM_BUNDLE_FORMAT_VERSION {
         return Err(WarmBundleError::UnsupportedVersion {
             found: manifest.format_version,
@@ -820,8 +1129,7 @@ fn validate_manifest(
             cap: MAX_WARM_BUNDLE_SNAPSHOT_BYTES,
         });
     }
-    compare_identity(&manifest.identity, expected)?;
-    validate_freshness(manifest.identity.created_at_utc_seconds, freshness)
+    Ok(())
 }
 
 fn validate_identity(identity: &WarmBundleIdentityV1) -> Result<(), WarmBundleError> {
@@ -1031,7 +1339,7 @@ fn validate_snapshot_semantics(
             });
         }
         let view = WarmBundleViewV1 {
-            kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+            kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
             peer: entry.peer.peer_addr,
             peer_asn: entry.peer.peer_asn,
             peer_router_id: entry.peer.peer_bgp_id,
@@ -1425,6 +1733,18 @@ enum FaultPoint {
     CleanupUnlink,
     #[cfg(test)]
     CleanupDirSync,
+    #[cfg(test)]
+    CleanupReplaceManifestAfterScan,
+    #[cfg(test)]
+    CleanupCreateManifestAfterScan,
+    #[cfg(test)]
+    CleanupBudgetAfterFirstUnlinkAndDirSync,
+    #[cfg(test)]
+    ManifestDirSyncAndRollback,
+    #[cfg(test)]
+    ManifestWriteAndTempCleanup,
+    #[cfg(test)]
+    ManifestWriteAndArtifactCleanup,
 }
 
 #[cfg(test)]
@@ -1451,7 +1771,22 @@ fn stage(role: AtomicRole, ordinal: u8) -> FaultPoint {
 
 #[cfg(test)]
 fn fail_if(selected: FaultPoint, current: FaultPoint) -> io::Result<()> {
-    if selected == current {
+    let selected_matches = selected == current
+        || matches!(
+            (selected, current),
+            (
+                FaultPoint::ManifestDirSyncAndRollback,
+                FaultPoint::ManifestDirSync
+            ) | (
+                FaultPoint::CleanupBudgetAfterFirstUnlinkAndDirSync,
+                FaultPoint::CleanupDirSync
+            ) | (
+                FaultPoint::ManifestWriteAndTempCleanup
+                    | FaultPoint::ManifestWriteAndArtifactCleanup,
+                FaultPoint::ManifestWrite
+            )
+        );
+    if selected_matches {
         Err(io::Error::other(format!("injected failure at {current:?}")))
     } else {
         Ok(())
@@ -1622,11 +1957,13 @@ fn write_atomic_at(
         Err(error) => {
             if let Some(publication) = committed
                 && let Err(rollback_error) =
-                    rollback_atomic_destination(directory, name, &temp_name, publication)
+                    rollback_atomic_destination(directory, name, &temp_name, publication, fault)
             {
-                return Err(rollback_error);
+                return Err(recovery_failed(error, rollback_error));
             }
-            remove_temporary_entry(directory, &temp_name)?;
+            if let Err(cleanup_error) = remove_temporary_entry(directory, &temp_name, fault) {
+                return Err(recovery_failed(error, cleanup_error));
+            }
             return Err(error);
         }
     };
@@ -1694,8 +2031,12 @@ fn rollback_atomic_destination(
     name: &str,
     temp_name: &str,
     publication: AtomicPublication,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
 ) -> Result<(), WarmBundleError> {
     let display = directory.display_path.join(name);
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::ManifestDirSyncAndRollback)
+        .map_err(|source| io_error(&display, source))?;
     match publication {
         AtomicPublication::Created => {
             unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir)
@@ -1725,8 +2066,12 @@ fn rollback_atomic_destination(
 fn remove_committed_destination(
     directory: &WarmBundleDirectory,
     name: &str,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
 ) -> Result<(), WarmBundleError> {
     let display = directory.display_path.join(name);
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::ManifestWriteAndArtifactCleanup)
+        .map_err(|source| io_error(&display, source))?;
     match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
         Ok(()) | Err(Errno::ENOENT) => {}
         Err(error) => return Err(io_error(&display, errno_io(error))),
@@ -1740,8 +2085,12 @@ fn remove_committed_destination(
 fn remove_temporary_entry(
     directory: &WarmBundleDirectory,
     name: &str,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: FaultPoint,
 ) -> Result<(), WarmBundleError> {
     let display = directory.display_path.join(name);
+    #[cfg(test)]
+    fail_if(fault, FaultPoint::ManifestWriteAndTempCleanup)
+        .map_err(|source| io_error(&display, source))?;
     match unlinkat(&directory.file, name, UnlinkatFlags::NoRemoveDir) {
         Ok(()) | Err(Errno::ENOENT) => {}
         Err(error) => return Err(io_error(&display, errno_io(error))),
@@ -1796,6 +2145,13 @@ fn io_error(path: &Path, source: io::Error) -> WarmBundleError {
     }
 }
 
+fn recovery_failed(primary: WarmBundleError, recovery: WarmBundleError) -> WarmBundleError {
+    WarmBundleError::RecoveryFailed {
+        primary: Box::new(primary),
+        recovery: Box::new(recovery),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1812,7 +2168,7 @@ mod tests {
 
     fn v4_view(peer: u8, add_path: bool) -> WarmBundleViewV1 {
         WarmBundleViewV1 {
-            kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+            kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, peer)),
             peer_asn: 64_500 + u32::from(peer),
             peer_router_id: Ipv4Addr::new(10, 0, 0, peer),
@@ -1887,6 +2243,26 @@ mod tests {
             .collect()
     }
 
+    fn assert_recovery_error_order(
+        error: WarmBundleError,
+        primary_fragment: &str,
+        recovery_fragment: &str,
+    ) {
+        let display = error.to_string();
+        let WarmBundleError::RecoveryFailed { primary, recovery } = error else {
+            panic!("expected compound recovery error, got {display}");
+        };
+        assert!(primary.to_string().contains(primary_fragment), "{display}");
+        assert!(
+            recovery.to_string().contains(recovery_fragment),
+            "{display}"
+        );
+        assert!(
+            display.find(primary_fragment).unwrap() < display.find(recovery_fragment).unwrap(),
+            "primary error must remain first: {display}"
+        );
+    }
+
     #[test]
     fn cancelled_bounded_writer_publishes_no_artifact_or_manifest() {
         let temp = tempfile::tempdir().unwrap();
@@ -1943,7 +2319,7 @@ mod tests {
         let mut id = identity();
         id.views = (0..=u16::MAX)
             .map(|suffix| WarmBundleViewV1 {
-                kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+                kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
                 peer: IpAddr::V6(Ipv6Addr::from(
                     0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + u128::from(suffix),
                 )),
@@ -2281,12 +2657,35 @@ mod tests {
         let first = resolved_import_policy_digest_v1(&inputs).unwrap();
         assert_eq!(first, resolved_import_policy_digest_v1(&inputs).unwrap());
         assert_eq!(first.version, WARM_BUNDLE_POLICY_DIGEST_VERSION);
+        assert_eq!(
+            first.sha256, "d1fc11acac8c70d6e22ab9c88b535e9e327c9c2c1b98639436eb2cf87bec622b",
+            "the corrected public view spelling must not change digest-v1 framing"
+        );
         let mut reversed = inputs;
         reversed.reverse();
         assert!(matches!(
             resolved_import_policy_digest_v1(&reversed),
             Err(WarmBundleError::NonCanonicalPolicyInputs)
         ));
+    }
+
+    #[test]
+    fn legacy_pre_policy_manifest_tag_loads_and_reserializes_truthfully() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        publish(&dir, &id);
+        let path = temp.path().join(WARM_BUNDLE_MANIFEST_FILE);
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("adj-rib-in-post-import-policy"));
+        assert!(!current.contains("adj-rib-in-pre-policy"));
+
+        let legacy = current.replace("adj-rib-in-post-import-policy", "adj-rib-in-pre-policy");
+        fs::write(&path, legacy).unwrap();
+        let loaded = load_warm_bundle(&dir, &expected(&id), freshness()).unwrap();
+        let reserialized = serde_json::to_string(&loaded.manifest).unwrap();
+        assert!(reserialized.contains("adj-rib-in-post-import-policy"));
+        assert!(!reserialized.contains("adj-rib-in-pre-policy"));
     }
 
     #[test]
@@ -2644,6 +3043,255 @@ mod tests {
         assert!(temp.path().join(&current.snapshot.path).is_file());
         assert!(temp.path().join(WARM_BUNDLE_MANIFEST_FILE).is_file());
         assert!(load_warm_bundle(&dir, &expected(&next), freshness()).is_ok());
+    }
+
+    #[test]
+    fn boot_scavenge_without_manifest_removes_only_canonical_owned_names() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let snapshot = snapshot_name(SHA);
+        let snapshot_temp = format!(".{snapshot}.tmp.12.1");
+        let manifest_temp = ".manifest.json.tmp.12.2";
+        fs::write(temp.path().join(&snapshot), b"orphan").unwrap();
+        fs::write(temp.path().join(&snapshot_temp), b"orphan").unwrap();
+        fs::write(temp.path().join(manifest_temp), b"orphan").unwrap();
+        fs::write(temp.path().join("snapshot-not-a-digest.mrt"), b"operator").unwrap();
+        fs::write(
+            temp.path().join(OsString::from_vec(b"notes-\xff".to_vec())),
+            b"operator",
+        )
+        .unwrap();
+
+        let report = dir.scavenge_owned_entries().unwrap();
+        assert_eq!(report.removed(), 3);
+        assert_eq!(report.failed(), 0);
+        assert!(report.first_failure().is_none());
+        assert!(!temp.path().join(snapshot).exists());
+        assert!(!temp.path().join(snapshot_temp).exists());
+        assert!(!temp.path().join(manifest_temp).exists());
+        assert!(temp.path().join("snapshot-not-a-digest.mrt").is_file());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn boot_scavenge_preserves_selected_snapshot_without_opening_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let current = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        fs::write(
+            temp.path().join(&current.snapshot.path),
+            b"corrupt but selected",
+        )
+        .unwrap();
+        let stale = snapshot_name(SHA);
+        assert_ne!(stale, current.snapshot.path);
+        fs::write(temp.path().join(&stale), b"stale").unwrap();
+
+        let report = dir.scavenge_owned_entries().unwrap();
+        assert_eq!(report.removed(), 1);
+        assert_eq!(report.failed(), 0);
+        assert_eq!(
+            fs::read(temp.path().join(&current.snapshot.path)).unwrap(),
+            b"corrupt but selected"
+        );
+        assert!(!temp.path().join(stale).exists());
+    }
+
+    #[test]
+    fn boot_scavenge_invalid_or_unsafe_manifest_deletes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let stale = snapshot_name(SHA);
+        fs::write(temp.path().join(&stale), b"stale").unwrap();
+        fs::write(temp.path().join(WARM_BUNDLE_MANIFEST_FILE), b"not json").unwrap();
+        assert!(dir.scavenge_owned_entries().is_err());
+        assert!(temp.path().join(&stale).is_file());
+
+        fs::remove_file(temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap();
+        let target = temp.path().join("manifest-target");
+        fs::write(&target, b"{}").unwrap();
+        symlink(&target, temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap();
+        assert!(dir.scavenge_owned_entries().is_err());
+        assert!(temp.path().join(&stale).is_file());
+    }
+
+    #[test]
+    fn boot_scavenge_rechecks_present_and_missing_manifest_after_scan() {
+        let present = tempfile::tempdir().unwrap();
+        let present_dir = opened(&present);
+        let id = identity();
+        let current = write_warm_bundle(&present_dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        let stale = snapshot_name(SHA);
+        assert_ne!(stale, current.snapshot.path);
+        fs::write(present.path().join(&stale), b"stale").unwrap();
+        assert!(
+            scavenge_owned_entries_inner(
+                &present_dir,
+                FaultPoint::CleanupReplaceManifestAfterScan,
+            )
+            .is_err()
+        );
+        assert!(present.path().join(&stale).is_file());
+
+        let missing = tempfile::tempdir().unwrap();
+        let missing_dir = opened(&missing);
+        fs::write(missing.path().join(&stale), b"stale").unwrap();
+        assert!(
+            scavenge_owned_entries_inner(&missing_dir, FaultPoint::CleanupCreateManifestAfterScan,)
+                .is_err()
+        );
+        assert!(missing.path().join(stale).is_file());
+    }
+
+    #[test]
+    fn cleanup_continues_after_entry_failure_in_bytewise_name_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let current = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        let obstruction = ".manifest.json.tmp.321.9";
+        fs::create_dir(temp.path().join(obstruction)).unwrap();
+        let stale = snapshot_name(SHA);
+        assert_ne!(stale, current.snapshot.path);
+        fs::write(temp.path().join(&stale), b"stale").unwrap();
+
+        let report = dir.scavenge_owned_entries().unwrap();
+        assert_eq!(report.removed(), 1);
+        assert_eq!(report.failed(), 1);
+        assert!(
+            report
+                .first_failure()
+                .is_some_and(|error| error.to_string().contains(obstruction))
+        );
+        assert!(temp.path().join(obstruction).is_dir());
+        assert!(!temp.path().join(stale).exists());
+        assert!(temp.path().join(current.snapshot.path).is_file());
+    }
+
+    #[test]
+    fn cleanup_sync_failure_is_reported_after_partial_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let current = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        fs::create_dir(temp.path().join(".manifest.json.tmp.321.9")).unwrap();
+        let stale = snapshot_name(SHA);
+        assert_ne!(stale, current.snapshot.path);
+        fs::write(temp.path().join(&stale), b"stale").unwrap();
+
+        assert!(
+            scavenge_owned_entries_inner(&dir, FaultPoint::CleanupDirSync).is_err(),
+            "a failed durability sync is a whole-pass error"
+        );
+        assert!(!temp.path().join(stale).exists());
+        assert!(temp.path().join(current.snapshot.path).is_file());
+    }
+
+    #[test]
+    fn cleanup_budget_expiry_after_unlink_still_attempts_durability_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        let current = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        let first =
+            snapshot_name("0000000000000000000000000000000000000000000000000000000000000000");
+        let second =
+            snapshot_name("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assert_ne!(first, current.snapshot.path);
+        assert_ne!(second, current.snapshot.path);
+        fs::write(temp.path().join(&first), b"first stale").unwrap();
+        fs::write(temp.path().join(&second), b"second stale").unwrap();
+
+        let error =
+            scavenge_owned_entries_inner(&dir, FaultPoint::CleanupBudgetAfterFirstUnlinkAndDirSync)
+                .unwrap_err();
+        let WarmBundleError::RecoveryFailed { primary, recovery } = error else {
+            panic!("budget expiry plus sync failure must retain both errors");
+        };
+        assert!(matches!(
+            *primary,
+            WarmBundleError::WarmSnapshotBudget(WarmSnapshotBudgetError::Cancelled)
+        ));
+        assert!(recovery.to_string().contains("CleanupDirSync"));
+        assert!(!temp.path().join(first).exists());
+        assert!(temp.path().join(second).is_file());
+        assert!(temp.path().join(current.snapshot.path).is_file());
+    }
+
+    #[test]
+    fn failed_boot_scavenge_does_not_poison_later_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        fs::write(
+            temp.path().join(WARM_BUNDLE_MANIFEST_FILE),
+            b"corrupt prior manifest",
+        )
+        .unwrap();
+        assert!(dir.scavenge_owned_entries().is_err());
+
+        let id = identity();
+        let manifest = write_warm_bundle(&dir, id.clone(), &valid_snapshot(&id)).unwrap();
+        assert!(temp.path().join(manifest.snapshot.path).is_file());
+        assert!(load_warm_bundle(&dir, &expected(&id), freshness()).is_ok());
+    }
+
+    #[test]
+    fn publication_preserves_primary_error_across_every_recovery_failure() {
+        let temp_cleanup = tempfile::tempdir().unwrap();
+        let temp_cleanup_dir = opened(&temp_cleanup);
+        let first = identity();
+        let error = write_warm_bundle_inner(
+            &temp_cleanup_dir,
+            first.clone(),
+            &valid_snapshot(&first),
+            FaultPoint::ManifestWriteAndTempCleanup,
+            None,
+        )
+        .unwrap_err();
+        assert_recovery_error_order(error, "ManifestWrite", "ManifestWriteAndTempCleanup");
+
+        let artifact_cleanup = tempfile::tempdir().unwrap();
+        let artifact_cleanup_dir = opened(&artifact_cleanup);
+        let second = identity();
+        let error = write_warm_bundle_inner(
+            &artifact_cleanup_dir,
+            second.clone(),
+            &valid_snapshot(&second),
+            FaultPoint::ManifestWriteAndArtifactCleanup,
+            None,
+        )
+        .unwrap_err();
+        assert_recovery_error_order(error, "ManifestWrite", "ManifestWriteAndArtifactCleanup");
+
+        let rollback = tempfile::tempdir().unwrap();
+        let rollback_dir = opened(&rollback);
+        let old = identity();
+        publish(&rollback_dir, &old);
+        let mut next = old;
+        next.checkpoint_generation = "boot-42".to_string();
+        next.peer_index_table_view = "warm-generation-42".to_string();
+        next.snapshot_revision += 1;
+        next.created_at_utc_seconds += 1;
+        let error = write_warm_bundle_inner(
+            &rollback_dir,
+            next.clone(),
+            &valid_snapshot(&next),
+            FaultPoint::ManifestDirSyncAndRollback,
+            None,
+        )
+        .unwrap_err();
+        assert_recovery_error_order(error, "ManifestDirSync", "ManifestDirSyncAndRollback");
+        assert!(
+            fs::read_dir(rollback.path()).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".manifest.json.tmp.")),
+            "failed manifest rollback must retain the prior manifest temp"
+        );
     }
 
     #[test]
