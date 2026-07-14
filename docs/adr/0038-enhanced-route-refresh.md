@@ -84,8 +84,8 @@ Each active inbound ERR window has a fixed 5-minute timeout.
 If a peer sends `BoRR` but never sends `EoRR`, rustbgpd treats the timeout as
 an implicit end-of-refresh sweep for that `(peer, afi, safi)`:
 
-1. transport enqueues an ordinary `EndRouteRefresh` on the same ordered peer
-   sender used by inbound UPDATEs
+1. transport enqueues a distinct `RouteRefreshTimeout` on the same ordered
+   peer sender used by inbound UPDATEs
 2. after that enqueue succeeds, remaining unreplaced refresh-stale entries are
    withdrawn from the RIB and transport max-prefix mirror
 3. the refresh window is closed and a warning is logged
@@ -96,6 +96,12 @@ the implicit end marker cannot be overtaken by the next UPDATE. If the channel
 is closed, the session preserves the window and live count and stops processing
 the buffered batch; it does not perform an unpaired local sweep. Families with
 different refresh deadlines expire independently.
+
+The timeout is deliberately not a peer `EoRR`. In particular, it cannot
+release a planned-restart collision-failback convergence hold. The independent
+post-failback BoRR receipt remains armed after the local stale-route sweep, so
+a later real peer EoRR can still complete that hold; otherwise the original
+`Selection_Deferral_Timer` remains the bounded fallback.
 
 This bounds resource use and prevents stale refresh state from persisting
 indefinitely due to buggy peers or dropped inbound markers.

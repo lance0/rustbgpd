@@ -1633,10 +1633,10 @@ impl RibManager {
                 .any(|(prefix, _)| self.selection_deferred(prefix_family(prefix)))
             || end_of_rib
                 .iter()
-                .any(|family| self.selection_deferred(*family))
+                .any(|family| self.selection_convergence_held(*family))
             || refresh_markers
                 .iter()
-                .any(|(afi, safi, _)| self.selection_deferred((*afi, *safi)))
+                .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))
             || flowspec_announce
                 .iter()
                 .any(|route| self.selection_deferred((route.afi, Safi::FlowSpec)))
@@ -3739,8 +3739,10 @@ impl RibManager {
                 || self.pending_otc_blocked.contains_key(&peer)
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
-                // piggyback it on the successful dirty resync update so it
-                // can't be starved behind the resync message on a small queue.
+                // piggyback only convergence-ready families on the successful
+                // dirty resync update so they cannot be starved behind the
+                // resync message on a small queue. Collision-failback holds
+                // stay pending until peer EoRR or the original timer.
                 // EoR piggyback only attaches to *dirty* resyncs (the
                 // dump-deferral pattern). A force-only resync is a
                 // GShut-style outbound-attribute refresh and never
@@ -3748,7 +3750,13 @@ impl RibManager {
                 let pending_eor = if is_dirty {
                     self.pending_eor
                         .get(&peer)
-                        .map(|families| families.iter().copied().collect())
+                        .map(|families| {
+                            families
+                                .iter()
+                                .copied()
+                                .filter(|family| !self.selection_convergence_held(*family))
+                                .collect()
+                        })
                         .unwrap_or_default()
                 } else {
                     vec![]
@@ -3898,7 +3906,14 @@ impl RibManager {
                             if pending_eor.is_empty() {
                                 self.flush_pending_eor(peer);
                             } else {
-                                self.pending_eor.remove(&peer);
+                                let empty =
+                                    self.pending_eor.get_mut(&peer).is_some_and(|families| {
+                                        families.retain(|family| !pending_eor.contains(family));
+                                        families.is_empty()
+                                    });
+                                if empty {
+                                    self.pending_eor.remove(&peer);
+                                }
                             }
                             self.retry_pending_refresh(peer);
                         }
@@ -3952,7 +3967,9 @@ impl RibManager {
                         self.dirty_peers.remove(&peer);
                         self.clear_grouped_member_synced(peer);
                         self.flush_pending_eor(peer);
-                        self.retry_pending_refresh(peer);
+                        if !self.dirty_peers.contains(&peer) {
+                            self.retry_pending_refresh(peer);
+                        }
                     }
                     if is_force {
                         self.force_outbound_peers.remove(&peer);

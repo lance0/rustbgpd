@@ -42,22 +42,33 @@ Implement an honest restarting-speaker mode:
    `restart_state = false`.
 6. On a marker-backed startup, freeze the complete GR-enabled static-peer
    roster before any session starts. Route selection is deferred separately
-   for every locally supported family until all roster peers are either:
+   for every locally supported family while a roster peer is still awaiting a
+   session or its initial End-of-RIB. A family remains under a convergence/EoR
+   hold until all roster peers are either:
    - bound to a current session that sends that family's End-of-RIB;
    - excluded because its OPEN omitted GR/the family or carried Restart State;
+   - a collision-failback survivor whose post-failback enhanced refresh reaches
+     its associated EoRR;
    - or the marker-bounded `Selection_Deferral_Timer` expires.
-7. Adj-RIB-In continues ingesting while a family is gated, but Loc-RIB
-   selection, initial outbound table data, route-refresh responses, and EoR
-   remain withheld. On release, deferred route identities (withdrawals
-   included) are selected and advertised before EoR.
+7. Adj-RIB-In continues ingesting while route selection is deferred. If only
+   an `awaiting_refresh` collision survivor remains, rustbgpd stages the current
+   Loc-RIB and permits route payloads, while route-refresh responses and EoR
+   remain held. Ordinary release selects deferred route identities
+   (withdrawals included) before EoR; the timer fallback recomputes an already
+   staged collision-failback family before releasing its EoR.
 8. Waiters are transport-generation stamped. An ordinary replacement re-arms
    its frozen roster entry, and an EoR from a predecessor or collision loser
    cannot release the gate. If collision resolution instead fails the
    registration back to the exact nonzero, unambiguous surviving session, that
-   survivor is excluded from its re-armed entries: its EoR may already have
-   been discarded while it was superseded, and the recovery ROUTE-REFRESH is
-   best-effort assistance rather than a completion signal. Every other real
-   waiter continues to gate the family.
+   survivor enters `awaiting_refresh`: its EoR may already have been discarded
+   while it was superseded, so an ordinary EoR cannot release it. Once the
+   ordinary waiters finish, rustbgpd stages the complete current Loc-RIB but
+   withholds downstream EoR and route-refresh responses. A post-failback BoRR
+   arms the survivor waiter; only the matching peer EoRR declares convergence
+   and releases the held markers. A local refresh timeout sweeps refresh-stale
+   routes but is not peer completion. Peers without Enhanced Route Refresh use
+   the original `Selection_Deferral_Timer` as the bounded fallback. Every other
+   real waiter continues to gate the family.
 
 This mode helps peers retain our routes briefly during a planned restart,
 but makes **no claim** that rustbgpd preserved dataplane continuity.
