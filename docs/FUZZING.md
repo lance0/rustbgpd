@@ -31,9 +31,9 @@ network — so it has no fuzz surface.
 | `decode_rtc` | wire | RFC 4684 RT-Constrain NLRI (AFI 1/SAFI 132), default + 32..96-bit prefixes | lossless round-trip |
 | `parse_rd` | wire | Route Distinguisher `FromStr` | Display→FromStr lossless |
 | `rpol_compile` | policy | `.rpol` lexer, parser, typechecker, lowering, and the in-language `test`-block runner (eval engine on fuzzer-authored programs) | returns `Diagnostics`, never panics/aborts/hangs |
-| `parse_rt` | EVPN | Route Target `FromStr` over arbitrary UTF-8 | Display→FromStr lossless |
-| `snapshot_reader_drain` | MRT | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
-| `warm_bundle_manifest` | MRT | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
+| `parse_rt` | evpn | Route Target `FromStr` over arbitrary UTF-8 | Display→FromStr lossless |
+| `snapshot_reader_drain` | mrt | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
+| `warm_bundle_manifest` | mrt | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
 
 "Round-trip" targets assert the promise the interop labs pin for specific
 bytes (M73 BGP-LS byte fidelity, M74 VPN preserve-verbatim) over the whole
