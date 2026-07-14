@@ -348,8 +348,8 @@ pub struct RibManager {
     /// Includes withdrawals so restored rows absent from Adj-RIB-In are
     /// still removed when the gate releases.
     deferred_selection_keys: selection_deferral::DeferredSelectionKeys,
-    /// Route-refresh responses received while family selection is frozen.
-    /// Replayed after the released initial table and `EoR` are queued.
+    /// Route-refresh responses received while family convergence and `EoR`
+    /// remain held. Replayed after the convergence `EoR` is queued.
     selection_deferred_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
@@ -1098,6 +1098,13 @@ impl RibManager {
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.selection_deferral
             .as_ref()
+            .is_some_and(|state| state.selection_deferred(family))
+    }
+
+    #[must_use]
+    pub(super) fn selection_convergence_held(&self, family: (Afi, Safi)) -> bool {
+        self.selection_deferral
+            .as_ref()
             .is_some_and(|state| state.is_gated(family))
     }
 
@@ -1753,13 +1760,12 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "EndOfRib", "eor") {
-                    let selection_released =
+                    let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
-                    if selection_released {
-                        self.finalize_selection_deferral_all_eor((afi, safi));
-                        self.release_selection_families(
-                            &[(afi, safi)],
+                    if let Some(transition) = selection_transition {
+                        self.apply_selection_deferral_transitions(
+                            [transition],
                             "all current-session End-of-RIB markers received",
                         );
                     }
@@ -1783,6 +1789,14 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", "refresh") {
                     self.handle_begin_route_refresh(peer, afi, safi);
+                    if let Some(transition) =
+                        self.selection_deferral_begin_route_refresh(peer, session_id, (afi, safi))
+                    {
+                        self.apply_selection_deferral_transitions(
+                            [transition],
+                            "collision-failback refresh began",
+                        );
+                    }
                 }
             }
             RibUpdate::EndRouteRefresh {
@@ -1793,6 +1807,24 @@ impl RibManager {
             } => {
                 if !self.stale_session_message(peer, session_id, "EndRouteRefresh", "refresh") {
                     self.handle_end_route_refresh(peer, afi, safi);
+                    if let Some(transition) =
+                        self.selection_deferral_end_route_refresh(peer, session_id, (afi, safi))
+                    {
+                        self.apply_selection_deferral_transitions(
+                            [transition],
+                            "collision-failback survivor refresh completed",
+                        );
+                    }
+                }
+            }
+            RibUpdate::RouteRefreshTimeout {
+                peer,
+                session_id,
+                afi,
+                safi,
+            } => {
+                if !self.stale_session_message(peer, session_id, "RouteRefreshTimeout", "refresh") {
+                    self.finish_route_refresh(peer, afi, safi, true);
                 }
             }
             RibUpdate::PeerGracefulRestart {

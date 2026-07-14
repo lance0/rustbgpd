@@ -483,7 +483,7 @@ authenticated sensitive-read surface.
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
 | `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` is `routes` (`RoutesReceived`), `eor` (End-of-RIB), `refresh` (route-refresh request / RFC 7313 BoRR/EoRR), `orf` (RFC 5291 ORF push), or `policy_context` (peer-group policy identity). The registered session's state is untouched |
-| `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor is excluded from any re-armed startup selection wait, re-registered, re-sent the initial table, and asked for a best-effort inbound ROUTE-REFRESH |
+| `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane stays live |
@@ -786,9 +786,9 @@ owned-state.
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
 | `bgp_gr_stale_routes` | Routes currently marked stale |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
-| `bgp_selection_deferral_active{afi_safi}` | Planned-restart family selection gate (1 = active) |
-| `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking selection for the family |
-| `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor` or `timer` |
+| `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
+| `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
+| `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor`, `collision_refresh`, or `timer` |
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
 | `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore use a complete release sweep |
 
@@ -806,12 +806,13 @@ cap enters overflow fallback.
 
 An ordinary same-address replacement remains an EoR waiter, and stale EoR from
 its predecessor is rejected. If collision resolution fails registration back
-to the exact nonzero, unambiguous survivor, only that survivor is excluded from
-its re-armed roster entries; other waiters remain blocking. The follow-up
-ROUTE-REFRESH request is best-effort Adj-RIB-In recovery assistance and is not
-treated as EoR or refresh completion. Full or closed survivor outbound channels
-can lose that request but cannot re-arm a family that selection already
-released.
+to the exact nonzero, unambiguous survivor, only that survivor enters
+`awaiting_refresh`; other waiters remain blocking. The current Loc-RIB is staged
+as soon as ordinary waiters finish, but downstream EoR and route-refresh
+responses stay held until a post-failback BoRR is followed by the matching peer
+EoRR. Ordinary EoR, stray EoRR, and the local refresh timeout do not satisfy the
+waiter. Full or closed survivor outbound channels can lose the request, so the
+original selection-deferral deadline remains the bounded fallback.
 
 ### BFD
 

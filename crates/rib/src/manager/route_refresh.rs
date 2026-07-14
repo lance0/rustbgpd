@@ -590,12 +590,12 @@ impl RibManager {
     )]
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let family = (afi, safi);
-        if self.selection_deferred(family) {
+        if self.selection_convergence_held(family) {
             self.selection_deferred_refresh
                 .entry(peer)
                 .or_default()
                 .insert(family);
-            debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 selection gate");
+            debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
             return;
         }
         // RFC 5291 §6: a ROUTE-REFRESH (plain or ORF-carrying) for this family
@@ -1224,7 +1224,7 @@ impl RibManager {
         };
         let (blocked, ready): (HashSet<_>, HashSet<_>) = families
             .into_iter()
-            .partition(|family| self.selection_deferred(*family));
+            .partition(|family| self.selection_convergence_held(*family));
         if !blocked.is_empty() {
             self.pending_eor.entry(peer).or_default().extend(blocked);
         }

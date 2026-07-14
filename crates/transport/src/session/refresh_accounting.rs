@@ -120,10 +120,11 @@ impl PeerSession {
     /// Reconcile every due family. Called before each buffered PDU decode and
     /// from the independent quiet-session run-loop timer.
     ///
-    /// The timeout is first enqueued to the RIB as an ordinary `EoRR` so it is
-    /// ordered ahead of the next UPDATE from this session. Only after that send
-    /// succeeds may transport consume/sweep the matching local window. The
-    /// RIB's own timer remains an idempotent safety net.
+    /// The timeout is first enqueued to the RIB as a distinct local boundary so
+    /// it is ordered ahead of the next UPDATE from this session without being
+    /// mistaken for a peer `EoRR`. Only after that send succeeds may transport
+    /// consume/sweep the matching local window. The RIB's own timer remains an
+    /// idempotent safety net.
     pub(super) async fn expire_refresh_accounting_windows(&mut self) -> Result<(), ()> {
         if self.refresh_accounting.windows.is_empty() {
             self.refresh_accounting_timer = None;
@@ -148,7 +149,7 @@ impl PeerSession {
 
             if self
                 .rib_tx
-                .send(rustbgpd_rib::RibUpdate::EndRouteRefresh {
+                .send(rustbgpd_rib::RibUpdate::RouteRefreshTimeout {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
                     afi,

@@ -1669,6 +1669,19 @@ pub enum RibUpdate {
         /// Subsequent address family identifier.
         safi: Safi,
     },
+    /// Local enhanced-route-refresh accounting expired for this family.
+    /// This synthetic event sweeps the RIB refresh window but cannot stand in
+    /// for an RFC 7313 `EoRR` received from the peer.
+    RouteRefreshTimeout {
+        /// Peer whose refresh accounting window expired.
+        peer: IpAddr,
+        /// Transport session identity owning the accounting window.
+        session_id: u64,
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// RPKI cache update — new VRP table for origin validation.
     RpkiCacheUpdate {
         /// The new VRP table snapshot.

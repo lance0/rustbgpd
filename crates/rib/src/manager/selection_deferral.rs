@@ -248,13 +248,27 @@ pub struct SelectionDeferralConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SelectionDeferralReleaseReason {
     AllEndOfRib,
+    CollisionRefreshComplete,
     TimerExpired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionDeferralTransition {
+    Stage {
+        family: (Afi, Safi),
+    },
+    Release {
+        family: (Afi, Safi),
+        already_staged: bool,
+        release_reason: SelectionDeferralReleaseReason,
+    },
 }
 
 impl SelectionDeferralReleaseReason {
     fn label(self) -> &'static str {
         match self {
             Self::AllEndOfRib => "all_eor",
+            Self::CollisionRefreshComplete => "collision_refresh",
             Self::TimerExpired => "timer",
         }
     }
@@ -263,9 +277,19 @@ impl SelectionDeferralReleaseReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WaiterState {
     AwaitingSession,
-    AwaitingEor { session_id: u64 },
-    Satisfied { session_id: u64 },
-    Excluded { session_id: u64 },
+    AwaitingEor {
+        session_id: u64,
+    },
+    AwaitingRefresh {
+        session_id: u64,
+        begin_received: bool,
+    },
+    Satisfied {
+        session_id: u64,
+    },
+    Excluded {
+        session_id: u64,
+    },
 }
 
 impl WaiterState {
@@ -273,6 +297,7 @@ impl WaiterState {
         match self {
             Self::AwaitingSession => ("awaiting_session", None),
             Self::AwaitingEor { session_id } => ("awaiting_eor", Some(session_id)),
+            Self::AwaitingRefresh { session_id, .. } => ("awaiting_refresh", Some(session_id)),
             Self::Satisfied { session_id } => ("satisfied", Some(session_id)),
             Self::Excluded { session_id } => ("excluded", Some(session_id)),
         }
@@ -282,6 +307,7 @@ impl WaiterState {
 #[derive(Debug)]
 struct FamilyGate {
     waiters: HashMap<IpAddr, WaiterState>,
+    selection_staged: bool,
 }
 
 #[derive(Debug)]
@@ -290,9 +316,10 @@ struct ReleasedFamily {
     waiters: HashMap<IpAddr, WaiterState>,
 }
 
-/// Actor-owned selection-deferral state.  Released families are retained in
-/// `released` for process-lifetime operator diagnostics; only `active` gates
-/// participate in selection and outbound suppression.
+/// Actor-owned selection-deferral state. Released families are retained in
+/// `released` for process-lifetime operator diagnostics. Every `active` gate
+/// suppresses convergence markers; an active gate whose selection is not yet
+/// staged also suppresses route selection and route payloads.
 #[derive(Debug)]
 pub(super) struct SelectionDeferral {
     deadline: tokio::time::Instant,
@@ -311,7 +338,9 @@ impl SelectionDeferral {
             .filter(|state| {
                 matches!(
                     state,
-                    WaiterState::AwaitingSession | WaiterState::AwaitingEor { .. }
+                    WaiterState::AwaitingSession
+                        | WaiterState::AwaitingEor { .. }
+                        | WaiterState::AwaitingRefresh { .. }
                 )
             })
             .count()
@@ -319,6 +348,18 @@ impl SelectionDeferral {
 
     fn complete(gate: &FamilyGate) -> bool {
         Self::blocking_waiters(gate) == 0
+    }
+
+    fn selection_blocking_waiters(gate: &FamilyGate) -> usize {
+        gate.waiters
+            .values()
+            .filter(|state| {
+                matches!(
+                    state,
+                    WaiterState::AwaitingSession | WaiterState::AwaitingEor { .. }
+                )
+            })
+            .count()
     }
 
     pub(super) fn new(config: SelectionDeferralConfig, metrics: &BgpMetrics) -> Option<Self> {
@@ -334,6 +375,7 @@ impl SelectionDeferral {
                     .entry(family)
                     .or_insert_with(|| FamilyGate {
                         waiters: HashMap::new(),
+                        selection_staged: false,
                     })
                     .waiters
                     .insert(waiter.peer, WaiterState::AwaitingSession);
@@ -362,8 +404,35 @@ impl SelectionDeferral {
         self.active.contains_key(&family)
     }
 
-    fn has_active_gates(&self) -> bool {
-        !self.active.is_empty()
+    pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
+        self.active
+            .get(&family)
+            .is_some_and(|gate| !gate.selection_staged)
+    }
+
+    fn has_deferred_selection(&self) -> bool {
+        self.active.values().any(|gate| !gate.selection_staged)
+    }
+
+    fn evaluate_family(
+        &mut self,
+        family: (Afi, Safi),
+        release_reason: SelectionDeferralReleaseReason,
+    ) -> Option<SelectionDeferralTransition> {
+        let gate = self.active.get_mut(&family)?;
+        let transition = if Self::complete(gate) {
+            SelectionDeferralTransition::Release {
+                family,
+                already_staged: gate.selection_staged,
+                release_reason,
+            }
+        } else if !gate.selection_staged && Self::selection_blocking_waiters(gate) == 0 {
+            gate.selection_staged = true;
+            SelectionDeferralTransition::Stage { family }
+        } else {
+            return None;
+        };
+        Some(transition)
     }
 
     pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
@@ -426,7 +495,7 @@ impl SelectionDeferral {
         peer_restart_state: bool,
         peer_gr_families: &HashSet<(Afi, Safi)>,
         metrics: &BgpMetrics,
-    ) -> Vec<(Afi, Safi)> {
+    ) -> Vec<SelectionDeferralTransition> {
         if session_id == 0 {
             tracing::warn!(%peer, "selection-deferral waiter received unstamped PeerUp; keeping it blocked");
             return Vec::new();
@@ -439,7 +508,7 @@ impl SelectionDeferral {
             return Vec::new();
         }
         let families: Vec<_> = self.active.keys().copied().collect();
-        let mut released = Vec::new();
+        let mut transitions = Vec::new();
         for family in families {
             let Some(gate) = self.active.get_mut(&family) else {
                 continue;
@@ -458,30 +527,29 @@ impl SelectionDeferral {
                 afi_safi_label(family.0, family.1),
                 gauge_val(Self::blocking_waiters(gate)),
             );
-            if Self::complete(gate) {
-                self.release(family, SelectionDeferralReleaseReason::AllEndOfRib, metrics);
-                released.push(family);
+            if let Some(transition) =
+                self.evaluate_family(family, SelectionDeferralReleaseReason::AllEndOfRib)
+            {
+                transitions.push(transition);
             }
         }
-        released
+        transitions
     }
 
-    /// Exclude the exact session recovered by collision failback from the
-    /// startup-frozen roster. Its `EoR` may already have been discarded while
-    /// the session was superseded, and the best-effort ROUTE-REFRESH used to
-    /// rebuild its Adj-RIB-In has no completion signal. Only an unambiguous,
-    /// stamped survivor whose current roster state was re-armed by the active
-    /// session's teardown may take this path.
+    /// Hold the exact session recovered by collision failback until a
+    /// post-failback `BoRR`/`EoRR` pair proves that its Adj-RIB-In replay
+    /// completed. Only an unambiguous, stamped survivor whose current roster
+    /// state was re-armed by the active session's teardown may take this path.
     ///
     /// `Some` means at least one active family was classified; the contained
-    /// families are those that became complete and must use the normal full
-    /// release path. `None` leaves every waiter unchanged.
-    pub(super) fn exclude_collision_failback_survivor(
+    /// transitions stage any family whose ordinary waiters are already done.
+    /// `None` leaves every waiter unchanged.
+    pub(super) fn await_collision_failback_refresh(
         &mut self,
         peer: IpAddr,
         session_id: u64,
         metrics: &BgpMetrics,
-    ) -> Option<Vec<(Afi, Safi)>> {
+    ) -> Option<Vec<SelectionDeferralTransition>> {
         if session_id == 0 {
             tracing::warn!(
                 %peer,
@@ -500,7 +568,7 @@ impl SelectionDeferral {
 
         let families: Vec<_> = self.active.keys().copied().collect();
         let mut classified = false;
-        let mut released = Vec::new();
+        let mut transitions = Vec::new();
         for family in families {
             let Some(gate) = self.active.get_mut(&family) else {
                 continue;
@@ -508,19 +576,25 @@ impl SelectionDeferral {
             if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingSession) {
                 continue;
             }
-            gate.waiters
-                .insert(peer, WaiterState::Excluded { session_id });
+            gate.waiters.insert(
+                peer,
+                WaiterState::AwaitingRefresh {
+                    session_id,
+                    begin_received: false,
+                },
+            );
             classified = true;
             metrics.set_selection_deferral_waiters(
                 afi_safi_label(family.0, family.1),
                 gauge_val(Self::blocking_waiters(gate)),
             );
-            if Self::complete(gate) {
-                self.release(family, SelectionDeferralReleaseReason::AllEndOfRib, metrics);
-                released.push(family);
+            if let Some(transition) =
+                self.evaluate_family(family, SelectionDeferralReleaseReason::AllEndOfRib)
+            {
+                transitions.push(transition);
             }
         }
-        classified.then_some(released)
+        classified.then_some(transitions)
     }
 
     /// Revert a current-session waiter to the not-yet-established state.  A
@@ -531,6 +605,10 @@ impl SelectionDeferral {
                 gate.waiters.get(&peer),
                 Some(
                     WaiterState::AwaitingEor { session_id: current }
+                        | WaiterState::AwaitingRefresh {
+                            session_id: current,
+                            ..
+                        }
                         | WaiterState::Satisfied { session_id: current }
                         | WaiterState::Excluded { session_id: current }
                 ) if *current == session_id
@@ -550,15 +628,13 @@ impl SelectionDeferral {
         session_id: u64,
         family: (Afi, Safi),
         metrics: &BgpMetrics,
-    ) -> bool {
+    ) -> Option<SelectionDeferralTransition> {
         if session_id == 0 {
-            return false;
+            return None;
         }
-        let Some(gate) = self.active.get_mut(&family) else {
-            return false;
-        };
+        let gate = self.active.get_mut(&family)?;
         if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingEor { session_id }) {
-            return false;
+            return None;
         }
         gate.waiters
             .insert(peer, WaiterState::Satisfied { session_id });
@@ -566,13 +642,60 @@ impl SelectionDeferral {
             afi_safi_label(family.0, family.1),
             gauge_val(Self::blocking_waiters(gate)),
         );
-        Self::complete(gate)
+        self.evaluate_family(family, SelectionDeferralReleaseReason::AllEndOfRib)
     }
 
-    pub(super) fn finalize_all_eor(&mut self, family: (Afi, Safi), metrics: &BgpMetrics) {
-        if self.active.get(&family).is_some_and(Self::complete) {
-            self.release(family, SelectionDeferralReleaseReason::AllEndOfRib, metrics);
+    pub(super) fn begin_route_refresh(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+    ) -> Option<SelectionDeferralTransition> {
+        let gate = self.active.get_mut(&family)?;
+        if gate.waiters.get(&peer)
+            != Some(&WaiterState::AwaitingRefresh {
+                session_id,
+                begin_received: false,
+            })
+        {
+            return None;
         }
+        gate.waiters.insert(
+            peer,
+            WaiterState::AwaitingRefresh {
+                session_id,
+                begin_received: true,
+            },
+        );
+        self.evaluate_family(family, SelectionDeferralReleaseReason::AllEndOfRib)
+    }
+
+    pub(super) fn end_route_refresh(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+        metrics: &BgpMetrics,
+    ) -> Option<SelectionDeferralTransition> {
+        let gate = self.active.get_mut(&family)?;
+        if gate.waiters.get(&peer)
+            != Some(&WaiterState::AwaitingRefresh {
+                session_id,
+                begin_received: true,
+            })
+        {
+            return None;
+        }
+        gate.waiters
+            .insert(peer, WaiterState::Satisfied { session_id });
+        metrics.set_selection_deferral_waiters(
+            afi_safi_label(family.0, family.1),
+            gauge_val(Self::blocking_waiters(gate)),
+        );
+        self.evaluate_family(
+            family,
+            SelectionDeferralReleaseReason::CollisionRefreshComplete,
+        )
     }
 
     pub(super) fn expire(&mut self, metrics: &BgpMetrics) -> Vec<(Afi, Safi)> {
@@ -617,7 +740,7 @@ impl RibManager {
     fn deferred_selection_recording_active(&self) -> bool {
         self.selection_deferral
             .as_ref()
-            .is_some_and(SelectionDeferral::has_active_gates)
+            .is_some_and(SelectionDeferral::has_deferred_selection)
     }
 
     fn record_selection_ledger_overflows(
@@ -650,13 +773,15 @@ impl RibManager {
         let Some(selection) = self
             .selection_deferral
             .as_ref()
-            .filter(|selection| selection.has_active_gates())
+            .filter(|selection| selection.has_deferred_selection())
         else {
             return;
         };
         let deferred = affected.iter().filter_map(|prefix| {
             let family = super::helpers::prefix_family(prefix);
-            selection.is_gated(family).then_some((family, prefix))
+            selection
+                .selection_deferred(family)
+                .then_some((family, prefix))
         });
         let current_len = self.deferred_selection_keys.len();
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
@@ -678,13 +803,15 @@ impl RibManager {
         let Some(selection) = self
             .selection_deferral
             .as_ref()
-            .filter(|selection| selection.has_active_gates())
+            .filter(|selection| selection.has_deferred_selection())
         else {
             return;
         };
         let deferred = affected.iter().filter_map(|key| {
             let family = (key.afi, Safi::FlowSpec);
-            selection.is_gated(family).then_some((family, key))
+            selection
+                .selection_deferred(family)
+                .then_some((family, key))
         });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
@@ -725,13 +852,15 @@ impl RibManager {
         let Some(selection) = self
             .selection_deferral
             .as_ref()
-            .filter(|selection| selection.has_active_gates())
+            .filter(|selection| selection.has_deferred_selection())
         else {
             return;
         };
         let deferred = affected.iter().filter_map(|key| {
             let family = key.afi_safi();
-            selection.is_gated(family).then_some((family, key))
+            selection
+                .selection_deferred(family)
+                .then_some((family, key))
         });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
@@ -754,13 +883,15 @@ impl RibManager {
         let Some(selection) = self
             .selection_deferral
             .as_ref()
-            .filter(|selection| selection.has_active_gates())
+            .filter(|selection| selection.has_deferred_selection())
         else {
             return;
         };
         let deferred = affected.iter().filter_map(|key| {
             let family = key.afi_safi();
-            selection.is_gated(family).then_some((family, key))
+            selection
+                .selection_deferred(family)
+                .then_some((family, key))
         });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
@@ -783,13 +914,15 @@ impl RibManager {
         let Some(selection) = self
             .selection_deferral
             .as_ref()
-            .filter(|selection| selection.has_active_gates())
+            .filter(|selection| selection.has_deferred_selection())
         else {
             return;
         };
         let deferred = affected.iter().filter_map(|key| {
             let family = key.family.to_afi_safi();
-            selection.is_gated(family).then_some((family, key))
+            selection
+                .selection_deferred(family)
+                .then_some((family, key))
         });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
@@ -893,16 +1026,32 @@ impl RibManager {
         peer: IpAddr,
         session_id: u64,
         family: (Afi, Safi),
-    ) -> bool {
+    ) -> Option<SelectionDeferralTransition> {
         self.selection_deferral
             .as_mut()
-            .is_some_and(|selection| selection.end_of_rib(peer, session_id, family, &self.metrics))
+            .and_then(|selection| selection.end_of_rib(peer, session_id, family, &self.metrics))
     }
 
-    pub(super) fn finalize_selection_deferral_all_eor(&mut self, family: (Afi, Safi)) {
-        if let Some(selection) = self.selection_deferral.as_mut() {
-            selection.finalize_all_eor(family, &self.metrics);
-        }
+    pub(super) fn selection_deferral_begin_route_refresh(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+    ) -> Option<SelectionDeferralTransition> {
+        self.selection_deferral
+            .as_mut()
+            .and_then(|selection| selection.begin_route_refresh(peer, session_id, family))
+    }
+
+    pub(super) fn selection_deferral_end_route_refresh(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+    ) -> Option<SelectionDeferralTransition> {
+        self.selection_deferral.as_mut().and_then(|selection| {
+            selection.end_route_refresh(peer, session_id, family, &self.metrics)
+        })
     }
 
     pub(super) fn expire_selection_deferral(&mut self) {
@@ -919,49 +1068,97 @@ impl RibManager {
             .and_then(SelectionDeferral::deadline)
     }
 
-    /// Run the delayed family selection exactly once after its gate opens.
-    /// All identity sets come from Adj-RIB-In, which continued accepting the
-    /// current sessions' updates while Loc-RIB selection was frozen.
+    /// Complete a family release. Ordinary release runs the delayed selection;
+    /// a timer fallback may recompute a family that collision failback staged
+    /// earlier. All identity sets come from Adj-RIB-In, which continued
+    /// accepting current-session updates while Loc-RIB selection was frozen.
     pub(super) fn release_selection_families(
         &mut self,
         families: &[(Afi, Safi)],
         reason: &'static str,
     ) {
         for &family in families {
-            tracing::info!(
-                afi = ?family.0,
-                safi = ?family.1,
-                reason,
-                "RFC 4724 route-selection deferral released"
-            );
-            self.recompute_released_selection_family(family);
-            // Existing sessions received no initial table and no EoR while
-            // gated. Queue the marker only after the released selection has
-            // been staged; dirty peers keep it pending until their full resync
-            // succeeds, preserving table-before-EoR ordering.
-            let peers: Vec<_> = self
-                .peer_sendable_families
-                .iter()
-                .filter_map(|(&peer, sendable)| sendable.contains(&family).then_some(peer))
-                .collect();
-            for peer in peers {
-                self.pending_eor.entry(peer).or_default().insert(family);
-                if !self.dirty_peers.contains(&peer) {
-                    self.flush_pending_eor(peer);
+            self.complete_selection_family(family, false, reason);
+        }
+    }
+
+    pub(super) fn apply_selection_deferral_transitions(
+        &mut self,
+        transitions: impl IntoIterator<Item = SelectionDeferralTransition>,
+        reason: &'static str,
+    ) {
+        for transition in transitions {
+            match transition {
+                SelectionDeferralTransition::Stage { family } => {
+                    tracing::info!(
+                        afi = ?family.0,
+                        safi = ?family.1,
+                        reason,
+                        "RFC 4724 route selection staged while collision-failback convergence remains held"
+                    );
+                    self.recompute_released_selection_family(family);
+                }
+                SelectionDeferralTransition::Release {
+                    family,
+                    already_staged,
+                    release_reason,
+                } => {
+                    if let Some(selection) = self.selection_deferral.as_mut() {
+                        selection.release(family, release_reason, &self.metrics);
+                    }
+                    self.complete_selection_family(family, already_staged, reason);
                 }
             }
-            let refresh_peers: Vec<_> = self
-                .selection_deferred_refresh
-                .iter()
-                .filter_map(|(&peer, families)| families.contains(&family).then_some(peer))
-                .collect();
-            for peer in refresh_peers {
-                if let Some(families) = self.selection_deferred_refresh.get_mut(&peer) {
-                    families.remove(&family);
-                    if families.is_empty() {
-                        self.selection_deferred_refresh.remove(&peer);
-                    }
+        }
+    }
+
+    fn complete_selection_family(
+        &mut self,
+        family: (Afi, Safi),
+        already_staged: bool,
+        reason: &'static str,
+    ) {
+        tracing::info!(
+            afi = ?family.0,
+            safi = ?family.1,
+            reason,
+            "RFC 4724 route-selection deferral released"
+        );
+        if !already_staged {
+            self.recompute_released_selection_family(family);
+        }
+        // Existing sessions received no initial table and no EoR while
+        // gated. Queue the marker only after the released selection has
+        // been staged; dirty peers keep it pending until their full resync
+        // succeeds, preserving table-before-EoR ordering.
+        let peers: Vec<_> = self
+            .peer_sendable_families
+            .iter()
+            .filter_map(|(&peer, sendable)| sendable.contains(&family).then_some(peer))
+            .collect();
+        for peer in peers {
+            self.pending_eor.entry(peer).or_default().insert(family);
+            if !self.dirty_peers.contains(&peer) {
+                self.flush_pending_eor(peer);
+            }
+        }
+        let refresh_peers: Vec<_> = self
+            .selection_deferred_refresh
+            .iter()
+            .filter_map(|(&peer, families)| families.contains(&family).then_some(peer))
+            .collect();
+        for peer in refresh_peers {
+            if let Some(families) = self.selection_deferred_refresh.get_mut(&peer) {
+                families.remove(&family);
+                if families.is_empty() {
+                    self.selection_deferred_refresh.remove(&peer);
                 }
+            }
+            if self.dirty_peers.contains(&peer) {
+                // The dirty-resync success path flushes or piggybacks the
+                // convergence EoR before retrying this response.
+                self.pending_refresh.entry(peer).or_default().insert(family);
+            } else {
                 self.send_route_refresh_response(peer, family.0, family.1);
             }
         }

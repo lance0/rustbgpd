@@ -729,11 +729,11 @@ impl RibManager {
         }
 
         // Classify only the startup-frozen waiter already present for this
-        // peer. This runs before outbound registration, so if exclusion of
-        // the final waiter releases a family, existing peers receive the
-        // converged table and this peer receives it once in its normal
-        // initial dump below.
-        let released = match registration {
+        // peer. This runs before outbound registration, so a completed normal
+        // gate releases existing peers first, while collision failback can
+        // stage the current table for this peer's normal initial dump below
+        // without emitting the held convergence marker.
+        let transitions = match registration {
             ActiveSessionRegistration::PeerUp => {
                 if let Some(gr_context) = gr_context {
                     let peer_gr_families: HashSet<_> =
@@ -754,21 +754,24 @@ impl RibManager {
                 }
             }
             ActiveSessionRegistration::CollisionFailback => {
-                let excluded = self.selection_deferral.as_mut().and_then(|selection| {
-                    selection.exclude_collision_failback_survivor(peer, session_id, &self.metrics)
+                let waiting = self.selection_deferral.as_mut().and_then(|selection| {
+                    selection.await_collision_failback_refresh(peer, session_id, &self.metrics)
                 });
-                if let Some(released) = &excluded {
+                if let Some(transitions) = &waiting {
                     info!(
                         %peer,
                         session_id,
-                        released_families = released.len(),
-                        "exact collision-failback survivor excluded from the startup selection roster; inbound ROUTE-REFRESH remains best-effort recovery assistance"
+                        transition_count = transitions.len(),
+                        "exact collision-failback survivor is awaiting a post-failback enhanced ROUTE-REFRESH completion"
                     );
                 }
-                excluded.unwrap_or_default()
+                waiting.unwrap_or_default()
             }
         };
-        self.release_selection_families(&released, "all current waiters satisfied or excluded");
+        self.apply_selection_deferral_transitions(
+            transitions,
+            "all ordinary selection waiters satisfied or excluded",
+        );
 
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();
@@ -1447,6 +1450,23 @@ impl RibManager {
                 eor_families.retain(|family| !deferred.contains(family));
                 self.gr_deferred_eor.insert(peer, deferred);
             }
+        }
+
+        // Collision failback may stage the current Loc-RIB before the
+        // survivor has replayed its Adj-RIB-In. Send those staged routes, but
+        // keep the family EoR queued until an associated peer EoRR (or the
+        // original Selection_Deferral_Timer) proves convergence.
+        let convergence_held: HashSet<_> = eor_families
+            .iter()
+            .copied()
+            .filter(|family| self.selection_convergence_held(*family))
+            .collect();
+        if !convergence_held.is_empty() {
+            eor_families.retain(|family| !convergence_held.contains(family));
+            self.pending_eor
+                .entry(peer)
+                .or_default()
+                .extend(convergence_held);
         }
 
         let has_outbound_diff = !announce.is_empty()

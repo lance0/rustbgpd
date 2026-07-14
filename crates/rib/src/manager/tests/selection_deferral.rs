@@ -3,19 +3,21 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, Ipv4Prefix, Safi};
+use rustbgpd_wire::{Afi, Ipv4Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     dummy_query_rx, make_bgpls_route, make_evpn_imet, make_flowspec_route, make_labeled_rib_route,
     make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route, query_best_routes,
 };
+use crate::manager::selection_deferral::SelectionDeferralTransition;
 use crate::{
     PeerOutboundState, RibManager, RibUpdate, SelectionDeferralConfig,
     SelectionDeferralWaiterConfig,
 };
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+const READY_FAMILY: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 
 fn counter_value(metrics: &BgpMetrics, name: &str) -> f64 {
     metrics
@@ -49,6 +51,15 @@ fn peer_up(
     session_id: u64,
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
 ) -> RibUpdate {
+    peer_up_with_families(peer, session_id, outbound_tx, vec![FAMILY])
+}
+
+fn peer_up_with_families(
+    peer: IpAddr,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
+    sendable_families: Vec<(Afi, Safi)>,
+) -> RibUpdate {
     RibUpdate::PeerUp {
         peer,
         session_id,
@@ -56,7 +67,7 @@ fn peer_up(
         peer_router_id: Ipv4Addr::new(10, 0, 0, 254),
         outbound_tx,
         export_policy: None,
-        sendable_families: vec![FAMILY],
+        sendable_families,
         is_ebgp: false,
         route_reflector_client: true,
         orr_vantage: None,
@@ -129,6 +140,34 @@ fn config(timeout: Duration, peers: &[IpAddr]) -> SelectionDeferralConfig {
             })
             .collect(),
     }
+}
+
+fn commit_control_markers(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    end_of_rib: Vec<(Afi, Safi)>,
+    refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
+) -> bool {
+    manager.try_send_and_commit_outbound_update(
+        peer,
+        Vec::new().into(),
+        Vec::new().into(),
+        Vec::new(),
+        end_of_rib,
+        refresh_markers,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 #[tokio::test]
@@ -350,7 +389,7 @@ async fn duplicate_address_roster_fails_closed_until_timer() {
 }
 
 #[test]
-fn collision_failback_excludes_only_the_rearmed_survivor() {
+fn collision_failback_stages_then_waits_for_refresh_completion() {
     let survivor = peer(1);
     let remaining = peer(2);
     let metrics = BgpMetrics::new();
@@ -365,22 +404,28 @@ fn collision_failback_excludes_only_the_rearmed_survivor() {
             .classify_session(survivor, 11, false, &gr_families, &metrics)
             .is_empty()
     );
-    assert!(!selection.end_of_rib(survivor, 11, FAMILY, &metrics));
+    assert!(
+        selection
+            .end_of_rib(survivor, 11, FAMILY, &metrics)
+            .is_none()
+    );
     selection.session_down(survivor, 11, &metrics);
     assert_eq!(
-        selection.exclude_collision_failback_survivor(survivor, 11, &metrics),
+        selection.await_collision_failback_refresh(survivor, 11, &metrics),
         Some(Vec::new()),
-        "the exact re-armed survivor should stop blocking without releasing a real waiter"
+        "the exact re-armed survivor must wait for a post-failback refresh"
     );
 
     let survivor_row = selection.peer_snapshot(survivor).remove(0);
     assert!(survivor_row.active);
-    assert_eq!(survivor_row.waiter_state, "excluded");
+    assert_eq!(survivor_row.waiter_state, "awaiting_refresh");
     assert_eq!(survivor_row.waiter_session_id, Some(11));
-    assert_eq!(survivor_row.blocking_waiters, 1);
+    assert_eq!(survivor_row.blocking_waiters, 2);
     assert!(
-        !selection.end_of_rib(survivor, 12, FAMILY, &metrics),
-        "an unrelated session must not satisfy the excluded survivor"
+        selection
+            .end_of_rib(survivor, 12, FAMILY, &metrics)
+            .is_none(),
+        "an unrelated session must not satisfy the refresh waiter"
     );
 
     assert!(
@@ -388,11 +433,572 @@ fn collision_failback_excludes_only_the_rearmed_survivor() {
             .classify_session(remaining, 21, false, &gr_families, &metrics)
             .is_empty()
     );
-    assert!(selection.end_of_rib(remaining, 21, FAMILY, &metrics));
-    selection.finalize_all_eor(FAMILY, &metrics);
-    let remaining_row = selection.peer_snapshot(remaining).remove(0);
-    assert!(!remaining_row.active);
-    assert_eq!(remaining_row.release_reason, "all_eor");
+    assert_eq!(
+        selection.end_of_rib(remaining, 21, FAMILY, &metrics),
+        Some(SelectionDeferralTransition::Stage { family: FAMILY })
+    );
+    let staged = selection.peer_snapshot(survivor).remove(0);
+    assert!(staged.active);
+    assert_eq!(staged.waiter_state, "awaiting_refresh");
+    assert_eq!(staged.blocking_waiters, 1);
+    assert!(
+        selection
+            .begin_route_refresh(survivor, 11, FAMILY)
+            .is_none()
+    );
+    let release = selection
+        .end_route_refresh(survivor, 11, FAMILY, &metrics)
+        .unwrap();
+    assert!(matches!(
+        release,
+        SelectionDeferralTransition::Release {
+            family: FAMILY,
+            already_staged: true,
+            ..
+        }
+    ));
+    manager.apply_selection_deferral_transitions([release], "test refresh completion");
+    let released = manager
+        .selection_deferral
+        .as_ref()
+        .unwrap()
+        .peer_snapshot(survivor)
+        .remove(0);
+    assert!(!released.active);
+    assert_eq!(released.release_reason, "collision_refresh");
+}
+
+#[test]
+fn multiple_failback_survivors_release_only_after_every_waiter_converges() {
+    let first_survivor = peer(1);
+    let second_survivor = peer(2);
+    let ordinary = peer(3);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(
+            Duration::from_mins(1),
+            &[first_survivor, second_survivor, ordinary],
+        ));
+    let gr_families = HashSet::from([FAMILY]);
+    let selection = manager.selection_deferral.as_mut().unwrap();
+
+    for (peer, session_id) in [(first_survivor, 11), (second_survivor, 21)] {
+        assert!(
+            selection
+                .classify_session(peer, session_id, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        assert!(
+            selection
+                .end_of_rib(peer, session_id, FAMILY, &metrics)
+                .is_none()
+        );
+        selection.session_down(peer, session_id, &metrics);
+        assert_eq!(
+            selection.await_collision_failback_refresh(peer, session_id, &metrics),
+            Some(Vec::new())
+        );
+        let waiting = selection.peer_snapshot(peer).remove(0);
+        assert!(waiting.active);
+        assert_eq!(waiting.waiter_state, "awaiting_refresh");
+    }
+    assert!(
+        selection
+            .classify_session(ordinary, 31, false, &gr_families, &metrics)
+            .is_empty()
+    );
+
+    assert!(
+        selection
+            .begin_route_refresh(first_survivor, 11, FAMILY)
+            .is_none()
+    );
+    assert!(
+        selection
+            .end_route_refresh(first_survivor, 11, FAMILY, &metrics)
+            .is_none(),
+        "one survivor EoRR cannot release while another survivor and an ordinary waiter remain"
+    );
+    assert!(selection.peer_snapshot(ordinary)[0].active);
+
+    assert!(
+        selection
+            .begin_route_refresh(second_survivor, 21, FAMILY)
+            .is_none()
+    );
+    assert!(
+        selection
+            .end_route_refresh(second_survivor, 21, FAMILY, &metrics)
+            .is_none(),
+        "every survivor can finish refresh while the ordinary waiter still blocks selection"
+    );
+    let waiting = selection.peer_snapshot(ordinary).remove(0);
+    assert!(waiting.active);
+    assert_eq!(waiting.waiter_state, "awaiting_eor");
+    assert_eq!(waiting.blocking_waiters, 1);
+
+    let release = selection
+        .end_of_rib(ordinary, 31, FAMILY, &metrics)
+        .unwrap();
+    assert!(
+        matches!(
+            release,
+            SelectionDeferralTransition::Release {
+                family: FAMILY,
+                already_staged: false,
+                ..
+            }
+        ),
+        "the last ordinary EoR must perform the one full release recompute"
+    );
+    manager.apply_selection_deferral_transitions([release], "test ordinary completion");
+    let released = manager
+        .selection_deferral
+        .as_ref()
+        .unwrap()
+        .peer_snapshot(ordinary)
+        .remove(0);
+    assert!(!released.active);
+    assert_eq!(released.release_reason, "all_eor");
+}
+
+#[test]
+fn staged_selection_rejects_eor_and_refresh_marker_commits() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(source, 11, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        selection.session_down(source, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(source, 11, &metrics)
+            .unwrap()
+    };
+    assert_eq!(
+        transitions,
+        vec![SelectionDeferralTransition::Stage { family: FAMILY }]
+    );
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+    assert!(manager.selection_convergence_held(FAMILY));
+    assert!(!manager.selection_deferred(FAMILY));
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+    manager.outbound_peers.insert(target, outbound_tx);
+    assert!(
+        !commit_control_markers(&mut manager, target, vec![FAMILY], Vec::new()),
+        "staged selection must still reject a family EoR commit"
+    );
+    assert!(
+        !commit_control_markers(
+            &mut manager,
+            target,
+            Vec::new(),
+            vec![
+                (FAMILY.0, FAMILY.1, RouteRefreshSubtype::BoRR),
+                (FAMILY.0, FAMILY.1, RouteRefreshSubtype::EoRR),
+            ],
+        ),
+        "staged selection must still reject route-refresh marker commits"
+    );
+    assert!(outbound_rx.try_recv().is_err());
+}
+
+#[test]
+fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(source, 11, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        selection.session_down(source, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(source, 11, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+    manager.outbound_peers.insert(target, outbound_tx);
+
+    manager.send_route_refresh_response(target, FAMILY.0, FAMILY.1);
+
+    assert_eq!(
+        manager.selection_deferred_refresh.get(&target),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert!(!manager.pending_refresh.contains_key(&target));
+    assert!(outbound_rx.try_recv().is_err());
+}
+
+#[test]
+fn dirty_resync_sends_ready_eor_and_retains_held_family() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 254)),
+        metrics.clone(),
+    )
+    .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(source, 11, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        selection.session_down(source, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(source, 11, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up_with_families(
+        target,
+        21,
+        outbound_tx,
+        vec![FAMILY, READY_FAMILY],
+    ));
+    let initial_ready_eor = outbound_rx.try_recv().unwrap();
+    assert_eq!(initial_ready_eor.end_of_rib, vec![READY_FAMILY]);
+
+    let route = make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+        100,
+    );
+    manager.enqueue_routes_received(
+        source,
+        vec![route],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    while manager.process_next_route_chunk() {}
+    assert!(!outbound_rx.try_recv().unwrap().announce.is_empty());
+
+    manager
+        .pending_eor
+        .entry(target)
+        .or_default()
+        .insert(READY_FAMILY);
+    manager.mark_outbound_dirty(target);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+
+    let resync = outbound_rx.try_recv().unwrap();
+    assert!(
+        !resync.announce.is_empty(),
+        "dirty resync omitted route payload"
+    );
+    assert_eq!(resync.end_of_rib, vec![READY_FAMILY]);
+    assert_eq!(
+        manager.pending_eor.get(&target),
+        Some(&HashSet::from([FAMILY])),
+        "successful mixed-family resync must retain only the convergence-held EoR"
+    );
+
+    let release = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(selection.begin_route_refresh(source, 11, FAMILY).is_none());
+        selection
+            .end_route_refresh(source, 11, FAMILY, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions([release], "test refresh completion");
+    assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one production-shaped transcript pins dirty resync, EoR, and refresh ordering"
+)]
+fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
+    let survivor = peer(1);
+    let route_source = peer(2);
+    let observer = peer(3);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (_tx, rx) = mpsc::channel(32);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 254)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(config(Duration::from_mins(1), &[survivor]));
+
+    let (survivor_tx, _survivor_rx) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: survivor,
+        session_id: 11,
+        peer_restart_state: false,
+        peer_gr_families: vec![FAMILY],
+    });
+    manager.handle_update(peer_up(survivor, 11, survivor_tx));
+    let (replacement_tx, _replacement_rx) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: survivor,
+        session_id: 12,
+        peer_restart_state: false,
+        peer_gr_families: vec![FAMILY],
+    });
+    manager.handle_update(peer_up(survivor, 12, replacement_tx));
+
+    let (source_tx, _source_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up(route_source, 21, source_tx));
+    let (observer_tx, mut observer_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up(observer, 31, observer_tx));
+    manager.enqueue_routes_received(
+        route_source,
+        vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    while manager.process_next_route_chunk() {}
+    assert!(
+        manager
+            .loc_rib
+            .get(&rustbgpd_wire::Prefix::V4(prefix))
+            .is_none()
+    );
+    assert!(observer_rx.try_recv().is_err());
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    });
+    let staged = observer_rx.try_recv().unwrap();
+    assert!(
+        staged
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(prefix))
+    );
+    assert!(!staged.end_of_rib.contains(&FAMILY));
+    while observer_rx.try_recv().is_ok() {}
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: observer,
+        session_id: 31,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert_eq!(
+        manager.selection_deferred_refresh.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert!(observer_rx.try_recv().is_err());
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    // Preserve the production EoRR ordering while injecting the dirty state
+    // at the release boundary: the ordinary refresh finisher runs first, then
+    // the selection transition consumes the peer EoRR.
+    manager.handle_end_route_refresh(survivor, FAMILY.0, FAMILY.1);
+    manager.mark_outbound_dirty(observer);
+    let release = manager
+        .selection_deferral_end_route_refresh(survivor, 11, FAMILY)
+        .unwrap();
+    manager.apply_selection_deferral_transitions([release], "test survivor EoRR completion");
+    assert!(!manager.selection_convergence_held(FAMILY));
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(
+        observer_rx.try_recv().is_err(),
+        "dirty observer emitted deferred BoRR/routes/EoRR before convergence resync/EoR"
+    );
+    assert_eq!(
+        manager.pending_eor.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert_eq!(
+        manager.pending_refresh.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+
+    let convergence = observer_rx.try_recv().unwrap();
+    assert_eq!(convergence.end_of_rib, vec![FAMILY]);
+    assert!(convergence.refresh_markers.is_empty());
+    assert!(
+        convergence
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(prefix))
+    );
+
+    let refresh = observer_rx.try_recv().unwrap();
+    assert_eq!(
+        refresh.refresh_markers,
+        vec![
+            (FAMILY.0, FAMILY.1, RouteRefreshSubtype::BoRR),
+            (FAMILY.0, FAMILY.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
+    assert!(
+        refresh
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(prefix))
+    );
+    assert!(observer_rx.try_recv().is_err());
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript pins the full-channel no-diff retry ordering"
+)]
+fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
+    let survivor = peer(1);
+    let observer = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[survivor]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(survivor, 11, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        selection.session_down(survivor, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(survivor, 11, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+
+    let (observer_tx, mut observer_rx) = mpsc::channel(2);
+    let fill_tx = observer_tx.clone();
+    manager.handle_update(peer_up(observer, 21, observer_tx));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    manager.enqueue_routes_received(
+        observer,
+        vec![make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 2), 100)],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    while manager.process_next_route_chunk() {}
+    assert!(
+        manager
+            .loc_rib
+            .get(&rustbgpd_wire::Prefix::V4(prefix))
+            .is_some()
+    );
+    assert!(observer_rx.try_recv().is_err());
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: observer,
+        session_id: 21,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert_eq!(
+        manager.selection_deferred_refresh.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+
+    assert!(
+        manager
+            .selection_deferral_begin_route_refresh(survivor, 11, FAMILY)
+            .is_none()
+    );
+    manager.mark_outbound_dirty(observer);
+    let release = manager
+        .selection_deferral_end_route_refresh(survivor, 11, FAMILY)
+        .unwrap();
+    manager.apply_selection_deferral_transitions([release], "test survivor EoRR completion");
+    assert_eq!(
+        manager.pending_eor.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert_eq!(
+        manager.pending_refresh.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert!(observer_rx.try_recv().is_err());
+
+    fill_tx
+        .try_send(crate::OutboundRouteUpdate::default())
+        .unwrap();
+    fill_tx
+        .try_send(crate::OutboundRouteUpdate::default())
+        .unwrap();
+    assert_eq!(fill_tx.capacity(), 0);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+
+    assert_counter_value(&metrics, "bgp_outbound_route_drops_total", 0.0);
+    assert!(
+        manager.dirty_peers.contains(&observer),
+        "pending_eor={:?} pending_refresh={:?} channel_capacity={}",
+        manager.pending_eor.get(&observer),
+        manager.pending_refresh.get(&observer),
+        fill_tx.capacity()
+    );
+    assert_eq!(
+        manager.pending_eor.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert_eq!(
+        manager.pending_refresh.get(&observer),
+        Some(&HashSet::from([FAMILY]))
+    );
+    let _ = observer_rx.try_recv().unwrap();
+    let _ = observer_rx.try_recv().unwrap();
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+
+    let convergence = observer_rx.try_recv().unwrap();
+    assert_eq!(convergence.end_of_rib, vec![FAMILY]);
+    assert!(convergence.refresh_markers.is_empty());
+    let refresh = observer_rx.try_recv().unwrap();
+    assert_eq!(
+        refresh.refresh_markers,
+        vec![
+            (FAMILY.0, FAMILY.1, RouteRefreshSubtype::BoRR),
+            (FAMILY.0, FAMILY.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
+    assert!(observer_rx.try_recv().is_err());
 }
 
 #[test]
@@ -408,11 +1014,11 @@ fn unstamped_or_ambiguous_collision_failback_stays_timer_bound() {
     let selection = manager.selection_deferral.as_mut().unwrap();
 
     assert_eq!(
-        selection.exclude_collision_failback_survivor(unstamped, 0, &metrics),
+        selection.await_collision_failback_refresh(unstamped, 0, &metrics),
         None
     );
     assert_eq!(
-        selection.exclude_collision_failback_survivor(duplicate, 22, &metrics),
+        selection.await_collision_failback_refresh(duplicate, 22, &metrics),
         None
     );
     for peer in [unstamped, duplicate] {
@@ -423,10 +1029,17 @@ fn unstamped_or_ambiguous_collision_failback_stays_timer_bound() {
     }
 }
 
-#[tokio::test]
-async fn exact_collision_failback_releases_table_before_eor_and_then_requests_refresh() {
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one protocol transcript pins collision failback staging and convergence ordering"
+)]
+async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     let survivor = peer(1);
     let remaining = peer(2);
+    let observer = peer(3);
+    let survivor_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let remaining_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(
         rx,
@@ -441,6 +1054,22 @@ async fn exact_collision_failback_releases_table_before_eor_and_then_requests_re
     let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
     stage_gr_context(&tx, survivor, 11).await;
     tx.send(peer_up(survivor, 11, survivor_tx)).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: survivor,
+        session_id: 11,
+        announced: vec![make_route_with_lp(
+            survivor_prefix,
+            Ipv4Addr::new(10, 0, 0, 1),
+            100,
+        )],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
     tx.send(RibUpdate::EndOfRib {
         peer: survivor,
         session_id: 11,
@@ -471,7 +1100,7 @@ async fn exact_collision_failback_releases_table_before_eor_and_then_requests_re
         peer: remaining,
         session_id: 21,
         announced: vec![make_route_with_lp(
-            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            remaining_prefix,
             Ipv4Addr::new(10, 0, 0, 2),
             100,
         )],
@@ -491,6 +1120,9 @@ async fn exact_collision_failback_releases_table_before_eor_and_then_requests_re
     })
     .await
     .unwrap();
+
+    let (observer_tx, mut observer_rx) = mpsc::channel(16);
+    tx.send(peer_up(observer, 31, observer_tx)).await.unwrap();
     assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
 
     tx.send(RibUpdate::PeerDown {
@@ -501,39 +1133,334 @@ async fn exact_collision_failback_releases_table_before_eor_and_then_requests_re
     .unwrap();
 
     let state = query_state(&tx, survivor).await;
-    assert!(!state.selection_deferral[0].active);
-    assert_eq!(state.selection_deferral[0].waiter_state, "excluded");
+    assert!(
+        state.selection_deferral[0].active,
+        "collision failback declared convergence before the survivor replayed its routes"
+    );
+    assert_eq!(state.selection_deferral[0].waiter_state, "awaiting_refresh");
     assert_eq!(state.selection_deferral[0].waiter_session_id, Some(11));
-    assert_eq!(state.selection_deferral[0].release_reason, "all_eor");
+    assert!(state.selection_deferral[0].release_reason.is_empty());
     assert_eq!(query_best_routes(&tx).await.len(), 1);
 
-    let mut saw_table = false;
-    let mut saw_eor = false;
-    loop {
-        let update = survivor_rx.recv().await.unwrap();
-        if !update.announce.is_empty() {
-            assert!(!saw_eor, "released table arrived after EoR");
-            saw_table = true;
-        }
-        if update.end_of_rib.contains(&FAMILY) {
-            assert!(saw_table, "EoR overtook the released table");
-            saw_eor = true;
-        }
-        if update.request_refresh_all_negotiated {
+    let mut survivor_saw_remaining = false;
+    let mut survivor_saw_refresh_request = false;
+    while let Ok(update) = survivor_rx.try_recv() {
+        assert!(!update.end_of_rib.contains(&FAMILY));
+        survivor_saw_remaining |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(remaining_prefix));
+        survivor_saw_refresh_request |= update.request_refresh_all_negotiated;
+    }
+    assert!(
+        survivor_saw_remaining,
+        "fast stage omitted the remaining route"
+    );
+    assert!(
+        survivor_saw_refresh_request,
+        "failback omitted the inbound refresh request"
+    );
+    let mut observer_saw_remaining = false;
+    while let Ok(update) = observer_rx.try_recv() {
+        assert!(!update.end_of_rib.contains(&FAMILY));
+        observer_saw_remaining |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(remaining_prefix));
+    }
+    assert!(observer_saw_remaining, "observer missed the fast stage");
+
+    // Re-register the observer after staging. Its initial table is allowed,
+    // but its EoR must stay pending. Force one full-channel failure so the
+    // dirty-resync path calls `flush_pending_eor` while convergence is held.
+    let (observer_retry_tx, mut observer_retry_rx) = mpsc::channel(2);
+    let observer_fill_tx = observer_retry_tx.clone();
+    tx.send(peer_up(observer, 32, observer_retry_tx))
+        .await
+        .unwrap();
+    let _ = query_state(&tx, observer).await;
+    observer_fill_tx
+        .try_send(crate::OutboundRouteUpdate::default())
+        .unwrap();
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: observer,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.await.unwrap(), Ok(()));
+    let mut retry_saw_remaining = false;
+    while let Ok(update) = observer_retry_rx.try_recv() {
+        assert!(!update.end_of_rib.contains(&FAMILY));
+        retry_saw_remaining |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(remaining_prefix));
+    }
+    assert!(
+        retry_saw_remaining,
+        "observer retry missed the staged table"
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let _ = query_state(&tx, observer).await;
+    let mut resync_saw_remaining = false;
+    while let Ok(update) = observer_retry_rx.try_recv() {
+        assert!(
+            !update.end_of_rib.contains(&FAMILY),
+            "dirty resync flushed EoR before collision-failback convergence"
+        );
+        resync_saw_remaining |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(remaining_prefix));
+    }
+    assert!(resync_saw_remaining, "observer dirty resync did not run");
+    observer_rx = observer_retry_rx;
+
+    tx.send(RibUpdate::RouteRefreshRequest {
+        peer: observer,
+        session_id: 32,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let _ = query_state(&tx, observer).await;
+    assert!(
+        observer_rx.try_recv().is_err(),
+        "route-refresh response escaped before collision-failback convergence"
+    );
+
+    // A late ordinary EoR from the survivor cannot prove that the requested
+    // replay completed, and an EoRR without a post-failback BoRR is stray.
+    tx.send(RibUpdate::EndOfRib {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: survivor,
+        session_id: 11,
+        announced: vec![make_route_with_lp(
+            survivor_prefix,
+            Ipv4Addr::new(10, 0, 0, 1),
+            100,
+        )],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let best_before_eorr = query_best_routes(&tx).await;
+    assert_eq!(best_before_eorr.len(), 2);
+    assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
+    assert!(survivor_rx.try_recv().is_err());
+    let mut observer_saw_survivor = false;
+    while let Ok(update) = observer_rx.try_recv() {
+        assert!(!update.end_of_rib.contains(&FAMILY));
+        assert!(update.refresh_markers.is_empty());
+        observer_saw_survivor |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(survivor_prefix));
+    }
+    assert!(observer_saw_survivor, "observer missed the survivor replay");
+
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let released = query_state(&tx, survivor).await;
+    assert!(!released.selection_deferral[0].active);
+    assert_eq!(
+        released.selection_deferral[0].release_reason,
+        "collision_refresh"
+    );
+    assert_eq!(query_best_routes(&tx).await.len(), 2);
+    assert_eq!(survivor_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
+
+    let mut observer_saw_convergence_eor = false;
+    let mut observer_saw_deferred_refresh = false;
+    while !observer_saw_convergence_eor || !observer_saw_deferred_refresh {
+        let update = observer_rx.recv().await.unwrap();
+        if update.end_of_rib.contains(&FAMILY) && update.refresh_markers.is_empty() {
             assert!(
-                saw_eor,
-                "best-effort refresh request overtook table and EoR"
+                observer_saw_survivor,
+                "convergence EoR overtook the survivor's replayed route"
             );
-            break;
+            observer_saw_convergence_eor = true;
         }
+        if !update.refresh_markers.is_empty() {
+            assert!(
+                observer_saw_convergence_eor,
+                "deferred route-refresh response overtook convergence EoR"
+            );
+            observer_saw_deferred_refresh = true;
+        }
+        observer_saw_survivor |= update
+            .announce
+            .iter()
+            .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(survivor_prefix));
     }
 
     drop(tx);
     handle.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn collision_failback_keeps_the_original_selection_deadline() {
+    let survivor = peer(1);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_secs(5), &[survivor]));
+    let handle = tokio::spawn(manager.run());
+
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    stage_gr_context(&tx, survivor, 11).await;
+    tx.send(peer_up(survivor, 11, survivor_tx)).await.unwrap();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, survivor, 12).await;
+    tx.send(peer_up(survivor, 12, replacement_tx))
+        .await
+        .unwrap();
+    assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
+
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tx.send(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    })
+    .await
+    .unwrap();
+    let staged = query_state(&tx, survivor).await;
+    assert!(staged.selection_deferral[0].active);
+    assert_eq!(
+        staged.selection_deferral[0].waiter_state,
+        "awaiting_refresh"
+    );
+    assert!(staged.selection_deferral[0].remaining_millis <= 1_000);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let released = query_state(&tx, survivor).await;
+    assert!(!released.selection_deferral[0].active);
+    assert_eq!(released.selection_deferral[0].release_reason, "timer");
+    let mut saw_eor = false;
+    while let Ok(update) = survivor_rx.try_recv() {
+        saw_eor |= update.end_of_rib.contains(&FAMILY);
+    }
+    assert!(
+        saw_eor,
+        "the original timer must remain a bounded EoR fallback"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn synthetic_refresh_timeout_cannot_complete_collision_failback() {
+    let survivor = peer(1);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[survivor]));
+    let handle = tokio::spawn(manager.run());
+
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    stage_gr_context(&tx, survivor, 11).await;
+    tx.send(peer_up(survivor, 11, survivor_tx)).await.unwrap();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, survivor, 12).await;
+    tx.send(peer_up(survivor, 12, replacement_tx))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    })
+    .await
+    .unwrap();
+    assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
+    while let Ok(update) = survivor_rx.try_recv() {
+        assert!(!update.end_of_rib.contains(&FAMILY));
+    }
+
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RouteRefreshTimeout {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let held = query_state(&tx, survivor).await;
+    assert!(held.selection_deferral[0].active);
+    assert_eq!(held.selection_deferral[0].waiter_state, "awaiting_refresh");
+    assert!(survivor_rx.try_recv().is_err());
+
+    // The independent post-failback BoRR receipt survives the local sweep, so
+    // a later real peer EoRR can still prove convergence.
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let released = query_state(&tx, survivor).await;
+    assert!(!released.selection_deferral[0].active);
+    assert_eq!(
+        released.selection_deferral[0].release_reason,
+        "collision_refresh"
+    );
+    assert_eq!(survivor_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[test]
-fn unavailable_survivor_channel_does_not_rearm_released_selection() {
+fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
     for channel_closed in [false, true] {
         let survivor = peer(1);
         let metrics = BgpMetrics::new();
@@ -575,9 +1502,9 @@ fn unavailable_survivor_channel_does_not_rearm_released_selection() {
             .unwrap()
             .peer_snapshot(survivor)
             .remove(0);
-        assert!(!row.active);
-        assert_eq!(row.waiter_state, "excluded");
-        assert_eq!(row.release_reason, "all_eor");
+        assert!(row.active);
+        assert_eq!(row.waiter_state, "awaiting_refresh");
+        assert!(row.release_reason.is_empty());
         if !channel_closed {
             let queued = survivor_rx.try_recv().unwrap();
             assert!(!queued.request_refresh_all_negotiated);
@@ -671,30 +1598,51 @@ fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
         .as_mut()
         .unwrap()
         .session_down(source, 8, &metrics);
-    let released = manager
+    let transitions = manager
         .selection_deferral
         .as_mut()
         .unwrap()
-        .exclude_collision_failback_survivor(source, 8, &metrics)
+        .await_collision_failback_refresh(source, 8, &metrics)
         .unwrap();
-    assert_eq!(released, vec![FAMILY]);
-    manager.release_selection_families(&released, "test collision failback");
+    assert_eq!(
+        transitions,
+        vec![SelectionDeferralTransition::Stage { family: FAMILY }]
+    );
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
 
     assert!(manager.loc_rib.get(&prefix_a).is_none());
     assert!(manager.loc_rib.get(&prefix_b).is_none());
     assert_eq!(manager.adj_ribs_out.get(&observer).unwrap().len(), 0);
     let mut withdrawn = HashSet::new();
+    while let Ok(update) = observer_rx.try_recv() {
+        assert!(
+            !update.end_of_rib.contains(&FAMILY),
+            "staging must not declare convergence"
+        );
+        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+    }
+    assert_eq!(withdrawn, HashSet::from([prefix_a, prefix_b]));
+
+    assert!(
+        manager
+            .selection_deferral
+            .as_mut()
+            .unwrap()
+            .begin_route_refresh(source, 8, FAMILY)
+            .is_none()
+    );
+    let completed = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .end_route_refresh(source, 8, FAMILY, &metrics)
+        .into_iter();
+    manager.apply_selection_deferral_transitions(completed, "test refresh completion");
     loop {
         let update = observer_rx.try_recv().unwrap();
         if update.end_of_rib.contains(&FAMILY) {
-            assert_eq!(
-                withdrawn,
-                HashSet::from([prefix_a, prefix_b]),
-                "EoR overtook one or more deferred withdrawals"
-            );
             break;
         }
-        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
     }
     assert_counter_value(
         &metrics,

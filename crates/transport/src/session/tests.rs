@@ -2356,7 +2356,7 @@ async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
     session.expire_refresh_accounting_windows().await.unwrap();
     assert!(matches!(
         rib_rx.try_recv(),
-        Ok(RibUpdate::EndRouteRefresh {
+        Ok(RibUpdate::RouteRefreshTimeout {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             ..
@@ -2372,7 +2372,7 @@ async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
     session.expire_refresh_accounting_windows().await.unwrap();
     assert!(matches!(
         rib_rx.try_recv(),
-        Ok(RibUpdate::EndRouteRefresh {
+        Ok(RibUpdate::RouteRefreshTimeout {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             ..
@@ -2395,7 +2395,7 @@ async fn quiet_run_loop_expires_refresh_accounting() {
     tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
     assert!(matches!(
         rib_rx.recv().await,
-        Some(RibUpdate::EndRouteRefresh {
+        Some(RibUpdate::RouteRefreshTimeout {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             ..
@@ -2412,7 +2412,7 @@ async fn quiet_run_loop_expires_refresh_accounting() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn timeout_eorr_precedes_next_buffered_update_after_rib_backpressure() {
+async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() {
     let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
     let stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -2458,7 +2458,7 @@ async fn timeout_eorr_precedes_next_buffered_update_after_rib_backpressure() {
     ));
     assert!(matches!(
         rib_rx.recv().await,
-        Some(RibUpdate::EndRouteRefresh {
+        Some(RibUpdate::RouteRefreshTimeout {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             ..
