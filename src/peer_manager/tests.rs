@@ -4433,7 +4433,7 @@ fn build_transport_config_reflects_every_transport_field() {
         hold_time: Some(240),
         send_hold_time: Some(600),
         max_prefixes: Some(1000),
-        md5_password: Some("hunter2".to_string()),
+        md5_password: Some("hunter2".into()),
         tcp_ao: Some(
             rustbgpd_transport::TcpAoConfig {
                 key: "ao-secret".into(),
@@ -4524,7 +4524,7 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.max_prefixes, *max_prefixes, "max_prefixes");
     assert_eq!(
         t.md5_password.as_ref().map(std::convert::AsRef::as_ref),
-        md5_password.as_deref(),
+        md5_password.as_ref().map(std::convert::AsRef::as_ref),
         "md5_password"
     );
     assert_eq!(t.tcp_ao, *tcp_ao, "tcp_ao");

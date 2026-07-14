@@ -4204,10 +4204,7 @@ async fn run<T>(
                     hold_time: Some(transport_config.peer.hold_time),
                     send_hold_time: Some(transport_config.peer.send_hold_time),
                     max_prefixes: transport_config.max_prefixes,
-                    md5_password: transport_config
-                        .md5_password
-                        .as_ref()
-                        .map(|secret| secret.as_ref().to_owned()),
+                    md5_password: transport_config.md5_password.clone(),
                     tcp_ao: transport_config.tcp_ao.clone(),
                     ttl_security: transport_config.ttl_security,
                     families: transport_config.peer.families.clone(),

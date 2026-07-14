@@ -47,10 +47,7 @@ pub(crate) fn build_peer_mgr_config(
         hold_time: Some(tc.peer.hold_time),
         send_hold_time: Some(tc.peer.send_hold_time),
         max_prefixes: tc.max_prefixes,
-        md5_password: tc
-            .md5_password
-            .as_ref()
-            .map(|secret| secret.as_ref().to_owned()),
+        md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
         ttl_security: tc.ttl_security,
         families: tc.peer.families.clone(),

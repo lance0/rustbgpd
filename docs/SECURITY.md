@@ -175,6 +175,13 @@ access controls as Prometheus.
 Per-neighbor TCP MD5 authentication (RFC 2385) and GTSM / TTL security
 (RFC 5082) are supported on Linux via `md5_password` and `ttl_security`.
 These protect BGP transport sessions, not the gRPC management surface.
+After MD5 material crosses the protobuf or parsed-configuration boundary,
+internal API, peer-manager, and transport owners use a redacting wrapper whose
+independent clones zeroize their own allocation on drop. The temporary Linux
+`tcp_md5sig` record also scrubs its 80-byte key buffer and key length after
+every `setsockopt` attempt, including errors and unwinding. This narrows
+runtime retention; it does not erase separately owned parser/config/protobuf
+strings, compiler-created copies, or the key copied into the kernel.
 
 ## TCP-AO
 
