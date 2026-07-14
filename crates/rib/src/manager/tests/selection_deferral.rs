@@ -398,7 +398,8 @@ fn overflow_fallback_withdraws_restored_keys_before_release_eor() {
     // overflowed, after which later identities for that family are not retained.
     // Release must use the frozen Loc-RIB as the fail-safe identity source.
     manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
-    manager.record_deferred_unicast_with_test_limit(&HashSet::from([prefix_a, prefix_b]), 1);
+    manager.set_deferred_selection_limits_for_test(1, 64 * 1024 * 1024);
+    manager.record_deferred_unicast(&HashSet::from([prefix_a, prefix_b]));
     assert_counter_value(
         &metrics,
         "bgp_selection_deferral_ledger_overflows_total",
@@ -524,6 +525,75 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
     assert!(manager.loc_rib.get_labeled(&labeled_key).is_none());
     assert!(manager.loc_rib.get_bgpls(&bgpls_key).is_none());
     assert!(manager.loc_rib.get_rtc(&rtc_key).is_none());
+}
+
+#[test]
+fn zero_byte_limit_overflows_all_real_recorders_once_per_family() {
+    let route_peer = Ipv4Addr::new(10, 0, 0, 1);
+    let bgpls_route = make_bgpls_route(route_peer, 33, 100);
+    let families = vec![
+        FAMILY,
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::L2Vpn, Safi::Evpn),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        bgpls_route.family.to_afi_safi(),
+        crate::route::RtcRibRouteKey::afi_safi(),
+    ];
+    let selection_config = SelectionDeferralConfig {
+        timeout: Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer(1),
+            families,
+        }],
+    };
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(selection_config);
+    manager.set_deferred_selection_limits_for_test(1_000_000, 0);
+
+    let unicast = HashSet::from([make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        route_peer,
+        100,
+    )
+    .prefix]);
+    let flowspec = HashSet::from([make_flowspec_route(route_peer).selection_key()]);
+    let evpn = HashSet::from([make_evpn_imet(route_peer, 101).key()]);
+    let vpn = HashSet::from([make_vpn_rib_route(route_peer, 31, 100, 100).key()]);
+    let labeled = HashSet::from([make_labeled_rib_route(route_peer, 32, 100, 100).key()]);
+    let bgpls = HashSet::from([bgpls_route.key()]);
+    let rtc = HashSet::from([make_rtc_rib_route(route_peer, 34, 100).key()]);
+
+    for _ in 0..2 {
+        manager.record_deferred_unicast(&unicast);
+        manager.record_deferred_flowspec(&flowspec);
+        manager.record_deferred_evpn(&evpn);
+        manager.record_deferred_vpn(&vpn);
+        manager.record_deferred_labeled(&labeled);
+        manager.record_deferred_bgpls(&bgpls);
+        manager.record_deferred_rtc(&rtc);
+    }
+
+    let overflow = metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_selection_deferral_ledger_overflows_total")
+        .expect("all seven recorders should publish overflow metrics");
+    assert_eq!(
+        overflow.get_metric().len(),
+        7,
+        "each gated family should have one metric series"
+    );
+    assert!(
+        overflow
+            .get_metric()
+            .iter()
+            .all(|metric| (metric.get_counter().value() - 1.0).abs() < f64::EPSILON),
+        "sticky overflow must increment each family exactly once"
+    );
 }
 
 #[test]

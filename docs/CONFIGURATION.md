@@ -1078,7 +1078,12 @@ retains their `all_eor` or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
 `bgp_selection_deferral_releases_total`, and
 `bgp_selection_deferral_timeouts_total`. The process-wide deferred-identity
-ledger is capped at one million keys; if it fills,
+ledger has two independent limits: one million distinct keys and 64 MiB of
+deterministic logical retained-key data. The byte limit counts inline key data,
+nested FlowSpec numeric/bitmask terms, and each BGP-LS key payload; it is not a
+process-RSS, allocator-capacity, or hash-table-overhead limit. If retaining a
+new identity would exceed either process-wide limit, that identity's family
+enters overflow fallback and
 `bgp_selection_deferral_ledger_overflows_total` increments once for each
 affected family and release sweeps the complete Adj-RIB-In plus Loc-RIB family
 so an already-withdrawn identity cannot remain stale. All labels are bounded by
