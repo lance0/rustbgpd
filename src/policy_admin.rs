@@ -57,7 +57,7 @@ fn transport_tcp_ao_to_config(tcp_ao: &rustbgpd_transport::TcpAoKeyring) -> TcpA
         tcp_ao
             .iter()
             .map(|key| TcpAoConfig {
-                key: key.key.clone(),
+                key: key.key.as_ref().to_owned(),
                 send_id: key.send_id,
                 recv_id: key.recv_id,
                 algorithm: key.algorithm.linux_name().to_string(),
@@ -851,7 +851,7 @@ remote_asn = 65002
                     md5_password: None,
                     tcp_ao: Some(
                         rustbgpd_transport::TcpAoConfig {
-                            key: "ao-secret".to_string(),
+                            key: "ao-secret".into(),
                             send_id: 7,
                             recv_id: 9,
                             algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,

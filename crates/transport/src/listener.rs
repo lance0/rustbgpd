@@ -1247,7 +1247,7 @@ mod tests {
 
     fn tcp_ao_config() -> TcpAoKeyring {
         TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 1,
             recv_id: 1,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -1275,7 +1275,7 @@ mod tests {
                 let owner_key_count = (key_count - owner_index * 256).min(256);
                 let config = (0..owner_key_count)
                     .map(|key_id| TcpAoConfig {
-                        key: "secret".to_string(),
+                        key: "secret".into(),
                         send_id: u8::try_from(key_id).expect("owner key count is bounded to 256"),
                         recv_id: u8::try_from(key_id).expect("owner key count is bounded to 256"),
                         algorithm: TcpAoAlgorithm::HmacSha256,
@@ -1304,7 +1304,7 @@ mod tests {
         let old = tcp_ao_owner();
         let mut new = old.clone();
         let mut successor = new.config.0[0].clone();
-        successor.key = "successor".to_string();
+        successor.key = "successor".into();
         successor.send_id = 11;
         successor.recv_id = 13;
         successor.preferred = false;
@@ -1325,7 +1325,7 @@ mod tests {
         let old = tcp_ao_owner();
         let mut current = old.clone();
         let mut successor = current.config.0[0].clone();
-        successor.key = "successor".to_string();
+        successor.key = "successor".into();
         successor.send_id = 11;
         successor.recv_id = 13;
         successor.preferred = false;
@@ -1353,7 +1353,7 @@ mod tests {
         );
 
         let mut redefined = old;
-        redefined.config.0[0].key = "redefined".to_string();
+        redefined.config.0[0].key = "redefined".into();
         let redefined_previous = TcpAoPreviousListenerGeneration {
             generation: TcpAoRotationGeneration::STARTUP,
             keys: TcpAoListenerKeyIndex::new(vec![redefined]),
@@ -1420,7 +1420,7 @@ mod tests {
         );
 
         let mut redefined = old.clone();
-        redefined.config.0[0].key = "different-secret".to_string();
+        redefined.config.0[0].key = "different-secret".into();
         assert!(
             plan_add_only_listener_generation(
                 &[old],
@@ -1436,7 +1436,7 @@ mod tests {
     fn partial_apply_retry_cannot_redefine_failed_generation_inventory() {
         let mut desired_owner = tcp_ao_owner();
         let mut successor = desired_owner.config.0[0].clone();
-        successor.key = "first-successor".to_string();
+        successor.key = "first-successor".into();
         successor.send_id = 11;
         successor.recv_id = 13;
         successor.preferred = false;
@@ -1447,7 +1447,7 @@ mod tests {
         retain_pending_listener_generation(&mut retained, &desired).unwrap();
 
         let mut changed = desired.clone();
-        Arc::make_mut(&mut changed.keys)[0].config.0[1].key = "different-successor".to_string();
+        Arc::make_mut(&mut changed.keys)[0].config.0[1].key = "different-successor".into();
         assert!(retain_pending_listener_generation(&mut retained, &changed).is_err());
         assert_eq!(retained.as_ref(), Some(&desired));
     }
@@ -1889,7 +1889,7 @@ mod tests {
         let mut owner = tcp_ao_owner();
         owner.config.0[0].deprecated = true;
         owner.config.0.push(TcpAoConfig {
-            key: "selected".to_string(),
+            key: "selected".into(),
             send_id: 8,
             recv_id: 10,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -1897,7 +1897,7 @@ mod tests {
             deprecated: false,
         });
         owner.config.0.push(TcpAoConfig {
-            key: "other".to_string(),
+            key: "other".into(),
             send_id: 9,
             recv_id: 11,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2086,10 +2086,11 @@ mod tests {
     }
 
     /// Deterministic Linux accept-queue receipt: complete the TCP-AO handshake
-    /// before the listener actor accepts the child, then flip the listener to
-    /// its add-only successor. Linux leaves the queued child at the previous
-    /// inventory, so accept must reconcile it forward without changing key
-    /// selection or dropping authenticated traffic.
+    /// through a dynamic `/24` owner before the listener actor accepts the
+    /// child, then flip the listener to its add-only successor. Linux leaves
+    /// the queued child at the previous inventory, so accept must reconcile it
+    /// forward without changing key selection or dropping authenticated
+    /// traffic.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
@@ -2101,9 +2102,10 @@ mod tests {
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        let owner_prefix = Ipv4Addr::new(127, 0, 0, 0);
         let peer_ip = Ipv4Addr::new(127, 0, 0, 2);
         let current = TcpAoConfig {
-            key: "queued-child-current-secret".to_string(),
+            key: "queued-child-current-secret".into(),
             send_id: 21,
             recv_id: 31,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2112,9 +2114,9 @@ mod tests {
         };
         let current_ring = TcpAoKeyring(vec![current.clone()]);
         let owner = TcpAoListenerKey {
-            owner: TcpAoListenerOwnerKind::Static,
-            peer: peer_ip.into(),
-            prefix_len: 32,
+            owner: TcpAoListenerOwnerKind::Dynamic,
+            peer: owner_prefix.into(),
+            prefix_len: 24,
             config: current_ring.clone(),
         };
         let (accept_tx, mut accept_rx) = mpsc::channel(1);
@@ -2153,7 +2155,7 @@ mod tests {
 
         let mut desired_owner = owner;
         desired_owner.config.0.push(TcpAoConfig {
-            key: "queued-child-successor-secret".to_string(),
+            key: "queued-child-successor-secret".into(),
             send_id: 22,
             recv_id: 32,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2189,11 +2191,15 @@ mod tests {
         assert_eq!(info.pkt_bad, 0);
         assert_eq!(info.pkt_key_not_found, 0);
         assert_eq!(info.pkt_ao_required, 0);
-        assert!(
-            info.keys
-                .iter()
-                .any(|key| key.send_id == 22 && key.recv_id == 32)
-        );
+        // The production snapshot accepts either the configured selector or a
+        // kernel-normalized connected-host selector, then restores the logical
+        // dynamic-owner metadata exposed to the session.
+        assert!(info.keys.iter().any(|key| {
+            key.peer == IpAddr::V4(owner_prefix)
+                && key.prefix_len == 24
+                && key.send_id == 22
+                && key.recv_id == 32
+        }));
 
         let std_client: std::net::TcpStream = client.into();
         std_client.set_nonblocking(true).unwrap();
@@ -2268,7 +2274,7 @@ mod tests {
         }
 
         let covering_config = TcpAoKeyring(vec![TcpAoConfig {
-            key: "kernel-receipt-covering-secret".to_string(),
+            key: "kernel-receipt-covering-secret".into(),
             send_id: 1,
             recv_id: 1,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2277,7 +2283,7 @@ mod tests {
         }]);
         let static_config = TcpAoKeyring(vec![
             TcpAoConfig {
-                key: "kernel-receipt-old-secret".to_string(),
+                key: "kernel-receipt-old-secret".into(),
                 send_id: 2,
                 recv_id: 2,
                 algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2285,7 +2291,7 @@ mod tests {
                 deprecated: true,
             },
             TcpAoConfig {
-                key: "kernel-receipt-next-secret".to_string(),
+                key: "kernel-receipt-next-secret".into(),
                 send_id: 3,
                 recv_id: 3,
                 algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2390,7 +2396,7 @@ mod tests {
         // INFO/GET_KEYS convergence without moving Current/RNext.
         let mut desired_static = static_config.clone();
         desired_static.0.push(TcpAoConfig {
-            key: "kernel-receipt-live-successor".to_string(),
+            key: "kernel-receipt-live-successor".into(),
             send_id: 4,
             recv_id: 4,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2447,7 +2453,7 @@ mod tests {
         );
 
         let mut mismatched = static_config.clone();
-        mismatched.0[1].key = "kernel-receipt-wrong-secret".to_string();
+        mismatched.0[1].key = "kernel-receipt-wrong-secret".into();
         let protected_mismatch = tokio::task::spawn_blocking(move || {
             connect_from("127.0.0.2".parse().unwrap(), destination, Some(&mismatched))
         })

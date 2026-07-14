@@ -213,6 +213,13 @@ selectors, while current and RNext selection must belong to the resolved owner.
 If a child completed before an add-only listener flip, only the exact
 immediately previous inventory may be reconciled forward; arbitrary subsets,
 partial successor inventories, and older generations remain fail-closed.
+The hosted queued-child receipt uses a dynamic `127.0.0.0/24` owner and proves
+its successor is reconciled onto the accepted child with logical owner metadata,
+unchanged Current/RNext, and authenticated traffic. Transport-owned TCP-AO key
+and TCP-MD5 password allocations are redacted and zeroized when each runtime
+clone is replaced or dropped. This does not claim erasure of the TOML parser,
+configuration snapshots, API messages, kernel MKTs, allocator copies, or other
+process memory outside the transport-owned allocations.
 Overlapping TCP-AO owners require directionally disjoint SendID and RecvID sets;
 TCP-AO/plaintext and TCP-AO/MD5 overlaps are rejected. Config validation and
 transport binding enforce the same 4,096-MKT inspection ceiling independently

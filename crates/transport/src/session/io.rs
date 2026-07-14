@@ -769,7 +769,7 @@ where
     C: FnOnce(&socket2::Socket, &socket2::SockAddr) -> std::io::Result<()>,
 {
     if let Some(ref password) = config.md5_password {
-        crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password)?;
+        crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password.as_ref())?;
         debug!(peer = %peer_label, "TCP MD5 authentication configured");
     }
 

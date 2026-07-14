@@ -6,6 +6,47 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+/// Authentication secret owned by the transport runtime.
+///
+/// The wrapper deliberately exposes only borrowed plaintext access. Its inner
+/// wrapper allocation is zeroized when that runtime copy is dropped; schema,
+/// parser, API, and kernel copies have separate lifetimes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TransportAuthSecret(Zeroizing<String>);
+
+impl From<String> for TransportAuthSecret {
+    fn from(secret: String) -> Self {
+        Self(Zeroizing::new(secret))
+    }
+}
+
+impl From<&str> for TransportAuthSecret {
+    fn from(secret: &str) -> Self {
+        Self::from(secret.to_owned())
+    }
+}
+
+impl AsRef<str> for TransportAuthSecret {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for TransportAuthSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl Zeroize for TransportAuthSecret {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for TransportAuthSecret {}
 
 /// Monotonic identity for one immutable TCP-AO desired inventory.
 ///
@@ -174,7 +215,7 @@ impl TcpAoAlgorithm {
 #[derive(Clone, PartialEq, Eq)]
 pub struct TcpAoConfig {
     /// TCP-AO Master Key Tuple secret.
-    pub key: String,
+    pub key: TransportAuthSecret,
     /// Sender `KeyID` (`sndid` in Linux's TCP-AO UAPI).
     pub send_id: u8,
     /// Receiver `KeyID` (`rcvid` in Linux's TCP-AO UAPI).
@@ -275,7 +316,7 @@ pub struct TransportConfig {
     /// Optional peer-group name used for policy matching and operator visibility.
     pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
-    pub md5_password: Option<String>,
+    pub md5_password: Option<TransportAuthSecret>,
     /// TCP-AO authentication key (RFC 5925).
     pub tcp_ao: Option<TcpAoKeyring>,
     /// Enable GTSM / TTL security (RFC 5082).
@@ -369,6 +410,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transport_auth_secret_clones_independently_redacts_and_zeroizes() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<TransportAuthSecret>();
+        let mut secret = TransportAuthSecret::from("transport-secret-sentinel");
+        let retained_clone = secret.clone();
+
+        assert_eq!(format!("{secret:?}"), "<redacted>");
+        assert!(!format!("{secret:?}").contains("transport-secret-sentinel"));
+        secret.zeroize();
+        assert!(secret.as_ref().is_empty());
+        assert_eq!(retained_clone.as_ref(), "transport-secret-sentinel");
+    }
+
+    #[test]
+    fn transport_config_debug_redacts_md5_password() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        config.md5_password = Some("md5-secret-sentinel".into());
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("md5-secret-sentinel"));
+    }
+
+    #[test]
     fn tcp_ao_rotation_generation_is_nonzero_monotonic_and_checked() {
         assert!(TcpAoRotationGeneration::new(0).is_none());
         assert_eq!(TcpAoRotationGeneration::STARTUP.as_u64(), 1);
@@ -384,7 +452,7 @@ mod tests {
     #[test]
     fn tcp_ao_config_debug_redacts_key() {
         let config = TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 1,
             recv_id: 1,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -401,7 +469,7 @@ mod tests {
     #[test]
     fn tcp_ao_keyring_selection_is_preferred_then_first_nondeprecated() {
         let key = |send_id, preferred, deprecated| TcpAoConfig {
-            key: format!("secret-{send_id}"),
+            key: format!("secret-{send_id}").into(),
             send_id,
             recv_id: send_id + 10,
             algorithm: TcpAoAlgorithm::HmacSha256,

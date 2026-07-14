@@ -1187,7 +1187,14 @@ ttl_security = true
     assert_eq!(config.neighbors[0].ttl_security, Some(true));
 
     let peers = config.to_peer_configs().unwrap();
-    assert_eq!(peers[0].0.md5_password.as_deref(), Some("secret"));
+    assert_eq!(
+        peers[0]
+            .0
+            .md5_password
+            .as_ref()
+            .map(std::convert::AsRef::as_ref),
+        Some("secret")
+    );
     assert!(peers[0].0.ttl_security);
 }
 
@@ -1222,7 +1229,7 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)",
     assert!(peers[0].0.md5_password.is_none());
     let runtime_tcp_ao = peers[0].0.tcp_ao.as_ref().unwrap();
     let runtime_tcp_ao = &runtime_tcp_ao.0[0];
-    assert_eq!(runtime_tcp_ao.key, "secret");
+    assert_eq!(runtime_tcp_ao.key.as_ref(), "secret");
     assert_eq!(runtime_tcp_ao.send_id, 7);
     assert_eq!(runtime_tcp_ao.recv_id, 9);
     assert_eq!(

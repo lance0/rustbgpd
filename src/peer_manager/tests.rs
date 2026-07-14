@@ -1676,7 +1676,7 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
             "plaintext"
         );
 
-        managed.transport_config.md5_password = Some("test-password".to_string());
+        managed.transport_config.md5_password = Some("test-password".into());
         assert_eq!(
             super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
             "md5"
@@ -2110,7 +2110,7 @@ async fn apply_peer_reshape_snapshot_rejects_tcp_ao_delta_without_mutation() {
     replacement.hold_time = Some(45);
     replacement.tcp_ao = Some(
         rustbgpd_transport::TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 1,
             recv_id: 1,
             algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
@@ -3988,7 +3988,7 @@ async fn delete_tcp_ao_peer_is_restart_required() {
     let mut config = make_config(addr, 65002);
     config.tcp_ao = Some(
         rustbgpd_transport::TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 1,
             recv_id: 1,
             algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
@@ -4055,7 +4055,7 @@ async fn same_key_tcp_ao_peer_reconfigure_is_allowed() {
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let tcp_ao: rustbgpd_transport::TcpAoKeyring = rustbgpd_transport::TcpAoConfig {
-        key: "secret".to_string(),
+        key: "secret".into(),
         send_id: 1,
         recv_id: 1,
         algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
@@ -4436,7 +4436,7 @@ fn build_transport_config_reflects_every_transport_field() {
         md5_password: Some("hunter2".to_string()),
         tcp_ao: Some(
             rustbgpd_transport::TcpAoConfig {
-                key: "ao-secret".to_string(),
+                key: "ao-secret".into(),
                 send_id: 11,
                 recv_id: 22,
                 algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
@@ -4522,7 +4522,11 @@ fn build_transport_config_reflects_every_transport_field() {
         "send_hold_time"
     );
     assert_eq!(t.max_prefixes, *max_prefixes, "max_prefixes");
-    assert_eq!(t.md5_password, *md5_password, "md5_password");
+    assert_eq!(
+        t.md5_password.as_ref().map(std::convert::AsRef::as_ref),
+        md5_password.as_deref(),
+        "md5_password"
+    );
     assert_eq!(t.tcp_ao, *tcp_ao, "tcp_ao");
     assert_eq!(t.ttl_security, *ttl_security, "ttl_security");
     assert_eq!(t.peer.families, *families, "families");
@@ -11124,7 +11128,7 @@ fn build_transport_config_carries_tcp_ao_key() {
     let mut cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
     cfg.tcp_ao = Some(
         rustbgpd_transport::TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 1,
             recv_id: 2,
             algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
@@ -11138,7 +11142,7 @@ fn build_transport_config_carries_tcp_ao_key() {
 
     let tcp_ao = transport.tcp_ao.as_ref().expect("tcp_ao carried");
     let tcp_ao = &tcp_ao.0[0];
-    assert_eq!(tcp_ao.key, "secret");
+    assert_eq!(tcp_ao.key.as_ref(), "secret");
     assert_eq!(tcp_ao.send_id, 1);
     assert_eq!(tcp_ao.recv_id, 2);
     assert_eq!(

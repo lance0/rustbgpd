@@ -541,7 +541,7 @@ fn tcp_ao_key_from_config(
         recv_id: config.recv_id,
         algorithm: config.algorithm,
         mac_len: 0,
-        key: config.key.as_bytes(),
+        key: config.key.as_ref().as_bytes(),
         set_current: matches!(role, TcpAoSocketRole::ActiveOpen),
         set_rnext: matches!(role, TcpAoSocketRole::ActiveOpen),
     }
@@ -2545,7 +2545,7 @@ mod tests {
         let owner = IpAddr::from([192, 0, 2, 0]);
         let connected = IpAddr::from([192, 0, 2, 9]);
         let config = TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 7,
             recv_id: 9,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -2629,19 +2629,22 @@ mod tests {
     fn tcp_ao_raw_config_receipt_accepts_kernel_normalized_aes_cmac_material() {
         let peer = IpAddr::from([192, 0, 2, 1]);
         let config = TcpAoConfig {
-            key: "cmac-master13".to_string(),
+            key: "cmac-master13".into(),
             send_id: 7,
             recv_id: 9,
             algorithm: TcpAoAlgorithm::CmacAes128,
             preferred: false,
             deprecated: false,
         };
-        assert_eq!(config.key.len(), 13);
+        assert_eq!(config.key.as_ref().len(), 13);
         let normalized = [0xa5; 16];
         let raw = raw_dump_key(peer, "cmac(aes)", &normalized);
         let receipt = receipt_from_raw_inventory(&[raw], peer, 32, &config, true).unwrap();
         assert_eq!(receipt.cores[0].key.as_slice(), normalized);
-        assert_ne!(receipt.cores[0].key.as_slice(), config.key.as_bytes());
+        assert_ne!(
+            receipt.cores[0].key.as_slice(),
+            config.key.as_ref().as_bytes()
+        );
     }
 
     #[test]
@@ -3078,7 +3081,7 @@ mod tests {
     #[test]
     fn tcp_ao_config_for_active_open_sets_current_and_rnext() {
         let config = TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 10,
             recv_id: 11,
             algorithm: TcpAoAlgorithm::HmacSha1,
@@ -3105,7 +3108,7 @@ mod tests {
     #[test]
     fn tcp_ao_config_for_listener_does_not_set_current_or_rnext() {
         let config = TcpAoConfig {
-            key: "secret".to_string(),
+            key: "secret".into(),
             send_id: 10,
             recv_id: 11,
             algorithm: TcpAoAlgorithm::HmacSha256,
