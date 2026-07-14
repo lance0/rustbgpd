@@ -8,6 +8,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
     ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoInfoSnapshot, TcpAoKeyring,
+    TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1463,7 +1464,7 @@ pub struct PeerGroupDefinition {
     /// Override max prefixes.
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.
-    pub md5_password: Option<String>,
+    pub md5_password: Option<TransportAuthSecret>,
     /// Optional TTL-security override.
     pub ttl_security: Option<bool>,
     /// Address families override.
@@ -1547,7 +1548,7 @@ pub struct PeerManagerNeighborConfig {
     /// Maximum prefixes accepted before Cease/1 (None = unlimited).
     pub max_prefixes: Option<u32>,
     /// Optional TCP MD5 password.
-    pub md5_password: Option<String>,
+    pub md5_password: Option<TransportAuthSecret>,
     /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.
     pub tcp_ao: Option<TcpAoKeyring>,
     /// Whether GTSM / TTL security is enabled.

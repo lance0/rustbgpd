@@ -643,7 +643,7 @@ impl PeerManager {
         transport.peer_scope_id = scope_id;
         transport.max_prefixes = config.max_prefixes;
         transport.peer_group.clone_from(&config.peer_group);
-        transport.md5_password = config.md5_password.clone().map(Into::into);
+        transport.md5_password.clone_from(&config.md5_password);
         transport.tcp_ao.clone_from(&config.tcp_ao);
         transport.ttl_security = config.ttl_security;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;

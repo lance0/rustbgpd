@@ -115,9 +115,12 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   selection are required. Partial, arbitrary-subset, and older inventories are
   rejected. A hosted real-kernel receipt proves this path for a dynamic
   `127.0.0.0/24` owner, retaining its logical owner metadata on the child.
-- TCP-AO keys and TCP-MD5 passwords owned by the transport runtime use an
-  immutable redacting wrapper whose independent clones zeroize on drop. This
-  deliberately excludes parser/config/API copies and kernel-owned MKTs.
+- TCP-AO keys and TCP-MD5 passwords owned by the internal API, peer manager,
+  and transport runtime use an immutable redacting wrapper whose independent
+  clones zeroize on drop. The short-lived Linux `tcp_md5sig` UAPI record also
+  scrubs its key buffer and length after every socket-option attempt. This
+  deliberately excludes parser/config/protobuf strings, compiler-created
+  copies, and kernel-owned keys.
 - Protected M43 interop against BIRD 3.3.1 runs in the GitHub-hosted
   `kernel-dataplane` workflow on the current TCP-AO-capable runner. The
   workflow keeps a `CONFIG_TCP_AO` probe so future runner kernels without the

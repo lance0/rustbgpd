@@ -21,6 +21,46 @@ use socket2::Socket;
 #[cfg(target_os = "linux")]
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(target_os = "linux")]
+const TCP_MD5SIG_MAXKEYLEN: usize = 80;
+
+/// Linux `tcp_md5sig`. The key buffer is populated only for the duration of
+/// one `setsockopt` call and is scrubbed, together with its length, on drop.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names mirror the Linux tcp_md5sig ABI"
+)]
+struct TcpMd5Sig {
+    tcpm_addr: libc::sockaddr_storage,
+    tcpm_flags: u8,
+    tcpm_prefixlen: u8,
+    tcpm_keylen: u16,
+    tcpm_ifindex: libc::c_int,
+    tcpm_key: [u8; TCP_MD5SIG_MAXKEYLEN],
+}
+
+#[cfg(target_os = "linux")]
+impl TcpMd5Sig {
+    fn zeroed() -> Self {
+        // SAFETY: this is a C UAPI record made entirely of integer/byte fields.
+        unsafe { std::mem::zeroed() }
+    }
+
+    fn scrub(&mut self) {
+        self.tcpm_key.zeroize();
+        self.tcpm_keylen.zeroize();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TcpMd5Sig {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
 /// Set TCP MD5 signature on a socket for a specific peer.
 ///
 /// This implements RFC 2385 by calling `setsockopt(TCP_MD5SIG)` on Linux.
@@ -36,22 +76,8 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
 
     const TCP_MD5SIG: libc::c_int = 14;
 
-    #[allow(
-        clippy::struct_field_names,
-        reason = "field names mirror the Linux tcp_md5sig ABI"
-    )]
-    #[repr(C)]
-    struct TcpMd5Sig {
-        tcpm_addr: libc::sockaddr_storage,
-        tcpm_flags: u8,
-        tcpm_prefixlen: u8,
-        tcpm_keylen: u16,
-        tcpm_ifindex: libc::c_int,
-        tcpm_key: [u8; 80],
-    }
-
     let peer_sa: socket2::SockAddr = peer.into();
-    let mut sig: TcpMd5Sig = unsafe { mem::zeroed() };
+    let mut sig = TcpMd5Sig::zeroed();
 
     // Copy the sockaddr into the struct
     let sa_bytes = peer_sa.as_ptr().cast::<u8>();
@@ -62,7 +88,7 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
     }
 
     let key_bytes = password.as_bytes();
-    if key_bytes.len() > 80 {
+    if key_bytes.len() > TCP_MD5SIG_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "MD5 password exceeds 80 bytes",
@@ -2305,6 +2331,27 @@ mod tests {
             set_current: true,
             set_rnext: true,
         }
+    }
+
+    #[test]
+    fn tcp_md5sig_uapi_layout_and_secret_scrub_match_linux_header() {
+        assert_eq!(mem::size_of::<TcpMd5Sig>(), 216);
+        assert_eq!(mem::align_of::<TcpMd5Sig>(), 8);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_addr), 0);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_flags), 128);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_prefixlen), 129);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_keylen), 130);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_ifindex), 132);
+        assert_eq!(mem::offset_of!(TcpMd5Sig, tcpm_key), 136);
+
+        let mut sig = TcpMd5Sig::zeroed();
+        sig.tcpm_keylen = 15;
+        sig.tcpm_key[..15].copy_from_slice(b"secret-sentinel");
+        sig.scrub();
+
+        assert_eq!(sig.tcpm_keylen, 0);
+        assert!(sig.tcpm_key.iter().all(|byte| *byte == 0));
+        assert!(mem::needs_drop::<TcpMd5Sig>());
     }
 
     #[test]

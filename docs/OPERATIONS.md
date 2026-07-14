@@ -984,11 +984,13 @@ lengths, hashes, and fingerprints are never returned. `TCP_AO_GET_KEYS` does
 copy raw key bytes into a private temporary buffer; rustbgpd compares accepted
 sockets against the complete configured keyring without logging the bytes and
 zeroizes every temporary on success, error, retry, and unwind.
-Longer-lived TCP-AO keys and TCP-MD5 passwords owned by the transport runtime
-are also redacted and each clone zeroizes its allocation when replaced or
-dropped. Parsed TOML, configuration snapshots, API messages, kernel MKTs, and
-other non-transport copies retain their own lifetimes and are not covered by
-that guarantee.
+Longer-lived TCP-AO keys and TCP-MD5 passwords owned by the internal API,
+peer-manager, and transport runtime are also redacted and each clone zeroizes
+its allocation when replaced or dropped. The temporary Linux `tcp_md5sig`
+record scrubs its key buffer and length after `setsockopt`. Parsed TOML,
+configuration snapshots, protobuf messages, compiler-created copies, and
+kernel-owned keys retain their own lifetimes and are not covered by that
+guarantee.
 
 The same neighbor view reports TCP-AO rotation `desired`, `applied`, and
 `phase` values. `idle` means the peer has acknowledged the desired immutable

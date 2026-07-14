@@ -178,7 +178,10 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         hold_time: definition.hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
-        md5_password: definition.md5_password,
+        md5_password: definition
+            .md5_password
+            .as_ref()
+            .map(|secret| secret.as_ref().to_owned()),
         ttl_security: definition.ttl_security,
         bfd: None,
         families: definition.families,
@@ -218,7 +221,7 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         hold_time: definition.hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
-        md5_password: definition.md5_password.clone(),
+        md5_password: definition.md5_password.as_deref().map(Into::into),
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
         graceful_restart: definition.graceful_restart,
@@ -399,7 +402,10 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     hold_time: cfg.hold_time,
                     send_hold_time: cfg.send_hold_time,
                     max_prefixes: cfg.max_prefixes,
-                    md5_password: cfg.md5_password.clone(),
+                    md5_password: cfg
+                        .md5_password
+                        .as_ref()
+                        .map(|secret| secret.as_ref().to_owned()),
                     tcp_ao: cfg.tcp_ao.as_ref().map(transport_tcp_ao_to_config),
                     bfd: None,
                     ttl_security: Some(cfg.ttl_security),

@@ -179,11 +179,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proves a live SIGHUP successor rotation against BIRD 3.3.1 without a session
   flap.
 
-- **Transport-owned BGP authentication secrets are zeroized on drop.** TCP-AO
-  MKT secrets and TCP-MD5 passwords use an immutable redacting runtime wrapper,
-  so each transport clone scrubs its own allocation when replaced or dropped.
-  TOML parser, configuration snapshot, API, and kernel copies retain their
-  separate lifetimes. The queued-child kernel receipt now exercises a dynamic
+- **Runtime-owned BGP authentication secrets are zeroized on drop.** TCP-AO
+  MKT secrets and TCP-MD5 passwords use an immutable redacting wrapper across
+  the internal API, peer manager, and transport runtime, so each clone scrubs
+  its own allocation when replaced or dropped. The Linux `tcp_md5sig`
+  temporary also scrubs its key buffer and length after every socket-option
+  attempt. TOML parser, configuration snapshot, protobuf, compiler-created,
+  and kernel copies retain their separate lifetimes. The queued-child kernel
+  receipt now exercises a dynamic
   `127.0.0.0/24` owner and proves its successor is installed on the accepted
   child without changing Current/RNext or authenticated traffic.
 

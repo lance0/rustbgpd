@@ -121,7 +121,7 @@ fn proto_definition_to_input(
         hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
-        md5_password: definition.md5_password,
+        md5_password: definition.md5_password.map(Into::into),
         ttl_security: definition.ttl_security,
         families,
         graceful_restart: definition.graceful_restart,
@@ -743,11 +743,21 @@ mod tests {
     #[tokio::test]
     async fn read_peer_group_responses_redact_md5_password() {
         let definition = proto_definition_to_input(sample_definition()).unwrap();
-        assert_eq!(definition.md5_password.as_deref(), Some("secret"));
+        assert_eq!(
+            definition
+                .md5_password
+                .as_ref()
+                .map(std::convert::AsRef::as_ref),
+            Some("secret")
+        );
 
         let output = input_definition_to_proto(&definition);
         assert_eq!(output.md5_password, None);
         assert_eq!(output.has_md5_password, Some(true));
+
+        let debug = format!("{definition:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret"));
 
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None, None);
@@ -840,7 +850,13 @@ mod tests {
                 ack,
             }) => {
                 assert_eq!(name, "rs-clients");
-                assert_eq!(definition.md5_password.as_deref(), Some("secret"));
+                assert_eq!(
+                    definition
+                        .md5_password
+                        .as_ref()
+                        .map(std::convert::AsRef::as_ref),
+                    Some("secret")
+                );
                 assert_eq!(definition.families, vec!["ipv6_unicast"]);
                 ack.expect("persisted mutation must carry an ack")
                     .send(Ok(()))
@@ -882,7 +898,13 @@ mod tests {
                     PeerManagerCommand::SetPeerGroup {
                         definition, reply, ..
                     } => {
-                        assert_eq!(definition.md5_password.as_deref(), Some("super-secret"));
+                        assert_eq!(
+                            definition
+                                .md5_password
+                                .as_ref()
+                                .map(std::convert::AsRef::as_ref),
+                            Some("super-secret")
+                        );
                         let _ = reply.send(Ok(()));
                     }
                     _ => panic!("unexpected peer-manager command"),
@@ -1121,9 +1143,18 @@ mod tests {
 
         let sets = set_definitions.lock().await;
         assert_eq!(sets.len(), 2, "mutation then rollback");
-        assert_eq!(sets[0].md5_password.as_deref(), Some("new-secret"));
         assert_eq!(
-            sets[1].md5_password.as_deref(),
+            sets[0]
+                .md5_password
+                .as_ref()
+                .map(std::convert::AsRef::as_ref),
+            Some("new-secret")
+        );
+        assert_eq!(
+            sets[1]
+                .md5_password
+                .as_ref()
+                .map(std::convert::AsRef::as_ref),
             Some("old-secret"),
             "rollback must restore the prior definition with its stored secret"
         );
