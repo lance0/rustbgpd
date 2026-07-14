@@ -608,8 +608,11 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
     /// snapshots produce identical wire bytes for the same candidate after
     /// excluding only the target-owned message ceiling and identity fields.
     /// Probe failures are deliberately not representable here: callers may
-    /// reuse only encoded lengths from successful source probes. The returned
-    /// vector must preserve the input lengths' cardinality and order.
+    /// reuse only encoded lengths from successful source probes. For a
+    /// wire-equivalent source/target pair, acceptance must be monotone in the
+    /// encoded length: every value at or below the target's negotiated ceiling
+    /// succeeds, and every longer value fails. The returned vector must
+    /// preserve the input lengths' cardinality and order.
     fn reuse_successful_probes(
         &self,
         source: &dyn ExactExportSnapshot,

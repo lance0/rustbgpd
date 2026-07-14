@@ -380,9 +380,11 @@ advertise to eBGP route-server clients with the same local address,
 capabilities, route-server mode, and grouping inputs. One population assigns
 AS 65001 to every client; the other assigns a different remote ASN to each
 client. The transition matrix changes one export-policy community over 4,096
-routes. Every cell ran on the same pinned CPU and release binary settings; the
-raw medians, paired change confidence intervals, commands, and environment are
-retained in the campaign artifact directory.
+routes. These fixtures are groupable plain single-best peers; per-client-best
+and Add-Path peers remain ungrouped and receive no shared-cohort benefit. Every
+cell ran on the same pinned CPU and release binary settings; the aggregate
+Criterion estimates, paired change confidence intervals, commands, and
+environment are retained in the campaign artifact directory.
 
 ### Results
 
@@ -430,11 +432,12 @@ remove-private-AS mode, cluster and next-hop inputs, every negotiated family
 capability, local socket address, scoped-link-local mode, and GShut state.
 Target-owned message ceiling and generation checks still run for every member.
 
-A byte-level regression constructs two route-server profiles with different
-eBGP remote ASNs, proves their complete encoded UPDATEs are identical, and
-proves successful-length reuse. The same test changes the target to iBGP,
-observes different bytes, and requires reuse to fail. The eight-cohort bound is
-unchanged for profiles that differ on a real wire input.
+A byte-level regression constructs distinct-remote-ASN profiles in both
+route-server and ordinary eBGP modes, proves their complete encoded UPDATEs are
+identical, and proves successful-length reuse. The ordinary arm additionally
+asserts that local-AS prepend and next-hop rewriting ran. The same test changes
+the target to iBGP, observes different bytes, and requires reuse to fail. The
+eight-cohort bound is unchanged for profiles that differ on a real wire input.
 
 A separate live-capture canary configures dynamic `remote_asn = 0`, then proves
 that the negotiated ASN classifies an eBGP session as eBGP and a same-AS

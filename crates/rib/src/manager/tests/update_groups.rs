@@ -11,6 +11,27 @@ use rustbgpd_policy::{
 
 use super::*;
 
+#[test]
+fn policy_transition_production_slice_boundaries_are_exact() {
+    let budget = super::super::POLICY_TRANSITION_PRODUCTION_ROUTE_SLICE;
+    let slice_ends = |len| {
+        let mut cursor = 0;
+        let mut ends = Vec::new();
+        while cursor < len {
+            cursor = super::super::policy_transition_slice_end(cursor, len, budget);
+            ends.push(cursor);
+        }
+        ends
+    };
+
+    assert_eq!(budget, 1_024);
+    assert_eq!(slice_ends(0), Vec::<usize>::new());
+    assert_eq!(slice_ends(1_023), vec![1_023]);
+    assert_eq!(slice_ends(1_024), vec![1_024]);
+    assert_eq!(slice_ends(1_025), vec![1_024, 1_025]);
+    assert_eq!(slice_ends(2_049), vec![1_024, 2_048, 2_049]);
+}
+
 struct CohortExactEncoder {
     owner: u64,
     profile: u64,

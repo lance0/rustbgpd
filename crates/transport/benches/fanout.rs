@@ -33,6 +33,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_rib::RibManager;
+use rustbgpd_rib::manager::PolicyTransitionBenchReceipt;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
@@ -280,6 +281,51 @@ type PolicyRegroupState = (
     PolicyChain,
 );
 
+fn assert_shared_transition_receipt(
+    fast: bool,
+    receipt: &PolicyTransitionBenchReceipt,
+    routes: usize,
+    peers: usize,
+) {
+    assert_eq!(
+        fast,
+        peers > 1,
+        "only multi-peer fixtures are eligible for the clean shared transition"
+    );
+    if fast {
+        assert_eq!(receipt.plan_builds, 1, "one shared plan per transition");
+        assert_eq!(
+            receipt.full_exact_probes, routes,
+            "one full exact probe per route"
+        );
+        assert_eq!(
+            receipt.route_shell_materializations, routes,
+            "one route-shell materialization per route"
+        );
+        assert_eq!(
+            receipt.authoritative_peer_applies, 0,
+            "the clean shared transition must not use per-peer fallback"
+        );
+    } else {
+        assert_eq!(
+            receipt.plan_builds, 0,
+            "fallback must not build a shared plan"
+        );
+        assert_eq!(
+            receipt.full_exact_probes, 0,
+            "fallback must not run a shared exact probe"
+        );
+        assert_eq!(
+            receipt.route_shell_materializations, 0,
+            "fallback must not materialize shared route shells"
+        );
+        assert_eq!(
+            receipt.authoritative_peer_applies, 1,
+            "the one-peer fixture must use one authoritative apply"
+        );
+    }
+}
+
 fn build_policy_regroup(routes: usize, peers: usize) -> PolicyRegroupState {
     let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
     let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
@@ -361,7 +407,9 @@ fn bench_ixp_policy_regroup_resync(c: &mut Criterion) {
                         || build_ixp_policy_regroup(4_096, peers, distinct),
                         |(manager, _receivers, next)| {
                             let fast = manager.bench_replace_export_policy_cohort(peers, next);
-                            std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                            let receipt = manager.bench_policy_transition_receipt();
+                            assert_shared_transition_receipt(fast, &receipt, 4_096, peers);
+                            std::hint::black_box((fast, receipt))
                         },
                         BatchSize::PerIteration,
                     );
@@ -386,7 +434,9 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
                         || build_policy_regroup(routes, peers),
                         |(manager, _receivers, next)| {
                             let fast = manager.bench_replace_export_policy_cohort(peers, next);
-                            std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                            let receipt = manager.bench_policy_transition_receipt();
+                            assert_shared_transition_receipt(fast, &receipt, routes, peers);
+                            std::hint::black_box((fast, receipt))
                         },
                         BatchSize::PerIteration,
                     );
@@ -415,7 +465,9 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
                 || build_policy_regroup(routes, peers),
                 |(manager, _receivers, next)| {
                     let fast = manager.bench_replace_export_policy_cohort(peers, next);
-                    std::hint::black_box((fast, manager.bench_policy_transition_receipt()))
+                    let receipt = manager.bench_policy_transition_receipt();
+                    assert_shared_transition_receipt(fast, &receipt, routes, peers);
+                    std::hint::black_box((fast, receipt))
                 },
                 BatchSize::PerIteration,
             );
