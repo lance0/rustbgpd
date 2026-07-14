@@ -98,6 +98,7 @@ use rustbgpd_wire::{Afi, Safi};
 
 const GR_RESTART_MARKER_V1: u8 = 1;
 const GR_RESTART_MARKER_V2: u8 = 2;
+const GR_RESTART_MARKER_V3: u8 = 3;
 const GR_RESTART_MARKER_FILE: &str = "gr-restart.toml";
 const WARM_BUNDLE_DIRECTORY: &str = "warm-bundle-v1";
 const MAX_GR_RESTART_MARKER_BYTES: u64 = 4096;
@@ -155,17 +156,136 @@ struct GrRestartMarker {
     expires_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time_namespace_dev: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time_namespace_ino: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boottime_offset_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boottime_offset_nanos: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at_boottime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrRestartClockSample {
+    boot_id: String,
+    time_namespace_dev: u64,
+    time_namespace_ino: u64,
+    boottime_offset_secs: i64,
+    boottime_offset_nanos: u32,
+    boottime_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrRestartClockDomain {
+    boot_id: String,
+    time_namespace_dev: u64,
+    time_namespace_ino: u64,
+    boottime_offset_secs: i64,
+    boottime_offset_nanos: u32,
+    expires_at_boottime_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidGrRestartMarker {
+    version: u8,
     expires_at: SystemTime,
-    /// Present only for durable marker v2. Checkpoint publication records this
-    /// binding, but startup has no cache load or route-serving behavior.
+    /// Present for generation-bound marker v2 or v3. Checkpoint publication
+    /// records this binding, but startup has no cache load or route-serving
+    /// behavior.
     checkpoint_generation: Option<String>,
+    clock_domain: Option<GrRestartClockDomain>,
     /// SHA-256 of the exact bounded bytes read from the pinned marker entry.
     /// `None` only for values validated directly in unit tests before storage.
     storage_sha256: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrRestartMarkerWriteOutcome {
+    version: u8,
+    checkpoint_generation: Option<String>,
+    degraded_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct GrRestartMarkerWriteError {
+    error: std::io::Error,
+    visible_outcome: Option<GrRestartMarkerWriteOutcome>,
+}
+
+impl std::fmt::Display for GrRestartMarkerWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GrRestartMarkerWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<std::io::Error> for GrRestartMarkerWriteError {
+    fn from(error: std::io::Error) -> Self {
+        Self {
+            error,
+            visible_outcome: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrRestartMarkerDurability {
+    DirectorySynced,
+    VisibleDirectorySyncUncertain,
+}
+
+impl GrRestartMarkerDurability {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectorySynced => "directory_synced",
+            Self::VisibleDirectorySyncUncertain => "visible_directory_sync_uncertain",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleGrRestartMarker {
+    outcome: GrRestartMarkerWriteOutcome,
+    durability: GrRestartMarkerDurability,
+}
+
+#[derive(Debug)]
+struct GrRestartMarkerPublicationResult {
+    visible: Option<VisibleGrRestartMarker>,
+    initial_error: Option<GrRestartMarkerWriteError>,
+    fallback_error: Option<GrRestartMarkerWriteError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrRestartExpiryAuthority {
+    Boottime,
+    Wall,
+}
+
+impl GrRestartExpiryAuthority {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Boottime => "boottime",
+            Self::Wall => "wall_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrRestartMarkerResolution {
+    remaining: Duration,
+    authority: GrRestartExpiryAuthority,
+    fallback_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -348,45 +468,66 @@ impl GrRestartMarkerStore {
 
     fn write_selected(
         &self,
-        expires_at: SystemTime,
+        restart_duration: Duration,
         checkpoint_generation: Option<&str>,
-    ) -> std::io::Result<()> {
-        self.write_inner(expires_at, checkpoint_generation, MarkerFaultPoint::None)
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
+        self.write_inner(
+            restart_duration,
+            checkpoint_generation,
+            MarkerFaultPoint::None,
+        )
     }
 
     fn write_inner(
         &self,
-        expires_at: SystemTime,
+        restart_duration: Duration,
         checkpoint_generation: Option<&str>,
         fault: MarkerFaultPoint,
-    ) -> std::io::Result<()> {
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
+        let wall_now = SystemTime::now();
+        let clock_sample = sample_gr_restart_clock();
+        self.write_inner_with_sample(
+            restart_duration,
+            checkpoint_generation,
+            fault,
+            wall_now,
+            clock_sample,
+        )
+    }
+
+    fn write_inner_with_sample(
+        &self,
+        restart_duration: Duration,
+        checkpoint_generation: Option<&str>,
+        fault: MarkerFaultPoint,
+        wall_now: SystemTime,
+        clock_sample: Result<GrRestartClockSample, String>,
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
         use nix::fcntl::{OFlag, openat, renameat};
         use nix::sys::stat::Mode;
         use nix::unistd::{UnlinkatFlags, unlinkat};
 
-        if checkpoint_generation.is_some_and(|generation| {
-            generation.is_empty()
-                || generation.len() > MAX_CHECKPOINT_GENERATION_BYTES
-                || generation.chars().any(char::is_control)
-        }) {
+        if checkpoint_generation.is_some_and(|generation| !valid_checkpoint_generation(generation))
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "invalid checkpoint generation",
-            ));
+            )
+            .into());
         }
+        let expires_at = wall_now
+            .checked_add(restart_duration)
+            .ok_or_else(|| std::io::Error::other("marker wall expiry overflows system clock"))?;
         let expires_at_unix = expires_at
             .duration_since(UNIX_EPOCH)
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .as_secs();
-        let marker = GrRestartMarker {
-            version: if checkpoint_generation.is_some() {
-                GR_RESTART_MARKER_V2
-            } else {
-                GR_RESTART_MARKER_V1
-            },
+        let (marker, outcome) = build_gr_restart_marker(
             expires_at_unix,
-            checkpoint_generation: checkpoint_generation.map(str::to_string),
-        };
+            restart_duration,
+            checkpoint_generation,
+            clock_sample,
+        );
         let encoded =
             toml::to_string(&marker).map_err(|error| std::io::Error::other(error.to_string()))?;
         let sequence = MARKER_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -399,6 +540,7 @@ impl GrRestartMarkerStore {
             .io_lock
             .lock()
             .map_err(|_| std::io::Error::other("restart-marker I/O lock was poisoned"))?;
+        let mut renamed = false;
         let result = (|| -> std::io::Result<()> {
             marker_fail_if(fault, MarkerFaultPoint::Write)?;
             let fd = openat(
@@ -425,6 +567,7 @@ impl GrRestartMarkerStore {
                 GR_RESTART_MARKER_FILE,
             )
             .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            renamed = true;
             marker_fail_if(fault, MarkerFaultPoint::DirectorySync)?;
             self.directory.file.sync_all()
         })();
@@ -436,6 +579,11 @@ impl GrRestartMarkerStore {
             );
         }
         result
+            .map(|()| outcome.clone())
+            .map_err(|error| GrRestartMarkerWriteError {
+                error,
+                visible_outcome: renamed.then_some(outcome),
+            })
     }
 
     fn remove(&self) -> std::io::Result<()> {
@@ -476,6 +624,60 @@ impl GrRestartMarkerStore {
         ) {
             Ok(()) | Err(Errno::ENOENT) => Ok(()),
             Err(error) => Err(std::io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+}
+
+fn publish_gr_restart_marker_with_fallback<F>(
+    checkpoint_generation: Option<&str>,
+    mut publish: F,
+) -> GrRestartMarkerPublicationResult
+where
+    F: FnMut(Option<&str>) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError>,
+{
+    match publish(checkpoint_generation) {
+        Ok(outcome) => GrRestartMarkerPublicationResult {
+            visible: Some(VisibleGrRestartMarker {
+                outcome,
+                durability: GrRestartMarkerDurability::DirectorySynced,
+            }),
+            initial_error: None,
+            fallback_error: None,
+        },
+        Err(initial_error) => {
+            let initial_visible = initial_error.visible_outcome.clone();
+            if checkpoint_generation.is_none() {
+                return GrRestartMarkerPublicationResult {
+                    visible: initial_visible.map(|outcome| VisibleGrRestartMarker {
+                        outcome,
+                        durability: GrRestartMarkerDurability::VisibleDirectorySyncUncertain,
+                    }),
+                    initial_error: Some(initial_error),
+                    fallback_error: None,
+                };
+            }
+
+            match publish(None) {
+                Ok(outcome) => GrRestartMarkerPublicationResult {
+                    visible: Some(VisibleGrRestartMarker {
+                        outcome,
+                        durability: GrRestartMarkerDurability::DirectorySynced,
+                    }),
+                    initial_error: Some(initial_error),
+                    fallback_error: None,
+                },
+                Err(fallback_error) => {
+                    let final_visible = fallback_error.visible_outcome.clone().or(initial_visible);
+                    GrRestartMarkerPublicationResult {
+                        visible: final_visible.map(|outcome| VisibleGrRestartMarker {
+                            outcome,
+                            durability: GrRestartMarkerDurability::VisibleDirectorySyncUncertain,
+                        }),
+                        initial_error: Some(initial_error),
+                        fallback_error: Some(fallback_error),
+                    }
+                }
+            }
         }
     }
 }
@@ -837,39 +1039,353 @@ fn gr_restart_marker_remaining_time(
 ) -> Option<Duration> {
     let maximum = max_restart_time_secs.filter(|maximum| *maximum > 0)?;
     let remaining = expires_at.duration_since(now).ok()?;
+    if remaining.is_zero() {
+        return None;
+    }
     Some(remaining.min(Duration::from_secs(maximum)))
 }
 
-fn validate_gr_restart_marker(marker: GrRestartMarker) -> Result<ValidGrRestartMarker, String> {
-    match marker.version {
-        GR_RESTART_MARKER_V1 if marker.checkpoint_generation.is_none() => {}
-        GR_RESTART_MARKER_V1 => {
-            return Err("restart marker v1 must not reference a checkpoint generation".to_string());
+fn resolve_gr_restart_marker(
+    marker: &ValidGrRestartMarker,
+    wall_now: SystemTime,
+    clock_sample: Result<GrRestartClockSample, String>,
+    max_restart_time_secs: Option<u64>,
+) -> Option<GrRestartMarkerResolution> {
+    let maximum = max_restart_time_secs.filter(|maximum| *maximum > 0)?;
+    let Some(domain) = marker.clock_domain.as_ref() else {
+        return gr_restart_marker_remaining_time(marker.expires_at, wall_now, Some(maximum)).map(
+            |remaining| GrRestartMarkerResolution {
+                remaining,
+                authority: GrRestartExpiryAuthority::Wall,
+                fallback_reason: Some("legacy marker has no boottime clock domain".to_string()),
+            },
+        );
+    };
+
+    let fallback_reason = match clock_sample {
+        Ok(sample) => match gr_restart_clock_domain_mismatch(domain, &sample) {
+            None => {
+                let remaining_ms = domain
+                    .expires_at_boottime_ms
+                    .checked_sub(sample.boottime_ms)?;
+                if remaining_ms == 0 {
+                    return None;
+                }
+                let maximum_ms = maximum.saturating_mul(1_000);
+                return Some(GrRestartMarkerResolution {
+                    remaining: Duration::from_millis(remaining_ms.min(maximum_ms)),
+                    authority: GrRestartExpiryAuthority::Boottime,
+                    fallback_reason: None,
+                });
+            }
+            Some(reason) => reason,
+        },
+        Err(error) => format!("boottime clock sample unavailable: {error}"),
+    };
+
+    gr_restart_marker_remaining_time(marker.expires_at, wall_now, Some(maximum)).map(|remaining| {
+        GrRestartMarkerResolution {
+            remaining,
+            authority: GrRestartExpiryAuthority::Wall,
+            fallback_reason: Some(fallback_reason),
         }
-        GR_RESTART_MARKER_V2 => {
+    })
+}
+
+fn gr_restart_clock_domain_mismatch(
+    domain: &GrRestartClockDomain,
+    sample: &GrRestartClockSample,
+) -> Option<String> {
+    if domain.boot_id != sample.boot_id {
+        Some("boot ID changed".to_string())
+    } else if domain.time_namespace_dev != sample.time_namespace_dev {
+        Some("time namespace device changed".to_string())
+    } else if domain.time_namespace_ino != sample.time_namespace_ino {
+        Some("time namespace inode changed".to_string())
+    } else if domain.boottime_offset_secs != sample.boottime_offset_secs {
+        Some("time namespace boottime seconds offset changed".to_string())
+    } else if domain.boottime_offset_nanos != sample.boottime_offset_nanos {
+        Some("time namespace boottime nanoseconds offset changed".to_string())
+    } else {
+        None
+    }
+}
+
+fn build_gr_restart_marker(
+    expires_at_unix: u64,
+    restart_duration: Duration,
+    checkpoint_generation: Option<&str>,
+    clock_sample: Result<GrRestartClockSample, String>,
+) -> (GrRestartMarker, GrRestartMarkerWriteOutcome) {
+    let legacy_version = if checkpoint_generation.is_some() {
+        GR_RESTART_MARKER_V2
+    } else {
+        GR_RESTART_MARKER_V1
+    };
+    let mut marker = GrRestartMarker {
+        version: legacy_version,
+        expires_at_unix,
+        checkpoint_generation: checkpoint_generation.map(str::to_string),
+        boot_id: None,
+        time_namespace_dev: None,
+        time_namespace_ino: None,
+        boottime_offset_secs: None,
+        boottime_offset_nanos: None,
+        expires_at_boottime_ms: None,
+    };
+
+    let domain = clock_sample.and_then(|sample| {
+        canonical_boot_id(&sample.boot_id)?;
+        if sample.boottime_offset_nanos >= 1_000_000_000 {
+            return Err("boottime offset nanoseconds are outside 0..1,000,000,000".to_string());
+        }
+        let duration_ms = u64::try_from(restart_duration.as_millis())
+            .map_err(|_| "restart duration does not fit boottime milliseconds".to_string())?;
+        let expires_at_boottime_ms = sample
+            .boottime_ms
+            .checked_add(duration_ms)
+            .ok_or_else(|| "boottime expiry overflows milliseconds".to_string())?;
+        let time_namespace_dev = i64::try_from(sample.time_namespace_dev)
+            .map_err(|_| "time namespace device exceeds TOML's signed integer range".to_string())?;
+        let time_namespace_ino = i64::try_from(sample.time_namespace_ino)
+            .map_err(|_| "time namespace inode exceeds TOML's signed integer range".to_string())?;
+        let expires_at_boottime_ms = i64::try_from(expires_at_boottime_ms)
+            .map_err(|_| "boottime expiry exceeds TOML's signed integer range".to_string())?;
+        Ok((
+            GrRestartClockDomain {
+                boot_id: sample.boot_id,
+                time_namespace_dev: sample.time_namespace_dev,
+                time_namespace_ino: sample.time_namespace_ino,
+                boottime_offset_secs: sample.boottime_offset_secs,
+                boottime_offset_nanos: sample.boottime_offset_nanos,
+                expires_at_boottime_ms: u64::try_from(expires_at_boottime_ms)
+                    .expect("checked nonnegative boottime expiry"),
+            },
+            time_namespace_dev,
+            time_namespace_ino,
+            expires_at_boottime_ms,
+        ))
+    });
+
+    match domain {
+        Ok((domain, time_namespace_dev, time_namespace_ino, expires_at_boottime_ms)) => {
+            marker.version = GR_RESTART_MARKER_V3;
+            marker.boot_id = Some(domain.boot_id);
+            marker.time_namespace_dev = Some(time_namespace_dev);
+            marker.time_namespace_ino = Some(time_namespace_ino);
+            marker.boottime_offset_secs = Some(domain.boottime_offset_secs);
+            marker.boottime_offset_nanos = Some(domain.boottime_offset_nanos);
+            marker.expires_at_boottime_ms = Some(expires_at_boottime_ms);
+            (
+                marker,
+                GrRestartMarkerWriteOutcome {
+                    version: GR_RESTART_MARKER_V3,
+                    checkpoint_generation: checkpoint_generation.map(str::to_string),
+                    degraded_reason: None,
+                },
+            )
+        }
+        Err(reason) => (
+            marker,
+            GrRestartMarkerWriteOutcome {
+                version: legacy_version,
+                checkpoint_generation: checkpoint_generation.map(str::to_string),
+                degraded_reason: Some(reason),
+            },
+        ),
+    }
+}
+
+fn canonical_boot_id(value: &str) -> Result<String, String> {
+    let parsed =
+        uuid::Uuid::parse_str(value).map_err(|error| format!("invalid boot ID: {error}"))?;
+    let canonical = parsed.hyphenated().to_string();
+    if value != canonical {
+        return Err("boot ID is not canonical lowercase hyphenated UUID text".to_string());
+    }
+    Ok(canonical)
+}
+
+fn parse_boottime_offset(content: &str) -> Result<(i64, u32), String> {
+    let mut boottime = None;
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(clock) = fields.next() else {
+            continue;
+        };
+        if clock != "boottime" {
+            continue;
+        }
+        if boottime.is_some() {
+            return Err("time namespace offsets contain duplicate boottime lines".to_string());
+        }
+        let seconds = fields
+            .next()
+            .ok_or_else(|| "time namespace boottime offset is missing seconds".to_string())?
+            .parse::<i64>()
+            .map_err(|error| format!("invalid boottime offset seconds: {error}"))?;
+        let nanoseconds = fields
+            .next()
+            .ok_or_else(|| "time namespace boottime offset is missing nanoseconds".to_string())?
+            .parse::<u32>()
+            .map_err(|error| format!("invalid boottime offset nanoseconds: {error}"))?;
+        if fields.next().is_some() {
+            return Err("time namespace boottime offset has extra fields".to_string());
+        }
+        if nanoseconds >= 1_000_000_000 {
+            return Err(
+                "time namespace boottime nanoseconds are outside 0..1,000,000,000".to_string(),
+            );
+        }
+        boottime = Some((seconds, nanoseconds));
+    }
+    boottime.ok_or_else(|| "time namespace offsets do not contain boottime".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn sample_gr_restart_clock() -> Result<GrRestartClockSample, String> {
+    use nix::time::{ClockId, clock_gettime};
+
+    let raw_boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| format!("failed to read boot ID: {error}"))?;
+    let boot_id = canonical_boot_id(raw_boot_id.trim())?;
+    let metadata = std::fs::metadata("/proc/self/ns/time")
+        .map_err(|error| format!("failed to inspect time namespace: {error}"))?;
+    let offsets = std::fs::read_to_string("/proc/self/timens_offsets")
+        .map_err(|error| format!("failed to read time namespace offsets: {error}"))?;
+    let (boottime_offset_secs, boottime_offset_nanos) = parse_boottime_offset(&offsets)?;
+    let boottime = clock_gettime(ClockId::CLOCK_BOOTTIME)
+        .map_err(|error| format!("failed to sample CLOCK_BOOTTIME: {error}"))?;
+    let seconds = u64::try_from(boottime.tv_sec())
+        .map_err(|_| "CLOCK_BOOTTIME returned negative seconds".to_string())?;
+    let nanoseconds = u32::try_from(boottime.tv_nsec())
+        .map_err(|_| "CLOCK_BOOTTIME returned invalid nanoseconds".to_string())?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err("CLOCK_BOOTTIME nanoseconds are outside 0..1,000,000,000".to_string());
+    }
+    let boottime_ms = seconds
+        .checked_mul(1_000)
+        .and_then(|milliseconds| milliseconds.checked_add(u64::from(nanoseconds / 1_000_000)))
+        .ok_or_else(|| "CLOCK_BOOTTIME overflows milliseconds".to_string())?;
+
+    Ok(GrRestartClockSample {
+        boot_id,
+        time_namespace_dev: metadata.dev(),
+        time_namespace_ino: metadata.ino(),
+        boottime_offset_secs,
+        boottime_offset_nanos,
+        boottime_ms,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_gr_restart_clock() -> Result<GrRestartClockSample, String> {
+    Err("boottime clock-domain sampling is supported only on Linux".to_string())
+}
+
+fn valid_checkpoint_generation(generation: &str) -> bool {
+    !generation.is_empty()
+        && generation.len() <= MAX_CHECKPOINT_GENERATION_BYTES
+        && !generation.chars().any(char::is_control)
+}
+
+fn validate_gr_restart_marker(marker: GrRestartMarker) -> Result<ValidGrRestartMarker, String> {
+    let clock_fields = [
+        marker.boot_id.is_some(),
+        marker.time_namespace_dev.is_some(),
+        marker.time_namespace_ino.is_some(),
+        marker.boottime_offset_secs.is_some(),
+        marker.boottime_offset_nanos.is_some(),
+        marker.expires_at_boottime_ms.is_some(),
+    ];
+    let has_any_clock_field = clock_fields.iter().any(|present| *present);
+    let has_all_clock_fields = clock_fields.iter().all(|present| *present);
+    match marker.version {
+        GR_RESTART_MARKER_V1 if marker.checkpoint_generation.is_none() && !has_any_clock_field => {}
+        GR_RESTART_MARKER_V1 => {
+            return Err(
+                "restart marker v1 must not carry a checkpoint generation or v3 clock fields"
+                    .to_string(),
+            );
+        }
+        GR_RESTART_MARKER_V2 if !has_any_clock_field => {
             let generation = marker
                 .checkpoint_generation
                 .as_deref()
                 .ok_or_else(|| "restart marker v2 is missing checkpoint_generation".to_string())?;
-            if generation.is_empty()
-                || generation.len() > MAX_CHECKPOINT_GENERATION_BYTES
-                || generation.chars().any(char::is_control)
-            {
+            if !valid_checkpoint_generation(generation) {
                 return Err("restart marker v2 has an invalid checkpoint_generation".to_string());
+            }
+        }
+        GR_RESTART_MARKER_V2 => {
+            return Err("restart marker v2 must not carry v3 clock fields".to_string());
+        }
+        GR_RESTART_MARKER_V3 if !has_all_clock_fields => {
+            return Err("restart marker v3 requires all clock-domain fields".to_string());
+        }
+        GR_RESTART_MARKER_V3 => {
+            if marker
+                .checkpoint_generation
+                .as_deref()
+                .is_some_and(|generation| !valid_checkpoint_generation(generation))
+            {
+                return Err("restart marker v3 has an invalid checkpoint_generation".to_string());
             }
         }
         version => {
             return Err(format!(
-                "unsupported marker version {version} (expected {GR_RESTART_MARKER_V1} or {GR_RESTART_MARKER_V2})"
+                "unsupported marker version {version} (expected {GR_RESTART_MARKER_V1}, {GR_RESTART_MARKER_V2}, or {GR_RESTART_MARKER_V3})"
             ));
         }
     }
     let expires_at = UNIX_EPOCH
         .checked_add(Duration::from_secs(marker.expires_at_unix))
         .ok_or_else(|| "marker expiry overflows system clock".to_string())?;
+    let clock_domain = if marker.version == GR_RESTART_MARKER_V3 {
+        let boot_id = marker.boot_id.expect("v3 field presence checked");
+        canonical_boot_id(&boot_id)?;
+        let time_namespace_dev = u64::try_from(
+            marker
+                .time_namespace_dev
+                .expect("v3 field presence checked"),
+        )
+        .map_err(|_| "restart marker v3 time namespace device must be nonnegative")?;
+        let time_namespace_ino = u64::try_from(
+            marker
+                .time_namespace_ino
+                .expect("v3 field presence checked"),
+        )
+        .map_err(|_| "restart marker v3 time namespace inode must be nonnegative")?;
+        let boottime_offset_nanos = marker
+            .boottime_offset_nanos
+            .expect("v3 field presence checked");
+        let expires_at_boottime_ms = u64::try_from(
+            marker
+                .expires_at_boottime_ms
+                .expect("v3 field presence checked"),
+        )
+        .map_err(|_| "restart marker v3 boottime expiry must be nonnegative")?;
+        if boottime_offset_nanos >= 1_000_000_000 {
+            return Err("restart marker v3 has invalid boottime offset nanoseconds".to_string());
+        }
+        Some(GrRestartClockDomain {
+            boot_id,
+            time_namespace_dev,
+            time_namespace_ino,
+            boottime_offset_secs: marker
+                .boottime_offset_secs
+                .expect("v3 field presence checked"),
+            boottime_offset_nanos,
+            expires_at_boottime_ms,
+        })
+    } else {
+        None
+    };
     Ok(ValidGrRestartMarker {
+        version: marker.version,
         expires_at,
         checkpoint_generation: marker.checkpoint_generation,
+        clock_domain,
         storage_sha256: None,
     })
 }
@@ -1146,7 +1662,8 @@ async fn publish_warm_checkpoint_bounded(
     // detached if the coordinator deadline fires; dropping this future flips
     // the shared cancellation token. Encoding, validation, hashing, and
     // chunked writes observe that token and the same monotonic deadline, so a
-    // late worker stops bounded work and can never select marker v2.
+    // late worker stops bounded work and can never bind its generation into a
+    // restart marker.
     std::thread::Builder::new()
         .name("warm-checkpoint-writer".to_string())
         .spawn(move || {
@@ -2030,7 +2547,7 @@ async fn run<T>(
                 warn!(
                     path = %warm_bundle_path.display(),
                     %error,
-                    "warm checkpoint publication unavailable; coordinated shutdown will retain marker-v1 GR fallback"
+                    "warm checkpoint publication unavailable; coordinated shutdown will retain a generationless GR marker"
                 );
                 None
             }
@@ -2045,15 +2562,19 @@ async fn run<T>(
     {
         Ok(Some(marker)) => {
             let max_restart_time_secs = max_gr_restart_time_secs(&config);
-            if let Some(remaining) = gr_restart_marker_remaining_time(
-                marker.expires_at,
+            if let Some(resolution) = resolve_gr_restart_marker(
+                &marker,
                 SystemTime::now(),
+                sample_gr_restart_clock(),
                 max_restart_time_secs,
             ) {
-                let deadline = StdInstant::now() + remaining;
+                let deadline = StdInstant::now() + resolution.remaining;
                 info!(
                     marker = %gr_restart_marker_path.display(),
-                    restart_time_secs = remaining.as_secs(),
+                    marker_version = marker.version,
+                    restart_time_secs = resolution.remaining.as_secs(),
+                    expiry_clock = resolution.authority.as_str(),
+                    clock_fallback_reason = resolution.fallback_reason.as_deref().unwrap_or("none"),
                     checkpoint_generation = marker.checkpoint_generation.as_deref().unwrap_or("none"),
                     "detected GR restart marker — static peers will advertise R=1 until the restart window expires"
                 );
@@ -3915,7 +4436,7 @@ async fn run<T>(
                     Ok(Ok(capture)) => {
                         // Marker expiry and bundle identity come from this same
                         // actor-consistent capture. Main's Config can lag
-                        // accepted runtime CRUD and is only the marker-v1
+                        // accepted runtime CRUD and is only the generationless
                         // compatibility fallback when capture itself fails.
                         restart_time_secs = capture.restart_time_secs;
                         if restart_time_secs.is_some() {
@@ -3963,43 +4484,73 @@ async fn run<T>(
     if let Some(error) = checkpoint_failure.as_deref() {
         warn!(
             %error,
-            "warm checkpoint publication failed; retaining marker-v1 GR fallback"
+            "warm checkpoint publication failed; retaining a generationless GR marker"
         );
     }
 
     if let Some(restart_time_secs) = restart_time_secs {
-        let expires_at = SystemTime::now() + Duration::from_secs(restart_time_secs);
-        let marker_result = gr_restart_marker_store.as_ref().map_or_else(
-            || {
-                Err(std::io::Error::other(
-                    "pinned runtime-state marker storage is unavailable",
-                ))
+        let restart_duration = Duration::from_secs(restart_time_secs);
+        let publication = publish_gr_restart_marker_with_fallback(
+            checkpoint_generation.as_deref(),
+            |generation| {
+                gr_restart_marker_store.as_ref().map_or_else(
+                    || {
+                        Err(std::io::Error::other(
+                            "pinned runtime-state marker storage is unavailable",
+                        )
+                        .into())
+                    },
+                    |store| store.write_selected(restart_duration, generation),
+                )
             },
-            |store| store.write_selected(expires_at, checkpoint_generation.as_deref()),
         );
-        if let Err(e) = marker_result {
+        if let Some(error) = publication.initial_error.as_ref() {
             warn!(
                 marker = %gr_restart_marker_path.display(),
-                error = %e,
-                "failed to write GR restart marker"
+                marker_visible = error.visible_outcome.is_some(),
+                %error,
+                "initial GR restart marker publication did not reach directory-synced durability"
             );
-            if checkpoint_generation.is_some()
-                && let Some(store) = gr_restart_marker_store.as_ref()
-                && let Err(fallback_error) = store.write_selected(expires_at, None)
-            {
+        }
+        if let Some(error) = publication.fallback_error.as_ref() {
+            warn!(
+                marker = %gr_restart_marker_path.display(),
+                marker_visible = error.visible_outcome.is_some(),
+                %error,
+                "generationless GR restart marker fallback did not reach directory-synced durability"
+            );
+        }
+        if let Some(visible) = publication.visible {
+            let outcome = visible.outcome;
+            if visible.durability == GrRestartMarkerDurability::VisibleDirectorySyncUncertain {
                 warn!(
                     marker = %gr_restart_marker_path.display(),
-                    error = %fallback_error,
-                    "failed to publish marker-v1 after marker-v2 failure — restarting-speaker mode will be unavailable on the next start"
+                    marker_version = outcome.version,
+                    checkpoint_generation = outcome.checkpoint_generation.as_deref().unwrap_or("none"),
+                    publication_durability = visible.durability.as_str(),
+                    "GR restart marker is visible but parent-directory durability is unconfirmed"
                 );
             }
-        } else {
+            if let Some(reason) = outcome.degraded_reason.as_deref() {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    marker_version = outcome.version,
+                    %reason,
+                    "published GR restart marker with wall-clock fallback because boottime protection was unavailable"
+                );
+            }
             info!(
                 marker = %gr_restart_marker_path.display(),
                 restart_time_secs,
-                checkpoint_generation = checkpoint_generation.as_deref().unwrap_or("none"),
-                marker_version = if checkpoint_generation.is_some() { GR_RESTART_MARKER_V2 } else { GR_RESTART_MARKER_V1 },
-                "wrote GR restart marker for coordinated shutdown"
+                checkpoint_generation = outcome.checkpoint_generation.as_deref().unwrap_or("none"),
+                marker_version = outcome.version,
+                publication_durability = visible.durability.as_str(),
+                "finished GR restart marker publication for coordinated shutdown"
+            );
+        } else {
+            warn!(
+                marker = %gr_restart_marker_path.display(),
+                "neither publication attempt made a new GR restart marker visible — restarting-speaker mode is not guaranteed on the next start"
             );
         }
     } else if let Some(store) = gr_restart_marker_store.as_ref()
@@ -4210,6 +4761,134 @@ mod tests {
         (dir, GrRestartMarkerStore::new(Arc::new(pinned)))
     }
 
+    fn test_clock_sample(boottime_ms: u64) -> GrRestartClockSample {
+        GrRestartClockSample {
+            boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
+            time_namespace_dev: 17,
+            time_namespace_ino: 23,
+            boottime_offset_secs: -4,
+            boottime_offset_nanos: 500_000_000,
+            boottime_ms,
+        }
+    }
+
+    fn write_test_marker(
+        store: &GrRestartMarkerStore,
+        restart_duration: Duration,
+        checkpoint_generation: Option<&str>,
+        fault: MarkerFaultPoint,
+        wall_now: SystemTime,
+        clock_sample: Result<GrRestartClockSample, String>,
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
+        store.write_inner_with_sample(
+            restart_duration,
+            checkpoint_generation,
+            fault,
+            wall_now,
+            clock_sample,
+        )
+    }
+
+    fn write_test_v3(
+        store: &GrRestartMarkerStore,
+        checkpoint_generation: Option<&str>,
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
+        write_test_marker(
+            store,
+            Duration::from_mins(2),
+            checkpoint_generation,
+            MarkerFaultPoint::None,
+            UNIX_EPOCH + Duration::from_hours(10),
+            Ok(test_clock_sample(10_000)),
+        )
+    }
+
+    fn write_test_legacy(
+        store: &GrRestartMarkerStore,
+        restart_duration: Duration,
+        checkpoint_generation: Option<&str>,
+        wall_now: SystemTime,
+    ) -> Result<GrRestartMarkerWriteOutcome, GrRestartMarkerWriteError> {
+        write_test_marker(
+            store,
+            restart_duration,
+            checkpoint_generation,
+            MarkerFaultPoint::None,
+            wall_now,
+            Err("injected clock sample failure".to_string()),
+        )
+    }
+
+    fn valid_test_v3(expires_at: SystemTime, expires_at_boottime_ms: u64) -> ValidGrRestartMarker {
+        ValidGrRestartMarker {
+            version: GR_RESTART_MARKER_V3,
+            expires_at,
+            checkpoint_generation: None,
+            clock_domain: Some(GrRestartClockDomain {
+                boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
+                time_namespace_dev: 17,
+                time_namespace_ino: 23,
+                boottime_offset_secs: -4,
+                boottime_offset_nanos: 500_000_000,
+                expires_at_boottime_ms,
+            }),
+            storage_sha256: None,
+        }
+    }
+
+    fn publish_test_marker_schedule(
+        store: &GrRestartMarkerStore,
+        checkpoint_generation: Option<&str>,
+        faults: &[MarkerFaultPoint],
+    ) -> GrRestartMarkerPublicationResult {
+        let mut faults = faults.iter().copied();
+        publish_gr_restart_marker_with_fallback(checkpoint_generation, |generation| {
+            write_test_marker(
+                store,
+                Duration::from_mins(2),
+                generation,
+                faults.next().unwrap_or(MarkerFaultPoint::None),
+                UNIX_EPOCH + Duration::from_hours(10),
+                Ok(test_clock_sample(10_000)),
+            )
+        })
+    }
+
+    fn assert_test_v3_on_disk(store: &GrRestartMarkerStore, checkpoint_generation: Option<&str>) {
+        let marker = store.read().unwrap().unwrap();
+        assert_eq!(marker.version, GR_RESTART_MARKER_V3);
+        assert_eq!(
+            marker.checkpoint_generation.as_deref(),
+            checkpoint_generation
+        );
+        assert_eq!(
+            marker.clock_domain,
+            Some(GrRestartClockDomain {
+                boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
+                time_namespace_dev: 17,
+                time_namespace_ino: 23,
+                boottime_offset_secs: -4,
+                boottime_offset_nanos: 500_000_000,
+                expires_at_boottime_ms: 130_000,
+            })
+        );
+    }
+
+    fn v3_marker_toml() -> String {
+        [
+            "version = 3",
+            "expires_at_unix = 36000",
+            "boot_id = \"12345678-1234-4abc-8def-1234567890ab\"",
+            "time_namespace_dev = 17",
+            "time_namespace_ino = 23",
+            "boottime_offset_secs = -4",
+            "boottime_offset_nanos = 500000000",
+            "expires_at_boottime_ms = 130000",
+            "",
+        ]
+        .join("\n")
+    }
+
     fn load_config_from_toml(name: &str, toml: &str) -> Config {
         let path = unique_temp_path(name);
         std::fs::write(&path, toml).unwrap();
@@ -4392,39 +5071,137 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    fn gr_restart_marker_round_trip() {
+    fn gr_restart_marker_v3_round_trips_with_and_without_generation() {
         let (_dir, store) = marker_store();
-        let expires_at = SystemTime::now() + Duration::from_mins(2);
-        store.write_selected(expires_at, None).unwrap();
-        let read_back = store.read().unwrap().unwrap();
-        let diff = read_back
-            .expires_at
-            .duration_since(expires_at)
-            .unwrap_or_else(|e| e.duration());
-        assert!(diff < Duration::from_secs(1));
-        assert_eq!(read_back.checkpoint_generation, None);
+        for generation in [None, Some("checkpoint-0007")] {
+            let outcome = write_test_v3(&store, generation).unwrap();
+            assert_eq!(outcome.version, GR_RESTART_MARKER_V3);
+            assert_eq!(outcome.checkpoint_generation.as_deref(), generation);
+            assert_eq!(outcome.degraded_reason, None);
+
+            let read_back = store.read().unwrap().unwrap();
+            assert_eq!(read_back.version, GR_RESTART_MARKER_V3);
+            assert_eq!(read_back.checkpoint_generation.as_deref(), generation);
+            assert_eq!(
+                read_back.clock_domain,
+                Some(GrRestartClockDomain {
+                    boot_id: "12345678-1234-4abc-8def-1234567890ab".to_string(),
+                    time_namespace_dev: 17,
+                    time_namespace_ino: 23,
+                    boottime_offset_secs: -4,
+                    boottime_offset_nanos: 500_000_000,
+                    expires_at_boottime_ms: 130_000,
+                })
+            );
+        }
         store.remove().unwrap();
     }
 
     #[test]
-    fn gr_restart_marker_v2_round_trip_binds_exact_generation() {
+    fn gr_restart_marker_v1_and_v2_remain_compatible() {
         let (_dir, store) = marker_store();
-        let expires_at = SystemTime::now() + Duration::from_mins(2);
-        store
-            .write_selected(expires_at, Some("checkpoint-0007"))
-            .unwrap();
-
-        let read_back = store.read().unwrap().unwrap();
-        assert_eq!(
-            read_back.checkpoint_generation.as_deref(),
-            Some("checkpoint-0007")
-        );
-        let diff = read_back
-            .expires_at
-            .duration_since(expires_at)
-            .unwrap_or_else(|e| e.duration());
-        assert!(diff < Duration::from_secs(1));
+        let wall_now = UNIX_EPOCH + Duration::from_hours(10);
+        for (generation, version) in [
+            (None, GR_RESTART_MARKER_V1),
+            (Some("checkpoint-0007"), GR_RESTART_MARKER_V2),
+        ] {
+            let outcome =
+                write_test_legacy(&store, Duration::from_mins(2), generation, wall_now).unwrap();
+            assert_eq!(outcome.version, version);
+            assert!(outcome.degraded_reason.is_some());
+            let read_back = store.read().unwrap().unwrap();
+            assert_eq!(read_back.version, version);
+            assert_eq!(read_back.checkpoint_generation.as_deref(), generation);
+            assert_eq!(read_back.clock_domain, None);
+            assert_eq!(read_back.expires_at, wall_now + Duration::from_mins(2));
+        }
         store.remove().unwrap();
+    }
+
+    #[test]
+    fn marker_builder_downgrades_sampling_overflow_and_serializer_range_failures_atomically() {
+        let (_dir, store) = marker_store();
+        let wall_now = UNIX_EPOCH + Duration::from_hours(10);
+        let cases = [
+            Err("sample unavailable".to_string()),
+            Ok(GrRestartClockSample {
+                boottime_ms: u64::MAX,
+                ..test_clock_sample(0)
+            }),
+            Ok(GrRestartClockSample {
+                time_namespace_dev: u64::MAX,
+                ..test_clock_sample(0)
+            }),
+            Ok(GrRestartClockSample {
+                time_namespace_ino: u64::MAX,
+                ..test_clock_sample(0)
+            }),
+            Ok(GrRestartClockSample {
+                boottime_ms: i64::MAX.unsigned_abs(),
+                ..test_clock_sample(0)
+            }),
+        ];
+
+        for (generation, expected_version) in [
+            (None, GR_RESTART_MARKER_V1),
+            (Some("generation"), GR_RESTART_MARKER_V2),
+        ] {
+            for sample in cases.clone() {
+                let outcome = write_test_marker(
+                    &store,
+                    Duration::from_millis(1),
+                    generation,
+                    MarkerFaultPoint::None,
+                    wall_now,
+                    sample,
+                )
+                .unwrap();
+                assert_eq!(outcome.version, expected_version);
+                assert_eq!(outcome.checkpoint_generation.as_deref(), generation);
+                assert!(outcome.degraded_reason.is_some());
+
+                let encoded = std::fs::read_to_string(store.display_path()).unwrap();
+                for field in [
+                    "boot_id",
+                    "time_namespace_dev",
+                    "time_namespace_ino",
+                    "boottime_offset_secs",
+                    "boottime_offset_nanos",
+                    "expires_at_boottime_ms",
+                ] {
+                    assert!(!encoded.contains(field), "unexpected {field} in {encoded}");
+                }
+                let marker = store.read().unwrap().unwrap();
+                assert_eq!(marker.version, expected_version);
+                assert_eq!(marker.clock_domain, None);
+            }
+        }
+        store.remove().unwrap();
+    }
+
+    #[test]
+    fn legacy_decoder_rejects_v3_unknown_clock_fields() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyMarker {
+            #[allow(dead_code)]
+            version: u8,
+            #[allow(dead_code)]
+            expires_at_unix: u64,
+            #[allow(dead_code)]
+            #[serde(default)]
+            checkpoint_generation: Option<String>,
+        }
+
+        let (_dir, store) = marker_store();
+        write_test_v3(&store, Some("generation")).unwrap();
+        let encoded = std::fs::read_to_string(store.display_path()).unwrap();
+        assert!(toml::from_str::<LegacyMarker>(&encoded).is_err());
+
+        // The older process treats the unknown v3 shape as one cold start and
+        // removes it; subsequent starts see no marker to reject again.
+        store.remove().unwrap();
+        assert!(store.read().unwrap().is_none());
     }
 
     #[test]
@@ -4436,7 +5213,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         std::fs::write(&path, "version = 3\nexpires_at_unix = 1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let err = store.read().unwrap_err();
-        assert!(err.contains("unsupported marker version"));
+        assert!(err.contains("requires all clock-domain fields"));
         std::fs::write(&path, "version = 2\nexpires_at_unix = 1\n").unwrap();
         let err = store.read().unwrap_err();
         assert!(err.contains("missing checkpoint_generation"));
@@ -4446,24 +5223,139 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         )
         .unwrap();
         let err = store.read().unwrap_err();
-        assert!(err.contains("v1 must not reference"));
+        assert!(err.contains("v1 must not carry"));
         store.remove().unwrap();
+    }
+
+    #[test]
+    fn gr_restart_marker_v3_requires_exact_clock_field_set() {
+        let complete = v3_marker_toml();
+        let parsed: GrRestartMarker = toml::from_str(&complete).unwrap();
+        assert!(validate_gr_restart_marker(parsed).is_ok());
+
+        for field in [
+            "boot_id",
+            "time_namespace_dev",
+            "time_namespace_ino",
+            "boottime_offset_secs",
+            "boottime_offset_nanos",
+            "expires_at_boottime_ms",
+        ] {
+            let partial = complete
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{field} =")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let marker: GrRestartMarker = toml::from_str(&partial).unwrap();
+            let error = validate_gr_restart_marker(marker).unwrap_err();
+            assert!(
+                error.contains("requires all clock-domain fields"),
+                "missing {field}: {error}"
+            );
+        }
+
+        for version in [GR_RESTART_MARKER_V1, GR_RESTART_MARKER_V2] {
+            let generation = if version == GR_RESTART_MARKER_V2 {
+                "checkpoint_generation = \"legacy\"\n"
+            } else {
+                ""
+            };
+            let encoded = format!(
+                "version = {version}\nexpires_at_unix = 1\n{generation}boot_id = \"12345678-1234-4abc-8def-1234567890ab\"\n"
+            );
+            let marker: GrRestartMarker = toml::from_str(&encoded).unwrap();
+            assert!(validate_gr_restart_marker(marker).is_err());
+        }
+        let unknown = format!("{complete}unexpected_clock_field = 1\n");
+        assert!(toml::from_str::<GrRestartMarker>(&unknown).is_err());
+    }
+
+    #[test]
+    fn gr_restart_marker_v3_validates_uuid_offsets_and_signed_integer_domain() {
+        let uppercase = v3_marker_toml().replace(
+            "12345678-1234-4abc-8def-1234567890ab",
+            "12345678-1234-4ABC-8DEF-1234567890AB",
+        );
+        let marker: GrRestartMarker = toml::from_str(&uppercase).unwrap();
+        assert!(
+            validate_gr_restart_marker(marker)
+                .unwrap_err()
+                .contains("canonical")
+        );
+
+        let bad_nanos = v3_marker_toml().replace("500000000", "1000000000");
+        let marker: GrRestartMarker = toml::from_str(&bad_nanos).unwrap();
+        assert!(
+            validate_gr_restart_marker(marker)
+                .unwrap_err()
+                .contains("nanoseconds")
+        );
+
+        let negative_offset: GrRestartMarker = toml::from_str(&v3_marker_toml()).unwrap();
+        assert_eq!(
+            validate_gr_restart_marker(negative_offset)
+                .unwrap()
+                .clock_domain
+                .unwrap()
+                .boottime_offset_secs,
+            -4
+        );
+
+        let out_of_range = v3_marker_toml().replace(
+            "time_namespace_dev = 17",
+            "time_namespace_dev = 9223372036854775808",
+        );
+        assert!(toml::from_str::<GrRestartMarker>(&out_of_range).is_err());
+
+        let negative_device =
+            v3_marker_toml().replace("time_namespace_dev = 17", "time_namespace_dev = -1");
+        let marker: GrRestartMarker = toml::from_str(&negative_device).unwrap();
+        assert!(
+            validate_gr_restart_marker(marker)
+                .unwrap_err()
+                .contains("nonnegative")
+        );
+    }
+
+    #[test]
+    fn boottime_offset_parser_is_strict_and_accepts_negative_seconds() {
+        assert_eq!(
+            parse_boottime_offset("monotonic 0 0\nboottime -9 42\n").unwrap(),
+            (-9, 42)
+        );
+        for invalid in [
+            "monotonic 0 0\n",
+            "boottime 0\n",
+            "boottime 0 0 extra\n",
+            "boottime 0 1000000000\n",
+            "boottime 0 0\nboottime 0 0\n",
+        ] {
+            assert!(parse_boottime_offset(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]
     fn gr_restart_marker_precommit_failures_preserve_previous_generation() {
         let (_dir, store) = marker_store();
-        let expires_at = SystemTime::now() + Duration::from_mins(2);
-        store.write_selected(expires_at, Some("committed")).unwrap();
+        write_test_v3(&store, Some("committed")).unwrap();
 
         for fault in [
             MarkerFaultPoint::Write,
             MarkerFaultPoint::FileSync,
             MarkerFaultPoint::Rename,
         ] {
-            let result = store.write_inner(expires_at, Some("uncommitted"), fault);
+            let result = write_test_marker(
+                &store,
+                Duration::from_mins(2),
+                Some("uncommitted"),
+                fault,
+                UNIX_EPOCH + Duration::from_hours(10),
+                Ok(test_clock_sample(10_000)),
+            );
             assert!(result.is_err(), "fault {fault:?} must fail");
             let marker = store.read().unwrap().unwrap();
+            assert_eq!(marker.version, GR_RESTART_MARKER_V3);
+            assert!(marker.clock_domain.is_some());
             assert_eq!(
                 marker.checkpoint_generation.as_deref(),
                 Some("committed"),
@@ -4474,26 +5366,158 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    fn gr_restart_marker_postrename_failure_exposes_only_complete_v2() {
+    fn generationless_retry_reports_the_marker_it_actually_committed() {
         let (_dir, store) = marker_store();
-        let expires_at = SystemTime::now() + Duration::from_mins(2);
-        store.write_selected(expires_at, Some("old")).unwrap();
+        let failed = write_test_marker(
+            &store,
+            Duration::from_mins(2),
+            Some("uncommitted"),
+            MarkerFaultPoint::Write,
+            UNIX_EPOCH + Duration::from_hours(10),
+            Ok(test_clock_sample(10_000)),
+        );
+        assert!(failed.is_err());
 
-        let result = store.write_inner(expires_at, Some("new"), MarkerFaultPoint::DirectorySync);
+        let outcome = write_test_v3(&store, None).unwrap();
+        assert_eq!(outcome.version, GR_RESTART_MARKER_V3);
+        assert_eq!(outcome.checkpoint_generation, None);
+        assert_eq!(outcome.degraded_reason, None);
+        let marker = store.read().unwrap().unwrap();
+        assert_eq!(marker.version, GR_RESTART_MARKER_V3);
+        assert_eq!(marker.checkpoint_generation, None);
+        store.remove().unwrap();
+    }
+
+    #[test]
+    fn gr_restart_marker_postrename_failure_exposes_only_complete_v3() {
+        let (_dir, store) = marker_store();
+        write_test_v3(&store, Some("old")).unwrap();
+
+        let result = write_test_marker(
+            &store,
+            Duration::from_mins(2),
+            Some("new"),
+            MarkerFaultPoint::DirectorySync,
+            UNIX_EPOCH + Duration::from_hours(10),
+            Ok(test_clock_sample(10_000)),
+        );
         assert!(result.is_err());
         let marker = store.read().unwrap().unwrap();
+        assert_eq!(marker.version, GR_RESTART_MARKER_V3);
+        assert!(marker.clock_domain.is_some());
         assert_eq!(marker.checkpoint_generation.as_deref(), Some("new"));
         store.remove().unwrap();
     }
 
     #[test]
+    fn generationless_postrename_failure_reports_visible_uncertain_marker() {
+        let (_dir, store) = marker_store();
+        let publication =
+            publish_test_marker_schedule(&store, None, &[MarkerFaultPoint::DirectorySync]);
+
+        assert!(
+            publication
+                .initial_error
+                .as_ref()
+                .is_some_and(|error| error.visible_outcome.is_some())
+        );
+        assert!(publication.fallback_error.is_none());
+        let visible = publication.visible.unwrap();
+        assert_eq!(
+            visible.durability,
+            GrRestartMarkerDurability::VisibleDirectorySyncUncertain
+        );
+        assert_eq!(visible.outcome.version, GR_RESTART_MARKER_V3);
+        assert_eq!(visible.outcome.checkpoint_generation, None);
+        assert_test_v3_on_disk(&store, None);
+    }
+
+    #[test]
+    fn generation_bound_postrename_failure_then_fallback_success_reports_synced_generationless() {
+        let (_dir, store) = marker_store();
+        let publication = publish_test_marker_schedule(
+            &store,
+            Some("generation"),
+            &[MarkerFaultPoint::DirectorySync, MarkerFaultPoint::None],
+        );
+
+        assert!(publication.initial_error.is_some());
+        assert!(publication.fallback_error.is_none());
+        let visible = publication.visible.unwrap();
+        assert_eq!(
+            visible.durability,
+            GrRestartMarkerDurability::DirectorySynced
+        );
+        assert_eq!(visible.outcome.version, GR_RESTART_MARKER_V3);
+        assert_eq!(visible.outcome.checkpoint_generation, None);
+        assert_test_v3_on_disk(&store, None);
+    }
+
+    #[test]
+    fn fallback_precommit_failure_retains_visible_generation_bound_marker() {
+        let (_dir, store) = marker_store();
+        let publication = publish_test_marker_schedule(
+            &store,
+            Some("generation"),
+            &[MarkerFaultPoint::DirectorySync, MarkerFaultPoint::Write],
+        );
+
+        assert!(publication.initial_error.is_some());
+        assert!(
+            publication
+                .fallback_error
+                .as_ref()
+                .is_some_and(|error| error.visible_outcome.is_none())
+        );
+        let visible = publication.visible.unwrap();
+        assert_eq!(
+            visible.durability,
+            GrRestartMarkerDurability::VisibleDirectorySyncUncertain
+        );
+        assert_eq!(visible.outcome.version, GR_RESTART_MARKER_V3);
+        assert_eq!(
+            visible.outcome.checkpoint_generation.as_deref(),
+            Some("generation")
+        );
+        assert_test_v3_on_disk(&store, Some("generation"));
+    }
+
+    #[test]
+    fn fallback_postrename_failure_reports_visible_generationless_marker() {
+        let (_dir, store) = marker_store();
+        let publication = publish_test_marker_schedule(
+            &store,
+            Some("generation"),
+            &[
+                MarkerFaultPoint::DirectorySync,
+                MarkerFaultPoint::DirectorySync,
+            ],
+        );
+
+        assert!(publication.initial_error.is_some());
+        assert!(
+            publication
+                .fallback_error
+                .as_ref()
+                .is_some_and(|error| error.visible_outcome.is_some())
+        );
+        let visible = publication.visible.unwrap();
+        assert_eq!(
+            visible.durability,
+            GrRestartMarkerDurability::VisibleDirectorySyncUncertain
+        );
+        assert_eq!(visible.outcome.version, GR_RESTART_MARKER_V3);
+        assert_eq!(visible.outcome.checkpoint_generation, None);
+        assert_test_v3_on_disk(&store, None);
+    }
+
+    #[test]
     fn inherited_marker_expiry_cannot_remove_replacement_generation() {
         let (_dir, store) = marker_store();
-        let expires_at = SystemTime::now() + Duration::from_mins(2);
-        store.write_selected(expires_at, Some("old")).unwrap();
+        write_test_v3(&store, Some("old")).unwrap();
         let inherited = store.read().unwrap().unwrap();
 
-        store.write_selected(expires_at, Some("new")).unwrap();
+        write_test_v3(&store, Some("new")).unwrap();
         assert!(!store.remove_if_matches(&inherited).unwrap());
         assert_eq!(
             store
@@ -4509,8 +5533,13 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     #[test]
     fn inherited_marker_expiry_compares_exact_bytes_not_parsed_semantics() {
         let (_dir, store) = marker_store();
-        let expires_at = UNIX_EPOCH + Duration::from_hours(500_000);
-        store.write_selected(expires_at, Some("same")).unwrap();
+        write_test_legacy(
+            &store,
+            Duration::from_hours(500_000),
+            Some("same"),
+            UNIX_EPOCH,
+        )
+        .unwrap();
         let inherited = store.read().unwrap().unwrap();
 
         // Same parsed marker, different exact stored bytes and therefore a
@@ -4551,7 +5580,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         symlink(&attacker, &runtime).unwrap();
 
         store
-            .write_selected(SystemTime::now() + Duration::from_mins(2), Some("pinned"))
+            .write_selected(Duration::from_mins(2), Some("pinned"))
             .unwrap();
         pinned.prepare_warm_bundle().unwrap();
         assert!(original.join(GR_RESTART_MARKER_FILE).is_file());
@@ -4649,15 +5678,132 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
+    fn v3_same_domain_uses_boottime_across_wall_clock_steps() {
+        let wall_written = UNIX_EPOCH + Duration::from_hours(10);
+        let marker = valid_test_v3(wall_written + Duration::from_mins(2), 130_000);
+
+        for wall_now in [
+            wall_written - Duration::from_hours(1),
+            wall_written + Duration::from_hours(1),
+        ] {
+            let resolution = resolve_gr_restart_marker(
+                &marker,
+                wall_now,
+                Ok(test_clock_sample(40_000)),
+                Some(120),
+            )
+            .unwrap();
+            assert_eq!(resolution.remaining, Duration::from_secs(90));
+            assert_eq!(resolution.authority, GrRestartExpiryAuthority::Boottime);
+            assert_eq!(resolution.fallback_reason, None);
+        }
+    }
+
+    #[test]
+    fn v1_and_v2_resolution_use_bounded_wall_fallback() {
+        let (_dir, store) = marker_store();
+        let wall_now = UNIX_EPOCH + Duration::from_hours(10);
+        for generation in [None, Some("generation")] {
+            write_test_legacy(&store, Duration::from_secs(30), generation, wall_now).unwrap();
+            let marker = store.read().unwrap().unwrap();
+            let resolution = resolve_gr_restart_marker(
+                &marker,
+                wall_now,
+                Ok(test_clock_sample(100_000)),
+                Some(20),
+            )
+            .unwrap();
+            assert_eq!(resolution.remaining, Duration::from_secs(20));
+            assert_eq!(resolution.authority, GrRestartExpiryAuthority::Wall);
+            assert!(
+                resolution
+                    .fallback_reason
+                    .unwrap()
+                    .contains("legacy marker")
+            );
+        }
+        store.remove().unwrap();
+    }
+
+    #[test]
+    fn v3_boottime_resolution_handles_normal_equal_expired_and_clamped_deadlines() {
+        let wall_now = UNIX_EPOCH + Duration::from_hours(10);
+        let marker = valid_test_v3(wall_now + Duration::from_hours(1), 130_000);
+        let resolution =
+            resolve_gr_restart_marker(&marker, wall_now, Ok(test_clock_sample(100_000)), Some(120))
+                .unwrap();
+        assert_eq!(resolution.remaining, Duration::from_secs(30));
+
+        for current_ms in [130_000, 130_001] {
+            assert_eq!(
+                resolve_gr_restart_marker(
+                    &marker,
+                    wall_now,
+                    Ok(test_clock_sample(current_ms)),
+                    Some(120),
+                ),
+                None
+            );
+        }
+
+        let far = valid_test_v3(wall_now + Duration::from_hours(1), 1_000_000);
+        assert_eq!(
+            resolve_gr_restart_marker(&far, wall_now, Ok(test_clock_sample(100_000)), Some(120),)
+                .unwrap()
+                .remaining,
+            Duration::from_mins(2)
+        );
+    }
+
+    #[test]
+    fn v3_domain_mismatches_and_sample_failure_use_bounded_wall_fallback() {
+        let wall_now = UNIX_EPOCH + Duration::from_hours(10);
+        let marker = valid_test_v3(wall_now + Duration::from_secs(30), 130_000);
+        let mut mismatches = Vec::new();
+
+        let mut sample = test_clock_sample(100_000);
+        sample.boot_id = "87654321-4321-4abc-8def-ba0987654321".to_string();
+        mismatches.push(sample);
+        let mut sample = test_clock_sample(100_000);
+        sample.time_namespace_dev += 1;
+        mismatches.push(sample);
+        let mut sample = test_clock_sample(100_000);
+        sample.time_namespace_ino += 1;
+        mismatches.push(sample);
+        let mut sample = test_clock_sample(100_000);
+        sample.boottime_offset_secs += 1;
+        mismatches.push(sample);
+        let mut sample = test_clock_sample(100_000);
+        sample.boottime_offset_nanos += 1;
+        mismatches.push(sample);
+
+        for sample in mismatches {
+            let resolution =
+                resolve_gr_restart_marker(&marker, wall_now, Ok(sample), Some(20)).unwrap();
+            assert_eq!(resolution.remaining, Duration::from_secs(20));
+            assert_eq!(resolution.authority, GrRestartExpiryAuthority::Wall);
+            assert!(resolution.fallback_reason.is_some());
+        }
+
+        let unavailable =
+            resolve_gr_restart_marker(&marker, wall_now, Err("injected".to_string()), Some(20))
+                .unwrap();
+        assert_eq!(unavailable.remaining, Duration::from_secs(20));
+        assert_eq!(unavailable.authority, GrRestartExpiryAuthority::Wall);
+        assert!(unavailable.fallback_reason.unwrap().contains("unavailable"));
+    }
+
+    #[test]
     fn gr_restart_marker_remaining_time_rejects_or_clamps_valid_far_future_v2_marker() {
         let (_dir, store) = marker_store();
         let far_future_secs = i64::MAX.unsigned_abs();
-        let expires_at = UNIX_EPOCH
-            .checked_add(Duration::from_secs(far_future_secs))
-            .unwrap();
-        store
-            .write_selected(expires_at, Some("far-future-generation"))
-            .unwrap();
+        write_test_legacy(
+            &store,
+            Duration::from_secs(far_future_secs),
+            Some("far-future-generation"),
+            UNIX_EPOCH,
+        )
+        .unwrap();
         let marker = store.read().unwrap().unwrap();
         assert_eq!(
             marker.checkpoint_generation.as_deref(),
@@ -4676,19 +5822,20 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    fn authoritative_capture_restart_window_controls_v2_expiry() {
+    fn authoritative_capture_restart_window_controls_marker_expiry() {
         let (_dir, store) = marker_store();
         // Represents a live runtime-config capture that advanced from a stale
         // startup value to 17 seconds. Production overwrites the fallback with
-        // `capture.restart_time_secs` before selecting marker v2.
+        // `capture.restart_time_secs` before publishing the restart marker.
         let captured_restart_time_secs = 17;
         let before = SystemTime::now();
-        store
-            .write_selected(
-                before + Duration::from_secs(captured_restart_time_secs),
-                Some("captured-generation"),
-            )
-            .unwrap();
+        write_test_legacy(
+            &store,
+            Duration::from_secs(captured_restart_time_secs),
+            Some("captured-generation"),
+            before,
+        )
+        .unwrap();
 
         let marker = store.read().unwrap().unwrap();
         assert_eq!(
@@ -4704,9 +5851,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     #[test]
     fn failed_or_timed_out_writer_selects_v1_without_generation_reference() {
         let (_dir, store) = marker_store();
-        store
-            .write_selected(SystemTime::now() + Duration::from_mins(2), None)
-            .unwrap();
+        write_test_legacy(&store, Duration::from_mins(2), None, SystemTime::now()).unwrap();
 
         let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
@@ -4773,15 +5918,12 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         );
 
         marker_store
-            .write_selected(
-                SystemTime::now() + Duration::from_mins(2),
-                result.ok().as_deref(),
-            )
+            .write_selected(Duration::from_mins(2), result.ok().as_deref())
             .unwrap();
         let marker = marker_store.read().unwrap().unwrap();
         assert_eq!(
             marker.checkpoint_generation, None,
-            "failed publication must retain marker-v1 fallback"
+            "failed publication must retain a generationless marker"
         );
         marker_store.remove().unwrap();
     }
@@ -4821,9 +5963,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         session.peer_gr_families.clear();
         assert!(build_warm_checkpoint_plan(&[session]).is_err());
 
-        store
-            .write_selected(SystemTime::now() + Duration::from_mins(2), None)
-            .unwrap();
+        store.write_selected(Duration::from_mins(2), None).unwrap();
         let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
         store.remove().unwrap();

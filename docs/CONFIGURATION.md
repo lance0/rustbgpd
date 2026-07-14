@@ -149,7 +149,7 @@ publish a content-addressed MRT artifact plus `manifest.json` under
 the exact effective configuration, resolved import policies, live peer/family
 identity, and restart-marker generation, and is readable only through the
 daemon-private runtime-state directory. If capture or publication fails, the
-daemon falls back to the existing marker-v1 Graceful Restart behavior.
+daemon still publishes a generationless Graceful Restart marker.
 After a new manifest is durably committed, rustbgpd removes superseded
 content-addressed snapshots and recognizable interrupted-write temporary
 files from that pinned private directory. Cleanup failure is logged but does
@@ -158,8 +158,13 @@ untouched.
 
 This option does **not** make startup restore routes: no cached route is loaded,
 selected, installed, or advertised. A successful checkpoint only causes the GR
-restart marker to carry the matching generation (marker v2); the current boot
-path still rebuilds all routing state from peers.
+restart marker to carry the matching generation. On Linux this is normally
+marker v3, whose complete boot/time-namespace identity and `CLOCK_BOOTTIME`
+deadline protect the shutdown-to-startup interval from wall-clock steps. If
+that clock domain cannot be sampled or represented, generation-bound marker v2
+retains the bounded wall-clock behavior. Checkpoint failure similarly selects
+a generationless v3 or wall-only v1 marker. The current boot path still
+rebuilds all routing state from peers.
 
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
