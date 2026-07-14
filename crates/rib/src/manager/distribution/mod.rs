@@ -1480,6 +1480,12 @@ impl RibManager {
                     );
                 }
                 self.finish_clean_policy_transition_commit();
+                // Match the authoritative single-peer replacement seam: a
+                // successful policy transaction also owns the global retry
+                // opportunity for dirty peers. Without this pass, unrelated
+                // withdrawal residue can remain queued until the timer even
+                // though the caller has already observed a successful commit.
+                self.distribute_changes(&HashSet::new(), &HashSet::new());
                 debug!(
                     source_group = source,
                     destination_group = destination,

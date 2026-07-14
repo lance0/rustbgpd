@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
@@ -191,9 +192,163 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
-        if let Some(result) = self.try_apply_export_only_policy_cohort(&targets).await {
-            return result;
+        let total_targets = targets.len();
+        let mut seen = BTreeSet::new();
+        let has_duplicate = targets
+            .iter()
+            .any(|target| !seen.insert(PeerKey::new(target.address, target.interface.clone())));
+        if has_duplicate {
+            return self
+                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .await
+                .map(|captured| {
+                    captured
+                        .into_iter()
+                        .map(|captured| captured.policy)
+                        .collect()
+                });
         }
+
+        let cohort_mask = self.export_only_policy_cohort_mask(&targets).await;
+        let cohort_targets = cohort_mask.iter().filter(|&&selected| selected).count();
+        if cohort_targets < 2 {
+            return self
+                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .await
+                .map(|captured| {
+                    captured
+                        .into_iter()
+                        .map(|captured| captured.policy)
+                        .collect()
+                });
+        }
+
+        let cohort = targets
+            .iter()
+            .zip(&cohort_mask)
+            .filter_map(|(target, &selected)| selected.then_some(target))
+            .collect::<Vec<_>>();
+        let remainder_targets = total_targets - cohort_targets;
+        let started = Instant::now();
+        info!(
+            total_targets,
+            cohort_targets, remainder_targets, "partitioned resolved policy snapshot"
+        );
+
+        let Some(cohort_result) = self.try_apply_export_only_policy_cohort(&cohort).await else {
+            // Defensive invariant fallback: no mutation occurs before this
+            // helper returns `None`, so preserve original authoritative order.
+            return self
+                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .await
+                .map(|captured| {
+                    captured
+                        .into_iter()
+                        .map(|captured| captured.policy)
+                        .collect()
+                });
+        };
+        let mut captured = cohort_result?;
+        drop(cohort);
+        let remainder = targets
+            .into_iter()
+            .zip(cohort_mask)
+            .filter_map(|(target, selected)| (!selected).then_some(target))
+            .collect();
+        match self
+            .apply_resolved_policy_snapshot_authoritatively(remainder)
+            .await
+        {
+            Ok(mut remainder_captured) => {
+                captured.append(&mut remainder_captured);
+                info!(
+                    total_targets,
+                    cohort_targets,
+                    remainder_targets,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "committed partitioned resolved policy snapshot"
+                );
+                Ok(captured
+                    .into_iter()
+                    .map(|captured| captured.policy)
+                    .collect())
+            }
+            Err(remainder_error) => Err(match self.restore_resolved_policies(captured).await {
+                Ok(()) => format!(
+                    "failed to apply authoritative policy remainder: {remainder_error}; \
+                     committed cohort restored"
+                ),
+                Err(cohort_restore_error) => format!(
+                    "failed to apply authoritative policy remainder: {remainder_error}; \
+                     restoring committed cohort also failed: {cohort_restore_error}"
+                ),
+            }),
+        }
+    }
+
+    /// Select the first viable export-only cohort in target order. Selection is
+    /// linear: once the first Established local candidate fixes the installed
+    /// and target export chains, later candidates either join that exact pair or
+    /// remain in the authoritative remainder. The RIB independently revalidates
+    /// runtime group identity, ownership, generation, and session state. If a
+    /// selected session changes after this observation, its hot-apply failure is
+    /// restored by the owned cohort transaction; a later RIB divergence hands
+    /// the entire cohort to the authoritative per-peer seam.
+    async fn export_only_policy_cohort_mask(
+        &mut self,
+        targets: &[ResolvedPeerPolicy],
+    ) -> Vec<bool> {
+        let mut selected = vec![false; targets.len()];
+        let mut anchor: Option<(Option<PolicyChain>, Option<PolicyChain>)> = None;
+
+        for (index, target) in targets.iter().enumerate() {
+            let peer_key = PeerKey::new(target.address, target.interface.clone());
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            if managed.import_policy != target.import_policy
+                || managed.export_policy == target.export_policy
+                || managed.pending_refresh
+                || managed.pending_export_apply
+                || anchor.as_ref().is_some_and(|(installed, target_chain)| {
+                    installed != &managed.export_policy || target_chain != &target.export_policy
+                })
+            {
+                continue;
+            }
+            let prospective_anchor = anchor
+                .is_none()
+                .then(|| (managed.export_policy.clone(), target.export_policy.clone()));
+            let commands = managed.handle.commands_sender();
+
+            let established = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await
+                .is_some_and(|state| state.fsm_state == SessionState::Established);
+            self.drain_readiness_queries().await;
+            if !established {
+                continue;
+            }
+
+            if let Some(prospective_anchor) = prospective_anchor {
+                anchor = Some(prospective_anchor);
+            }
+            selected[index] = true;
+        }
+
+        selected
+    }
+
+    /// Apply targets one at a time in their supplied order. This is the
+    /// authoritative transaction used for an unpartitioned snapshot and for a
+    /// partition's stable remainder. It never recursively selects a cohort.
+    async fn apply_resolved_policy_snapshot_authoritatively(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+    ) -> Result<Vec<CapturedResolvedPolicy>, String> {
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
@@ -242,10 +397,7 @@ impl PeerManager {
             }
             applied[applied_idx].forward_completed = true;
         }
-        Ok(applied
-            .into_iter()
-            .map(|captured| captured.policy)
-            .collect())
+        Ok(applied)
     }
 
     /// Fast path for the dominant reload shape: two or more Established peers
@@ -263,8 +415,8 @@ impl PeerManager {
     )]
     async fn try_apply_export_only_policy_cohort(
         &mut self,
-        targets: &[ResolvedPeerPolicy],
-    ) -> Option<Result<Vec<ResolvedPeerPolicy>, String>> {
+        targets: &[&ResolvedPeerPolicy],
+    ) -> Option<Result<Vec<CapturedResolvedPolicy>, String>> {
         if targets.len() < 2 {
             return None;
         }
@@ -284,28 +436,6 @@ impl PeerManager {
                 return None;
             }
             peer_keys.push(peer_key);
-        }
-
-        // Establishment is part of the fast-path preflight. The ordinary path
-        // remains authoritative for reconnecting or query-stalled sessions.
-        for peer_key in &peer_keys {
-            let commands = self
-                .peers
-                .get(peer_key)
-                .expect("cohort peer existed during local preflight")
-                .handle
-                .commands_sender();
-            let established = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
-                    commands,
-                    PEER_QUERY_TIMEOUT,
-                ))
-                .await
-                .is_some_and(|state| state.fsm_state == SessionState::Established);
-            if !established {
-                return None;
-            }
-            self.drain_readiness_queries().await;
         }
 
         let mut captured = Vec::with_capacity(targets.len());
@@ -433,10 +563,7 @@ impl PeerManager {
         for captured in &mut captured {
             captured.forward_completed = true;
         }
-        Some(Ok(captured
-            .into_iter()
-            .map(|captured| captured.policy)
-            .collect()))
+        Some(Ok(captured))
     }
 
     /// Await the cohort RIB reply while admitting only the dedicated
@@ -956,7 +1083,19 @@ impl PeerManager {
             false
         };
 
-        let export_apply_result = if export_changed {
+        // A failed forward export command is not proof that the session kept
+        // its prior chain: the reply may be lost after a partial local apply.
+        // During rollback, `managed.export_policy` deliberately still names the
+        // prior chain, so equality alone would skip the reassertion and clear
+        // the pending marker against an ambiguous session. Re-send the prior
+        // chain before restoring the RIB whenever this incomplete-forward path
+        // inherited export intent.
+        let reassert_prior_export = had_pending_export_apply
+            && matches!(
+                refresh_failure,
+                RefreshFailureHandling::BestEffortRestorePrior { .. }
+            );
+        let export_apply_result = if export_changed || reassert_prior_export {
             managed
                 .handle
                 .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)

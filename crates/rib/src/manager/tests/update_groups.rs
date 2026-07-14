@@ -1107,6 +1107,230 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 }
 
 #[tokio::test]
+async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 40, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 40, 0, 2)),
+    ];
+    let old_policies = [community_chain(0xFDE8_1001), community_chain(0xFDE8_1002)];
+    let next_policy = community_chain(0xFDE8_1003);
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policies[index].clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 41,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source_groups = [
+        query_update_group(&tx, peers[0]).await,
+        query_update_group(&tx, peers[1]).await,
+    ];
+    assert_ne!(source_groups[0], source_groups[1]);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
+    );
+    assert_eq!(query_update_group(&tx, peers[0]).await, source_groups[0]);
+    assert_eq!(query_update_group(&tx, peers[1]).await, source_groups[1]);
+    assert!(
+        receivers
+            .iter_mut()
+            .all(|receiver| receiver.try_recv().is_err())
+    );
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "a divergent source edge must not retain a staged destination"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the residue regression constructs an unrelated saturated member and proves the batch reply boundary"
+)]
+async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_1101);
+    let next_policy = community_chain(0xFDE8_1102);
+    let cohort = [
+        IpAddr::V4(Ipv4Addr::new(10, 41, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 41, 0, 2)),
+    ];
+    let mut cohort_receivers = Vec::new();
+    for (index, peer) in cohort.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        cohort_receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 43,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+
+    let dirty_peer = IpAddr::V4(Ipv4Addr::new(10, 41, 0, 3));
+    tx.send(RibUpdate::SetPeerExportEncoder {
+        peer: dirty_peer,
+        session_id: 0,
+        encoder: Arc::new(CohortExactEncoder {
+            owner: 3,
+            profile: 43,
+            max_len: 4_096,
+            generation: AtomicUsize::new(0),
+            advance_generation: false,
+            probes: Arc::clone(&probes),
+            reuses: Arc::clone(&reuses),
+        }),
+    })
+    .await
+    .unwrap();
+    let mut dirty_spec = PeerUpSpec::ibgp(dirty_peer);
+    dirty_spec.route_reflector_client = true;
+    let mut dirty_receiver = peer_up_with_capacity(&tx, dirty_spec, 1).await;
+    let source = Ipv4Addr::new(192, 0, 2, 41);
+    let first_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24);
+    let second_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
+    let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    };
+    let make_route = |prefix| crate::test_support::make_route(prefix, source);
+    send_routes(vec![make_route(first_prefix)], vec![]).await;
+    send_routes(vec![make_route(second_prefix)], vec![]).await;
+    send_routes(vec![], vec![(Prefix::V4(first_prefix), 0)]).await;
+    let (health_reply, health_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth {
+        reply: health_reply,
+    })
+    .await
+    .unwrap();
+    let (dirty, _, group_dirty, _, _, _) = health_response.await.unwrap();
+    assert_eq!((dirty, group_dirty), (1, 1));
+    assert!(
+        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]) > 0.0,
+        "withdrawal residue must exist before the clean cohort commit"
+    );
+    let initially_delivered = dirty_receiver.recv().await.unwrap();
+    assert_eq!(initially_delivered.announce.len(), 1);
+    for receiver in &mut cohort_receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: cohort
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+
+    let (health_reply, health_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryOutboundHealth {
+        reply: health_reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        health_response.await.unwrap(),
+        (0, 0, 0, 0, 0, 0),
+        "the success reply must follow the global dirty drain"
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
+        0.0,
+        "residue after pre-reply dirty drain",
+    );
+    let healed = dirty_receiver.recv().await.unwrap();
+    assert!(
+        healed.withdraw.contains(&(Prefix::V4(first_prefix), 0)),
+        "the pre-reply drain must emit the unrelated withdrawal residue"
+    );
+    assert!(
+        healed
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(second_prefix))
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "the existing-destination regression checks every grouped counter handle before and after later staging"
