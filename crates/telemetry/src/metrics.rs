@@ -604,8 +604,10 @@ impl BgpMetrics {
                  PeerDown/PeerGracefulRestart — the symmetric collision \
                  interleaving where the loser's PeerUp replaced the winner's \
                  registration before the loser went down. The survivor is \
-                 re-registered, re-sent the initial table, and asked for an \
-                 inbound ROUTE-REFRESH.",
+                 excluded from any re-armed startup selection wait only when \
+                 its stamped identity is exact and unambiguous, re-registered, \
+                 re-sent the initial table, and asked for a best-effort inbound \
+                 ROUTE-REFRESH.",
             ),
             &["peer"],
         )

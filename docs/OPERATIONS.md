@@ -483,7 +483,7 @@ authenticated sensitive-read surface.
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
 | `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` is `routes` (`RoutesReceived`), `eor` (End-of-RIB), `refresh` (route-refresh request / RFC 7313 BoRR/EoRR), `orf` (RFC 5291 ORF push), or `policy_context` (peer-group policy identity). The registered session's state is untouched |
-| `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The survivor is re-registered, re-sent the initial table, and asked for an inbound ROUTE-REFRESH |
+| `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor is excluded from any re-armed startup selection wait, re-registered, re-sent the initial table, and asked for a best-effort inbound ROUTE-REFRESH |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane stays live |
@@ -803,6 +803,15 @@ nested FlowSpec terms and BGP-LS payload bytes), not a promise about process
 RSS, allocator capacity, or hash-table overhead. An identity that lands exactly
 on either cap is retained; the family of the next identity that would exceed a
 cap enters overflow fallback.
+
+An ordinary same-address replacement remains an EoR waiter, and stale EoR from
+its predecessor is rejected. If collision resolution fails registration back
+to the exact nonzero, unambiguous survivor, only that survivor is excluded from
+its re-armed roster entries; other waiters remain blocking. The follow-up
+ROUTE-REFRESH request is best-effort Adj-RIB-In recovery assistance and is not
+treated as EoR or refresh completion. Full or closed survivor outbound channels
+can lose that request but cannot re-arm a family that selection already
+released.
 
 ### BFD
 

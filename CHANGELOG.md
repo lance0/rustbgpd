@@ -197,6 +197,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured window. Expired markers, or markers without a positive effective
   restart window, produce an immediate cold start.
 
+- **Collision failback no longer strands startup route selection until the
+  timer.** When an active collision replacement drops, only the exact nonzero,
+  unambiguous surviving session is excluded from its re-armed frozen-roster
+  entries; ordinary replacement, real remaining waiters, and stale predecessor
+  EoR handling are unchanged. Complete family recomputation and ledger
+  reclamation still stage the table before EoR, while the survivor's inbound
+  ROUTE-REFRESH remains best-effort recovery assistance rather than a
+  completion signal.
+
 - **The v1 config compatibility gate now pins stable object shape.** Stable
   definition digests cover the complete required-field set and unknown-field
   policy in addition to selected property schemas, while continuing to allow

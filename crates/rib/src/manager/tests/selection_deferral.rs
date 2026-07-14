@@ -350,7 +350,248 @@ async fn duplicate_address_roster_fails_closed_until_timer() {
 }
 
 #[test]
-fn overflow_fallback_withdraws_restored_keys_before_release_eor() {
+fn collision_failback_excludes_only_the_rearmed_survivor() {
+    let survivor = peer(1);
+    let remaining = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[survivor, remaining]));
+    let gr_families = HashSet::from([FAMILY]);
+    let selection = manager.selection_deferral.as_mut().unwrap();
+
+    assert!(
+        selection
+            .classify_session(survivor, 11, false, &gr_families, &metrics)
+            .is_empty()
+    );
+    assert!(!selection.end_of_rib(survivor, 11, FAMILY, &metrics));
+    selection.session_down(survivor, 11, &metrics);
+    assert_eq!(
+        selection.exclude_collision_failback_survivor(survivor, 11, &metrics),
+        Some(Vec::new()),
+        "the exact re-armed survivor should stop blocking without releasing a real waiter"
+    );
+
+    let survivor_row = selection.peer_snapshot(survivor).remove(0);
+    assert!(survivor_row.active);
+    assert_eq!(survivor_row.waiter_state, "excluded");
+    assert_eq!(survivor_row.waiter_session_id, Some(11));
+    assert_eq!(survivor_row.blocking_waiters, 1);
+    assert!(
+        !selection.end_of_rib(survivor, 12, FAMILY, &metrics),
+        "an unrelated session must not satisfy the excluded survivor"
+    );
+
+    assert!(
+        selection
+            .classify_session(remaining, 21, false, &gr_families, &metrics)
+            .is_empty()
+    );
+    assert!(selection.end_of_rib(remaining, 21, FAMILY, &metrics));
+    selection.finalize_all_eor(FAMILY, &metrics);
+    let remaining_row = selection.peer_snapshot(remaining).remove(0);
+    assert!(!remaining_row.active);
+    assert_eq!(remaining_row.release_reason, "all_eor");
+}
+
+#[test]
+fn unstamped_or_ambiguous_collision_failback_stays_timer_bound() {
+    let unstamped = peer(1);
+    let duplicate = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_selection_deferral(
+            config(Duration::from_mins(1), &[unstamped, duplicate, duplicate]),
+        );
+    let selection = manager.selection_deferral.as_mut().unwrap();
+
+    assert_eq!(
+        selection.exclude_collision_failback_survivor(unstamped, 0, &metrics),
+        None
+    );
+    assert_eq!(
+        selection.exclude_collision_failback_survivor(duplicate, 22, &metrics),
+        None
+    );
+    for peer in [unstamped, duplicate] {
+        let row = selection.peer_snapshot(peer).remove(0);
+        assert!(row.active);
+        assert_eq!(row.waiter_state, "awaiting_session");
+        assert_eq!(row.blocking_waiters, 2);
+    }
+}
+
+#[tokio::test]
+async fn exact_collision_failback_releases_table_before_eor_and_then_requests_refresh() {
+    let survivor = peer(1);
+    let remaining = peer(2);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 254)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(config(Duration::from_mins(1), &[survivor, remaining]));
+    let handle = tokio::spawn(manager.run());
+
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    stage_gr_context(&tx, survivor, 11).await;
+    tx.send(peer_up(survivor, 11, survivor_tx)).await.unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+
+    let (replacement_tx, _replacement_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, survivor, 12).await;
+    tx.send(peer_up(survivor, 12, replacement_tx))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        peer: survivor,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+
+    let (remaining_tx, _remaining_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, remaining, 21).await;
+    tx.send(peer_up(remaining, 21, remaining_tx)).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: remaining,
+        session_id: 21,
+        announced: vec![make_route_with_lp(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 2),
+            100,
+        )],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        peer: remaining,
+        session_id: 21,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert!(query_state(&tx, survivor).await.selection_deferral[0].active);
+
+    tx.send(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    })
+    .await
+    .unwrap();
+
+    let state = query_state(&tx, survivor).await;
+    assert!(!state.selection_deferral[0].active);
+    assert_eq!(state.selection_deferral[0].waiter_state, "excluded");
+    assert_eq!(state.selection_deferral[0].waiter_session_id, Some(11));
+    assert_eq!(state.selection_deferral[0].release_reason, "all_eor");
+    assert_eq!(query_best_routes(&tx).await.len(), 1);
+
+    let mut saw_table = false;
+    let mut saw_eor = false;
+    loop {
+        let update = survivor_rx.recv().await.unwrap();
+        if !update.announce.is_empty() {
+            assert!(!saw_eor, "released table arrived after EoR");
+            saw_table = true;
+        }
+        if update.end_of_rib.contains(&FAMILY) {
+            assert!(saw_table, "EoR overtook the released table");
+            saw_eor = true;
+        }
+        if update.request_refresh_all_negotiated {
+            assert!(
+                saw_eor,
+                "best-effort refresh request overtook table and EoR"
+            );
+            break;
+        }
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[test]
+fn unavailable_survivor_channel_does_not_rearm_released_selection() {
+    for channel_closed in [false, true] {
+        let survivor = peer(1);
+        let metrics = BgpMetrics::new();
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics)
+            .with_selection_deferral(config(Duration::from_mins(1), &[survivor]));
+        let (survivor_tx, mut survivor_rx) = mpsc::channel(1);
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: survivor,
+            session_id: 11,
+            peer_restart_state: false,
+            peer_gr_families: vec![FAMILY],
+        });
+        manager.handle_update(peer_up(survivor, 11, survivor_tx.clone()));
+        let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: survivor,
+            session_id: 12,
+            peer_restart_state: false,
+            peer_gr_families: vec![FAMILY],
+        });
+        manager.handle_update(peer_up(survivor, 12, replacement_tx));
+
+        if channel_closed {
+            survivor_rx.close();
+        } else {
+            survivor_tx
+                .try_send(crate::OutboundRouteUpdate::default())
+                .unwrap();
+        }
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: survivor,
+            session_id: 12,
+        });
+
+        let row = manager
+            .selection_deferral
+            .as_ref()
+            .unwrap()
+            .peer_snapshot(survivor)
+            .remove(0);
+        assert!(!row.active);
+        assert_eq!(row.waiter_state, "excluded");
+        assert_eq!(row.release_reason, "all_eor");
+        if !channel_closed {
+            let queued = survivor_rx.try_recv().unwrap();
+            assert!(!queued.request_refresh_all_negotiated);
+            assert!(survivor_rx.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one overflow fixture pins complete sweep, ordering, and byte reclamation"
+)]
+fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
     let source = peer(1);
     let observer = peer(2);
     let (_tx, rx) = mpsc::channel(32);
@@ -425,10 +666,19 @@ fn overflow_fallback_withdraws_restored_keys_before_release_eor() {
         .unwrap()
         .classify_session(source, 8, false, &peer_gr_families, &metrics);
     assert!(released.is_empty());
-    assert!(manager.selection_deferral_end_of_rib(source, 8, FAMILY));
-    manager.handle_end_of_rib(source, FAMILY.0, FAMILY.1);
-    manager.finalize_selection_deferral_all_eor(FAMILY);
-    manager.release_selection_families(&[FAMILY], "test all EoRs received");
+    manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .session_down(source, 8, &metrics);
+    let released = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .exclude_collision_failback_survivor(source, 8, &metrics)
+        .unwrap();
+    assert_eq!(released, vec![FAMILY]);
+    manager.release_selection_families(&released, "test collision failback");
 
     assert!(manager.loc_rib.get(&prefix_a).is_none());
     assert!(manager.loc_rib.get(&prefix_b).is_none());
@@ -450,6 +700,11 @@ fn overflow_fallback_withdraws_restored_keys_before_release_eor() {
         &metrics,
         "bgp_selection_deferral_ledger_overflows_total",
         1.0,
+    );
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(FAMILY),
+        (0, false),
+        "complete failback release must reclaim the family byte charge and sticky overflow state"
     );
 }
 
