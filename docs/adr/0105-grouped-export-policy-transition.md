@@ -1,0 +1,284 @@
+# ADR-0105: Grouped export-policy transition transaction
+
+**Status:** Accepted
+**Date:** 2026-07-14
+
+## Context
+
+A live policy reload can move hundreds of route-reflector or route-server
+sessions from one export policy to another while all of them share an update
+group. Rebuilding the destination table and probing every outbound route once
+per peer made that common case scale as routes times peers. The optimized path
+now shares the work, but spans two single-owner actors, a narrow fast path, a
+mixed-fleet partition, compensating rollback, and a readiness bypass. This ADR
+records that design as built. It does not broaden the fast path or change its
+behavior.
+
+"Atomic" has two different scopes here. The RIB's clean cohort commit is
+observationally atomic inside the RIB actor: ordinary RIB work cannot observe
+staged state, and no member changes group or receives the new payload before
+the final commit. The complete PeerManager transaction is rollback-capable,
+not fleet-wide observationally atomic. Session commands and an authoritative
+remainder run one peer at a time, and a failed compensating rollback can leave
+state that must be retried.
+
+## Decision
+
+### 1. Ownership and fences
+
+PeerManager is the sole owner of the live-policy transaction. It resolves and
+captures prior session policies, selects an optional fast-path cohort, applies
+session policy commands, submits RIB work, applies the remainder, and owns
+commit or compensating rollback even if the original caller disappears. While
+it awaits a session or RIB reply, it services only its dedicated, read-only
+`ListPeers` readiness lane. Its ordinary command receiver remains behind the
+transaction.
+
+RibManager accepts at most one `ReplacePeerExportPolicies` transition at a
+time. Once accepted, `pending_clean_policy_transition` is the actor's sole
+transition owner. The run loop advances one state-machine poll, services only
+the dedicated `LocRibCount` readiness lane, yields, and repeats. General
+queries, route mutations and batches, resync, refresh, GR/LLGR work, and timers
+remain queued until commit or a cleaned-up fallback handoff. Dropping the
+reply receiver does not cancel the actor-owned work.
+
+This fence is what makes the RIB-local commit observable as one transaction.
+It also means every additional synchronous poll directly delays all ordinary
+RIB work, so the fast path stays deliberately narrow.
+
+### 2. Policy cohort, wire cohorts, and remainder
+
+PeerManager chooses at most one policy cohort. In caller order, it anchors on
+the first viable pair of installed and target export chains, then selects
+Established peers with that same pair, unchanged import policy, and no pending
+refresh or export apply. Fewer than two selected peers disables the cohort.
+Everything not selected remains the authoritative remainder; the algorithm
+does not recursively find a second cohort. The local repeated-pair preflight is
+O(targets squared) in the worst case; after it finds a possible pair, the
+Established-state selection pass is linear in targets and issues at most one
+session query per locally eligible candidate.
+
+The policy cohort is not a wire-equivalence cohort. RibManager independently
+revalidates update-group source and destination, clean state, live session and
+encoder identity, and groups exact-export probes by compatible wire snapshot.
+Successful probes may be shared within a wire cohort because the staged
+payload is identical; each compatible member still checks the largest encoded
+message against its own negotiated ceiling. The pass-local cache retains at
+most eight wire cohorts per update group. A profile beyond that bound takes
+the ordinary exact-probe path rather than growing retained state.
+
+The fast RIB path accepts only clean, grouped-to-grouped, plain single-best
+unicast members moving across one source/destination group pair. Dirty or
+forced members, Add-Path, per-client-best, ORF, RTC, VPN or other private
+family state, selection gates, stale generations, closed or saturated writer
+channels, and exact-export rejection cause a fail-closed handoff before the
+first optimized emission. PeerManager then performs ordinary authoritative
+RIB replacements for the entire selected policy cohort, one peer at a time,
+without hot-applying the session chain a second time.
+
+### 3. The five RIB phases
+
+The actor-owned transition has exactly five phases:
+
+1. **Classify** examines at most eight members per poll, rejects duplicates or
+   non-clean members, and proves that the complete cohort has one update-group
+   source/destination pair.
+2. **StageDestination** creates the unowned destination group when needed,
+   takes one complete Loc-RIB prefix-identity snapshot, and builds the
+   destination table in chunks of at most 1,024 identities per production
+   poll. An already-maintained destination skips the build.
+3. **BuildInventory** takes one complete destination-table route-key snapshot,
+   then builds the immutable announce, next-hop, and policy-counter inventory
+   in chunks of at most 1,024 keys per production poll.
+4. **ProbeAndPrepare** exact-probes at most 1,024 announcements per poll for a
+   new wire profile, reuses a successful profile's largest encoded length when
+   compatible, and reserves each member's outbound writer permit. It emits
+   nothing.
+5. **Finalize** revalidates every session, sender, encoder owner/generation,
+   clean-state predicate, group pair, and reserved permit. In one synchronous
+   actor poll it changes memberships, replays counters, and sends the shared
+   `Arc` payload through the reserved permits. It then runs the global
+   `distribute_changes(empty, empty)` retry opportunity before replying, so
+   unrelated dirty or forced peers can drain promptly rather than waiting for
+   the retry timer.
+
+No phase before `Finalize` changes committed membership, policy, counters, or
+wire state. On fallback, reserved permits are released and a destination
+created by this transition is removed only if it is still unowned. Failure to
+prove safe cleanup is an error rather than a per-peer handoff.
+
+The 1,024-route budget does not bound the two snapshot polls. The initial
+Loc-RIB prefix snapshot is O(Loc-RIB entries) in one actor poll; the later
+destination-key snapshot is O(destination entries) in one actor poll. They
+provide stable identity vectors for the chunked bodies, at the cost of two
+full-table allocations and two scheduler-visible, data-dependent polls.
+`Finalize` has an O(cohort members) commit body, but its global retry tail also
+enumerates outbound peers and can perform full Loc-RIB/Adj-RIB-Out work for
+unrelated dirty or forced peers. Its work shape can therefore reach
+O(outbound peers + table entries times dirty/forced peers) in one poll. These
+are explicit bounds of the current model, not claims of constant-time actor
+latency.
+
+### 4. Cross-partition apply and rollback order
+
+PeerManager hot-applies the selected cohort's session export chains in caller
+order, then asks RibManager to commit the cohort or return a cleaned-up
+handoff. After the cohort succeeds, it applies the remainder authoritatively
+in original caller order. Import-policy changes and other non-cohort shapes
+always use this authoritative path.
+
+Each authoritative failure first compensates the peers changed by that helper,
+newest first. If the remainder fails, PeerManager next restores the already
+committed cohort, also newest first. Restore attempts continue after an
+individual error so the reply contains the composed failures. A successful
+rollback restores the captured priors; a failed rollback returns an error and
+leaves retry intent where the existing per-peer path can preserve it. A later
+persistence failure replays the successful transaction's returned prior token
+through the same transaction owner.
+
+The ordinary RIB replacement wait has a five-second timeout per peer. The
+current rollback loop has no aggregate deadline, so N congested RIB restores
+can consume N times five seconds. Bounding the aggregate rollback RIB wait is
+required follow-up; this ADR does not hide that cost by calling the
+cross-actor operation atomic.
+
+### 5. Readiness and observability
+
+The read-only readiness lanes exist so a legitimate large transition does not
+depool a healthy daemon merely because normal actor work is fenced. Each RIB
+seam drains at most eight readiness queries, and PeerManager services live
+peer snapshots while awaiting owned session or RIB work. Readiness can
+overtake queued ordinary commands but cannot preempt a RIB poll that is already
+running.
+
+Production currently exposes transition-in-progress and last-total-duration
+gauges and emits one slow warning after five seconds. Per-poll duration is
+recorded only in tests and benchmark builds. Production actor-poll visibility
+is required so operators can distinguish a long transaction from one long
+single-threaded poll. Readiness also remains successful for as long as the
+transition owner continues servicing the narrow lane; it needs a far-above-
+normal ownership-age ceiling that fails closed for a true soft wedge. Those
+follow-ups must preserve the lane's read-only nature and the transaction
+fence.
+
+## Evidence and earns-its-keep review
+
+The integrated receipt compared base
+`a170ab0f38fd97cc294d56ba5f283c7221c2c166` with candidate
+`fa2759e9b19ecbc00f245c6d07e520e8f28e0882`. The same frozen candidate harness
+drove serial, non-overlapping real daemon runs with 700 real BGP sessions, the
+production exact-export encoder path, and 400,400 IPv4-unicast routes. Of those
+sessions, 600 changed policy through one cohort and 100 content-stable sessions
+formed the remainder. Every measured cycle finished with 700/700 sessions up,
+fresh stable-peer markers, and zero parser errors. Relative to that control,
+median completion p50 improved from 220.148412 seconds to 1.894807 seconds
+(116.185x), and median completion maximum improved from 436.698156 seconds to
+2.925734 seconds (149.261x). Structured production logs prove that each
+candidate cycle performed one committed 600-member RIB batch and zero
+authoritative per-peer RIB commands; the base performed 600 authoritative RIB
+commands and zero batches per cycle. The exact provenance, raw rows,
+production-event summary, checksums, and reproduction steps are in the
+[integrated receipt](../perf/artifacts/policy-reload-cohort-partition-2026-07/README.md).
+
+That speedup has a real availability cost. Median full-fleet delivery-gap p50
+grew from 976.8845 milliseconds to 2022.590 milliseconds (2.070x), and median
+maximum grew from 1002.756 milliseconds to 2906.551 milliseconds (2.899x).
+The fast path therefore earns its current narrow role by removing hundreds of
+repeated O(table) rebuilds, not by improving every latency dimension.
+
+The scheduler receipt used the production state-machine seam and real session
+encoders. Before each multi-peer iteration reaches `black_box`, the in-code
+`assert_shared_transition_receipt` guard in
+`crates/transport/benches/fanout.rs` asserts one shared plan, exactly one full
+probe and route-shell materialization per route, and zero authoritative
+per-peer applies. Its 65,536-route/64-peer workload recorded a 4.927 ms maximum
+actor poll, which was also the slower of the two full-snapshot polls. A
+separate 4,096-route/700-member clean fixture recorded a 2.001 ms finalization
+poll; it had no unrelated dirty/forced residue to exercise the global retry
+tail. These are measured cells, not extrapolated upper bounds for a
+400,400-route table, a residue-bearing finalization, or another host. The two
+O(table) snapshots and the data-dependent finalization retain no hard
+wall-clock guarantee. See the
+[actor-poll receipt](../perf/policy-regroup-shared-plan-2026-07.md#actor-poll-receipts).
+
+- **Outer config and persistence rollback:** keep. Returning captured priors
+  lets the config transaction restore runtime policy after a later persistence
+  failure. The cost is a second compensating transaction whose failure must be
+  surfaced rather than described as atomic.
+- **Session hot-apply:** keep. It changes live import/export chains without
+  rebuilding TCP sessions or the BGP FSM. The cost is sequential peer commands,
+  transient cross-peer skew, and another state surface that rollback must
+  restore.
+- **Single policy cohort plus remainder:** keep. It captures the measured
+  dominant shape without forcing content-stable or otherwise ineligible peers
+  through the RIB batch. Multiple simultaneous policy cohorts would multiply
+  state and rollback edges without current demand evidence.
+- **Actor fence, single RIB owner, and five phases:** keep. Together they buy
+  an auditable, observationally atomic RIB commit while bounded bodies provide
+  scheduler opportunities. The cost is queued normal work; the two snapshot
+  polls, final member loop, and final global retry are not bounded by the route
+  chunk size.
+- **Immutable inventory and wire-cohort probe sharing:** keep. They change
+  staging and exact probing from routes-times-peers toward
+  routes-times-compatible-profiles while retaining per-session generation and
+  message-ceiling checks. The eight-entry retention bound prevents adversarial
+  profile growth.
+- **Authoritative remainder and compensating rollback:** keep as the complete
+  fallback and mixed-fleet correctness path. It handles every shape the fast
+  path rejects. Its sequential, per-peer RIB waits need one aggregate rollback
+  deadline.
+- **Final global retry opportunity:** keep until production poll data says
+  otherwise. It promptly drains unrelated dirty/forced residue before the
+  successful transaction reply, matching the authoritative replacement seam.
+  Its cost is an unchunked global retry opportunity inside `Finalize`;
+  production poll visibility is a prerequisite to optimizing or relocating it.
+- **Read-only readiness isolation:** keep, with the stale-owner fail-close
+  follow-up. It avoids false depools during normal transactions; without an
+  age ceiling it can mask a soft wedge.
+
+This review found no existing layer that can be removed without discarding a
+measured benefit or a correctness boundary. The complexity that is not paying
+for itself is prospective generalization beyond the measured shape; the
+following choices keep that complexity out rather than adding it speculatively.
+The one plausible measured-path simplification is the second inventory pass
+for a newly created destination: its staging deltas might eventually feed the
+inventory directly. Do not make that change without first measuring the
+snapshot poll in production and proving identical inventory and fallback
+semantics for both newly created and already-maintained destinations.
+
+## Rejected scope and simplifications
+
+- Do not generalize the partition into a multi-cohort planner. Revisit only if
+  a measured fleet regularly leaves another large compatible cohort in the
+  remainder.
+- Do not broaden the fast path to Add-Path, per-client-best, VPN, RTC, ORF, or
+  other private-family state. The authoritative path is the safe fallback.
+- Do not rebuild the transaction around a general RIB scheduler or a parallel
+  RibManager. First measure a production single-actor ceiling.
+- Do not replace the two snapshots with a new cursor protocol solely because
+  they are O(table). Add production poll visibility, observe a real breach,
+  then choose the smallest scheduler repair.
+- Do not redesign or chunk member resync in this consolidation phase. The
+  delivery-gap receipt makes that a legitimate future target, but changing its
+  emission model belongs in a separately measured and reviewed transaction.
+- Do not introduce a fleet-wide two-phase commit protocol for session tasks
+  and the RIB. The current single-owner plus compensating rollback is adequate
+  for the measured route-reflector/route-server workload once the rollback's
+  aggregate RIB wait is bounded.
+
+## Consequences
+
+- Contributors have one map of the transaction boundaries and can distinguish
+  the PeerManager policy cohort from RIB wire-equivalence cohorts.
+- The optimized RIB cohort remains all-or-nothing and hidden from ordinary RIB
+  observers until finalization; the complete cross-actor transaction remains
+  explicitly rollback-capable rather than strictly atomic.
+- Normal RIB work may wait behind the transaction. Readiness remains available
+  through dedicated read-only lanes, subject to the documented stale-owner
+  follow-up.
+- The current implementation deliberately retains two O(table) snapshot polls,
+  one data-dependent finalization poll with a global dirty/force retry tail, a
+  single-cohort partition, and a sequential authoritative remainder.
+- The measured completion win is retained together with its measured delivery-
+  gap regression. Neither the ADR nor the microbenchmark receipts turn that
+  regression into a success claim.

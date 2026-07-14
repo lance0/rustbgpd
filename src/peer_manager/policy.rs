@@ -180,9 +180,10 @@ impl PeerManager {
     }
 
     /// Apply resolved import/export chains to a set of live peers, capturing each
-    /// peer's prior chains for rollback. Atomic at the peer-manager layer: on the
-    /// first per-peer apply failure, restores the peers already changed (newest
-    /// first) and returns `Err` with nothing left mutated. On success returns the
+    /// peer's prior chains for rollback. On the first per-peer apply failure it
+    /// attempts to restore the peers already changed (newest first). A successful
+    /// restore leaves nothing mutated; a compound rollback failure is returned
+    /// and may leave per-peer retry intent armed. On success it returns the
     /// captured priors — the rollback token the transaction executor replays
     /// through this same path after a later persistence failure. Targets not
     /// currently in `self.peers` (e.g. a dynamic peer that disconnected) are
@@ -689,7 +690,7 @@ impl PeerManager {
     /// dynamic ranges. Dynamic ranges are expanded inside the peer manager
     /// against the accepted-range attribution captured on each live dynamic
     /// peer, then the full concrete target list is committed by the existing
-    /// atomic resolved-policy snapshot path.
+    /// rollback-capable resolved-policy snapshot path.
     pub(super) async fn apply_policy_impact_snapshot(
         &mut self,
         mut static_targets: Vec<ResolvedPeerPolicy>,
@@ -1465,8 +1466,8 @@ impl PeerManager {
     /// ADR-0096: adopt a new compiled `.rpol` registry (SIGHUP reload
     /// of `[policy] rpol_files` or of referenced file content) and
     /// re-resolve every live peer's chains through it, using the same
-    /// atomic two-phase fan-out as catalog policy edits. Peers whose
-    /// import chain materially changed get a Route Refresh inside
+    /// resolve-first, rollback-capable fan-out as catalog policy edits. Peers
+    /// whose import chain materially changed get a Route Refresh inside
     /// `apply_resolved_policy_snapshot`.
     pub(super) async fn sync_rpol_policies(
         &mut self,
@@ -1489,7 +1490,7 @@ impl PeerManager {
     }
 
     /// Shared catalog-change fan-out: resolve every affected peer's
-    /// chains against `next_config`, commit them through the atomic
+    /// chains against `next_config`, commit them through the rollback-capable
     /// resolved-policy snapshot path, then adopt `next_config` as the
     /// manager's snapshot. Returns the number of peers whose chains
     /// were applied.
@@ -1508,13 +1509,12 @@ impl PeerManager {
             },
         );
         // Resolve every affected peer's chains BEFORE mutating anything, then
-        // commit the whole set through the atomic resolved-policy snapshot
-        // path (the ADR-0076 live-impact executor's capturing mechanism).
-        // The two-phase shape is what makes the fan-out atomic: a resolution
-        // failure rejects with zero peers touched, and a mid-fanout apply
-        // failure restores the already-updated peers to their captured
-        // priors — no more split-brain where peers updated before the
-        // failure run the new chains while the rest keep the old ones.
+        // commit the whole set through the rollback-capable resolved-policy
+        // snapshot path (the ADR-0076 live-impact executor's capturing mechanism).
+        // The two-phase shape rejects a resolution failure with zero peers
+        // touched. A mid-fanout apply failure attempts to restore already-updated
+        // peers to their captured priors; a compound rollback failure is surfaced
+        // and may leave the existing per-peer retry intent armed.
         let mut targets: Vec<ResolvedPeerPolicy> = Vec::new();
         for peer_key in peers {
             let Some(managed) = self.peers.get(&peer_key) else {
