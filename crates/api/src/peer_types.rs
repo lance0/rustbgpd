@@ -736,7 +736,7 @@ pub enum PeerManagerCommand {
         /// Reply returns the redacted effective config TOML.
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// Atomically apply resolved import/export policy chains to a set of live
+    /// Apply resolved import/export policy chains to a set of live
     /// peer sessions, returning each peer's PRIOR chains for rollback.
     ///
     /// Used by the ADR-0076 live-impact policy executor to commit policy /
@@ -759,7 +759,7 @@ pub enum PeerManagerCommand {
         /// Reply returns the captured prior chains (the rollback token).
         reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
     },
-    /// Atomically apply resolved import/export policy chains for a live-impact
+    /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
     ///
     /// `static_targets` are already resolved by the transaction controller.
@@ -798,7 +798,7 @@ pub enum PeerManagerCommand {
         /// Reply returns the per-peer signaling outcome.
         reply: oneshot::Sender<DynamicPeerBounceOutcome>,
     },
-    /// Atomically reconfigure a set of live static peers and return each peer's
+    /// Reconfigure a set of live static peers and return each peer's
     /// PRIOR neighbor config for rollback.
     ///
     /// Used by the config-transaction peer-group/session reshape executor. Each
