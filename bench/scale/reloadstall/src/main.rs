@@ -7,7 +7,8 @@
 //!
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
-//!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs>
+//!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
+//!       [changed_peers]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
 //! generated [[neighbors]] blocks) and connect to 127.0.0.1:<port>.
@@ -550,15 +551,27 @@ fn rss_mib(pid: i32) -> u64 {
     0
 }
 
-fn stats_line(label: &str, mut vals: Vec<f64>) {
+#[derive(Clone, Copy)]
+struct Stats {
+    p50: f64,
+    p95: f64,
+    max: f64,
+    n: usize,
+}
+
+fn stats_line(label: &str, mut vals: Vec<f64>) -> Stats {
     vals.sort_by(f64::total_cmp);
+    let stats = Stats {
+        p50: pct(&vals, 0.5),
+        p95: pct(&vals, 0.95),
+        max: pct(&vals, 1.0),
+        n: vals.len(),
+    };
     println!(
         "{label}: p50={:.2} p95={:.2} max={:.2} (n={})",
-        pct(&vals, 0.5),
-        pct(&vals, 0.95),
-        pct(&vals, 1.0),
-        vals.len()
+        stats.p50, stats.p95, stats.max, stats.n
     );
+    stats
 }
 
 #[allow(clippy::too_many_lines)]
@@ -567,7 +580,8 @@ fn main() {
     if a.len() < 10 {
         eprintln!(
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
-             <policy_live> <policy_a> <policy_b> <reloads> <control_secs>"
+             <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
+             [changed_peers]"
         );
         std::process::exit(2);
     }
@@ -580,6 +594,12 @@ fn main() {
     let policy_b = a[7].clone();
     let reloads: u32 = a[8].parse().unwrap();
     let control_secs: u64 = a[9].parse().unwrap();
+    let changed_peers: u32 = a.get(10).map_or(n_peers, |value| value.parse().unwrap());
+    assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
+    assert!(
+        (1..=n_peers).contains(&changed_peers),
+        "changed_peers must be in 1..={n_peers}"
+    );
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
 
@@ -607,7 +627,11 @@ fn main() {
                 .collect(),
             parse_errors: AtomicU64::new(0),
         });
-        println!("# reloadstall peers={n_peers} prefixes={total} per_peer={per_peer} pid={pid}");
+        println!(
+            "# reloadstall peers={n_peers} changed_peers={changed_peers} \
+             stable_peers={} prefixes={total} per_peer={per_peer} pid={pid}",
+            n_peers - changed_peers
+        );
 
         // --- Establish all sessions (waves of 64). ---
         let mut txs: Vec<mpsc::Sender<Message>> = Vec::with_capacity(n_peers as usize);
@@ -699,6 +723,15 @@ fn main() {
             .collect();
         stats_line("control_maxgap_ms", gaps);
         println!("control_rss_mib {}", rss_mib(pid));
+        println!(
+            "reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,\
+             completion_p50_s,completion_p95_s,completion_max_s,\
+             changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,\
+             all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,\
+             all_observer_maxgap_max_ms,changed_first_update_p50_ms,\
+             changed_first_update_p95_ms,changed_first_update_max_ms,\
+             rss_before_mib,rss_after_mib,sessions_up,parse_errors"
+        );
 
         // --- Reload loop. ---
         for r in 1..=reloads {
@@ -710,7 +743,12 @@ fn main() {
             };
             std::fs::copy(next, &policy_live).unwrap();
             let rss_before = rss_mib(pid);
-            for (i, observer) in ctx.obs.iter().enumerate() {
+            for (i, observer) in ctx
+                .obs
+                .iter()
+                .take(changed_peers as usize)
+                .enumerate()
+            {
                 observer.expected_community.store(0, Ordering::Release);
                 observer.generation.lock().unwrap().reset(
                     total,
@@ -732,37 +770,45 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            // Wait for every observer to receive the full re-advertisement.
+            // Completion is intentionally scoped to observers whose effective
+            // export chain changed. Stable observers still participate in the
+            // all-observer stall and session-health checks below.
             let deadline = Instant::now() + Duration::from_secs(900);
             let mut ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let done = (0..n_peers as usize).all(|i| completion_us(&ctx, i).is_some());
+                let done =
+                    (0..changed_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
                 }
                 ticks += 1;
-                if ticks % 20 == 0 {
-                    let sat = (0..n_peers as usize)
+                if ticks.is_multiple_of(20) {
+                    let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    eprintln!("reload {r} progress: complete={sat}/{n_peers}");
+                    eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
                 if Instant::now() > deadline {
                     println!("reload {r} TIMEOUT waiting for re-advertisement");
-                    let sat = (0..n_peers as usize)
+                    let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    eprintln!("reload {r} observers_complete {sat}/{n_peers}");
+                    eprintln!("reload {r} observers_complete {sat}/{changed_peers}");
                     std::process::exit(1);
                 }
             }
-            // Per-observer completion + max gap over the reload window.
+            // Changed-observer completion and gap metrics preserve the
+            // historical measurement. The all-observer gap extends through
+            // the slowest changed observer so stable sessions cannot disappear
+            // from the receipt just because they have no completion marker.
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
-            for i in 0..n_peers as usize {
+            let mut reload_end_us = t_hup;
+            for i in 0..changed_peers as usize {
                 if let Some(tc) = completion_us(&ctx, i) {
+                    reload_end_us = reload_end_us.max(tc);
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
                     // Leading stall: SIGHUP -> first UPDATE of any kind.
@@ -772,12 +818,20 @@ fn main() {
                     }
                 }
             }
-            stats_line(&format!("reload {r} completion_s"), comp_s);
-            stats_line(&format!("reload {r} maxgap_ms"), gaps);
-            stats_line(&format!("reload {r} first_update_ms"), firsts);
+            let all_observer_gaps: Vec<f64> = (0..n_peers as usize)
+                .map(|i| max_gap_ms(&ctx, i, t_hup, reload_end_us, true))
+                .collect();
+            let completion = stats_line(&format!("reload {r} completion_s"), comp_s);
+            let changed_gap = stats_line(&format!("reload {r} maxgap_ms"), gaps);
+            let all_gap = stats_line(
+                &format!("reload {r} all_observer_maxgap_ms"),
+                all_observer_gaps,
+            );
+            let first_update = stats_line(&format!("reload {r} first_update_ms"), firsts);
+            let rss_after = rss_mib(pid);
             println!(
                 "reload {r} rss_mib before={rss_before} after={} comms_sample={:?}",
-                rss_mib(pid),
+                rss_after,
                 ctx.obs[0].last_comms.lock().unwrap().clone()
             );
             let up = ctx
@@ -786,6 +840,25 @@ fn main() {
                 .filter(|o| o.established.load(Ordering::Relaxed))
                 .count();
             println!("reload {r} sessions_up {up}/{n_peers}");
+            println!(
+                "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total},\
+                 {:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
+                 {:.3},{:.3},{:.3},{rss_before},{rss_after},{up},{}",
+                n_peers - changed_peers,
+                completion.p50,
+                completion.p95,
+                completion.max,
+                changed_gap.p50,
+                changed_gap.p95,
+                changed_gap.max,
+                all_gap.p50,
+                all_gap.p95,
+                all_gap.max,
+                first_update.p50,
+                first_update.p95,
+                first_update.max,
+                ctx.parse_errors.load(Ordering::Relaxed),
+            );
             // Quiesce between reloads.
             tokio::time::sleep(Duration::from_secs(20)).await;
         }
