@@ -370,6 +370,15 @@ pub struct RuntimeConfigDiff {
     pub diff_json: String,
 }
 
+/// Validate-only diff failure returned by the peer manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeConfigDiffError {
+    /// Candidate TOML/config failed validation.
+    InvalidCandidate(String),
+    /// Internal diff rendering or serialization failed.
+    Internal(String),
+}
+
 /// Validate-only classification for the config transaction model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeConfigTransactionStatus {
@@ -658,7 +667,7 @@ pub enum PeerManagerCommand {
         /// Candidate TOML content supplied by the caller.
         candidate_toml: String,
         /// Reply channel returning redacted diff output only.
-        reply: oneshot::Sender<Result<RuntimeConfigDiff, String>>,
+        reply: oneshot::Sender<Result<RuntimeConfigDiff, RuntimeConfigDiffError>>,
     },
     /// Validate and classify a candidate config transaction without mutating
     /// daemon state.

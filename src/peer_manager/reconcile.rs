@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use rustbgpd_api::peer_types::{
     FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, ReconcileFailure, ReconcileFailureKind,
-    ReconcileResult, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
+    ReconcileResult, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use tracing::{info, warn};
@@ -122,11 +122,12 @@ impl PeerManager {
     pub(super) fn diff_runtime_config(
         &self,
         candidate_toml: &str,
-    ) -> Result<RuntimeConfigDiff, String> {
+    ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
         let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")?;
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
+                .map_err(RuntimeConfigDiffError::InvalidCandidate)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
-        runtime_config_diff_from_config_diff(&diff)
+        runtime_config_diff_from_config_diff(&diff).map_err(RuntimeConfigDiffError::Internal)
     }
 
     pub(super) async fn plan_config_transaction(
