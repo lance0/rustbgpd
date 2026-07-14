@@ -2150,9 +2150,11 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RibCommandError> {
         if !self.outbound_peers.contains_key(&peer) {
-            return Err(format!("peer {peer} not registered for outbound updates"));
+            return Err(RibCommandError::not_found(format!(
+                "peer {peer} not registered for outbound updates"
+            )));
         }
 
         // A content-equal replacement keeps the installed chain
@@ -2191,7 +2193,7 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         let _ = reply.send(self.replace_peer_export_policy_synchronously(peer, export_policy));
     }

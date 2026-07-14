@@ -506,6 +506,37 @@ fn assert_metric(observed: f64, expected: f64, what: &str) {
 }
 
 #[tokio::test]
+async fn replace_export_policy_after_peer_down_returns_typed_not_found() {
+    let (tx, rx) = mpsc::channel(16);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
+    let _outbound = peer_up(&tx, PeerUpSpec::ibgp(peer)).await;
+
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: None,
+        reply,
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        response.await.unwrap(),
+        Err(crate::update::RibCommandError::NotFound(_))
+    ));
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn identical_peers_group_together_and_gauges_track_membership() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
