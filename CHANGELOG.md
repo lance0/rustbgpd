@@ -23,8 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Coordinated shutdown can publish a bounded warm checkpoint.** The
   restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
-  captures eligible established static peers' pre-policy Adj-RIB-In views into
-  an owner-private, content-addressed MRT bundle under
+  captures eligible established static peers' post-import-policy Adj-RIB-In
+  views into an owner-private, content-addressed MRT bundle under
   `<runtime_state_dir>/warm-bundle-v1`. Publication is deadline-, allocation-,
   and size-bounded, atomically binds exact live identity/config/policy inputs to
   a generation-bound restart marker, and falls back to a generationless marker

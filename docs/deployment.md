@@ -622,7 +622,7 @@ processes is unsupported even when their configuration files differ.
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 
 Routing state is **not restored**. The optional shutdown checkpoint contains
-only eligible pre-policy Adj-RIB-In views for future use; Loc-RIB,
+only eligible post-import-policy Adj-RIB-In views for future use; Loc-RIB,
 Adj-RIB-Out, and policy evaluation state are not checkpointed, and the current
 startup path loads none of it. Routing state rebuilds from peer routes after
 restart. GR and checkpoint state support bounded control-plane restart

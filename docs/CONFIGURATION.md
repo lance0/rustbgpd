@@ -143,8 +143,8 @@ example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
 
 `warm_cache_checkpoint_on_shutdown` is an opt-in, restart-required publication
 step. During a coordinated shutdown, rustbgpd has up to 30 seconds to capture
-eligible established static peers' pre-policy Adj-RIB-In views and atomically
-publish a content-addressed MRT artifact plus `manifest.json` under
+eligible established static peers' post-import-policy Adj-RIB-In views and
+atomically publish a content-addressed MRT artifact plus `manifest.json` under
 `<runtime_state_dir>/warm-bundle-v1`. The bundle is capped at 512 MiB, binds
 the exact effective configuration, resolved import policies, live peer/family
 identity, and restart-marker generation, and is readable only through the

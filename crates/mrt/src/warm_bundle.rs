@@ -83,10 +83,13 @@ pub enum WarmBundleFamilyV1 {
 
 /// Semantic route view carried by a warm checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum WarmBundleViewKindV1 {
-    /// Routes received from the peer before import policy.
-    AdjRibInPrePolicy,
+    /// Routes accepted from the peer after import-policy permit/modification.
+    #[serde(
+        rename = "adj-rib-in-post-import-policy",
+        alias = "adj-rib-in-pre-policy"
+    )]
+    AdjRibInPostImportPolicy,
 }
 
 /// Exact eligible peer/family view identity bound by the snapshot.
@@ -126,6 +129,35 @@ pub struct WarmBundlePolicyInputV1 {
     pub canonical_policy: Vec<u8>,
 }
 
+/// Frozen view projection used only by the V1 policy-digest framing.
+///
+/// Early V1 manifests mislabeled the already post-import-policy RIB view as
+/// `adj-rib-in-pre-policy`. Correcting the public manifest spelling must not
+/// invalidate the resolved-policy digest of already published generations, so
+/// the V1 digest deliberately retains that legacy token and field order.
+#[derive(Serialize)]
+struct WarmBundlePolicyDigestViewV1 {
+    kind: &'static str,
+    peer: IpAddr,
+    peer_asn: u32,
+    peer_router_id: Ipv4Addr,
+    family: WarmBundleFamilyV1,
+    add_path_receive: bool,
+}
+
+impl From<&WarmBundleViewV1> for WarmBundlePolicyDigestViewV1 {
+    fn from(view: &WarmBundleViewV1) -> Self {
+        Self {
+            kind: "adj-rib-in-pre-policy",
+            peer: view.peer,
+            peer_asn: view.peer_asn,
+            peer_router_id: view.peer_router_id,
+            family: view.family,
+            add_path_receive: view.add_path_receive,
+        }
+    }
+}
+
 /// Deterministically digest strictly sorted resolved import-policy inputs.
 ///
 /// The framing includes a domain/version prefix and length-prefixes both the
@@ -146,7 +178,8 @@ pub fn resolved_import_policy_digest_v1(
     digest.update(b"rustbgpd/warm-bundle/resolved-import-policy\0");
     digest.update(WARM_BUNDLE_POLICY_DIGEST_VERSION.to_be_bytes());
     for input in inputs {
-        let view = serde_json::to_vec(&input.view).map_err(WarmBundleError::CorruptManifest)?;
+        let legacy_view = WarmBundlePolicyDigestViewV1::from(&input.view);
+        let view = serde_json::to_vec(&legacy_view).map_err(WarmBundleError::CorruptManifest)?;
         update_len_prefixed(&mut digest, &view);
         update_len_prefixed(&mut digest, &input.canonical_policy);
     }
@@ -1306,7 +1339,7 @@ fn validate_snapshot_semantics(
             });
         }
         let view = WarmBundleViewV1 {
-            kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+            kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
             peer: entry.peer.peer_addr,
             peer_asn: entry.peer.peer_asn,
             peer_router_id: entry.peer.peer_bgp_id,
@@ -2135,7 +2168,7 @@ mod tests {
 
     fn v4_view(peer: u8, add_path: bool) -> WarmBundleViewV1 {
         WarmBundleViewV1 {
-            kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+            kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, peer)),
             peer_asn: 64_500 + u32::from(peer),
             peer_router_id: Ipv4Addr::new(10, 0, 0, peer),
@@ -2286,7 +2319,7 @@ mod tests {
         let mut id = identity();
         id.views = (0..=u16::MAX)
             .map(|suffix| WarmBundleViewV1 {
-                kind: WarmBundleViewKindV1::AdjRibInPrePolicy,
+                kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
                 peer: IpAddr::V6(Ipv6Addr::from(
                     0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + u128::from(suffix),
                 )),
@@ -2624,12 +2657,35 @@ mod tests {
         let first = resolved_import_policy_digest_v1(&inputs).unwrap();
         assert_eq!(first, resolved_import_policy_digest_v1(&inputs).unwrap());
         assert_eq!(first.version, WARM_BUNDLE_POLICY_DIGEST_VERSION);
+        assert_eq!(
+            first.sha256, "d1fc11acac8c70d6e22ab9c88b535e9e327c9c2c1b98639436eb2cf87bec622b",
+            "the corrected public view spelling must not change digest-v1 framing"
+        );
         let mut reversed = inputs;
         reversed.reverse();
         assert!(matches!(
             resolved_import_policy_digest_v1(&reversed),
             Err(WarmBundleError::NonCanonicalPolicyInputs)
         ));
+    }
+
+    #[test]
+    fn legacy_pre_policy_manifest_tag_loads_and_reserializes_truthfully() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity();
+        publish(&dir, &id);
+        let path = temp.path().join(WARM_BUNDLE_MANIFEST_FILE);
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("adj-rib-in-post-import-policy"));
+        assert!(!current.contains("adj-rib-in-pre-policy"));
+
+        let legacy = current.replace("adj-rib-in-post-import-policy", "adj-rib-in-pre-policy");
+        fs::write(&path, legacy).unwrap();
+        let loaded = load_warm_bundle(&dir, &expected(&id), freshness()).unwrap();
+        let reserialized = serde_json::to_string(&loaded.manifest).unwrap();
+        assert!(reserialized.contains("adj-rib-in-post-import-policy"));
+        assert!(!reserialized.contains("adj-rib-in-pre-policy"));
     }
 
     #[test]

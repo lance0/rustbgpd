@@ -231,11 +231,12 @@ per-socket inspection remain deferred.
 
 ## Shutdown warm-checkpoint confidentiality
 
-The optional shutdown warm checkpoint contains pre-policy Adj-RIB-In routing
-data, peer identity, and digests of the effective configuration and resolved
-import policies. Treat `<runtime_state_dir>/warm-bundle-v1` as sensitive
-control-plane state: keep `runtime_state_dir` on local trusted storage, owned by
-the daemon account, and do not expose or back it up as a public MRT feed.
+The optional shutdown warm checkpoint contains post-import-policy Adj-RIB-In
+routing data, peer identity, and digests of the effective configuration and
+resolved import policies. Treat `<runtime_state_dir>/warm-bundle-v1` as
+sensitive control-plane state: keep `runtime_state_dir` on local trusted
+storage, owned by the daemon account, and do not expose or back it up as a
+public MRT feed.
 
 Publication is descriptor-relative beneath an owner-verified directory that is
 not group/world-writable. Bundle files are owner-only, symlink traversal is
