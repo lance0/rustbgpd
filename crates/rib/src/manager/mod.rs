@@ -34,9 +34,9 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibReadinessQuery,
-    RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget,
-    WarmMrtSnapshotView, route_query_key,
+    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibReadinessError,
+    RibReadinessQuery, RibUpdate, RoutePage, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
 };
 
 use helpers::{
@@ -487,6 +487,10 @@ const MAX_LIVE_SESSIONS_PER_PEER: usize = 2;
 /// A transition exceeding the former cohort wait budget is still allowed to
 /// complete, but deserves an operator-visible warning and metric investigation.
 const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Readiness stays live during bounded transition progress, but fails closed
+/// once ownership is far beyond any legitimate transition receipt.
+const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Registration material for one live transport session of a peer
 /// address, captured at `PeerUp`. Held in `RibManager::live_sessions` so
@@ -1213,17 +1217,27 @@ impl RibManager {
         }
     }
 
-    fn handle_readiness_query(&self, query: RibReadinessQuery) {
+    fn handle_readiness_query(
+        &self,
+        query: RibReadinessQuery,
+        policy_transition_elapsed: Option<std::time::Duration>,
+    ) {
         match query {
             RibReadinessQuery::LocRibCount { reply } => {
-                let _ = reply.send(self.loc_rib.len());
+                let result = match policy_transition_elapsed {
+                    Some(elapsed) if elapsed >= MAX_HEALTHY_POLICY_TRANSITION_AGE => {
+                        Err(RibReadinessError::PolicyTransitionStalled)
+                    }
+                    _ => Ok(self.loc_rib.len()),
+                };
+                let _ = reply.send(result);
             }
         }
     }
 
     /// Service a bounded number of type-narrow readiness probes at an actor
     /// seam without admitting any ordinary query or mutation.
-    fn drain_readiness_queries(&mut self) {
+    fn drain_readiness_queries(&mut self, policy_transition_elapsed: Option<std::time::Duration>) {
         for _ in 0..QUERY_BUDGET_PER_CHUNK {
             let query = match self.readiness_rx.as_mut() {
                 Some(rx) => match rx.try_recv() {
@@ -1236,7 +1250,7 @@ impl RibManager {
                 },
                 None => break,
             };
-            self.handle_readiness_query(query);
+            self.handle_readiness_query(query, policy_transition_elapsed);
         }
     }
 
@@ -1252,15 +1266,13 @@ impl RibManager {
     /// Record one real state-machine poll. Production yields immediately after
     /// each call; the benchmark driver invokes the same advance seam
     /// synchronously and records identical phase boundaries.
-    #[allow(
-        clippy::unused_self,
-        reason = "the shared production seam records state only in test and benchmark builds"
-    )]
     pub(in crate::manager) fn record_policy_transition_poll(
         &mut self,
         kind: distribution::CleanPolicyTransitionPollKind,
         elapsed: std::time::Duration,
     ) {
+        self.metrics
+            .observe_rib_policy_transition_actor_poll(kind.as_str(), elapsed);
         #[cfg(any(test, feature = "bench-internals"))]
         {
             self.policy_transition_stats.actor_polls =
@@ -1281,8 +1293,6 @@ impl RibManager {
                 distribution::CleanPolicyTransitionPollKind::Bounded => {}
             }
         }
-        #[cfg(not(any(test, feature = "bench-internals")))]
-        let _ = (kind, elapsed);
     }
 
     fn finish_policy_transition_observability(
@@ -4186,15 +4196,18 @@ impl RibManager {
                 // fail-closed fallback handoff.
                 let member_count = pending.member_count();
                 Self::warn_if_policy_transition_slow(&mut pending, member_count);
-                self.drain_readiness_queries();
+                self.drain_readiness_queries(Some(pending.elapsed()));
                 let kind = pending.poll_kind();
                 let started = std::time::Instant::now();
-                match self.advance_clean_policy_transition(pending) {
+                let policy_transition_elapsed = match self.advance_clean_policy_transition(pending)
+                {
                     distribution::CleanPolicyTransitionAdvance::Continue(mut next) => {
                         self.record_policy_transition_poll(kind, started.elapsed());
                         let member_count = next.member_count();
                         Self::warn_if_policy_transition_slow(&mut next, member_count);
+                        let elapsed = next.elapsed();
                         self.pending_clean_policy_transition = Some(next);
+                        Some(elapsed)
                     }
                     distribution::CleanPolicyTransitionAdvance::Committed(mut done) => {
                         self.record_policy_transition_poll(kind, started.elapsed());
@@ -4206,6 +4219,7 @@ impl RibManager {
                             done.elapsed(),
                         );
                         drop(done);
+                        None
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
                         let cleanup = failed.discard_uncommitted_transition(&mut self);
@@ -4228,9 +4242,10 @@ impl RibManager {
                             });
                             let _ = reply.send(result);
                         }
+                        None
                     }
-                }
-                self.drain_readiness_queries();
+                };
+                self.drain_readiness_queries(policy_transition_elapsed);
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -4342,14 +4357,14 @@ impl RibManager {
             }
 
             if self.process_next_route_chunk() {
-                self.drain_readiness_queries();
+                self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
             } else if needs_timers {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query),
+                            Some(query) => self.handle_readiness_query(query, None),
                             None => self.readiness_rx = None,
                         }
                     }
@@ -4427,7 +4442,7 @@ impl RibManager {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
-                            Some(query) => self.handle_readiness_query(query),
+                            Some(query) => self.handle_readiness_query(query, None),
                             None => self.readiness_rx = None,
                         }
                     }

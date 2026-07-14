@@ -9,7 +9,7 @@
 rule_files:
   - rustbgpd-alerts.yml
 
-evaluation_interval: 1m
+evaluation_interval: 30s
 
 tests:
   # ── RustbgpdDown ──────────────────────────────────────────────
@@ -269,9 +269,9 @@ tests:
               summary: "Export-policy transition stalled on edge1:9179"
               description: >-
                 bgp_rib_policy_transition_in_progress on edge1:9179 has
-                remained 1 for at least one minute. Core readiness uses a
-                dedicated lane and may still be healthy, but ordinary RIB
-                queries and mutations remain fenced. Check the daemon's
+                remained 1 for at least one minute. RIB readiness is failing
+                closed and ordinary queries and mutations remain
+                fenced. Check the poll_kind histogram and the daemon's
                 policy-transition warning;
                 bgp_rib_policy_transition_last_duration_milliseconds is the
                 previous terminal sample until this transition completes.

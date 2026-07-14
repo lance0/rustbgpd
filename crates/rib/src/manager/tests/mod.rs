@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -521,6 +521,35 @@ fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)])
             })
         })
         .map_or(0.0, |metric| metric.get_gauge().value())
+}
+
+fn histogram_sample_counts_by_label(
+    metrics: &BgpMetrics,
+    name: &str,
+    label_name: &str,
+) -> BTreeMap<String, u64> {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == name)
+        .map(|family| {
+            family
+                .metric
+                .iter()
+                .map(|metric| {
+                    let label = metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == label_name)
+                        .expect("histogram series carries the bounded label")
+                        .value()
+                        .to_owned();
+                    (label, metric.get_histogram().sample_count())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn assert_refresh_metrics(

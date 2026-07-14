@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
+use prometheus::{
+    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+};
 
 /// Monotonic id distinguishing `BgpMetrics` instances (tests create
 /// several on one thread). Clones share the id — they share the
@@ -136,6 +138,7 @@ pub struct BgpMetrics {
     rib_ingest_channel_depth: IntGauge,
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
+    rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
 
     // ── Update groups (shadow-mode fingerprint registry) ────────
     update_groups: IntGauge,
@@ -634,13 +637,26 @@ impl BgpMetrics {
 
         let rib_policy_transition_in_progress = IntGauge::new(
             "bgp_rib_policy_transition_in_progress",
-            "Whether the RIB actor currently owns an atomic export-policy transition (1 = in progress, 0 = idle). General RIB queries and mutations remain queued while this is 1; the dedicated readiness lane stays live.",
+            "Whether the RIB actor currently owns an atomic export-policy transition (1 = in progress, 0 = idle). General RIB queries and mutations remain queued while this is 1; the dedicated readiness lane remains responsive but reports stalled once ownership reaches 30 seconds.",
         )
         .expect("valid metric definition");
 
         let rib_policy_transition_last_duration_milliseconds = IntGauge::new(
             "bgp_rib_policy_transition_last_duration_milliseconds",
             "Monotonic elapsed duration in milliseconds of the most recently completed actor-owned export-policy transition.",
+        )
+        .expect("valid metric definition");
+
+        let rib_policy_transition_actor_poll_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_policy_transition_actor_poll_duration_seconds",
+                "Wall-clock duration of each real export-policy transition actor poll, partitioned by bounded work, complete prefix snapshot, or finalization (including commit and retry work).",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0,
+                30.0,
+            ]),
+            &["poll_kind"],
         )
         .expect("valid metric definition");
 
@@ -1556,6 +1572,11 @@ impl BgpMetrics {
             ))
             .expect("metric not already registered");
         registry
+            .register(Box::new(
+                rib_policy_transition_actor_poll_duration_seconds.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_groups.clone()))
             .expect("metric not already registered");
         registry
@@ -1880,6 +1901,7 @@ impl BgpMetrics {
             rib_ingest_channel_depth,
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
+            rib_policy_transition_actor_poll_duration_seconds,
             update_groups,
             update_group_members,
             update_group_regroups,
@@ -2877,6 +2899,20 @@ impl BgpMetrics {
     pub fn set_rib_policy_transition_last_duration(&self, duration: std::time::Duration) {
         self.rib_policy_transition_last_duration_milliseconds
             .set(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX));
+    }
+
+    /// Observe one real export-policy transition actor poll.
+    ///
+    /// `poll_kind` is one of the bounded `bounded`, `prefix_snapshot`, or
+    /// `finalize` values supplied by the RIB transition state machine.
+    pub fn observe_rib_policy_transition_actor_poll(
+        &self,
+        poll_kind: &str,
+        duration: std::time::Duration,
+    ) {
+        self.rib_policy_transition_actor_poll_duration_seconds
+            .with_label_values(&[poll_kind])
+            .observe(duration.as_secs_f64());
     }
 
     /// Set how many entries are still awaiting replacement in an inbound
@@ -4077,6 +4113,58 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_rib_policy_transition_in_progress 0"));
         assert!(text.contains("bgp_rib_policy_transition_last_duration_milliseconds 1234"));
+    }
+
+    #[test]
+    fn policy_transition_poll_histogram_has_bounded_labels_and_custom_buckets() {
+        let m = BgpMetrics::new();
+        for poll_kind in ["bounded", "prefix_snapshot", "finalize"] {
+            m.observe_rib_policy_transition_actor_poll(
+                poll_kind,
+                std::time::Duration::from_millis(12),
+            );
+        }
+
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_rib_policy_transition_actor_poll_duration_seconds")
+            .expect("policy-transition poll histogram is registered");
+        let observed: std::collections::BTreeMap<_, _> = family
+            .metric
+            .iter()
+            .map(|metric| {
+                let poll_kind = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "poll_kind")
+                    .expect("poll_kind label exists")
+                    .value()
+                    .to_owned();
+                let histogram = metric.get_histogram();
+                let buckets = histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| bucket.upper_bound().to_bits())
+                    .collect::<Vec<_>>();
+                (poll_kind, (histogram.sample_count(), buckets))
+            })
+            .collect();
+        let expected_buckets = [
+            0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
+        ]
+        .map(f64::to_bits)
+        .to_vec();
+
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["bounded", "finalize", "prefix_snapshot"]
+        );
+        for (poll_kind, (sample_count, buckets)) in observed {
+            assert_eq!(sample_count, 1, "one sample for {poll_kind}");
+            assert_eq!(buckets, expected_buckets, "custom buckets for {poll_kind}");
+        }
     }
 
     #[test]

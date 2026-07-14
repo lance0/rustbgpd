@@ -384,9 +384,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   general RIB queries now remain queued with ordinary mutations behind the
   transaction instead of extending its fence. The process-global
   `bgp_rib_policy_transition_in_progress` and retained terminal-duration gauges,
-  a five-second warning, and a shipped one-minute alert make unexpectedly slow
-  transitions visible without turning bounded progress into a readiness
-  failure. Later readiness can overtake queued general queries, although an
+  a production actor-poll histogram split across bounded work, complete table
+  snapshots, and finalization, a five-second warning, and a shipped one-minute
+  alert make unexpectedly slow transitions visible. Readiness stays healthy
+  during legitimate bounded progress but fails closed when ownership reaches
+  30 seconds, recovering immediately at a terminal actor seam. Later readiness
+  can overtake queued general queries, although an
   already-running O(table) query remains non-preemptible. Meanwhile,
   membership and reserved writer sends still commit as one synchronous
   section. A successfully enqueued cohort RIB reply remains transaction-owned

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerReadinessQuery};
-use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
+use rustbgpd_rib::{RibReadinessError, RibReadinessQuery, RibUpdate};
 
 /// Total deadline for the core actor readiness probe.
 pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
@@ -135,16 +135,18 @@ impl CoreReadinessProbe {
         self
     }
 
-    /// Probe `PeerManager` and RIB responsiveness.
+    /// Probe `PeerManager` responsiveness and RIB readiness.
     ///
-    /// This deliberately checks actor responsiveness only. A daemon with zero
-    /// configured peers or zero routes can still be ready.
+    /// A daemon with zero configured peers or zero routes can still be ready.
+    /// During an actor-owned export-policy transition, the dedicated RIB lane
+    /// remains responsive but reports a stalled owner once its age reaches 30
+    /// seconds.
     ///
     /// # Errors
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline.
+    /// deadline, or when the RIB reports a stalled export-policy transition.
     pub async fn check(&self) -> Result<(), CoreReadinessError> {
         self.snapshot().await.map(|_| ())
     }
@@ -155,7 +157,7 @@ impl CoreReadinessProbe {
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline.
+    /// deadline, or when the RIB reports a stalled export-policy transition.
     pub async fn snapshot(&self) -> Result<CoreHealthSnapshot, CoreReadinessError> {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
@@ -195,21 +197,30 @@ impl CoreReadinessProbe {
 
     async fn query_rib(&self, deadline: Instant) -> Result<usize, CoreReadinessError> {
         timeout_until(deadline, CoreReadinessError::RibTimedOut, async {
-            let (reply_tx, reply_rx) = oneshot::channel();
             if let Some(readiness_tx) = &self.rib_readiness_tx {
+                let (reply_tx, reply_rx) = oneshot::channel();
                 readiness_tx
                     .send(RibReadinessQuery::LocRibCount { reply: reply_tx })
                     .await
                     .map_err(|_| CoreReadinessError::RibUnavailable)?;
+                reply_rx
+                    .await
+                    .map_err(|_| CoreReadinessError::RibDroppedReply)?
+                    .map_err(|error| match error {
+                        RibReadinessError::PolicyTransitionStalled => {
+                            CoreReadinessError::RibPolicyTransitionStalled
+                        }
+                    })
             } else {
+                let (reply_tx, reply_rx) = oneshot::channel();
                 self.rib_query_tx
                     .send(RibUpdate::QueryLocRibCount { reply: reply_tx })
                     .await
                     .map_err(|_| CoreReadinessError::RibUnavailable)?;
+                reply_rx
+                    .await
+                    .map_err(|_| CoreReadinessError::RibDroppedReply)
             }
-            reply_rx
-                .await
-                .map_err(|_| CoreReadinessError::RibDroppedReply)
         })
         .await
     }
@@ -247,6 +258,8 @@ pub enum CoreReadinessError {
     RibTimedOut,
     /// RIB dropped the reply channel.
     RibDroppedReply,
+    /// The RIB actor's policy-transition ownership fence exceeded 30 seconds.
+    RibPolicyTransitionStalled,
     /// The daemon recorded a fatal availability fault ([`DaemonGate`]):
     /// BGP listener bind failure or coordinated shutdown in progress.
     DaemonUnavailable(&'static str),
@@ -266,6 +279,7 @@ impl fmt::Display for CoreReadinessError {
                 write!(f, "RIB manager probe timed out ({deadline_ms}ms deadline)")
             }
             Self::RibDroppedReply => f.write_str("RIB manager dropped reply"),
+            Self::RibPolicyTransitionStalled => f.write_str("RIB export-policy transition stalled"),
             Self::DaemonUnavailable(reason) => f.write_str(reason),
         }
     }
@@ -350,6 +364,10 @@ mod tests {
             CoreReadinessError::RibDroppedReply.to_string(),
             "RIB manager dropped reply"
         );
+        assert_eq!(
+            CoreReadinessError::RibPolicyTransitionStalled.to_string(),
+            "RIB export-policy transition stalled"
+        );
     }
 
     #[test]
@@ -408,10 +426,36 @@ mod tests {
             reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
             let RibReadinessQuery::LocRibCount { reply } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
-            reply.send(11).unwrap();
+            reply.send(Ok(11)).unwrap();
         });
 
         assert_eq!(result.unwrap().total_routes, 11);
+        assert!(
+            rib_query_rx.try_recv().is_err(),
+            "ordinary RIB query lane must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_maps_stalled_rib_transition_to_stable_readiness_error() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
+        let (rib_readiness_tx, mut rib_readiness_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            let RibReadinessQuery::LocRibCount { reply } =
+                rib_readiness_rx.recv().await.expect("RIB readiness query");
+            reply
+                .send(Err(RibReadinessError::PolicyTransitionStalled))
+                .unwrap();
+        });
+
+        let error = result.expect_err("stalled transition must fail core readiness");
+        assert_eq!(error, CoreReadinessError::RibPolicyTransitionStalled);
+        assert_eq!(error.to_string(), "RIB export-policy transition stalled");
         assert!(
             rib_query_rx.try_recv().is_err(),
             "ordinary RIB query lane must remain untouched"
