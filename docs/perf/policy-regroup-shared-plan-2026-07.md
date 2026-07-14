@@ -11,7 +11,9 @@ The optimized path is deliberately limited to clean grouped-to-grouped unicast
 members whose staging profile differs only by export-chain content. It builds
 one immutable old/new inventory, materializes changed route shells once, and
 reuses successful exact-export lengths only when each session snapshot proves
-wire compatibility. Dirty, force, ORF, Add-Path, RTC, VPN, mixed-family,
+wire compatibility. The path applies only to groupable plain single-best
+members; per-client-best and Add-Path peers remain ungrouped and do not receive
+this shared-cohort benefit. Dirty, force, ORF, RTC, VPN, mixed-family,
 generation-mismatched, saturated, or exact-rejecting cohorts fall back before
 the first optimized emission.
 
@@ -275,13 +277,17 @@ distinct-ASN clients, that produced 2,867,200 full probes, 3,599 actor polls,
 and a 510.332 ms median.
 
 The exact-export profile now stores the derived eBGP/iBGP class while retaining
-full equality for every actual wire input. The same distinct-ASN workload uses
-4,096 full probes and 803 polls and completes in 7.604 ms, a -98.51% Criterion
-mean change (-98.54%..-98.49%). The 64-client cell drops from 262,144 to 4,096
-full probes and from 49.206 ms to 3.464 ms. Optimized homogeneous and
-distinct-ASN receipts have identical plan/probe/shell/poll counts. Byte-level
-tests prove cross-ASN eBGP equality and preserve the eBGP/iBGP incompatibility
-boundary; per-member ceiling and generation checks remain mandatory.
+full equality for every actual wire input. The pass-local cache retains at most
+eight compatibility cohorts per update-group ID; profiles beyond that bound
+take the ordinary exact-probe path. The same distinct-ASN workload uses 4,096
+full probes and 803 polls and completes in 7.604 ms, a -98.51% Criterion mean
+change (-98.54%..-98.49%). The 64-client cell drops from 262,144 to 4,096 full
+probes and from 49.206 ms to 3.464 ms. Optimized homogeneous and distinct-ASN
+receipts have identical plan/probe/shell/poll counts. Byte-level tests prove
+cross-ASN equality for both route-server and ordinary eBGP transforms, including
+the ordinary local-AS prepend and next-hop rewrite, and preserve the eBGP/iBGP
+incompatibility boundary; per-member ceiling and generation checks remain
+mandatory.
 
 The homogeneous 700-client cell showed no detected change (-1.60% mean,
 -4.34%..+1.01%). The homogeneous 64-client cell also showed no detected change
@@ -291,7 +297,7 @@ The dynamic-neighbor capture canary additionally proves that configured
 `remote_asn = 0` defers classification to the negotiated ASN for both eBGP and
 same-AS iBGP sessions.
 
-Raw medians, confidence bounds, deterministic counters, environment, and
+Aggregate medians, confidence bounds, deterministic counters, environment, and
 reproduction commands are retained in
 [`artifacts/ixp-exact-export-cohorts-2026-07/`](artifacts/ixp-exact-export-cohorts-2026-07/).
 These results do not supersede the still-required loaded 700-peer campaign.
