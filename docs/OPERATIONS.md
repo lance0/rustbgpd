@@ -780,7 +780,7 @@ owned-state.
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking selection for the family |
 | `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor` or `timer` |
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
-| `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore used a complete release sweep |
+| `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore use a complete release sweep |
 
 For active gates, `rbgp neighbor <address>` and
 `NeighborService.GetNeighborState` also show the peer's waiter state, stamped

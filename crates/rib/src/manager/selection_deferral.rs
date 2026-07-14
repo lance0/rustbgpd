@@ -183,9 +183,10 @@ impl DeferredSelectionKeys {
         let mut remaining = limits.identities.saturating_sub(current_len);
         let mut newly_overflowed = Vec::new();
         for (family, identity) in identities {
-            // Borrowed lookup comes first: duplicate delivery never consumes
-            // identity or byte budget and never clones the key.
-            if set.contains(identity) || overflowed_families.contains(&family) {
+            // Once a family is sticky-overflowed, skip even the borrowed hash
+            // lookup. Otherwise duplicate delivery never consumes identity or
+            // byte budget and never clones the key.
+            if overflowed_families.contains(&family) || set.contains(identity) {
                 continue;
             }
             let charge = identity.logical_retained_bytes();
