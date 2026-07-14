@@ -158,6 +158,177 @@ fn v1_stable_v0_50_route_server_fixture_parses() {
         .unwrap_or_else(|err| panic!("v0.50.0 route-server config no longer validates: {err}"));
 }
 
+const V1_EFFECTIVE_DEFAULTS_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.context]
+families = ["ipv6_unicast"]
+hold_time = 300
+graceful_restart = false
+gr_restart_time = 0
+gr_stale_routes_time = 900
+llgr_stale_time = 1800
+disable_ipv4_unicast = true
+
+[peer_groups.override]
+families = ["ipv6_unicast"]
+hold_time = 300
+send_hold_time = 800
+graceful_restart = false
+gr_restart_time = 0
+gr_stale_routes_time = 900
+llgr_stale_time = 1800
+disable_ipv4_unicast = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65003
+peer_group = "context"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "override"
+families = ["ipv4_unicast"]
+hold_time = 45
+send_hold_time = 1000
+graceful_restart = true
+gr_restart_time = 240
+gr_stale_routes_time = 720
+llgr_stale_time = 60
+disable_ipv4_unicast = false
+"#;
+
+const V1_CLUSTER_ID_DEFAULTS_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[peer_groups.rr]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+peer_group = "rr"
+"#;
+
+#[test]
+fn v1_stable_effective_defaults_match_runtime_resolution() {
+    macro_rules! assert_v1_effective_default {
+        ($path:literal, $actual:expr, $expected:expr) => {
+            assert_eq!(
+                $actual, $expected,
+                "runtime effective default drifted for {}",
+                $path
+            );
+        };
+    }
+
+    let config =
+        parse_strict(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
+    let bare = config
+        .resolve_neighbor(&config.neighbors[0])
+        .expect("bare neighbor must resolve");
+    let inherited = config
+        .resolve_neighbor(&config.neighbors[1])
+        .expect("peer-group neighbor must resolve");
+    let overridden = config
+        .resolve_neighbor(&config.neighbors[2])
+        .expect("direct-override neighbor must resolve");
+    let bare_peer = &bare.transport_config.peer;
+    let bare_transport = &bare.transport_config;
+    let cluster_id = config.cluster_id();
+    let disable_ipv4_unicast = bare_peer.disable_ipv4_unicast;
+    let gr_restart_time = bare_peer.gr_restart_time;
+    let gr_stale_routes_time = bare_transport.gr_stale_routes_time;
+    let graceful_restart = bare_peer.graceful_restart;
+    let hold_time = bare_peer.hold_time;
+    let llgr_stale_time = (bare_peer.llgr_stale_time, bare_transport.llgr_stale_time);
+    let send_hold_time = bare_peer.send_hold_time;
+
+    // Mutation-red: each full path is bound to its actual production-resolved
+    // value and an explicit expected value; deleting or weakening any row is red.
+    assert_v1_effective_default!("Global.cluster_id", cluster_id, None);
+    assert_v1_effective_default!("Neighbor.disable_ipv4_unicast", disable_ipv4_unicast, false);
+    assert_v1_effective_default!("Neighbor.gr_restart_time", gr_restart_time, 120);
+    assert_v1_effective_default!("Neighbor.gr_stale_routes_time", gr_stale_routes_time, 360);
+    assert_v1_effective_default!("Neighbor.graceful_restart", graceful_restart, true);
+    assert_v1_effective_default!("Neighbor.hold_time", hold_time, 90);
+    assert_v1_effective_default!("Neighbor.llgr_stale_time", llgr_stale_time, (0, 0));
+    assert_v1_effective_default!("Neighbor.send_hold_time", send_hold_time, 480);
+
+    let effective = |resolved: &ResolvedNeighbor| {
+        let transport = &resolved.transport_config;
+        (
+            transport.peer.hold_time,
+            transport.peer.send_hold_time,
+            transport.peer.graceful_restart,
+            transport.peer.gr_restart_time,
+            transport.gr_stale_routes_time,
+            (transport.peer.llgr_stale_time, transport.llgr_stale_time),
+            transport.peer.disable_ipv4_unicast,
+        )
+    };
+
+    // Mutation-red: removing peer-group fallback for any inventoried Neighbor
+    // field, or replacing derived send-hold max(480, 2 * 300) with 480, fails.
+    assert_eq!(
+        effective(&inherited),
+        (300, 600, false, 0, 900, (1800, 1800), true)
+    );
+    // Mutation-red: making peer-group values outrank any direct Neighbor
+    // override changes this tuple (and disable_ipv4_unicast may fail validation).
+    assert_eq!(
+        effective(&overridden),
+        (45, 1000, true, 240, 720, (60, 60), false)
+    );
+
+    let rr =
+        parse_strict(V1_CLUSTER_ID_DEFAULTS_TOML).expect("inherited RR-client fixture must load");
+    let explicit_rr_toml = V1_CLUSTER_ID_DEFAULTS_TOML.replace(
+        "listen_port = 179",
+        "listen_port = 179\ncluster_id = \"10.0.0.9\"",
+    );
+    let explicit_rr =
+        parse_strict(&explicit_rr_toml).expect("explicit cluster-id fixture must load");
+
+    // Mutation-red: unconditional router-id fallback, ignoring inherited RR
+    // status, or ignoring an explicit cluster_id changes this three-case tuple.
+    assert_eq!(
+        (
+            config.cluster_id(),
+            rr.cluster_id(),
+            explicit_rr.cluster_id()
+        ),
+        (
+            None,
+            Some(Ipv4Addr::new(10, 0, 0, 1)),
+            Some(Ipv4Addr::new(10, 0, 0, 9))
+        )
+    );
+}
+
 fn collect_example_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|err| {
         panic!("failed to read example directory {}: {err}", dir.display());

@@ -94,6 +94,20 @@
       {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
       {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"}
     ],
+    "effective_defaults": {
+      "paths": [
+        "Global.cluster_id",
+        "Neighbor.disable_ipv4_unicast",
+        "Neighbor.gr_restart_time",
+        "Neighbor.gr_stale_routes_time",
+        "Neighbor.graceful_restart",
+        "Neighbor.hold_time",
+        "Neighbor.llgr_stale_time",
+        "Neighbor.send_hold_time"
+      ],
+      "validation_source": "src/config/tests.rs",
+      "validation_test": "v1_stable_effective_defaults_match_runtime_resolution"
+    },
     "explicitly_unstable_roots": [
       {"path": "AddPathConfig.receive_max", "classification": "experimental"},
       {"path": "Config.apply_bum_enforcement", "classification": "alpha"},
