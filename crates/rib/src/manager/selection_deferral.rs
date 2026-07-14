@@ -466,6 +466,63 @@ impl SelectionDeferral {
         released
     }
 
+    /// Exclude the exact session recovered by collision failback from the
+    /// startup-frozen roster. Its `EoR` may already have been discarded while
+    /// the session was superseded, and the best-effort ROUTE-REFRESH used to
+    /// rebuild its Adj-RIB-In has no completion signal. Only an unambiguous,
+    /// stamped survivor whose current roster state was re-armed by the active
+    /// session's teardown may take this path.
+    ///
+    /// `Some` means at least one active family was classified; the contained
+    /// families are those that became complete and must use the normal full
+    /// release path. `None` leaves every waiter unchanged.
+    pub(super) fn exclude_collision_failback_survivor(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        metrics: &BgpMetrics,
+    ) -> Option<Vec<(Afi, Safi)>> {
+        if session_id == 0 {
+            tracing::warn!(
+                %peer,
+                "selection-deferral collision-failback survivor is unstamped; keeping it blocked"
+            );
+            return None;
+        }
+        if self.ambiguous_peers.contains(&peer) {
+            tracing::warn!(
+                %peer,
+                session_id,
+                "selection-deferral collision-failback survivor address is ambiguous; keeping it blocked"
+            );
+            return None;
+        }
+
+        let families: Vec<_> = self.active.keys().copied().collect();
+        let mut classified = false;
+        let mut released = Vec::new();
+        for family in families {
+            let Some(gate) = self.active.get_mut(&family) else {
+                continue;
+            };
+            if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingSession) {
+                continue;
+            }
+            gate.waiters
+                .insert(peer, WaiterState::Excluded { session_id });
+            classified = true;
+            metrics.set_selection_deferral_waiters(
+                afi_safi_label(family.0, family.1),
+                gauge_val(Self::blocking_waiters(gate)),
+            );
+            if Self::complete(gate) {
+                self.release(family, SelectionDeferralReleaseReason::AllEndOfRib, metrics);
+                released.push(family);
+            }
+        }
+        classified.then_some(released)
+    }
+
     /// Revert a current-session waiter to the not-yet-established state.  A
     /// flap cannot shrink the frozen cohort and accidentally release a family.
     pub(super) fn session_down(&mut self, peer: IpAddr, session_id: u64, metrics: &BgpMetrics) {
@@ -813,6 +870,19 @@ impl RibManager {
         family: (Afi, Safi),
     ) {
         self.recompute_released_selection_family(family);
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn deferred_selection_ledger_state_for_test(
+        &self,
+        family: (Afi, Safi),
+    ) -> (usize, bool) {
+        (
+            self.deferred_selection_keys.retained_key_bytes,
+            self.deferred_selection_keys
+                .overflowed_families
+                .contains(&family),
+        )
     }
 
     /// Consume a current-session `EoR` in the startup gate. The caller invokes

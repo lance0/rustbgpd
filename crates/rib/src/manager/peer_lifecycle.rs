@@ -34,6 +34,12 @@ pub(super) enum SessionTeardownDisposition {
     TeardownActive,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ActiveSessionRegistration {
+    PeerUp,
+    CollisionFailback,
+}
+
 impl RibManager {
     /// Session-down teardown, dispatched on session identity (see
     /// [`SessionTeardownDisposition`]): a stale teardown from a
@@ -191,16 +197,20 @@ impl RibManager {
     /// peer's natural re-advertisement (its next own route change) — that
     /// staleness window is logged by the session task.
     pub(super) fn fail_over_registration(&mut self, peer: IpAddr, down_id: u64, event: &str) {
-        let survivor_id = self
+        let Some(survivor_session_id) = self
             .live_sessions
             .get(&peer)
             .and_then(|sessions| sessions.last())
-            .map(|record| record.session_id);
+            .map(|record| record.session_id)
+        else {
+            debug_assert!(false, "registration failback without a live survivor");
+            return;
+        };
         warn!(
             %peer,
             event,
             down_session_id = down_id,
-            survivor_session_id = survivor_id,
+            survivor_session_id,
             "active session went down with another live session present — \
              failing the outbound registration over to the survivor"
         );
@@ -214,7 +224,7 @@ impl RibManager {
             self.clear_peer_adj_rib_in(peer);
         }
         self.clear_outbound_peer_state(peer);
-        self.register_active_session(peer);
+        self.register_active_session(peer, ActiveSessionRegistration::CollisionFailback);
         self.request_inbound_refresh(peer);
     }
 
@@ -599,19 +609,20 @@ impl RibManager {
             );
         }
 
-        self.register_active_session(peer);
+        self.register_active_session(peer, ActiveSessionRegistration::PeerUp);
     }
 
     /// Register the most recent live session (the last `live_sessions`
     /// entry) as the peer's active outbound registration and send it the
-    /// initial table dump. Shared by `handle_peer_up` and the
-    /// registration failover; the caller has already cleared any prior
-    /// registration's state.
+    /// initial table dump. Shared by `handle_peer_up` and collision failback;
+    /// the caller has already cleared any prior registration's state and the
+    /// registration origin controls only the startup selection-deferral
+    /// classification.
     #[expect(
         clippy::too_many_lines,
         reason = "active-session registration installs every negotiated outbound capability"
     )]
-    fn register_active_session(&mut self, peer: IpAddr) {
+    fn register_active_session(&mut self, peer: IpAddr, registration: ActiveSessionRegistration) {
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -722,24 +733,42 @@ impl RibManager {
         // the final waiter releases a family, existing peers receive the
         // converged table and this peer receives it once in its normal
         // initial dump below.
-        let released = if let Some(gr_context) = gr_context {
-            let peer_gr_families: HashSet<_> =
-                gr_context.peer_gr_families.iter().copied().collect();
-            self.selection_deferral
-                .as_mut()
-                .map_or_else(Vec::new, |selection| {
-                    selection.classify_session(
-                        peer,
+        let released = match registration {
+            ActiveSessionRegistration::PeerUp => {
+                if let Some(gr_context) = gr_context {
+                    let peer_gr_families: HashSet<_> =
+                        gr_context.peer_gr_families.iter().copied().collect();
+                    self.selection_deferral
+                        .as_mut()
+                        .map_or_else(Vec::new, |selection| {
+                            selection.classify_session(
+                                peer,
+                                session_id,
+                                gr_context.peer_restart_state,
+                                &peer_gr_families,
+                                &self.metrics,
+                            )
+                        })
+                } else {
+                    Vec::new()
+                }
+            }
+            ActiveSessionRegistration::CollisionFailback => {
+                let excluded = self.selection_deferral.as_mut().and_then(|selection| {
+                    selection.exclude_collision_failback_survivor(peer, session_id, &self.metrics)
+                });
+                if let Some(released) = &excluded {
+                    info!(
+                        %peer,
                         session_id,
-                        gr_context.peer_restart_state,
-                        &peer_gr_families,
-                        &self.metrics,
-                    )
-                })
-        } else {
-            Vec::new()
+                        released_families = released.len(),
+                        "exact collision-failback survivor excluded from the startup selection roster; inbound ROUTE-REFRESH remains best-effort recovery assistance"
+                    );
+                }
+                excluded.unwrap_or_default()
+            }
         };
-        self.release_selection_families(&released, "all current waiters excluded");
+        self.release_selection_families(&released, "all current waiters satisfied or excluded");
 
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();

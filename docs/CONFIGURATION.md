@@ -1083,6 +1083,13 @@ send EoR or the remaining marker window expires. `gr_restart_time` therefore
 bounds both the advertised restart window and, via the maximum effective value
 across static peers, the process-start selection deferral.
 
+During a same-address collision, ordinary replacement still re-arms the
+replacement session as an EoR waiter and stale predecessor EoR is rejected. If
+the replacement then loses and registration fails back to the exact nonzero,
+unambiguous survivor, only that survivor is excluded from its re-armed roster
+entry; other waiters continue to block. Its inbound ROUTE-REFRESH request is
+best-effort recovery assistance, not evidence that refresh completed.
+
 `rbgp neighbor <address>` shows `Selection Deferral` rows while active and
 retains their `all_eor` or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,

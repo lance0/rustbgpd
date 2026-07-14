@@ -50,9 +50,14 @@ Implement an honest restarting-speaker mode:
    selection, initial outbound table data, route-refresh responses, and EoR
    remain withheld. On release, deferred route identities (withdrawals
    included) are selected and advertised before EoR.
-8. Waiters are transport-generation stamped. A replacement or failed-over
-   session re-arms its frozen roster entry, and an EoR from a predecessor or
-   collision loser cannot release the gate.
+8. Waiters are transport-generation stamped. An ordinary replacement re-arms
+   its frozen roster entry, and an EoR from a predecessor or collision loser
+   cannot release the gate. If collision resolution instead fails the
+   registration back to the exact nonzero, unambiguous surviving session, that
+   survivor is excluded from its re-armed entries: its EoR may already have
+   been discarded while it was superseded, and the recovery ROUTE-REFRESH is
+   best-effort assistance rather than a completion signal. Every other real
+   waiter continues to gate the family.
 
 This mode helps peers retain our routes briefly during a planned restart,
 but makes **no claim** that rustbgpd preserved dataplane continuity.
