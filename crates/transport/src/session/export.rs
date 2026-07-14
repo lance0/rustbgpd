@@ -41,6 +41,9 @@ pub(crate) struct SessionExportProfile {
     remove_private_as: RemovePrivateAs,
     cluster_id: Option<Ipv4Addr>,
     configured_local_ipv6_nexthop: Option<Ipv6Addr>,
+    /// Current encoding rules consume the remote ASN only through this class.
+    /// Any future rule that depends on the ASN value must add the negotiated
+    /// remote ASN to this immutable profile before sharing wire results.
     is_ebgp: bool,
     four_octet_as: bool,
     extended_messages: bool,
@@ -90,7 +93,9 @@ impl SessionExportProfile {
     /// Snapshot identity, generation, and the negotiated message ceiling do
     /// not affect the bytes. Cloning and normalizing those fields before using
     /// the derived full-struct equality keeps newly-added wire inputs in this
-    /// proof by default instead of requiring a parallel allow-list.
+    /// proof by default instead of requiring a parallel allow-list. Remote ASN
+    /// identity is deliberately absent because current rules consume only the
+    /// stored eBGP/iBGP class; a value-dependent rule must restore it here.
     fn has_same_wire_encoding(&self, other: &Self) -> bool {
         let mut this = self.clone();
         let mut other = other.clone();
@@ -2224,21 +2229,6 @@ mod tests {
 
     #[test]
     fn distinct_ebgp_remote_asns_share_wire_results_but_ibgp_does_not() {
-        let mut source_config = config_with_auth_secret("not-retained");
-        source_config.route_server_client = true;
-        source_config.peer.remote_asn = 65_002;
-        let mut target_config = source_config.clone();
-        target_config.peer.remote_asn = 65_003;
-        let mut ibgp_config = source_config.clone();
-        ibgp_config.peer.remote_asn = ibgp_config.peer.local_asn;
-
-        let source = SessionExportProfile::initial(&source_config, None, false);
-        let target = SessionExportProfile::initial(&target_config, None, false);
-        let ibgp = SessionExportProfile::initial(&ibgp_config, None, false);
-        assert!(source.is_ebgp());
-        assert!(target.is_ebgp());
-        assert!(!ibgp.is_ebgp());
-
         let route = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -2274,33 +2264,73 @@ mod tests {
                     .into_message(),
             )
         };
-        let source_bytes = wire_bytes(&source);
 
-        assert_eq!(
-            source_bytes,
-            wire_bytes(&target),
-            "remote ASN identity does not change bytes within the eBGP class"
-        );
-        assert!(
-            target
-                .reuse_successful_probes(&source, &[source_bytes.len()])
-                .is_some(),
-            "distinct eBGP client ASNs reuse a successful exact result"
-        );
-        assert_ne!(
-            source_bytes,
-            wire_bytes(&ibgp),
-            "the eBGP/iBGP classification remains wire-relevant"
-        );
-        assert!(
-            ibgp.reuse_successful_probes(&source, &[source_bytes.len()])
-                .is_none(),
-            "eBGP results must not cross the iBGP boundary"
-        );
+        for route_server_client in [false, true] {
+            let mut source_config = config_with_auth_secret("not-retained");
+            source_config.route_server_client = route_server_client;
+            source_config.peer.remote_asn = 65_002;
+            let mut target_config = source_config.clone();
+            target_config.peer.remote_asn = 65_003;
+            let mut ibgp_config = source_config.clone();
+            ibgp_config.peer.remote_asn = ibgp_config.peer.local_asn;
+
+            let source = SessionExportProfile::initial(&source_config, None, false);
+            let target = SessionExportProfile::initial(&target_config, None, false);
+            let ibgp = SessionExportProfile::initial(&ibgp_config, None, false);
+            assert!(source.is_ebgp());
+            assert!(target.is_ebgp());
+            assert!(!ibgp.is_ebgp());
+
+            if !route_server_client {
+                let attrs = source.prepare_unicast_attributes(&route, source.local_ipv4(), None);
+                assert!(
+                    attrs.iter().any(|attr| matches!(
+                        attr,
+                        PathAttribute::AsPath(AsPath { segments })
+                            if matches!(
+                                segments.first(),
+                                Some(AsPathSegment::AsSequence(asns))
+                                    if asns.first() == Some(&source.local_asn)
+                            )
+                    )),
+                    "the ordinary eBGP fixture must exercise local-AS prepend"
+                );
+                assert!(
+                    attrs.iter().any(|attr| matches!(
+                        attr,
+                        PathAttribute::NextHop(next_hop) if *next_hop == source.local_ipv4()
+                    )),
+                    "the ordinary eBGP fixture must exercise next-hop-self rewriting"
+                );
+            }
+
+            let source_bytes = wire_bytes(&source);
+            assert_eq!(
+                source_bytes,
+                wire_bytes(&target),
+                "remote ASN identity does not change bytes within either eBGP profile"
+            );
+            assert!(
+                target
+                    .reuse_successful_probes(&source, &[source_bytes.len()])
+                    .is_some(),
+                "distinct eBGP remote ASNs reuse a successful exact result"
+            );
+            assert_ne!(
+                source_bytes,
+                wire_bytes(&ibgp),
+                "the eBGP/iBGP classification remains wire-relevant"
+            );
+            assert!(
+                ibgp.reuse_successful_probes(&source, &[source_bytes.len()])
+                    .is_none(),
+                "eBGP results must not cross the iBGP boundary"
+            );
+        }
     }
 
     #[test]
-    fn successful_extended_probe_reuse_reapplies_smaller_target_ceiling() {
+    fn successful_probe_reuse_is_monotone_at_target_ceiling() {
         let config = config_with_auth_secret("not-retained");
         let mut source = SessionExportProfile::initial(&config, None, false);
         source.extended_messages = true;
@@ -2310,22 +2340,29 @@ mod tests {
         target.extended_messages = false;
         target.owner_id = 29;
         target.generation = 17;
-        let encoded_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN) + 1;
+        let max_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN);
 
-        let error = target
-            .reuse_successful_probes(&source, &[encoded_len])
-            .expect("the message ceiling does not affect encoded bytes")
-            .pop()
-            .expect("one source length produces one target result")
-            .expect_err("the successful 64K probe must be rejected by a 4K target");
+        let results = target
+            .reuse_successful_probes(&source, &[max_len - 1, max_len, max_len + 1])
+            .expect("the message ceiling does not affect encoded bytes");
+        for (encoded_len, result) in [max_len - 1, max_len].into_iter().zip(&results[..2]) {
+            assert_eq!(
+                result,
+                &Ok(ExactExportResult {
+                    encoded_len,
+                    max_len,
+                    generation: 17,
+                }),
+                "every encoded length through the target ceiling is accepted"
+            );
+        }
+        let error = results[2]
+            .as_ref()
+            .expect_err("the first encoded length above the target ceiling is rejected");
 
         assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
-        assert!(error.detail().contains(&encoded_len.to_string()));
-        assert!(
-            error
-                .detail()
-                .contains(&rustbgpd_wire::MAX_MESSAGE_LEN.to_string())
-        );
+        assert!(error.detail().contains(&(max_len + 1).to_string()));
+        assert!(error.detail().contains(&max_len.to_string()));
     }
 
     #[test]

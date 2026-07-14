@@ -623,12 +623,23 @@ fn page_routes<'a>(
     }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
+/// Production route budget for one strict shared-policy actor poll.
+pub(in crate::manager) const POLICY_TRANSITION_PRODUCTION_ROUTE_SLICE: usize = 1_024;
 /// Maximum route identities processed by one strict shared-policy actor poll.
 #[cfg(not(test))]
-pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize = 1_024;
+pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize =
+    POLICY_TRANSITION_PRODUCTION_ROUTE_SLICE;
 /// Tiny deterministic unit used to prove multi-poll ordering in tests.
 #[cfg(test)]
 pub(in crate::manager) const POLICY_TRANSITION_ROUTE_SLICE: usize = 1;
+
+pub(in crate::manager) fn policy_transition_slice_end(
+    cursor: usize,
+    len: usize,
+    budget: usize,
+) -> usize {
+    (cursor + budget).min(len)
+}
 /// Maximum members classified by one strict shared-policy actor poll.
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;

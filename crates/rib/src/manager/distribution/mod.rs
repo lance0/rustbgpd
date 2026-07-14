@@ -1173,7 +1173,11 @@ impl RibManager {
                 }
 
                 let snapshot = prefixes.as_ref().expect("initialized above");
-                let end = (cursor + super::POLICY_TRANSITION_ROUTE_SLICE).min(snapshot.len());
+                let end = super::policy_transition_slice_end(
+                    cursor,
+                    snapshot.len(),
+                    super::POLICY_TRANSITION_ROUTE_SLICE,
+                );
                 if cursor < end {
                     self.stage_policy_transition_group_chunk(
                         destination,
@@ -1226,7 +1230,11 @@ impl RibManager {
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
                 let snapshot = keys.as_ref().expect("initialized above");
-                let end = (cursor + super::POLICY_TRANSITION_ROUTE_SLICE).min(snapshot.len());
+                let end = super::policy_transition_slice_end(
+                    cursor,
+                    snapshot.len(),
+                    super::POLICY_TRANSITION_ROUTE_SLICE,
+                );
                 if self
                     .extend_clean_policy_transition_inventory(
                         source,
@@ -1272,8 +1280,11 @@ impl RibManager {
                 mut full_probe_count,
             } => {
                 if let Some(mut probe) = active_probe.take() {
-                    let end = (probe.cursor + super::POLICY_TRANSITION_ROUTE_SLICE)
-                        .min(inventory.announce.len());
+                    let end = super::policy_transition_slice_end(
+                        probe.cursor,
+                        inventory.announce.len(),
+                        super::POLICY_TRANSITION_ROUTE_SLICE,
+                    );
                     let candidates = inventory.announce[probe.cursor..end]
                         .iter()
                         .zip(inventory.next_hop_override[probe.cursor..end].iter())
