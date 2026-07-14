@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # rustbgpd carries one cargo-fuzz crate per fuzzed workspace crate.
-# Target names are globally unique across the two directories.
-FUZZ_DIRS="crates/wire crates/policy"
+# Target names are globally unique across the four directories.
+FUZZ_DIRS="crates/wire crates/policy crates/evpn crates/mrt"
 TARGET_DIR="fuzz/target/x86_64-unknown-linux-gnu/release"
 
 for dir in $FUZZ_DIRS; do
