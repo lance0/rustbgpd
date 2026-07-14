@@ -1600,7 +1600,7 @@ pub enum RibUpdate {
         /// New effective export policy (`None` = permit-all/global fallback resolved already).
         export_policy: Option<PolicyChain>,
         /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Replace a cohort of peer export policies as one optimized RIB transaction.
     ///

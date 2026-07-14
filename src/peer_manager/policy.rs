@@ -7,7 +7,9 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyReplacement, RibUpdate};
+use rustbgpd_rib::{
+    ExportPolicyCohortOutcome, PeerExportPolicyReplacement, RibCommandError, RibUpdate,
+};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -464,14 +466,22 @@ impl PeerManager {
         replacements: &[PeerExportPolicyReplacement],
     ) -> Result<(), String> {
         for replacement in replacements {
-            if let Err(error) = self
+            match self
                 .replace_peer_export_policy_in_rib(
                     replacement.peer,
                     replacement.export_policy.clone(),
                 )
                 .await
             {
-                return Err(format!("{}: {error}", replacement.peer));
+                Ok(()) => {}
+                Err(error @ RibCommandError::NotFound(_)) => {
+                    info!(
+                        peer = %replacement.peer,
+                        %error,
+                        "authoritative export-policy handoff skipped a peer no longer registered in the RIB; a reconnect will install the desired policy"
+                    );
+                }
+                Err(error) => return Err(format!("{}: {error}", replacement.peer)),
             }
             self.drain_readiness_queries().await;
         }
@@ -485,7 +495,7 @@ impl PeerManager {
         &mut self,
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RibCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
@@ -497,7 +507,7 @@ impl PeerManager {
             .await
             .is_err()
         {
-            return Err("RIB manager unavailable".to_string());
+            return Err(RibCommandError::internal("RIB manager unavailable"));
         }
         match tokio::time::timeout(
             super::RIB_REPLY_TIMEOUT,
@@ -505,12 +515,12 @@ impl PeerManager {
         )
         .await
         {
-            Err(_) => Err(format!(
+            Err(_) => Err(RibCommandError::internal(format!(
                 "RIB manager did not reply within {:?} while updating export policy",
                 super::RIB_REPLY_TIMEOUT
-            )),
-            Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
-            Ok(Ok(Err(error))) => Err(format!("failed to update export policy: {error}")),
+            ))),
+            Ok(Err(_)) => Err(RibCommandError::internal("RIB manager dropped reply")),
+            Ok(Ok(Err(error))) => Err(error),
             Ok(Ok(Ok(()))) => Ok(()),
         }
     }
@@ -972,6 +982,9 @@ impl PeerManager {
         let is_established = session_state
             .as_ref()
             .is_some_and(|s| s.fsm_state == SessionState::Established);
+        let is_known_non_established = session_state
+            .as_ref()
+            .is_some_and(|s| s.fsm_state != SessionState::Established);
 
         let needs_refresh = import_changed || had_pending_refresh;
         let needs_export_apply = export_changed || had_pending_export_apply;
@@ -1059,7 +1072,8 @@ impl PeerManager {
             ));
         }
 
-        if is_established && needs_export_apply {
+        let is_rollback = !matches!(refresh_failure, RefreshFailureHandling::Fatal);
+        if needs_export_apply && (is_established || is_rollback) {
             // The RIB step sits between session-side hot-apply (already
             // succeeded if we reached here) and Route Refresh. If it
             // fails, we still need to preserve any unfired refresh
@@ -1077,14 +1091,50 @@ impl PeerManager {
             // evaluating (and counting term hits) on the old instance
             // while the stats query snapshots the fresh one, freezing
             // the reported counters.
+            // A rollback cannot use the Established observation as a proxy for
+            // RIB registration. A peer may flap after its forward apply while
+            // its old outbound object is still registered, and skipping this
+            // step would leave that object evaluating the policy being rolled
+            // back. Try the authoritative restore even when the session query
+            // positively reports a non-Established state. A typed NotFound is
+            // safe only for rollback of such a known-down peer: there is no
+            // outbound object left to retain the forward policy, and the next
+            // PeerUp carries the restored policy from the session. A timed-out
+            // state query remains ambiguous and therefore fail-closed, as do
+            // forward applies and peers still reporting Established.
             let rib_outcome = self
                 .replace_peer_export_policy_in_rib(address, export_policy)
                 .await;
-            if let Err(error) = rib_outcome {
-                if needs_refresh && let Some(managed) = self.peers.get_mut(&peer_key) {
-                    managed.pending_refresh = true;
+            match rib_outcome {
+                Ok(()) => {}
+                Err(error @ RibCommandError::NotFound(_))
+                    if is_rollback && is_known_non_established =>
+                {
+                    info!(
+                        %address,
+                        %error,
+                        "policy rollback found no RIB outbound registration; the restored session policy will be authoritative on PeerUp"
+                    );
                 }
-                return Err(error);
+                Err(error) => {
+                    if let Some(managed) = self.peers.get_mut(&peer_key) {
+                        managed.pending_export_apply = true;
+                        if needs_refresh {
+                            managed.pending_refresh = true;
+                        }
+                    }
+                    return Err(error.to_string());
+                }
+            }
+        } else if had_pending_export_apply || (needs_export_apply && !is_known_non_established) {
+            // This ordinary call skipped the RIB. Preserve inherited intent
+            // even for a known-down peer, and arm fresh intent when the state
+            // query was ambiguous: that may be an Established peer whose RIB
+            // still holds the prior chain. Only a positively known-down fresh
+            // change can rely solely on PeerUp installing the current session
+            // policy without a retry marker.
+            if let Some(managed) = self.peers.get_mut(&peer_key) {
+                managed.pending_export_apply = true;
             }
         }
 
