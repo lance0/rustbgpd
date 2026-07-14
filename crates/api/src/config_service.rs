@@ -10,7 +10,7 @@ use crate::audit::{
     plan_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
-    PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
+    PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use crate::proto;
@@ -151,6 +151,13 @@ fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> Status {
     }
 }
 
+fn diff_error_to_status(error: RuntimeConfigDiffError) -> Status {
+    match error {
+        RuntimeConfigDiffError::InvalidCandidate(message) => Status::invalid_argument(message),
+        RuntimeConfigDiffError::Internal(message) => Status::internal(message),
+    }
+}
+
 #[tonic::async_trait]
 impl proto::config_service_server::ConfigService for ConfigService {
     async fn diff_runtime_config(
@@ -176,7 +183,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
             .map_err(|_| Status::unavailable("peer manager dropped config diff reply"))?
         {
             Ok(diff) => Ok(Response::new(diff_to_proto(diff))),
-            Err(error) => Err(Status::invalid_argument(error)),
+            Err(error) => Err(diff_error_to_status(error)),
         }
     }
 
@@ -874,7 +881,9 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
             };
-            let _ = reply.send(Err("error: invalid candidate".to_string()));
+            let _ = reply.send(Err(RuntimeConfigDiffError::InvalidCandidate(
+                "error: invalid candidate".to_string(),
+            )));
         });
 
         let err = svc
@@ -885,5 +894,28 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("invalid candidate"));
+    }
+
+    #[tokio::test]
+    async fn diff_runtime_config_maps_internal_render_error_to_internal() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
+                panic!("expected DiffRuntimeConfig command");
+            };
+            let _ = reply.send(Err(RuntimeConfigDiffError::Internal(
+                "failed to serialize config diff".to_string(),
+            )));
+        });
+
+        let err = svc
+            .diff_runtime_config(Request::new(proto::DiffRuntimeConfigRequest {
+                candidate_toml: "[global]".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("failed to serialize config diff"));
     }
 }
