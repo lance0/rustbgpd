@@ -136,11 +136,22 @@ leaves retry intent where the existing per-peer path can preserve it. A later
 persistence failure replays the successful transaction's returned prior token
 through the same transaction owner.
 
-The ordinary RIB replacement wait has a five-second timeout per peer. The
-current rollback loop has no aggregate deadline, so N congested RIB restores
-can consume N times five seconds. Bounding the aggregate rollback RIB wait is
-required follow-up; this ADR does not hide that cost by calling the
-cross-actor operation atomic.
+Rollback session and bookkeeping restoration remains newest first and may do
+O(peers) bounded session work. RIB compensation has one lazy absolute
+five-second deadline per top-level policy transaction, shared by authoritative
+self-heal and any later cohort unwind. Each partition first-polls every pinned
+RIB restore future newest first, without Tokio's cooperative budget, before it
+issues any rollback Route Refresh. This registers every bounded-channel waiter
+in FIFO order; refresh-generated route work and later peer lifecycle mutations
+cannot overtake a restore merely because the channel is full.
+
+PeerManager then awaits the registered aggregate while continuing to service
+readiness. Deadline expiry or caller cancellation detaches that same aggregate
+rather than reconstructing commands: already-registered repairs may finish in
+order after the caller returns, while conservative per-peer pending flags keep
+explicit retry intent. The five-second claim bounds cumulative rollback RIB
+send/reply waiting across all partitions. It does not bound sequential session
+commands, Route Refresh acknowledgements, or the RIB actor's late repair work.
 
 ### 5. Readiness and observability
 
@@ -231,8 +242,9 @@ wall-clock guarantee. See the
   profile growth.
 - **Authoritative remainder and compensating rollback:** keep as the complete
   fallback and mixed-fleet correctness path. It handles every shape the fast
-  path rejects. Its sequential, per-peer RIB waits need one aggregate rollback
-  deadline.
+  path rejects. Its session work remains sequential, but cumulative rollback
+  RIB send/reply waiting is bounded by one transaction-wide deadline; retaining
+  pinned late repairs and conservative retry flags is the cancellation cost.
 - **Final global retry opportunity:** keep until production poll data says
   otherwise. It promptly drains unrelated dirty/forced residue before the
   successful transaction reply, matching the authoritative replacement seam.
@@ -270,8 +282,8 @@ semantics for both newly created and already-maintained destinations.
   emission model belongs in a separately measured and reviewed transaction.
 - Do not introduce a fleet-wide two-phase commit protocol for session tasks
   and the RIB. The current single-owner plus compensating rollback is adequate
-  for the measured route-reflector/route-server workload once the rollback's
-  aggregate RIB wait is bounded.
+  for the measured route-reflector/route-server workload with the rollback's
+  aggregate RIB wait bounded.
 
 ## Consequences
 

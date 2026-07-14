@@ -331,6 +331,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Policy rollback has one aggregate RIB wait budget.** Authoritative
+  self-heal and a subsequent cohort unwind now share one lazy absolute
+  five-second deadline instead of waiting up to five seconds per peer. Every
+  reverse-order RIB restore is registered before rollback Route Refresh or
+  later lifecycle work; timeout and caller cancellation retain the same pinned
+  late repairs while conservative pending flags preserve explicit retry intent.
+  The bound covers cumulative rollback RIB send/reply waiting, not sequential
+  session commands, Route Refresh acknowledgements, or late RIB repair.
+
 - **Mixed policy reloads batch their eligible export-only cohort.** Snapshot
   application now selects the first equivalent Established export-only cohort
   in configuration order, commits it through one shared RIB transition, then

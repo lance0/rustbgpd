@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
@@ -79,6 +82,51 @@ struct CapturedResolvedPolicy {
     /// two branches: the asymmetry is what keeps a compound (rollback-time)
     /// refresh failure from either leaving routes stale or arming a spurious retry.
     forward_completed: bool,
+}
+
+#[derive(Default)]
+struct PolicyRollbackRibBudget {
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl PolicyRollbackRibBudget {
+    fn deadline(&mut self) -> tokio::time::Instant {
+        *self
+            .deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT)
+    }
+}
+
+struct PolicyRollbackPeerPlan {
+    peer_key: PeerKey,
+    export_restore: Option<(Option<PolicyChain>, bool)>,
+    refresh_failure: Option<RefreshFailureHandling>,
+    is_established: bool,
+    restore_prior_pending: Option<(bool, bool)>,
+}
+
+type PolicyRollbackRibOutcome = (usize, Result<(), RibCommandError>);
+type PolicyRollbackRibFuture =
+    Pin<Box<dyn Future<Output = PolicyRollbackRibOutcome> + Send + 'static>>;
+
+async fn first_poll_policy_rollback_rib(
+    future: &mut PolicyRollbackRibFuture,
+) -> Option<PolicyRollbackRibOutcome> {
+    std::future::poll_fn(|cx| {
+        let mut unconstrained = std::pin::pin!(tokio::task::unconstrained(future.as_mut()));
+        let poll = unconstrained.as_mut().poll(cx);
+        Poll::Ready(match poll {
+            Poll::Ready(outcome) => Some(outcome),
+            Poll::Pending => None,
+        })
+    })
+    .await
+}
+
+struct RegisteredPolicyRollbackRib {
+    deadline: tokio::time::Instant,
+    refreshable: Vec<bool>,
+    task: tokio::task::JoinHandle<Vec<PolicyRollbackRibOutcome>>,
 }
 
 fn metric_count(value: usize) -> u64 {
@@ -175,6 +223,7 @@ impl PeerManager {
             import_policy,
             export_policy,
             RefreshFailureHandling::Fatal,
+            None,
         )
         .await
     }
@@ -193,6 +242,7 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let mut seen = BTreeSet::new();
         let has_duplicate = targets
@@ -200,7 +250,7 @@ impl PeerManager {
             .any(|target| !seen.insert(PeerKey::new(target.address, target.interface.clone())));
         if has_duplicate {
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
                 .await
                 .map(|captured| {
                     captured
@@ -214,7 +264,7 @@ impl PeerManager {
         let cohort_targets = cohort_mask.iter().filter(|&&selected| selected).count();
         if cohort_targets < 2 {
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
                 .await
                 .map(|captured| {
                     captured
@@ -236,11 +286,14 @@ impl PeerManager {
             cohort_targets, remainder_targets, "partitioned resolved policy snapshot"
         );
 
-        let Some(cohort_result) = self.try_apply_export_only_policy_cohort(&cohort).await else {
+        let Some(cohort_result) = self
+            .try_apply_export_only_policy_cohort(&cohort, &mut rollback_rib_budget)
+            .await
+        else {
             // Defensive invariant fallback: no mutation occurs before this
             // helper returns `None`, so preserve original authoritative order.
             return self
-                .apply_resolved_policy_snapshot_authoritatively(targets)
+                .apply_resolved_policy_snapshot_authoritatively(targets, &mut rollback_rib_budget)
                 .await
                 .map(|captured| {
                     captured
@@ -257,7 +310,7 @@ impl PeerManager {
             .filter_map(|(target, selected)| (!selected).then_some(target))
             .collect();
         match self
-            .apply_resolved_policy_snapshot_authoritatively(remainder)
+            .apply_resolved_policy_snapshot_authoritatively(remainder, &mut rollback_rib_budget)
             .await
         {
             Ok(mut remainder_captured) => {
@@ -274,16 +327,21 @@ impl PeerManager {
                     .map(|captured| captured.policy)
                     .collect())
             }
-            Err(remainder_error) => Err(match self.restore_resolved_policies(captured).await {
-                Ok(()) => format!(
-                    "failed to apply authoritative policy remainder: {remainder_error}; \
+            Err(remainder_error) => Err(
+                match self
+                    .restore_resolved_policies(captured, &mut rollback_rib_budget)
+                    .await
+                {
+                    Ok(()) => format!(
+                        "failed to apply authoritative policy remainder: {remainder_error}; \
                      committed cohort restored"
-                ),
-                Err(cohort_restore_error) => format!(
-                    "failed to apply authoritative policy remainder: {remainder_error}; \
+                    ),
+                    Err(cohort_restore_error) => format!(
+                        "failed to apply authoritative policy remainder: {remainder_error}; \
                      restoring committed cohort also failed: {cohort_restore_error}"
-                ),
-            }),
+                    ),
+                },
+            ),
         }
     }
 
@@ -382,6 +440,7 @@ impl PeerManager {
     async fn apply_resolved_policy_snapshot_authoritatively(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
+        rollback_rib_budget: &mut PolicyRollbackRibBudget,
     ) -> Result<Vec<CapturedResolvedPolicy>, String> {
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
@@ -412,22 +471,28 @@ impl PeerManager {
                     target.import_policy.clone(),
                     target.export_policy.clone(),
                     RefreshFailureHandling::Fatal,
+                    None,
                 )
                 .await
             {
                 let restored = std::mem::take(&mut applied);
-                return Err(match self.restore_resolved_policies(restored).await {
-                    Ok(()) => format!(
-                        "failed to apply resolved policy to {}: {apply_error}; \
+                return Err(
+                    match self
+                        .restore_resolved_policies(restored, rollback_rib_budget)
+                        .await
+                    {
+                        Ok(()) => format!(
+                            "failed to apply resolved policy to {}: {apply_error}; \
                          already-applied peers restored",
-                        target.address
-                    ),
-                    Err(restore_error) => format!(
-                        "failed to apply resolved policy to {}: {apply_error}; \
+                            target.address
+                        ),
+                        Err(restore_error) => format!(
+                            "failed to apply resolved policy to {}: {apply_error}; \
                          restoring already-applied peers also failed: {restore_error}",
-                        target.address
-                    ),
-                });
+                            target.address
+                        ),
+                    },
+                );
             }
             applied[applied_idx].forward_completed = true;
         }
@@ -450,6 +515,7 @@ impl PeerManager {
     async fn try_apply_export_only_policy_cohort(
         &mut self,
         targets: &[&ResolvedPeerPolicy],
+        rollback_rib_budget: &mut PolicyRollbackRibBudget,
     ) -> Option<Result<Vec<CapturedResolvedPolicy>, String>> {
         if targets.len() < 2 {
             return None;
@@ -527,7 +593,9 @@ impl PeerManager {
                     .map_err(|restore_error| {
                         format!("{} session restore failed: {restore_error}", target.address)
                     });
-                let prior_restore = self.restore_resolved_policies(captured).await;
+                let prior_restore = self
+                    .restore_resolved_policies(captured, rollback_rib_budget)
+                    .await;
                 let restore_error = match (failing_restore, prior_restore) {
                     (Ok(()), Ok(())) => None,
                     (Err(error), Ok(())) | (Ok(()), Err(error)) => Some(error),
@@ -583,7 +651,9 @@ impl PeerManager {
             Err(error) => Err(error),
         };
         if let Err(error) = rib_result {
-            let rollback = self.restore_resolved_policies(captured).await;
+            let rollback = self
+                .restore_resolved_policies(captured, rollback_rib_budget)
+                .await;
             return Some(Err(match rollback {
                 Ok(()) => format!(
                     "failed to update export policy cohort: {error}; already-applied peers restored"
@@ -764,14 +834,176 @@ impl PeerManager {
         Ok(targets)
     }
 
+    async fn register_policy_rollback_rib(
+        &self,
+        plans: &[PolicyRollbackPeerPlan],
+        budget: &mut PolicyRollbackRibBudget,
+    ) -> Option<RegisteredPolicyRollbackRib> {
+        let mut futures = Vec::new();
+        for (index, plan) in plans.iter().enumerate() {
+            let Some((export_policy, _)) = &plan.export_restore else {
+                continue;
+            };
+            let rib_tx = self.rib_tx.clone();
+            let peer = plan.peer_key.address;
+            let export_policy = export_policy.clone();
+            let future: PolicyRollbackRibFuture = Box::pin(async move {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let result = if rib_tx
+                    .send(RibUpdate::ReplacePeerExportPolicy {
+                        peer,
+                        export_policy,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    Err(RibCommandError::internal("RIB manager unavailable"))
+                } else {
+                    match reply_rx.await {
+                        Ok(result) => result,
+                        Err(_) => Err(RibCommandError::internal("RIB manager dropped reply")),
+                    }
+                };
+                (index, result)
+            });
+            futures.push((index, future));
+        }
+        if futures.is_empty() {
+            return None;
+        }
+
+        let deadline = budget.deadline();
+        let mut completed = Vec::new();
+        let mut pending = Vec::new();
+        let mut refreshable = vec![false; plans.len()];
+        for (index, mut future) in futures {
+            // Poll every reverse-order send once without Tokio's cooperative
+            // budget. A full bounded channel therefore registers every waiter
+            // in FIFO order before rollback can emit a Route Refresh, time out,
+            // or return control to a later PeerManager mutation.
+            let first_poll = first_poll_policy_rollback_rib(&mut future).await;
+            if let Some(outcome) = first_poll {
+                refreshable[index] = match &outcome.1 {
+                    Ok(()) => true,
+                    Err(RibCommandError::NotFound(_)) => plans[index]
+                        .export_restore
+                        .as_ref()
+                        .is_some_and(|(_, is_known_non_established)| *is_known_non_established),
+                    Err(_) => false,
+                };
+                completed.push(outcome);
+            } else {
+                // The send either reached the RIB and awaits its reply, or
+                // owns its FIFO place in a full channel. Keep the import
+                // rollback moving: this pinned future survives the caller
+                // deadline and remains ahead of refresh-generated RIB work.
+                refreshable[index] = true;
+                pending.push(future);
+            }
+        }
+
+        let task = tokio::spawn(async move {
+            completed.extend(futures::future::join_all(pending).await);
+            completed
+        });
+        Some(RegisteredPolicyRollbackRib {
+            deadline,
+            refreshable,
+            task,
+        })
+    }
+
+    async fn finish_policy_rollback_refresh(&mut self, plan: &PolicyRollbackPeerPlan) {
+        let Some(refresh_failure) = plan.refresh_failure else {
+            return;
+        };
+        let pending_after = if plan.is_established {
+            match self.soft_reset_in(plan.peer_key.clone(), Vec::new()).await {
+                Ok(()) => plan
+                    .restore_prior_pending
+                    .is_some_and(|(pending_refresh, _)| pending_refresh),
+                Err(error) => {
+                    warn!(
+                        peer = %plan.peer_key.address,
+                        %error,
+                        "route refresh failed during policy rollback; retained safe pending state"
+                    );
+                    match refresh_failure {
+                        RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => {
+                            true
+                        }
+                        RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
+                            pending_refresh
+                        }
+                    }
+                }
+            }
+        } else {
+            match refresh_failure {
+                RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
+                RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
+                    pending_refresh
+                }
+            }
+        };
+        if let Some(managed) = self.peers.get_mut(&plan.peer_key) {
+            managed.pending_refresh = pending_after;
+        }
+    }
+
+    fn finish_policy_rollback_rib_success(&mut self, plan: &PolicyRollbackPeerPlan) {
+        let Some(managed) = self.peers.get_mut(&plan.peer_key) else {
+            return;
+        };
+        if let Some((pending_refresh, pending_export_apply)) = plan.restore_prior_pending {
+            managed.pending_refresh = pending_refresh;
+            managed.pending_export_apply = pending_export_apply;
+        } else {
+            managed.pending_export_apply = false;
+        }
+    }
+
+    fn retain_policy_rollback_rib_intent(&mut self, plan: &PolicyRollbackPeerPlan) {
+        if let Some(managed) = self.peers.get_mut(&plan.peer_key) {
+            managed.pending_export_apply = true;
+            if plan.refresh_failure.is_some() {
+                managed.pending_refresh = true;
+            }
+        }
+    }
+
+    async fn finish_policy_rollback_refreshes(
+        &mut self,
+        plans: &[PolicyRollbackPeerPlan],
+        registered: Option<&RegisteredPolicyRollbackRib>,
+    ) {
+        for (index, plan) in plans.iter().enumerate() {
+            let refreshable = plan.export_restore.is_none()
+                || registered.is_some_and(|registered| registered.refreshable[index]);
+            if refreshable {
+                self.finish_policy_rollback_refresh(plan).await;
+            }
+            if plan.export_restore.is_none() {
+                self.finish_policy_rollback_rib_success(plan);
+            }
+        }
+    }
+
     /// Re-apply captured prior chains (reverse of application order) to restore
-    /// live peers during a transaction rollback. Composes per-peer failures;
-    /// peers no longer live are skipped.
+    /// live peers during a transaction rollback. Session/bookkeeping restores
+    /// run first. Every required RIB send is then registered in reverse order
+    /// before any Route Refresh, and all RIB sends/replies share one lazy
+    /// absolute deadline across this top-level policy transaction. Timing out or
+    /// dropping the caller detaches the exact registered aggregate so FIFO repair
+    /// can continue while conservative pending flags retain retry intent.
     async fn restore_resolved_policies(
         &mut self,
         priors: Vec<CapturedResolvedPolicy>,
+        budget: &mut PolicyRollbackRibBudget,
     ) -> Result<(), String> {
         let mut errors: Vec<String> = Vec::new();
+        let mut plans = Vec::new();
         for prior in priors.into_iter().rev() {
             let address = prior.policy.address;
             let peer_key = PeerKey::new(address, prior.policy.interface.clone());
@@ -785,23 +1017,83 @@ impl PeerManager {
                     pending_refresh: prior.pending_refresh,
                 }
             };
-            if let Err(error) = self
+            let mut plan = None;
+            match self
                 .update_runtime_policies_for_peer_key(
-                    peer_key.clone(),
+                    peer_key,
                     prior.policy.import_policy,
                     prior.policy.export_policy,
                     refresh_failure,
+                    Some(&mut plan),
                 )
                 .await
             {
-                errors.push(format!("{address}: {error}"));
-            } else if !prior.forward_completed
-                && let Some(managed) = self.peers.get_mut(&peer_key)
-            {
-                managed.pending_refresh = prior.pending_refresh;
-                managed.pending_export_apply = prior.pending_export_apply;
+                Err(error) => errors.push(format!("{address}: {error}")),
+                Ok(()) => {
+                    if let Some(mut plan) = plan {
+                        if !prior.forward_completed {
+                            plan.restore_prior_pending =
+                                Some((prior.pending_refresh, prior.pending_export_apply));
+                        }
+                        plans.push(plan);
+                    }
+                }
             }
         }
+
+        let registered = self.register_policy_rollback_rib(&plans, budget).await;
+        self.finish_policy_rollback_refreshes(&plans, registered.as_ref())
+            .await;
+
+        if let Some(registered) = registered {
+            match tokio::time::timeout_at(
+                registered.deadline,
+                self.await_with_readiness(registered.task),
+            )
+            .await
+            {
+                Err(_) => {
+                    for plan in plans.iter().filter(|plan| plan.export_restore.is_some()) {
+                        self.retain_policy_rollback_rib_intent(plan);
+                    }
+                    errors.push(format!(
+                        "rollback RIB restores exceeded the shared {:?} deadline; late ordered repair continues",
+                        super::RIB_REPLY_TIMEOUT
+                    ));
+                }
+                Ok(Err(error)) => {
+                    for plan in plans.iter().filter(|plan| plan.export_restore.is_some()) {
+                        self.retain_policy_rollback_rib_intent(plan);
+                    }
+                    errors.push(format!("rollback RIB restore task failed: {error}"));
+                }
+                Ok(Ok(outcomes)) => {
+                    for (index, outcome) in outcomes {
+                        let plan = &plans[index];
+                        match outcome {
+                            Ok(()) => self.finish_policy_rollback_rib_success(plan),
+                            Err(error @ RibCommandError::NotFound(_))
+                                if plan.export_restore.as_ref().is_some_and(
+                                    |(_, is_known_non_established)| *is_known_non_established,
+                                ) =>
+                            {
+                                info!(
+                                    peer = %plan.peer_key.address,
+                                    %error,
+                                    "policy rollback found no RIB outbound registration; the restored session policy will be authoritative on PeerUp"
+                                );
+                                self.finish_policy_rollback_rib_success(plan);
+                            }
+                            Err(error) => {
+                                self.retain_policy_rollback_rib_intent(plan);
+                                errors.push(format!("{}: {error}", plan.peer_key.address));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1039,6 +1331,7 @@ impl PeerManager {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         refresh_failure: RefreshFailureHandling,
+        rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
     ) -> Result<(), String> {
         use std::fmt::Write as _;
         let address = peer_key.address;
@@ -1257,6 +1550,29 @@ impl PeerManager {
         }
 
         let is_rollback = !matches!(refresh_failure, RefreshFailureHandling::Fatal);
+        if let Some(rollback_plan) = rollback_plan {
+            debug_assert!(
+                is_rollback,
+                "rollback planning requires best-effort handling"
+            );
+            if let Some(managed) = self.peers.get_mut(&peer_key) {
+                if needs_refresh {
+                    managed.pending_refresh = true;
+                }
+                if needs_export_apply {
+                    managed.pending_export_apply = true;
+                }
+            }
+            *rollback_plan = Some(PolicyRollbackPeerPlan {
+                peer_key,
+                export_restore: needs_export_apply
+                    .then_some((export_policy, is_known_non_established)),
+                refresh_failure: needs_refresh.then_some(refresh_failure),
+                is_established,
+                restore_prior_pending: None,
+            });
+            return Ok(());
+        }
         if needs_export_apply && (is_established || is_rollback) {
             // The RIB step sits between session-side hot-apply (already
             // succeeded if we reached here) and Route Refresh. If it
@@ -1684,6 +2000,7 @@ impl PeerManager {
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
+                    None,
                 )
                 .await
             {
@@ -1766,6 +2083,7 @@ impl PeerManager {
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
+                    None,
                 )
                 .await
             {
@@ -1922,5 +2240,83 @@ impl PeerManager {
         self.current_config = next_config;
         self.publish_policy_config_event(&event, priors.len());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod first_poll_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum QueueItem {
+        Sentinel,
+        Rollback,
+        Marker,
+    }
+
+    #[tokio::test]
+    async fn rollback_first_poll_registers_after_cooperative_budget_is_exhausted() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(QueueItem::Sentinel).await.unwrap();
+
+        let rollback_tx = tx.clone();
+        let mut rollback: PolicyRollbackRibFuture = Box::pin(async move {
+            let result = rollback_tx
+                .send(QueueItem::Rollback)
+                .await
+                .map_err(|_| RibCommandError::internal("test RIB channel unavailable"));
+            (0, result)
+        });
+        let marker_tx = tx.clone();
+        let mut marker = Box::pin(async move { marker_tx.send(QueueItem::Marker).await });
+
+        std::future::poll_fn(|cx| {
+            loop {
+                match tokio::task::coop::poll_proceed(cx) {
+                    Poll::Ready(permit) => permit.made_progress(),
+                    Poll::Pending => return Poll::Ready(()),
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            first_poll_policy_rollback_rib(&mut rollback)
+                .await
+                .is_none()
+        );
+        let marker_registered = std::future::poll_fn(|cx| {
+            let mut marker = std::pin::pin!(tokio::task::unconstrained(marker.as_mut()));
+            Poll::Ready(marker.as_mut().poll(cx).is_ready())
+        })
+        .await;
+        assert!(!marker_registered);
+
+        assert_eq!(
+            tokio::task::unconstrained(rx.recv()).await,
+            Some(QueueItem::Sentinel)
+        );
+        let readiness = std::future::poll_fn(|cx| {
+            let marker_ready = {
+                let mut marker = std::pin::pin!(tokio::task::unconstrained(marker.as_mut()));
+                marker.as_mut().poll(cx).is_ready()
+            };
+            let rollback_ready = {
+                let mut rollback = std::pin::pin!(tokio::task::unconstrained(rollback.as_mut()));
+                rollback.as_mut().poll(cx).is_ready()
+            };
+            Poll::Ready((marker_ready, rollback_ready))
+        })
+        .await;
+
+        // LOAD-BEARING: removing only the helper's `unconstrained` wrapper
+        // changes this tuple to `(true, false)`: Marker claims the freed slot
+        // because Rollback was never registered under the exhausted budget.
+        assert_eq!(readiness, (false, true));
+        assert_eq!(
+            tokio::task::unconstrained(rx.recv()).await,
+            Some(QueueItem::Rollback)
+        );
     }
 }

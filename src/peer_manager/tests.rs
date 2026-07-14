@@ -1181,6 +1181,89 @@ fn established_export_policy_test_session(
     PeerHandle::from_parts(session_tx, task)
 }
 
+fn rollback_ordering_policy_session(
+    addr: IpAddr,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    fail_first_export: bool,
+    rollback_export_delay: Option<Duration>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        let mut export_attempts = 0;
+        let mut refresh_attempts = 0;
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    export_attempts += 1;
+                    let result = if fail_first_export && export_attempts == 1 {
+                        Err(PeerCommandError::CommandFailed(
+                            "injected final session failure".to_string(),
+                        ))
+                    } else {
+                        if export_attempts > 1
+                            && let Some(delay) = rollback_export_delay
+                        {
+                            tokio::time::sleep(delay).await;
+                        }
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Established,
+                        peer_ip: addr,
+                        peer_asn: Some(65002),
+                        prefix_count: 0,
+                        negotiated_hold_time: Some(90),
+                        four_octet_as: Some(true),
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        messages_received: 0,
+                        messages_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 1,
+                        last_error: String::new(),
+                        tcp_ao_info: None,
+                        tcp_ao_protected: false,
+                    });
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    refresh_attempts += 1;
+                    if refresh_attempts > 1 {
+                        let (marker_tx, marker_rx) = oneshot::channel();
+                        let _ = rib_tx
+                            .send(RibUpdate::QueryLocRibCount { reply: marker_tx })
+                            .await;
+                        let _ = marker_rx.await;
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
 fn stalled_export_policy_test_session(
     addr: IpAddr,
 ) -> (
@@ -8022,6 +8105,428 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
     );
 }
 
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cross-partition deadline proof must hold both rollback partitions at once"
+)]
+async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
+    use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 39, 2, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 39, 2, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 39, 2, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 39, 2, 4)),
+    ];
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&attempts), None),
+            false,
+        );
+    }
+
+    let cohort_policy = deny_policy_chain();
+    let remainder_policy = validation_policy_chain(ImportValidationDependency::Aspa);
+    let started = tokio::time::Instant::now();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .into_iter()
+            .zip([
+                cohort_policy.clone(),
+                cohort_policy,
+                remainder_policy.clone(),
+                remainder_policy,
+            ])
+            .map(|(address, export_policy)| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(export_policy),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort commit");
+        };
+        reply
+            .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+            .unwrap();
+
+        for (index, expected_peer) in peers[2..].iter().copied().enumerate() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected remainder forward command");
+            };
+            assert_eq!(peer, expected_peer);
+            if index == 0 {
+                reply.send(Ok(())).unwrap();
+            } else {
+                reply
+                    .send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "force cross-partition rollback",
+                    )))
+                    .unwrap();
+            }
+        }
+
+        let mut late_replies = Vec::new();
+        for expected_peer in peers[2..].iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected remainder rollback command");
+            };
+            assert_eq!(peer, *expected_peer);
+            late_replies.push(reply);
+        }
+
+        let (readiness_reply, readiness_response) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::ListPeers {
+                reply: readiness_reply,
+            })
+            .await
+            .unwrap();
+        // LOAD-BEARING: awaiting the registered aggregate without the
+        // read-only readiness lane makes this deadline expire.
+        assert_eq!(
+            tokio::time::timeout(
+                rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+                readiness_response,
+            )
+            .await
+            .expect("readiness must remain live during rollback RIB congestion")
+            .unwrap()
+            .len(),
+            peers.len()
+        );
+
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        for expected_peer in peers[..2].iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected cohort rollback command");
+            };
+            assert_eq!(peer, *expected_peer);
+            late_replies.push(reply);
+        }
+        late_replies
+    };
+    let (result, late_replies) = tokio::join!(apply, drive_rib);
+
+    // LOAD-BEARING: constructing a fresh five-second timeout for the cohort
+    // unwind makes elapsed time ten seconds and this assertion goes red.
+    assert!(
+        tokio::time::Instant::now().duration_since(started)
+            < RIB_REPLY_TIMEOUT + Duration::from_secs(1),
+        "all rollback partitions must share the first rollback RIB deadline"
+    );
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("force cross-partition rollback")
+                && error.matches("shared 5s deadline").count() == 2
+        }),
+        "both timed-out partitions must report the shared deadline: {result:?}"
+    );
+    for reply in late_replies {
+        assert!(
+            reply.send(Ok(())).is_ok(),
+            "the exact timed-out RIB future must remain detached for late repair"
+        );
+    }
+    for peer in peers {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.pending_export_apply);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn policy_rollback_rib_deadline_starts_after_session_restores() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    const PEER_COUNT: u8 = 13;
+    const ROLLBACK_EXPORT_DELAY: Duration = Duration::from_millis(450);
+
+    let peers = (1..=PEER_COUNT)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 39, 5, last)))
+        .collect::<Vec<_>>();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    for (index, peer) in peers.iter().copied().enumerate() {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            rollback_ordering_policy_session(
+                peer,
+                rib_tx.clone(),
+                index + 1 == peers.len(),
+                Some(ROLLBACK_EXPORT_DELAY),
+            ),
+            false,
+        );
+    }
+
+    let started = tokio::time::Instant::now();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .copied()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(deny_policy_chain()),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        let mut replies = Vec::new();
+        for expected_peer in peers[..peers.len() - 1].iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected rollback RIB restore");
+            };
+            assert_eq!(peer, *expected_peer);
+            replies.push(reply);
+        }
+        assert!(
+            tokio::time::Instant::now().duration_since(started) > RIB_REPLY_TIMEOUT,
+            "successful session restores must consume more than the RIB-only deadline"
+        );
+
+        tokio::time::advance(
+            RIB_REPLY_TIMEOUT
+                .checked_sub(Duration::from_millis(1))
+                .expect("RIB reply timeout exceeds one millisecond"),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        for reply in replies {
+            reply.send(Ok(())).unwrap();
+        }
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+
+    // LOAD-BEARING: moving `budget.deadline()` to the start of
+    // `restore_resolved_policies` makes this red because the successful session
+    // restores consume that prematurely anchored RIB-only wait budget.
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("injected final session failure")
+                && error.contains("already-applied peers restored")
+        }),
+        "rollback RIB waiting must receive a fresh deadline after session restores: {result:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 39, 3, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 39, 3, 2)),
+    ];
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            acking_policy_handle(peer, SessionState::Established),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .copied()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: Some(next.clone()),
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        for (index, expected_peer) in peers.iter().copied().enumerate() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected forward RIB command");
+            };
+            assert_eq!(peer, expected_peer);
+            if index == 0 {
+                reply.send(Ok(())).unwrap();
+            } else {
+                reply
+                    .send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "force rollback timeout",
+                    )))
+                    .unwrap();
+            }
+        }
+        let mut held = Vec::new();
+        for expected_peer in peers.iter().rev() {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected rollback RIB command");
+            };
+            assert_eq!(peer, *expected_peer);
+            held.push(reply);
+        }
+        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_millis(1)).await;
+        held
+    };
+    let (result, held) = tokio::join!(apply, drive_rib);
+    assert!(result.is_err());
+
+    for peer in peers {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        // LOAD-BEARING: clearing rollback refresh state before a timed-out RIB
+        // aggregate without rearming it makes pending_refresh false here.
+        assert!(peer_state.pending_refresh);
+        assert!(peer_state.pending_export_apply);
+    }
+    for reply in held {
+        assert!(reply.send(Ok(())).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn policy_rollback_skips_refresh_when_rib_restore_cannot_register() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 39, 4, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 39, 4, 2)),
+    ];
+    let counters = [
+        Arc::new(FakePeerCounters::default()),
+        Arc::new(FakePeerCounters::default()),
+    ];
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (_command_tx, command_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (peer, counter) in peers.iter().copied().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            acking_counted_policy_handle(peer, Arc::clone(counter)),
+            false,
+        );
+    }
+
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .copied()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: Some(next.clone()),
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+    );
+    let close_rib_before_rollback = async {
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected first forward RIB command");
+        };
+        assert_eq!(peer, peers[0]);
+        reply.send(Ok(())).unwrap();
+
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected second forward RIB command");
+        };
+        assert_eq!(peer, peers[1]);
+        reply
+            .send(Err(rustbgpd_rib::RibCommandError::internal(
+                "force rollback after one completed peer",
+            )))
+            .unwrap();
+        drop(rib_rx);
+    };
+    let (result, ()) = tokio::join!(apply, close_rib_before_rollback);
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("force rollback after one completed peer")),
+        "the injected second-peer failure must drive rollback: {result:?}"
+    );
+    // LOAD-BEARING: removing the immediate-registration-failure refresh gate
+    // sends a second Route Refresh to peer 1 even though its RIB restore was
+    // never queued, making this exact count red. Peer 2 failed before its
+    // forward refresh, so it must remain at zero as well.
+    assert_eq!(counters[0].route_refresh.load(Ordering::SeqCst), 1);
+    assert_eq!(counters[1].route_refresh.load(Ordering::SeqCst), 0);
+    for peer in peers {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert!(peer_state.pending_refresh);
+        assert!(peer_state.pending_export_apply);
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -8126,6 +8631,9 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
         }),
         "the ambiguous remainder failure must unwind both phases: {result:?}"
     );
+    // LOAD-BEARING: treating the ambiguous forward import command as complete
+    // suppresses its rollback reassertion; the live chain and install count
+    // below then remain on the changed policy and make this test red.
     assert_eq!(
         *live_import.lock().unwrap(),
         None,
@@ -8598,6 +9106,233 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
     }
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bounded-channel proof keeps registration, refresh, and later lifecycle ordering together"
+)]
+async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycle_work() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    const PEER_COUNT: u8 = 160;
+    let peers = (1..=PEER_COUNT)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 40, 0, last)))
+        .collect::<Vec<_>>();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+    let lifecycle_tx = rib_tx.clone();
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    for (index, peer) in peers.iter().copied().enumerate() {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            rollback_ordering_policy_session(peer, rib_tx.clone(), index + 1 == peers.len(), None),
+            false,
+        );
+    }
+
+    let next = deny_policy_chain();
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .copied()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: Some(next.clone()),
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+    );
+    let drive_rib = async {
+        for expected_peer in peers.iter().take(peers.len() - 1) {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected forward RIB restore");
+            };
+            assert_eq!(peer, *expected_peer);
+            reply.send(Ok(())).unwrap();
+        }
+
+        let mut lifecycle_task = None;
+        let mut restores = Vec::new();
+        let mut refresh_markers = 0;
+        let mut saw_delete = false;
+        let mut saw_recreate = false;
+        while restores.len() < peers.len()
+            || refresh_markers < peers.len() - 1
+            || !saw_delete
+            || !saw_recreate
+        {
+            match rib_rx.recv().await.unwrap() {
+                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
+                    if restores.is_empty() {
+                        let later_tx = lifecycle_tx.clone();
+                        let recreated = peers[0];
+                        lifecycle_task = Some(tokio::spawn(async move {
+                            later_tx
+                                .send(RibUpdate::PeerDeleted { peer: recreated })
+                                .await
+                                .unwrap();
+                            let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+                            later_tx
+                                .send(RibUpdate::PeerUp {
+                                    peer: recreated,
+                                    session_id: 99,
+                                    peer_asn: 65002,
+                                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                                    outbound_tx,
+                                    export_policy: None,
+                                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                                    is_ebgp: true,
+                                    route_reflector_client: false,
+                                    orr_vantage: None,
+                                    per_client_best: false,
+                                    add_path_send_families: Vec::new(),
+                                    add_path_send_max: 0,
+                                    negotiated_orf_recv: Vec::new(),
+                                    negotiated_llgr_families: Vec::new(),
+                                })
+                                .await
+                                .unwrap();
+                        }));
+                    }
+                    assert_eq!(peer, peers[peers.len() - 1 - restores.len()]);
+                    restores.push(peer);
+                    reply.send(Ok(())).unwrap();
+                }
+                RibUpdate::QueryLocRibCount { reply } => {
+                    // LOAD-BEARING: moving Route Refresh ahead of aggregate
+                    // registration lets this marker overtake a restore.
+                    assert_eq!(restores.len(), peers.len());
+                    refresh_markers += 1;
+                    reply.send(0).unwrap();
+                }
+                RibUpdate::PeerDeleted { peer } => {
+                    // LOAD-BEARING: removing reverse-order pre-registration
+                    // lets this later delete overtake an unregistered restore.
+                    assert_eq!(restores.len(), peers.len());
+                    assert_eq!(peer, peers[0]);
+                    saw_delete = true;
+                }
+                RibUpdate::PeerUp {
+                    peer, session_id, ..
+                } => {
+                    assert!(saw_delete);
+                    assert_eq!(restores.len(), peers.len());
+                    assert_eq!(peer, peers[0]);
+                    assert_eq!(session_id, 99);
+                    saw_recreate = true;
+                }
+                _ => panic!("unexpected RIB command in rollback ordering proof"),
+            }
+        }
+        lifecycle_task.unwrap().await.unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("injected final session failure")),
+        "the forced final failure must drive a complete rollback: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = (1..=8)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 41, 0, last)))
+        .collect::<Vec<_>>();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (index, peer) in peers.iter().copied().enumerate() {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(
+                peer,
+                Arc::clone(&attempts),
+                (index + 1 == peers.len()).then_some(peers.len()),
+            ),
+            false,
+        );
+    }
+    let task_peers = peers.clone();
+    let apply_task = tokio::spawn(async move {
+        manager
+            .apply_resolved_policy_snapshot(
+                task_peers
+                    .iter()
+                    .copied()
+                    .map(|address| ResolvedPeerPolicy {
+                        address,
+                        interface: None,
+                        import_policy: None,
+                        export_policy: Some(deny_policy_chain()),
+                    })
+                    .collect(),
+            )
+            .await
+    });
+
+    let RibUpdate::ReplacePeerExportPolicy {
+        peer: first_restore,
+        reply,
+        ..
+    } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected the first registered rollback restore");
+    };
+    assert_eq!(first_restore, peers[peers.len() - 2]);
+    apply_task.abort();
+    assert!(apply_task.await.unwrap_err().is_cancelled());
+    reply.send(Ok(())).unwrap();
+
+    let mut restored = vec![first_restore];
+    while restored.len() < peers.len() - 1 {
+        let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected detached rollback restore");
+        };
+        restored.push(peer);
+        reply.send(Ok(())).unwrap();
+    }
+    // LOAD-BEARING: awaiting rollback futures directly in the caller drops
+    // this suffix on cancellation, closing the channel before all peers arrive.
+    assert_eq!(
+        restored,
+        peers[..peers.len() - 1]
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
@@ -8962,6 +9697,8 @@ async fn export_only_snapshot_restores_newest_first_after_session_failure() {
         2,
         "the failing session must have its prior chain reasserted too"
     );
+    // LOAD-BEARING: planning RIB compensation for the session whose forward
+    // command failed increases this to two and makes the assertion red.
     assert_eq!(rib_single_restores.load(Ordering::SeqCst), 1);
     for peer in [first, second] {
         let peer_state = manager.peers.get(&key(peer)).unwrap();
