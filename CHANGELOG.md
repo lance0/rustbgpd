@@ -322,11 +322,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   application now selects the first equivalent Established export-only cohort
   in configuration order, commits it through one shared RIB transition, then
   preserves the original order for the authoritative remainder. Duplicate
-  targets disable partitioning wholesale, and any cohort or remainder failure
-  restores prior policy newest-first. A successful shared transition performs
-  the same global dirty-resync opportunity as the authoritative seam before
-  replying. The reload-stall harness can independently gate changed-observer
-  completion while retaining full-fleet delivery-gap and session checks.
+  targets disable partitioning wholesale. Cohort and remainder failures attempt
+  newest-first rollback and surface composed rollback failures. A successful
+  shared transition performs the same global dirty-resync opportunity as the
+  authoritative seam before replying. The reload-stall harness can
+  independently gate changed-observer completion while retaining full-fleet
+  delivery-gap and session checks.
 
 - **IXP route-server clients share exact-export work across remote ASNs.** The
   immutable session export profile now retains the wire-relevant eBGP/iBGP
