@@ -31,6 +31,21 @@ GRPC_INVENTORY_PATH = ROOT / "docs/grpc-method-inventory.json"
 WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
 JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
 V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
+EXPECTED_EFFECTIVE_DEFAULT_PATHS = (
+    "Global.cluster_id",
+    "Neighbor.disable_ipv4_unicast",
+    "Neighbor.gr_restart_time",
+    "Neighbor.gr_stale_routes_time",
+    "Neighbor.graceful_restart",
+    "Neighbor.hold_time",
+    "Neighbor.llgr_stale_time",
+    "Neighbor.send_hold_time",
+)
+EFFECTIVE_DEFAULT_ASSERTION_MACRO = "assert_v1_effective_default"
+EFFECTIVE_DEFAULT_ASSERTION_RE = re.compile(
+    rf'\b{EFFECTIVE_DEFAULT_ASSERTION_MACRO}!\(\s*"([^"\\]+)"\s*,\s*'
+    r"([a-z][a-z0-9_]*)\s*,\s*(None|true|false|\d+|\(\d+\s*,\s*\d+\))\s*\);"
+)
 
 
 def fail(message: str) -> None:
@@ -129,6 +144,129 @@ def check_stable_config_object_shape_regressions() -> None:
         fail("internal config-shape regression treated required ordering as semantic")
 
 
+def check_effective_default_assertion_block(test_region: str, test: str) -> None:
+    if not re.search(
+        rf"""
+        macro_rules!\s+{EFFECTIVE_DEFAULT_ASSERTION_MACRO}\s*\{{\s*
+        \(\s*\$path:literal\s*,\s*\$actual:expr\s*,\s*\$expected:expr\s*\)\s*=>\s*\{{\s*
+        assert_eq!\(\s*\$actual\s*,\s*\$expected\s*,.*?\);\s*
+        \}}\s*;\s*
+        \}}
+        """,
+        test_region,
+        flags=re.DOTALL | re.VERBOSE,
+    ):
+        fail(
+            f"effective-default validation test {test!r} has no runtime-vs-expected "
+            "assertion macro"
+        )
+    assertions = EFFECTIVE_DEFAULT_ASSERTION_RE.findall(test_region)
+    if [path for path, _, _ in assertions] != list(EXPECTED_EFFECTIVE_DEFAULT_PATHS):
+        fail(
+            f"effective-default validation test {test!r} must assert exactly the "
+            "eight scoped full paths in sorted order"
+        )
+    for path, actual, _ in assertions:
+        field = path.partition(".")[2]
+        extraction = (
+            rf"\blet\s+{re.escape(actual)}\s*=\s*"
+            rf"[^;\n]*\b{re.escape(field)}\b[^;\n]*;"
+        )
+        if actual != field or not re.search(extraction, test_region):
+            fail(
+                f"effective-default validation test {test!r} assertion for {path!r} "
+                "is not bound to that runtime field"
+            )
+
+
+def check_effective_defaults(
+    inventory: dict, schema: dict, stable_paths: set[str]
+) -> None:
+    effective = inventory["config"].get("effective_defaults")
+    if not isinstance(effective, dict):
+        fail("config.effective_defaults must be an object")
+    required_keys = {"paths", "validation_source", "validation_test"}
+    if set(effective) != required_keys:
+        fail(
+            "config.effective_defaults must contain exactly paths, validation_source, "
+            "and validation_test"
+        )
+
+    paths = effective["paths"]
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(path, str) and path for path in paths
+    ):
+        fail("config.effective_defaults.paths must be a non-empty string list")
+    require_sorted_unique(paths, "config.effective_defaults.paths")
+    if paths != list(EXPECTED_EFFECTIVE_DEFAULT_PATHS):
+        fail("config.effective_defaults.paths must match the exact eight-path scoped set")
+    for path in paths:
+        definition, separator, field = path.partition(".")
+        if not separator or "." in field or path not in stable_paths:
+            fail(f"effective default path {path!r} is not a stable config field")
+        property_schema = schema_definition(schema, definition)["properties"][field]
+        if "default" in property_schema:
+            fail(
+                f"contextual effective default {path!r} must not claim a static JSON Schema default"
+            )
+        description = property_schema.get("description")
+        if not isinstance(description, str) or not description.strip():
+            fail(f"contextual effective default {path!r} has no schema description")
+
+    source_name = effective["validation_source"]
+    test = effective["validation_test"]
+    if not isinstance(source_name, str) or not source_name:
+        fail("config.effective_defaults.validation_source must be a source path")
+    if not isinstance(test, str) or not test:
+        fail("config.effective_defaults.validation_test must be a test name")
+    source_path = ROOT / safe_relative_path(
+        source_name, "effective-default validation source"
+    )
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read effective-default validation source {source_name}: {error}")
+    test_region = named_rust_test_region(source, test)
+    if test_region is None:
+        fail(f"effective-default validation test {test!r} is not a live named test")
+    check_effective_default_assertion_block(test_region, test)
+    expect_checker_failure(
+        lambda: check_effective_default_assertion_block(
+            EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
+        ),
+        "must assert exactly the eight scoped full paths",
+        "missing effective-default runtime assertion block",
+    )
+    for broken_macro, label in (
+        (
+            test_region.replace("$actual, $expected", "$expected, $expected"),
+            "vacuous macro",
+        ),
+        (
+            re.sub(
+                r"assert_eq!\(\s*\$actual\s*,\s*\$expected\s*,.*?\);",
+                "",
+                test_region,
+                count=1,
+                flags=re.DOTALL,
+            ),
+            "no-op macro",
+        ),
+    ):
+        expect_checker_failure(
+            lambda broken_macro=broken_macro: check_effective_default_assertion_block(
+                broken_macro, test
+            ),
+            "no runtime-vs-expected assertion macro",
+            label,
+        )
+    for linkage in ("parse_strict(", "resolve_neighbor("):
+        if linkage not in test_region:
+            fail(
+                f"effective-default validation test {test!r} does not exercise {linkage[:-1]}"
+            )
+
+
 def check_config(inventory: dict, schema: dict) -> None:
     stable_entries = inventory["config"]["stable_fields"]
     definitions: set[str] = set()
@@ -202,6 +340,7 @@ def check_config(inventory: dict, schema: dict) -> None:
     missing = sorted(config_properties - classified_roots)
     if missing:
         fail(f"top-level config roots are unclassified: {', '.join(missing)}")
+    check_effective_defaults(inventory, schema, stable_paths)
 
 
 RPC_RE = re.compile(
@@ -688,10 +827,20 @@ def named_rust_test_region(source: str, name: str) -> str | None:
         r"((?:\s*#\[[^\]]*\])+\s*)$", source[: match.start()], flags=re.DOTALL
     )
     attributes = attributes_match.group(1) if attributes_match else ""
-    if not re.search(r"#\[(?:tokio::)?test(?:\([^\]]*\))?\]", attributes):
+    attribute_bodies = [body.strip() for body in re.findall(r"#\[(.*?)\]", attributes, re.DOTALL)]
+    if not any(
+        re.fullmatch(r"(?:tokio::)?test(?:\s*\(.*\))?", body, flags=re.DOTALL)
+        for body in attribute_bodies
+    ):
         return None
-    if re.search(r"#\[ignore(?:\([^\]]*\))?\]", attributes):
-        fail(f"JSON/upgrade contract test {name!r} must not be ignored")
+    for body in attribute_bodies:
+        is_cfg_attr = re.match(r"cfg_attr\b", body) is not None
+        if re.match(r"ignore\b", body) or (is_cfg_attr and re.search(r"\bignore\b", body)):
+            fail(f"inventory-linked contract test {name!r} must not be ignored")
+        if re.match(r"should_panic\b", body) or (
+            is_cfg_attr and re.search(r"\bshould_panic\b", body)
+        ):
+            fail(f"inventory-linked contract test {name!r} must not use should_panic")
     body_start = source.find("{", match.end())
     if body_start < 0:
         return None
@@ -931,6 +1080,40 @@ def check_cli_checker_selftests(inventory: dict) -> None:
     )
 
 
+def check_named_rust_test_region_selftests() -> None:
+    cases = [
+        ('#[test]\n#[ignore = "reason"]', "must not be ignored", "ignore with reason"),
+        (
+            "#[test]\n#[cfg_attr(test, ignore)]",
+            "must not be ignored",
+            "cfg_attr ignore",
+        ),
+        (
+            '#[test]\n#[cfg_attr(not(test), ignore = "reason")]',
+            "must not be ignored",
+            "conditional ignore with reason",
+        ),
+        ("#[test]\n#[should_panic]", "must not use should_panic", "should_panic"),
+        (
+            '#[test]\n#[should_panic(expected = "boom")]',
+            "must not use should_panic",
+            "should_panic with expected message",
+        ),
+        (
+            "#[test]\n#[cfg_attr(test, should_panic)]",
+            "must not use should_panic",
+            "cfg_attr should_panic",
+        ),
+    ]
+    for attributes, expected, label in cases:
+        source = f"{attributes}\nfn contract_probe() {{}}"
+        expect_checker_failure(
+            lambda source=source: named_rust_test_region(source, "contract_probe"),
+            expected,
+            label,
+        )
+
+
 def check_policy(inventory: dict) -> None:
     roles = inventory["roles"]
     role_ids = [role["id"] for role in roles]
@@ -960,6 +1143,7 @@ def check_policy(inventory: dict) -> None:
 def main() -> None:
     check_release_line_selftests()
     check_stable_config_object_shape_regressions()
+    check_named_rust_test_region_selftests()
     inventory = load_json(INVENTORY_PATH)
     if inventory.get("schema_version") != 1 or inventory.get("contract") != "rustbgpd-rs-rr-v1":
         fail("unexpected inventory schema or contract id")

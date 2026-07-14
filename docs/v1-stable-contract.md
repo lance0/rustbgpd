@@ -42,6 +42,17 @@ streaming mode. Each stable config definition's digest covers the selected
 property schemas, its complete (order-independent) required-field set, and its
 unknown-field policy. Unselected optional sibling properties and descriptive
 prose remain outside that digest, so additive optional siblings stay possible.
+The eight description-only contextual defaults scoped by this contract update
+are pinned separately under `config.effective_defaults`. Their named resolver
+test loads real TOML and checks omission, peer-group inheritance, derived
+values, direct overrides, and conditional route-reflector behavior. This is a
+deliberately scoped guard, not an exhaustive catalog of every config omission
+behavior. These eight values remain description-only in the JSON Schema: a
+static JSON Schema `default` is reserved for context-free omission semantics and
+must not misrepresent an inherited, computed, or conditional result. The Python
+release checker pins this inventory and its linkage to a live, non-ignored Rust
+test; the focused Cargo test executes that test and is the gate that detects
+runtime resolver changes.
 Nested protobuf evolution follows the compatibility rules below. The
 message-graph digest is a review tripwire, not an implicit promotion:
 experimental fields such as Paths-Limit are explicitly excluded in the
@@ -143,6 +154,7 @@ Run:
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
 cargo test -p rustbgpd v1_stable_v0_50_route_server_fixture_parses
+cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 
 Updating a digest is not a mechanical fix. Review the compatibility policy,
