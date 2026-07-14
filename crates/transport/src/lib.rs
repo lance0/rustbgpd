@@ -30,7 +30,7 @@ pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 pub use config::{
     RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring,
     TcpAoRotationGeneration, TcpAoRotationOwner, TcpAoRotationPhase, TcpAoRotationStatus,
-    TcpAoSessionGeneration, TransportConfig,
+    TcpAoSessionGeneration, TransportAuthSecret, TransportConfig,
 };
 pub use error::TransportError;
 pub use event_sink::{

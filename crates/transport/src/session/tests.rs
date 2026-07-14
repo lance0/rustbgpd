@@ -65,7 +65,7 @@ fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
     let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let old = crate::TcpAoConfig {
-        key: "old-secret".to_string(),
+        key: "old-secret".into(),
         send_id: 1,
         recv_id: 11,
         algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -92,7 +92,7 @@ fn disconnected_active_session_accepts_only_immediate_append_only_generation() {
         crate::TcpAoRotationGeneration::STARTUP,
     );
     let mut successor = old.clone();
-    successor.key = "successor-secret".to_string();
+    successor.key = "successor-secret".into();
     successor.send_id = 2;
     successor.recv_id = 12;
     let generation_two = crate::TcpAoRotationGeneration::new(2).unwrap();
@@ -127,7 +127,7 @@ fn disconnected_protected_session_cannot_advance_without_active_owner_inventory(
     let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.tcp_ao = Some(crate::TcpAoKeyring(vec![crate::TcpAoConfig {
-        key: "old-secret".to_string(),
+        key: "old-secret".into(),
         send_id: 1,
         recv_id: 11,
         algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -613,7 +613,7 @@ async fn tcp_ao_generation_does_not_advance_past_inflight_old_inventory_connect(
     peer_config.connect_retry_secs = 30;
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let old = crate::TcpAoConfig {
-        key: "old-secret".to_string(),
+        key: "old-secret".into(),
         send_id: 1,
         recv_id: 11,
         algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -643,7 +643,7 @@ async fn tcp_ao_generation_does_not_advance_past_inflight_old_inventory_connect(
         std::future::pending::<ConnectResult>().await
     }));
     let mut successor = old.clone();
-    successor.key = "successor-secret".to_string();
+    successor.key = "successor-secret".into();
     successor.send_id = 2;
     successor.recv_id = 12;
     let result = session.apply_tcp_ao_add_only(crate::TcpAoSessionGeneration {
@@ -1476,7 +1476,7 @@ fn active_open_second_key_install_failure_abandons_socket_before_connect() {
     let mut config = TransportConfig::new(peer_config, "192.0.2.2:179".parse().unwrap());
     config.tcp_ao = Some(crate::TcpAoKeyring(vec![
         crate::TcpAoConfig {
-            key: "selected".to_string(),
+            key: "selected".into(),
             send_id: 1,
             recv_id: 11,
             algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -1484,7 +1484,7 @@ fn active_open_second_key_install_failure_abandons_socket_before_connect() {
             deprecated: false,
         },
         crate::TcpAoConfig {
-            key: "standby".to_string(),
+            key: "standby".into(),
             send_id: 2,
             recv_id: 12,
             algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -1576,7 +1576,7 @@ async fn tcp_ao_query_test_session() -> PeerSession {
     let mut session = make_test_session(65001, 65002);
     session.config.tcp_ao = Some(
         crate::TcpAoConfig {
-            key: "test-secret".to_string(),
+            key: "test-secret".into(),
             send_id: 7,
             recv_id: 9,
             algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -1700,7 +1700,7 @@ async fn accepted_tcp_ao_refresh_restores_overlapping_owner_selectors_after_host
     let mut config = TransportConfig::new(peer_config, "127.0.0.1:179".parse().unwrap());
     config.tcp_ao = Some(crate::TcpAoKeyring(vec![
         crate::TcpAoConfig {
-            key: "static-current".to_string(),
+            key: "static-current".into(),
             send_id: 8,
             recv_id: 10,
             algorithm: crate::TcpAoAlgorithm::HmacSha256,
@@ -1708,7 +1708,7 @@ async fn accepted_tcp_ao_refresh_restores_overlapping_owner_selectors_after_host
             deprecated: true,
         },
         crate::TcpAoConfig {
-            key: "static-selected".to_string(),
+            key: "static-selected".into(),
             send_id: 11,
             recv_id: 12,
             algorithm: crate::TcpAoAlgorithm::HmacSha256,

@@ -2016,10 +2016,10 @@ mod tests {
     fn config_with_auth_secret(secret: &str) -> TransportConfig {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
         let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
-        config.md5_password = Some(secret.to_string());
+        config.md5_password = Some(secret.into());
         config.tcp_ao = Some(
             TcpAoConfig {
-                key: secret.to_string(),
+                key: secret.into(),
                 send_id: 7,
                 recv_id: 9,
                 algorithm: TcpAoAlgorithm::HmacSha256,

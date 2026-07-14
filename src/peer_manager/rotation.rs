@@ -540,7 +540,7 @@ mod tests {
 
     fn key(send_id: u8, recv_id: u8) -> TcpAoConfig {
         TcpAoConfig {
-            key: format!("secret-{send_id}"),
+            key: format!("secret-{send_id}").into(),
             send_id,
             recv_id,
             algorithm: TcpAoAlgorithm::HmacSha256,
@@ -603,7 +603,7 @@ mod tests {
         retain_desired_inventory(&mut retained, desired.clone()).unwrap();
 
         let mut changed_listener = listener.clone();
-        changed_listener.config.0[1].key = "changed-after-partial-apply".to_string();
+        changed_listener.config.0[1].key = "changed-after-partial-apply".into();
         let changed = canonical_desired_inventory(
             generation,
             &[changed_listener],

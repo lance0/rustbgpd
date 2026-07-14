@@ -1753,7 +1753,7 @@ fn tcp_ao_listener_key_for_dynamic_range(
             tcp_ao
                 .iter()
                 .map(|key| TransportTcpAoConfig {
-                    key: key.key.clone(),
+                    key: key.key.clone().into(),
                     send_id: key.send_id,
                     recv_id: key.recv_id,
                     algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
@@ -4176,7 +4176,10 @@ async fn run<T>(
                     hold_time: Some(transport_config.peer.hold_time),
                     send_hold_time: Some(transport_config.peer.send_hold_time),
                     max_prefixes: transport_config.max_prefixes,
-                    md5_password: transport_config.md5_password.clone(),
+                    md5_password: transport_config
+                        .md5_password
+                        .as_ref()
+                        .map(|secret| secret.as_ref().to_owned()),
                     tcp_ao: transport_config.tcp_ao.clone(),
                     ttl_security: transport_config.ttl_security,
                     families: transport_config.peer.families.clone(),

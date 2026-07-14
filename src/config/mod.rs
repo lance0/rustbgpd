@@ -1170,13 +1170,14 @@ impl Config {
         transport.md5_password = neighbor
             .md5_password
             .clone()
-            .or_else(|| group.and_then(|g| g.md5_password.clone()));
+            .or_else(|| group.and_then(|g| g.md5_password.clone()))
+            .map(Into::into);
         transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| {
             TcpAoKeyring(
                 tcp_ao
                     .iter()
                     .map(|key| TransportTcpAoConfig {
-                        key: key.key.clone(),
+                        key: key.key.clone().into(),
                         send_id: key.send_id,
                         recv_id: key.recv_id,
                         algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
