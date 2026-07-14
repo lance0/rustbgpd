@@ -14,7 +14,7 @@ would require a separate fail-closed selection and reconciliation design.
 
 The artifact contains sensitive, potentially large pre-policy routing data.
 Publication must therefore be private, bounded, transactional, and unable to
-weaken the existing marker-v1 restart path.
+weaken the existing generationless restart-marker path.
 
 ## Decision
 
@@ -41,9 +41,13 @@ weaken the existing marker-v1 restart path.
    files. It never selects `manifest.json` or the exact snapshot named by the
    current manifest. Cleanup failure is warned and leaves the new generation
    committed; no background collector or directory-size policy is introduced.
-5. A successful publication writes restart marker v2 with the exact checkpoint
-   generation. Failure writes the established marker-v1 form instead. Marker
-   and bundle operations remain independently fail-closed.
+5. A successful publication binds the exact checkpoint generation into the
+   restart marker. Marker v3 normally carries that binding plus a complete
+   Linux boottime clock domain; if clock-domain sampling or representation is
+   unavailable, the same generation is retained in wall-only marker v2.
+   Checkpoint failure publishes a generationless marker (normally v3, or
+   wall-only v1 when the clock domain is unavailable). Marker and bundle
+   operations remain independently fail-closed.
 6. This decision stops at publication and validation. The daemon has no boot
    call site that loads the bundle. No cached route is inserted into Adj-RIB-In
    or Loc-RIB, selected, installed, or advertised, and
@@ -57,7 +61,8 @@ weaken the existing marker-v1 restart path.
 - The checkpoint contains pre-policy routing and topology data and must be
   protected as sensitive daemon state.
 - Shutdown may spend up to 30 seconds attempting publication. Failure is
-  visible in logs but preserves the normal Graceful Restart marker fallback.
+  visible in logs but preserves the normal generationless Graceful Restart
+  marker fallback.
 - A successful checkpoint normally leaves one manifest and its one current
   snapshot. Unknown files are not garbage-collected. A post-commit cleanup
   warning means the new checkpoint remains committed but stale private bundle

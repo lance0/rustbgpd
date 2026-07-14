@@ -33,6 +33,10 @@ Implement an honest restarting-speaker mode:
    - `forwarding_preserved = false` for all families
 3. The restart window is process-wide and expires at:
    - `now + max(gr_restart_time)` across GR-enabled static neighbors
+   Marker v3 records this deadline against Linux `CLOCK_BOOTTIME`, together
+   with the boot ID and current time-namespace identity/offset needed to
+   prove that the next process is reading the same clock domain. It also
+   retains a wall-clock deadline as a bounded compatibility fallback.
 4. Dynamic peers added later via gRPC do **not** participate in that window.
 5. Once the window expires, subsequent reconnects revert to normal
    `restart_state = false`.
@@ -56,6 +60,19 @@ but makes **no claim** that rustbgpd preserved dataplane continuity.
 ADR-0104 extends coordinated shutdown with an optional generation-bound
 checkpoint publication. It deliberately does not change the startup behavior
 or the `forwarding_preserved = false` contract defined here.
+
+Marker v1 is wall-only and generationless; v2 is wall-only and
+generation-bound; v3 carries a complete boottime clock domain and permits an
+optional checkpoint generation. On Linux, coordinated shutdown publishes v3
+when the complete domain can be sampled and represented. Sampling, checked
+arithmetic, or serialization-domain failure publishes a complete v1/v2 marker
+instead. Startup uses boottime only when the boot ID, current time-namespace
+device/inode, and signed seconds plus nanoseconds offset all match. Legacy
+markers, a missing live sample, or any mismatch use the wall deadline, always
+clamped to the current configured maximum. Equal or past deadlines are
+expired. After that one-time resolution the live timer remains process-local
+`Instant` time; this decision does not claim suspend-inclusive behavior while
+the new daemon is running.
 
 ## Consequences
 

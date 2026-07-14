@@ -11,13 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Planned-restart markers resist wall-clock steps across a daemon restart on Linux.**
+  Marker v3 records a complete boot/time-namespace identity and checked
+  `CLOCK_BOOTTIME` deadline alongside its bounded wall fallback. Startup uses
+  boottime only when the live clock domain matches exactly; legacy markers,
+  mismatches, and sampling failures retain the bounded wall path. Publication
+  degrades atomically to complete v1/v2 markers when the domain cannot be
+  sampled or represented, and logs the actual visible version, checkpoint
+  binding, and directory-sync durability state. Runtime expiry remains
+  process-local monotonic time after startup.
+
 - **Coordinated shutdown can publish a bounded warm checkpoint.** The
   restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
   captures eligible established static peers' pre-policy Adj-RIB-In views into
   an owner-private, content-addressed MRT bundle under
   `<runtime_state_dir>/warm-bundle-v1`. Publication is deadline-, allocation-,
   and size-bounded, atomically binds exact live identity/config/policy inputs to
-  restart-marker v2, and falls back to the existing marker-v1 path on failure.
+  a generation-bound restart marker, and falls back to a generationless marker
+  on failure.
   Startup does not restore, select, install, or advertise cached routes;
   `forwarding_preserved` remains false.
 

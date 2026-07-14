@@ -307,6 +307,17 @@ chain, etc.).
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
 
+The GR marker format is versioned. V1 is generationless and wall-clock-only;
+v2 adds a required checkpoint generation; v3 adds a complete Linux boot and
+time-namespace identity plus an absolute `CLOCK_BOOTTIME` deadline, with an
+optional checkpoint generation. Startup trusts the v3 boottime deadline only
+when the live boot ID, current time-namespace device/inode, and both offset
+components match exactly. Otherwise it uses the marker's wall deadline,
+bounded by the current maximum configured restart time. Publication logs a
+warning when clock-domain sampling, checked arithmetic, or TOML's signed
+integer range forces a complete v1/v2 fallback; partial v3 markers are never
+published.
+
 **Not restored:** routing state, policy evaluation state, RPKI VRP tables, and
 BMP client state. The optional warm checkpoint persists only eligible
 pre-policy Adj-RIB-In views as a future-use artifact; the daemon does not load,
@@ -331,6 +342,11 @@ window is the largest `gr_restart_time` among all GR-enabled peers.
 rustbgpd still advertises `forwarding_preserved = false`; use a drained
 route-server pair or another traffic-shift procedure when forwarding
 continuity matters.
+
+Marker v3 makes the shutdown-to-startup deadline resistant to wall-clock steps
+and includes suspend time before the new process resolves it. The daemon then
+uses its normal process-local monotonic timer for the remaining live window; it
+does not claim suspend-inclusive timing after startup.
 
 For zero-downtime upgrades in a route-server pair, drain traffic to the
 standby, upgrade, then swap.
@@ -872,6 +888,7 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `config reloaded` | INFO | SIGHUP reload succeeded |
 | `config reload failed` | ERROR | SIGHUP reload failed — previous config kept |
 | `GR restart marker` | INFO | Restart marker written or read |
+| `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
 | `max-prefix limit exceeded` | WARN | Peer exceeded prefix limit |
 | `gRPC TCP listener bound to a non-loopback address` | WARN | Security posture warning |
 

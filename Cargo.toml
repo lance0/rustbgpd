@@ -163,7 +163,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 rtnetlink = "0.21"
 netlink-packet-route = "0.30"
 libc.workspace = true
-nix = { workspace = true, features = ["fs", "user"] }
+nix = { workspace = true, features = ["fs", "time", "user"] }
 futures = "0.3"
 
 [[bin]]

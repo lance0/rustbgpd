@@ -239,8 +239,14 @@ the manifest's exact current snapshot and ignores unknown entries. Cleanup
 failure is logged without invalidating the committed generation. Startup does
 not load the checkpoint, so a stale or tampered
 bundle cannot currently inject, select, install, or advertise a route. The GR
-marker carries only an opaque generation and retains the existing marker-v1
-fallback if publication fails.
+marker carries only an opaque checkpoint generation plus restart-deadline clock
+metadata. Marker v3 includes the kernel boot ID and time-namespace
+device/inode/offset, which can fingerprint a host or container clock domain;
+keep it under the same owner-private `runtime_state_dir` protections. It never
+contains key material, routes, or configuration. Checkpoint publication
+failure retains a generationless restart marker, while unavailable clock
+metadata degrades to a complete wall-only marker rather than publishing a
+partial clock identity.
 
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 

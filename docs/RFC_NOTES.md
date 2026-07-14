@@ -445,10 +445,12 @@ expires. Peer Restart State and absent GR families exclude that peer/family;
 superseded-session EoRs are rejected.
 
 When `warm_cache_checkpoint_on_shutdown = true`, a successful bounded
-checkpoint publication binds its generation into marker v2 (ADR-0104). A
-publication failure retains the marker-v1 path. This does not extend RFC 4724
-semantics: startup never restores or advertises cached routes, and
-`forwarding_preserved` remains false.
+checkpoint publication binds its generation into the restart marker
+(ADR-0104). Linux marker v3 also binds the expiry to a complete boot and time
+namespace `CLOCK_BOOTTIME` domain; wall-only v1/v2 remain compatibility
+fallbacks when that domain is unavailable. Checkpoint failure retains a
+generationless marker. This does not extend RFC 4724 semantics: startup never
+restores or advertises cached routes, and `forwarding_preserved` remains false.
 
 ### §4.2 — Procedures for the Receiving Speaker
 
