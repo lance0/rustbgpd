@@ -1688,7 +1688,11 @@ curl -fsS http://127.0.0.1:9179/readyz
 `/livez` only proves the process is accepting HTTP connections. `/readyz`
 returns `200 ready` when PeerManager and RIB respond within 200 ms total, or
 `503 not ready: <reason>` when either core actor is unavailable, drops its
-reply, or times out. It does not require peers or routes to exist.
+reply, or times out. During an actor-owned export-policy transition the
+dedicated read-only RIB lane stays healthy for bounded progress, then returns
+`503 not ready: RIB export-policy transition stalled` if ownership reaches 30
+seconds; commit or cleaned-up fallback restores readiness immediately. It does
+not require peers or routes to exist.
 
 ### Get Prometheus metrics via gRPC
 

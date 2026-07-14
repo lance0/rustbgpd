@@ -314,6 +314,16 @@ pub(super) enum CleanPolicyTransitionPollKind {
     Finalize,
 }
 
+impl CleanPolicyTransitionPollKind {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bounded => "bounded",
+            Self::PrefixSnapshot => "prefix_snapshot",
+            Self::Finalize => "finalize",
+        }
+    }
+}
+
 impl PendingCleanPolicyTransition {
     pub(super) fn new(
         replacements: Vec<PeerExportPolicyReplacement>,

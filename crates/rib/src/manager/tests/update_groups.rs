@@ -947,7 +947,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(128);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
@@ -1071,6 +1071,26 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     assert!(
         actor_polls >= ROUTE_COUNT,
         "the test-only one-route budget must require multiple real actor polls"
+    );
+    let poll_counts = histogram_sample_counts_by_label(
+        &metrics,
+        "bgp_rib_policy_transition_actor_poll_duration_seconds",
+        "poll_kind",
+    );
+    assert_eq!(
+        poll_counts,
+        BTreeMap::from([
+            (
+                "bounded".to_owned(),
+                u64::try_from(actor_polls - 3).unwrap()
+            ),
+            ("finalize".to_owned(), 1),
+            ("prefix_snapshot".to_owned(), 2),
+        ])
+    );
+    assert_eq!(
+        poll_counts.values().sum::<u64>(),
+        u64::try_from(actor_polls).unwrap()
     );
     for &peer in &peers {
         assert_eq!(query_update_group(&tx, peer).await, "group:1");
@@ -1467,7 +1487,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     handle.await.unwrap();
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "the scheduler regression pins dedicated readiness, general-query isolation, and terminal release in one transaction"
@@ -1586,12 +1606,14 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         })
         .await
         .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(29_999)).await;
     assert_eq!(
         tokio::time::timeout(std::time::Duration::from_millis(200), readiness_response)
             .await
             .expect("dedicated readiness must beat the core deadline")
             .unwrap(),
-        ROUTE_COUNT
+        Ok(ROUTE_COUNT),
+        "a legitimately progressing transition stays ready below the ownership limit"
     );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
@@ -1614,6 +1636,27 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         Err(oneshot::error::TryRecvError::Empty)
     ));
 
+    let (stalled_reply, stalled_response) = oneshot::channel();
+    readiness_tx
+        .send(crate::update::RibReadinessQuery::LocRibCount {
+            reply: stalled_reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), stalled_response)
+            .await
+            .expect("stalled readiness verdict must beat the core deadline")
+            .unwrap(),
+        Err(crate::update::RibReadinessError::PolicyTransitionStalled),
+        "readiness must fail closed at the 30-second ownership limit"
+    );
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
     assert_eq!(
         response.await.unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
@@ -1629,6 +1672,21 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
             Err(oneshot::error::TryRecvError::Empty)
         ));
     }
+
+    let (recovered_reply, recovered_response) = oneshot::channel();
+    readiness_tx
+        .send(crate::update::RibReadinessQuery::LocRibCount {
+            reply: recovered_reply,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), recovered_response)
+            .await
+            .expect("terminal transition must restore readiness immediately")
+            .unwrap(),
+        Ok(ROUTE_COUNT)
+    );
     for receiver in &mut receivers {
         assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
     }

@@ -12,6 +12,14 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+/// Failure returned by the dedicated, type-narrow RIB readiness lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RibReadinessError {
+    /// An actor-owned export-policy transition exceeded its maximum healthy
+    /// ownership age, so ordinary RIB work may be wedged behind its fence.
+    PolicyTransitionStalled,
+}
+
 /// Type-narrow readiness queries serviced independently of the general RIB
 /// query lane.
 ///
@@ -23,7 +31,7 @@ pub enum RibReadinessQuery {
     /// Return the current Loc-RIB best-path count.
     LocRibCount {
         /// Response channel.
-        reply: oneshot::Sender<usize>,
+        reply: oneshot::Sender<Result<usize, RibReadinessError>>,
     },
 }
 

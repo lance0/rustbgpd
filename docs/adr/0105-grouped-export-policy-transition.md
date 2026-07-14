@@ -151,15 +151,21 @@ peer snapshots while awaiting owned session or RIB work. Readiness can
 overtake queued ordinary commands but cannot preempt a RIB poll that is already
 running.
 
-Production currently exposes transition-in-progress and last-total-duration
-gauges and emits one slow warning after five seconds. Per-poll duration is
-recorded only in tests and benchmark builds. Production actor-poll visibility
-is required so operators can distinguish a long transaction from one long
-single-threaded poll. Readiness also remains successful for as long as the
-transition owner continues servicing the narrow lane; it needs a far-above-
-normal ownership-age ceiling that fails closed for a true soft wedge. Those
-follow-ups must preserve the lane's read-only nature and the transaction
-fence.
+Production exposes transition-in-progress and last-total-duration gauges,
+emits one slow warning after five seconds, and records every real actor poll in
+`bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}`. The three
+bounded label values separate chunked work (`bounded`), the two complete table
+snapshots (`prefix_snapshot`), and finalization including the atomic commit and
+global dirty/forced retry tail (`finalize`) so an operator can distinguish a
+long transaction from one long single-threaded poll.
+
+Readiness remains successful during legitimate bounded progress, but the
+dedicated RIB lane returns a typed stalled verdict once the transition's one
+monotonic ownership clock reaches 30 seconds. HTTP `/readyz` and gRPC health
+then fail closed with `RIB export-policy transition stalled`. Terminal commit
+or cleaned-up fallback removes that verdict at the same actor seam. The
+ordinary `QueryLocRibCount` contract remains unchanged; no general query is
+admitted through the readiness lane.
 
 ## Evidence and earns-its-keep review
 
@@ -231,10 +237,11 @@ wall-clock guarantee. See the
   otherwise. It promptly drains unrelated dirty/forced residue before the
   successful transaction reply, matching the authoritative replacement seam.
   Its cost is an unchunked global retry opportunity inside `Finalize`;
-  production poll visibility is a prerequisite to optimizing or relocating it.
-- **Read-only readiness isolation:** keep, with the stale-owner fail-close
-  follow-up. It avoids false depools during normal transactions; without an
-  age ceiling it can mask a soft wedge.
+  use the production poll histogram before optimizing or relocating it.
+- **Read-only readiness isolation:** keep. It avoids false depools during
+  normal transactions, then fails closed at 30 seconds so a true soft wedge is
+  automatically depooled. Its cost is a second narrow channel and one
+  ownership-age check at each readiness seam.
 
 This review found no existing layer that can be removed without discarding a
 measured benefit or a correctness boundary. The complexity that is not paying
@@ -256,8 +263,8 @@ semantics for both newly created and already-maintained destinations.
 - Do not rebuild the transaction around a general RIB scheduler or a parallel
   RibManager. First measure a production single-actor ceiling.
 - Do not replace the two snapshots with a new cursor protocol solely because
-  they are O(table). Add production poll visibility, observe a real breach,
-  then choose the smallest scheduler repair.
+  they are O(table). Use the production poll histogram to observe a real
+  breach, then choose the smallest scheduler repair.
 - Do not redesign or chunk member resync in this consolidation phase. The
   delivery-gap receipt makes that a legitimate future target, but changing its
   emission model belongs in a separately measured and reviewed transaction.
@@ -273,9 +280,9 @@ semantics for both newly created and already-maintained destinations.
 - The optimized RIB cohort remains all-or-nothing and hidden from ordinary RIB
   observers until finalization; the complete cross-actor transaction remains
   explicitly rollback-capable rather than strictly atomic.
-- Normal RIB work may wait behind the transaction. Readiness remains available
-  through dedicated read-only lanes, subject to the documented stale-owner
-  follow-up.
+- Normal RIB work may wait behind the transaction. Dedicated read-only
+  readiness lanes remain responsive at actor seams, but an owned transition
+  reports stalled from 30 seconds until terminal commit or cleaned-up fallback.
 - The current implementation deliberately retains two O(table) snapshot polls,
   one data-dependent finalization poll with a global dirty/force retry tail, a
   single-cohort partition, and a sequential authoritative remainder.
