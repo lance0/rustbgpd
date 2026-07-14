@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Birdwatcher-compatible REST looking glass adapter for rustbgpd. Serves the birdwatcher API contract (Alice-LG and similar frontends) from a running daemon over gRPC."
+description = "Birdwatcher-shaped status, peer, and accepted-route REST adapter for rustbgpd, backed by the daemon gRPC API."
 
 [[bin]]
 name = "birdwatcher-adapter"

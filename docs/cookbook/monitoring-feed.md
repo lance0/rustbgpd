@@ -141,10 +141,12 @@ $ ls /var/lib/rustbgpd/mrt/
 feed.20260703.120001.123456789.mrt.gz
 ```
 
-**Looking glass (optional):** for an Alice-LG-style frontend, run the
+**Looking glass (optional):** for status, peer, and accepted-route views in an
+Alice-LG-style frontend, run the
 [`examples/birdwatcher-adapter/`](../../examples/birdwatcher-adapter/)
 against a gRPC TCP listener. (The in-daemon
-`[global.telemetry.looking_glass]` server has been removed.)
+`[global.telemetry.looking_glass]` server has been removed.) The adapter does
+not yet supply filtered/noexport views or structured reject reasons.
 
 ## Watch
 

@@ -302,6 +302,8 @@ Details in the "Recently shipped" section below and ADR-0097.
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure
   route-server profile and RFC 9687 Send Hold Timer pieces are now shipped.
+  OSS-Fuzz submission #15874 is open and build-checked; upstream review,
+  merge, and the first hosted green build remain before onboarding is done.
 - **Route-server adoption polish** — the ADR-0101/M83 profile shipped the
   secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
   path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /
@@ -309,8 +311,10 @@ Details in the "Recently shipped" section below and ADR-0097.
   and a curated `examples/route-server` profile. The canonical semantic diff
   engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
   are also shipped. Remaining demand-shaped work: a real shadow/canary receipt,
-  Alice-LG adapter, a 1000+-peer route-server scale receipt, and an ARouteServer
-  target.
+  completion of the Alice-LG contract beyond the current Birdwatcher-shaped
+  status/peer/accepted-route subset (filtered/noexport views and structured
+  reject reasons remain), a 1000+-peer route-server scale receipt, and an
+  ARouteServer target.
 - **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
   RFC, no open-source implementation found, drops onto the existing
   BGP-LS substrate; deepens the controller feed (TE controllers reading
@@ -318,16 +322,20 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **ASPA/RTRv2 conformance refresh** against the latest drafts — cheap
   insurance for a day-one-RFC-compliant claim while BIRD's ASPA sits in a
   side branch and FRR has none.
-- **Paths-Limit capability** (draft-abraitis-idr-addpath-paths-limit) —
-  small, RR-relevant (bounds Add-Path fanout), FRR 10.1 interop available.
+- **Paths-Limit cross-vendor receipt**
+  (draft-abraitis-idr-addpath-paths-limit) — the capability is shipped as an
+  experimental RR-relevant Add-Path fanout bound. The FRR 10.1 receipt remains
+  pending.
 
 **The route-server (IXP) track** — the core is shipped; remaining work is
 adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 `per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
 multi-stack BIRD/GoBGP/FRR/StayRTR proof. Next useful slices are an Alice-LG
-gRPC source adapter, a 1000+-peer route-server scale receipt, shadow/canary
-RIB-diff tooling (`rbgp diff` against an incumbent's MRT/BMP feed), and an
-ARouteServer target once the pilot surface is stable.
+contract completion for filtered/noexport views plus structured reject
+reasons, a 1000+-peer route-server scale receipt, shadow/canary RIB-diff
+tooling (`rbgp diff` against an incumbent's MRT/BMP feed), and an ARouteServer
+target once the pilot surface is stable. The current external adapter already
+serves the Birdwatcher-shaped status, peer, and accepted-route subset.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
