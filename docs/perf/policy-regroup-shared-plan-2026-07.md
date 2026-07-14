@@ -3,9 +3,11 @@
 ## Scope
 
 This receipt measures the strict clean update-group policy-transition path and
-its bounded-readiness follow-up. It does not claim loaded reload acceptance:
-the prior 700-peer campaign remains rejected until a fresh integrated run
-supersedes it.
+its bounded-readiness follow-up. A corrected integrated mixed-fleet campaign
+now supersedes the rejected prior 700-peer run. It accepts the cohort
+transaction's completion and correctness result, but not the delivery-stall
+goal: the candidate's full-fleet gaps regress beyond the earlier sub-second
+target.
 
 The optimized path is deliberately limited to clean grouped-to-grouped unicast
 members whose staging profile differs only by export-chain content. It builds
@@ -16,6 +18,32 @@ members; per-client-best and Add-Path peers remain ungrouped and do not receive
 this shared-cohort benefit. Dirty, force, ORF, RTC, VPN, mixed-family,
 generation-mismatched, saturated, or exact-rejecting cohorts fall back before
 the first optimized emission.
+
+## Integrated mixed-fleet receipt
+
+The frozen integrated comparison uses base
+`a170ab0f38fd97cc294d56ba5f283c7221c2c166` and candidate
+`fa2759e9b19ecbc00f245c6d07e520e8f28e0882`. Four serial alternating reloads
+ran with 700 real sessions and 400,400 routes: 600 peers changed the same
+export-only chain while 100 peers retained a content-stable chain. Every cycle
+ended with 700/700 sessions up, fresh post-completion stable-marker evidence
+from 100/100 stable peers, and zero parser errors.
+
+Across the four cycles, median completion p50 improved from 220.148412 s to
+1.894807 s (116.185x), and the median completion maximum improved from
+436.698156 s to 2.925734 s (149.261x). The candidate used one committed
+600-member RIB batch plus a 100-member stable remainder on each reload, with
+zero authoritative per-peer RIB replacements; the base used 600 sequential RIB
+replacements per reload. Candidate RIB transitions took 953-973 ms and complete
+PeerManager transactions took 2223-2598 ms.
+
+This completion result is not a blanket stall win. Median full-fleet
+delivery-gap p50 increased from 976.8845 ms to 2022.590 ms (2.070x), and the
+median full-fleet maximum increased from 1002.756 ms to 2906.551 ms (2.899x).
+Chunking member resync remains required before the changed-policy reload
+program can satisfy its delivery-stall gate. Raw rows, operation/timing joins,
+provenance, reproduction, and checksums are retained in
+[`artifacts/policy-reload-cohort-partition-2026-07/`](artifacts/policy-reload-cohort-partition-2026-07/).
 
 ## Method and provenance
 
@@ -300,4 +328,5 @@ same-AS iBGP sessions.
 Aggregate medians, confidence bounds, deterministic counters, environment, and
 reproduction commands are retained in
 [`artifacts/ixp-exact-export-cohorts-2026-07/`](artifacts/ixp-exact-export-cohorts-2026-07/).
-These results do not supersede the still-required loaded 700-peer campaign.
+These microbenchmark results are now complemented by the integrated mixed-fleet
+campaign above; they do not override its measured delivery-gap regression.

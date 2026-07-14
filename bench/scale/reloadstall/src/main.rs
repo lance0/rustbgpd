@@ -7,7 +7,8 @@
 //!
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
-//!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs>
+//!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
+//!       [changed_peers]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
 //! generated [[neighbors]] blocks) and connect to 127.0.0.1:<port>.
@@ -44,6 +45,7 @@ const NLRI_PER_MSG: usize = 900;
 const HOLD_TIME: u16 = 180;
 const COMMUNITY_GEN_A: u32 = (65_500 << 16) | 1_000;
 const COMMUNITY_GEN_B: u32 = (65_500 << 16) | 2_000;
+const COMMUNITY_STABLE: u32 = (65_500 << 16) | 9_000;
 
 /// One received-UPDATE observation.
 #[derive(Clone, Copy)]
@@ -62,6 +64,8 @@ struct Obs {
     established: AtomicBool,
     /// communities seen on the most recently sampled fully-parsed UPDATE
     last_comms: Mutex<Vec<u32>>,
+    /// Most recent announced UPDATE carrying the content-stable export marker.
+    stable_marker_seen_at_us: AtomicU64,
     /// Community marker required for the active reload generation.
     expected_community: AtomicU32,
     /// Unique base prefixes observed with `expected_community`.
@@ -342,6 +346,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
     let (mut reader, mut writer) = stream.into_split();
 
     // Writer task: outbound messages + periodic keepalive.
+    let writer_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
         let mut ka_tick = tokio::time::interval(Duration::from_secs(u64::from(HOLD_TIME) / 3));
         ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -349,16 +354,19 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
         loop {
             tokio::select! {
                 Some(msg) = tx_rx.recv() => {
-                    let Ok(bytes) = encode_message(&msg) else { return };
-                    if writer.write_all(&bytes).await.is_err() { return; }
+                    let Ok(bytes) = encode_message(&msg) else { break };
+                    if writer.write_all(&bytes).await.is_err() { break; }
                 }
                 _ = ka_tick.tick() => {
                     let bytes = encode_message(&Message::Keepalive).unwrap();
-                    if writer.write_all(&bytes).await.is_err() { return; }
+                    if writer.write_all(&bytes).await.is_err() { break; }
                 }
-                else => return,
+                else => break,
             }
         }
+        writer_ctx.obs[i as usize]
+            .established
+            .store(false, Ordering::Relaxed);
     });
 
     // Reader task: frame, decode, record UPDATE arrivals, answer
@@ -386,7 +394,14 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 let total = match peek_message_length(&frame, MAX_MESSAGE_LEN) {
                     Ok(Some(len)) => usize::from(len),
                     Ok(None) => break,
-                    Err(_) => return,
+                    Err(error) => {
+                        eprintln!("stub {i} invalid daemon frame: {error}");
+                        rctx.parse_errors.fetch_add(1, Ordering::Relaxed);
+                        rctx.obs[i as usize]
+                            .established
+                            .store(false, Ordering::Relaxed);
+                        return;
+                    }
                 };
                 if frame.len() < total {
                     break;
@@ -394,7 +409,14 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                 let mut mb = frame.split_to(total).freeze();
                 let msg = match decode_message(&mut mb, MAX_MESSAGE_LEN) {
                     Ok(m) => m,
-                    Err(_) => return,
+                    Err(error) => {
+                        eprintln!("stub {i} failed to decode daemon message: {error}");
+                        rctx.parse_errors.fetch_add(1, Ordering::Relaxed);
+                        rctx.obs[i as usize]
+                            .established
+                            .store(false, Ordering::Relaxed);
+                        return;
+                    }
                 };
                 match msg {
                     Message::Update(u) => {
@@ -425,7 +447,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                         }
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
-                        if base > 0 {
+                        if !parsed.announced.is_empty() {
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
                             let communities: &[u32] = parsed
@@ -437,9 +459,12 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 })
                                 .unwrap_or(&[]);
                             *ob.last_comms.lock().unwrap() = communities.to_vec();
+                            if communities.contains(&COMMUNITY_STABLE) {
+                                ob.stable_marker_seen_at_us.store(t_us, Ordering::Release);
+                            }
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
-                            if expected != 0 && communities.contains(&expected) {
+                            if base > 0 && expected != 0 && communities.contains(&expected) {
                                 let total_prefixes = rctx.n_peers * rctx.per_peer;
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
@@ -507,7 +532,8 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 
 /// Max inter-UPDATE gap (ms) for one observer over [s_us, e_us].
 /// Includes the leading gap from s_us to the first event; includes the
-/// trailing gap to e_us only when `trailing` is set (control windows).
+/// trailing gap to e_us when `trailing` is set (control windows and the
+/// full-fleet reload window, whose stable observers have no completion event).
 fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 {
     let ev = ctx.obs[i].events.lock().unwrap();
     let mut last = s_us;
@@ -534,6 +560,23 @@ fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
     ctx.obs[i].generation.lock().unwrap().completed_at_us
 }
 
+fn stable_marker_is_fresh(seen_at_us: u64, since_us: u64) -> bool {
+    seen_at_us != 0 && seen_at_us >= since_us
+}
+
+fn stable_marker_peers_since(ctx: &Ctx, changed_peers: u32, since_us: u64) -> usize {
+    ctx.obs
+        .iter()
+        .skip(changed_peers as usize)
+        .filter(|observer| {
+            stable_marker_is_fresh(
+                observer.stable_marker_seen_at_us.load(Ordering::Acquire),
+                since_us,
+            )
+        })
+        .count()
+}
+
 fn rss_mib(pid: i32) -> u64 {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     for line in status.lines() {
@@ -550,15 +593,27 @@ fn rss_mib(pid: i32) -> u64 {
     0
 }
 
-fn stats_line(label: &str, mut vals: Vec<f64>) {
+#[derive(Clone, Copy)]
+struct Stats {
+    p50: f64,
+    p95: f64,
+    max: f64,
+    n: usize,
+}
+
+fn stats_line(label: &str, mut vals: Vec<f64>) -> Stats {
     vals.sort_by(f64::total_cmp);
+    let stats = Stats {
+        p50: pct(&vals, 0.5),
+        p95: pct(&vals, 0.95),
+        max: pct(&vals, 1.0),
+        n: vals.len(),
+    };
     println!(
         "{label}: p50={:.2} p95={:.2} max={:.2} (n={})",
-        pct(&vals, 0.5),
-        pct(&vals, 0.95),
-        pct(&vals, 1.0),
-        vals.len()
+        stats.p50, stats.p95, stats.max, stats.n
     );
+    stats
 }
 
 #[allow(clippy::too_many_lines)]
@@ -567,7 +622,8 @@ fn main() {
     if a.len() < 10 {
         eprintln!(
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
-             <policy_live> <policy_a> <policy_b> <reloads> <control_secs>"
+             <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
+             [changed_peers]"
         );
         std::process::exit(2);
     }
@@ -580,6 +636,12 @@ fn main() {
     let policy_b = a[7].clone();
     let reloads: u32 = a[8].parse().unwrap();
     let control_secs: u64 = a[9].parse().unwrap();
+    let changed_peers: u32 = a.get(10).map_or(n_peers, |value| value.parse().unwrap());
+    assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
+    assert!(
+        (1..=n_peers).contains(&changed_peers),
+        "changed_peers must be in 1..={n_peers}"
+    );
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
 
@@ -600,6 +662,7 @@ fn main() {
                     base_ann_total: AtomicU64::new(0),
                     established: AtomicBool::new(false),
                     last_comms: Mutex::new(Vec::new()),
+                    stable_marker_seen_at_us: AtomicU64::new(0),
                     expected_community: AtomicU32::new(0),
                     generation: Mutex::new(GenerationProgress::default()),
                     refresh_pending: AtomicBool::new(false),
@@ -607,7 +670,11 @@ fn main() {
                 .collect(),
             parse_errors: AtomicU64::new(0),
         });
-        println!("# reloadstall peers={n_peers} prefixes={total} per_peer={per_peer} pid={pid}");
+        println!(
+            "# reloadstall peers={n_peers} changed_peers={changed_peers} \
+             stable_peers={} prefixes={total} per_peer={per_peer} pid={pid}",
+            n_peers - changed_peers
+        );
 
         // --- Establish all sessions (waves of 64). ---
         let mut txs: Vec<mpsc::Sender<Message>> = Vec::with_capacity(n_peers as usize);
@@ -699,6 +766,15 @@ fn main() {
             .collect();
         stats_line("control_maxgap_ms", gaps);
         println!("control_rss_mib {}", rss_mib(pid));
+        println!(
+            "reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,\
+             completion_p50_s,completion_p95_s,completion_max_s,\
+             changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,\
+             all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,\
+             all_observer_maxgap_max_ms,changed_first_update_p50_ms,\
+             changed_first_update_p95_ms,changed_first_update_max_ms,\
+             rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
+        );
 
         // --- Reload loop. ---
         for r in 1..=reloads {
@@ -710,7 +786,12 @@ fn main() {
             };
             std::fs::copy(next, &policy_live).unwrap();
             let rss_before = rss_mib(pid);
-            for (i, observer) in ctx.obs.iter().enumerate() {
+            for (i, observer) in ctx
+                .obs
+                .iter()
+                .take(changed_peers as usize)
+                .enumerate()
+            {
                 observer.expected_community.store(0, Ordering::Release);
                 observer.generation.lock().unwrap().reset(
                     total,
@@ -723,6 +804,7 @@ fn main() {
                     .store(expected_community, Ordering::Release);
             }
             let t_hup = now_us(&ctx);
+            let expected_stable = usize::try_from(n_peers - changed_peers).unwrap();
             println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
             let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
             if kill_rc != 0 {
@@ -732,36 +814,73 @@ fn main() {
                 );
                 std::process::exit(1);
             }
-            // Wait for every observer to receive the full re-advertisement.
+            // Completion is intentionally scoped to observers whose effective
+            // export chain changed. Stable proof starts only after every
+            // changed observer has the new generation, below.
             let deadline = Instant::now() + Duration::from_secs(900);
             let mut ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let done = (0..n_peers as usize).all(|i| completion_us(&ctx, i).is_some());
+                let done =
+                    (0..changed_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done {
                     break;
                 }
                 ticks += 1;
-                if ticks % 20 == 0 {
-                    let sat = (0..n_peers as usize)
+                if ticks.is_multiple_of(20) {
+                    let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    eprintln!("reload {r} progress: complete={sat}/{n_peers}");
+                    eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
                 if Instant::now() > deadline {
                     println!("reload {r} TIMEOUT waiting for re-advertisement");
-                    let sat = (0..n_peers as usize)
+                    let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
-                    eprintln!("reload {r} observers_complete {sat}/{n_peers}");
+                    eprintln!("reload {r} observers_complete {sat}/{changed_peers}");
                     std::process::exit(1);
                 }
             }
-            // Per-observer completion + max gap over the reload window.
+            let reload_end_us = (0..changed_peers as usize)
+                .filter_map(|i| completion_us(&ctx, i))
+                .max()
+                .expect("changed_peers is non-zero and every observer completed");
+            // Reset the evidence threshold only after the changed cohort has
+            // fully received the target generation. Fresh stable-marker churn
+            // after this point proves stable observers retained stable-out
+            // through the completed transition, rather than merely sampling
+            // an UPDATE queued before or during it.
+            let marker_since_us = now_us(&ctx);
+            let mut stable_ticks = 0u32;
+            loop {
+                let stable_marker_peers =
+                    stable_marker_peers_since(&ctx, changed_peers, marker_since_us);
+                if stable_marker_peers == expected_stable {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    eprintln!(
+                        "reload {r} TIMEOUT waiting for post-completion stable markers: {stable_marker_peers}/{expected_stable}"
+                    );
+                    std::process::exit(1);
+                }
+                stable_ticks += 1;
+                if stable_ticks.is_multiple_of(20) {
+                    eprintln!(
+                        "reload {r} post-completion stable markers: {stable_marker_peers}/{expected_stable}"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // Changed-observer completion and gap metrics preserve the
+            // historical measurement. The all-observer gap extends through
+            // the slowest changed observer so stable sessions cannot disappear
+            // from the receipt just because they have no completion marker.
             let mut comp_s: Vec<f64> = Vec::new();
             let mut gaps: Vec<f64> = Vec::new();
             let mut firsts: Vec<f64> = Vec::new();
-            for i in 0..n_peers as usize {
+            for i in 0..changed_peers as usize {
                 if let Some(tc) = completion_us(&ctx, i) {
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
@@ -772,12 +891,20 @@ fn main() {
                     }
                 }
             }
-            stats_line(&format!("reload {r} completion_s"), comp_s);
-            stats_line(&format!("reload {r} maxgap_ms"), gaps);
-            stats_line(&format!("reload {r} first_update_ms"), firsts);
+            let all_observer_gaps: Vec<f64> = (0..n_peers as usize)
+                .map(|i| max_gap_ms(&ctx, i, t_hup, reload_end_us, true))
+                .collect();
+            let completion = stats_line(&format!("reload {r} completion_s"), comp_s);
+            let changed_gap = stats_line(&format!("reload {r} maxgap_ms"), gaps);
+            let all_gap = stats_line(
+                &format!("reload {r} all_observer_maxgap_ms"),
+                all_observer_gaps,
+            );
+            let first_update = stats_line(&format!("reload {r} first_update_ms"), firsts);
+            let rss_after = rss_mib(pid);
             println!(
                 "reload {r} rss_mib before={rss_before} after={} comms_sample={:?}",
-                rss_mib(pid),
+                rss_after,
                 ctx.obs[0].last_comms.lock().unwrap().clone()
             );
             let up = ctx
@@ -786,6 +913,39 @@ fn main() {
                 .filter(|o| o.established.load(Ordering::Relaxed))
                 .count();
             println!("reload {r} sessions_up {up}/{n_peers}");
+            let stable_marker_peers =
+                stable_marker_peers_since(&ctx, changed_peers, marker_since_us);
+            println!(
+                "reload {r} stable_marker_peers {stable_marker_peers}/{expected_stable}"
+            );
+            let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+            if stable_marker_peers != expected_stable
+                || up != n_peers as usize
+                || parse_errors != 0
+            {
+                eprintln!(
+                    "FAIL: reload {r} integrity check failed: stable_marker_peers={stable_marker_peers}/{expected_stable}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total},\
+                 {:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
+                 {:.3},{:.3},{:.3},{rss_before},{rss_after},{stable_marker_peers},{up},{parse_errors}",
+                n_peers - changed_peers,
+                completion.p50,
+                completion.p95,
+                completion.max,
+                changed_gap.p50,
+                changed_gap.p95,
+                changed_gap.max,
+                all_gap.p50,
+                all_gap.p95,
+                all_gap.max,
+                first_update.p50,
+                first_update.p95,
+                first_update.max,
+            );
             // Quiesce between reloads.
             tokio::time::sleep(Duration::from_secs(20)).await;
         }
@@ -873,6 +1033,14 @@ mod tests {
         progress.observe(3, 40);
         assert_eq!(progress.unique, 3);
         assert_eq!(progress.completed_at_us, Some(40));
+    }
+
+    #[test]
+    fn stable_marker_freshness_rejects_missing_and_pre_threshold_evidence() {
+        assert!(!stable_marker_is_fresh(0, 100));
+        assert!(!stable_marker_is_fresh(99, 100));
+        assert!(stable_marker_is_fresh(100, 100));
+        assert!(stable_marker_is_fresh(101, 100));
     }
 
     #[test]

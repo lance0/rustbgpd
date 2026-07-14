@@ -318,6 +318,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Mixed policy reloads batch their eligible export-only cohort.** Snapshot
+  application now selects the first equivalent Established export-only cohort
+  in configuration order, commits it through one shared RIB transition, then
+  preserves the original order for the authoritative remainder. Duplicate
+  targets disable partitioning wholesale. Cohort and remainder failures attempt
+  newest-first rollback and surface composed rollback failures. A successful
+  shared transition performs the same global dirty-resync opportunity as the
+  authoritative seam before replying. The reload-stall harness can
+  independently gate changed-observer completion while retaining full-fleet
+  delivery-gap and session checks. In the corrected 700-session / 400,400-route
+  mixed campaign (600 changed, 100 stable), median completion p50 improves
+  116.185x and median completion maximum improves 149.261x across four reloads,
+  with 700/700 sessions, 100/100 fresh stable markers, and zero parser errors in
+  every row. This is not an unconditional stall win: median full-fleet gap p50
+  regresses 2.070x to 2022.590 ms and median full-fleet maximum regresses 2.899x
+  to 2906.551 ms, so chunked member resync remains required. The exact raw
+  receipt and reproduction are retained under
+  `docs/perf/artifacts/policy-reload-cohort-partition-2026-07/`.
+
 - **IXP route-server clients share exact-export work across remote ASNs.** The
   immutable session export profile now retains the wire-relevant eBGP/iBGP
   classification instead of negotiated remote-AS identity; every other wire
