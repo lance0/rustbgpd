@@ -14,7 +14,7 @@ The codebase does **not** own or verify the complete forwarding plane:
 
 1. Opt-in unicast FIB integration exists, but it does not cover or prove the
    complete forwarding plane across every advertised family.
-2. An optional shutdown checkpoint may persist eligible pre-policy
+2. An optional shutdown checkpoint may persist eligible post-import-policy
    Adj-RIB-In views, but startup does not restore or adopt them (ADR-0104).
 3. There is no crash-safe journal.
 
