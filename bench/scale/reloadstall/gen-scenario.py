@@ -13,15 +13,17 @@ Addressing MUST match `src/main.rs`: stub `i` binds source
 and BGP-id `240.1.x.y` (higher than the daemon's router-id, so the inbound
 connection wins RFC 4271 §6.8 collision resolution against the daemon's
 active dial to the unreachable stub port 179). The base table lives in
-`20.0.0.0 .. 26.x` (`base_prefix`), so the two import-chain reject prefixes
-(`192.0.2.0/24` / `198.51.100.0/24`) are out-of-table: the import change is
-content-real (chain reinstalled, Route Refresh fires) but output-neutral, so
-the re-advertisement wire volume stays attributable to the export swap alone.
+`20.0.0.0 .. 26.x` (`base_prefix`). In historical mode, the import-chain
+reject prefix changes between two out-of-table values, so the import change is
+content-real and fires Route Refresh but remains output-neutral. In explicit
+`changed_peers` mode, `member-in` is byte-for-byte stable and only the selected
+observers' effective export chain changes.
 
-Both generations define the SAME policy names (`member-in` / `member-out`)
-with different bodies. Only one file is ever loaded at a time (copied over
-the live file per reload), so there is no shared-namespace collision; the
-TOML `import_chain` / `export_chain` name references stay valid across swaps.
+Both generations define the same policy names. `member-out` changes body;
+`member-in` changes only in historical mode, and explicit mixed mode also
+defines a content-stable `stable-out`. Only one file is loaded at a time
+(copied over the live file per reload), so there is no shared-namespace
+collision and the TOML chain-name references stay valid across swaps.
 
 Usage:
     gen-scenario.py <n_peers> <out_dir> [listen_port] [changed_peers]

@@ -1061,7 +1061,18 @@ impl PeerManager {
         // touch. Every reinstall fan-out (SIGHUP rpol overlay, catalog
         // edits, the ADR-0076 txn executor, honor-knob toggles) routes
         // through here, so this is the one place the scoping lives.
-        let import_apply_result = if import_changed {
+        // Mirror the export-side ambiguous-reply repair below. A failed
+        // forward import command may have installed the new chain before its
+        // reply was lost. Rollback bookkeeping still names the prior chain,
+        // so equality alone cannot prove the session has it. Reassert the
+        // prior import chain before any rollback Route Refresh whenever the
+        // incomplete forward attempt carried refresh intent.
+        let reassert_prior_import = had_pending_refresh
+            && matches!(
+                refresh_failure,
+                RefreshFailureHandling::BestEffortRestorePrior { .. }
+            );
+        let import_apply_result = if import_changed || reassert_prior_import {
             managed
                 .handle
                 .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
