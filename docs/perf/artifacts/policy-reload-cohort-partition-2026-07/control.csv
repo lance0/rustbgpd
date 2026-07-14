@@ -1,0 +1,3 @@
+variant,source_sha,observers,control_seconds,maxgap_p50_ms,maxgap_p95_ms,maxgap_max_ms,rss_mib
+base,a170ab0f38fd97cc294d56ba5f283c7221c2c166,700,30,18.85,19.25,41.99,953
+candidate,fa2759e9b19ecbc00f245c6d07e520e8f28e0882,700,30,66.69,67.63,86.74,939

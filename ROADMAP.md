@@ -221,13 +221,14 @@ new AFI/SAFI and EVPN dataplane expansion.
   Roles/OTC, transactions, BMP/MRT/events, and the already-proven RR/controller-
   feed families. Publish explicit stability, migration, deprecation, and
   compatibility rules. Keep EVPN VTEP/IRB alpha and out of this first contract.
-- **Make changed-policy reload the primary performance program.** First rerun
-  the corrected 700-client × 400,400-route harness with unique-generation
-  completion. Then compute shared group-to-group migration work once, chunk
-  member resync so queries and churn interleave, and gate repeated heterogeneous
-  reloads on completion time, control-query latency, session continuity, and
-  folded advertised-state equivalence. The withdrawn historical `< 1 s` claim
-  is not evidence until the corrected run replaces it.
+- **Make changed-policy reload the primary performance program.** The corrected
+  700-client × 400,400-route mixed run is now measured: shared cohort work cuts
+  median completion p50 116.185x and median completion maximum 149.261x, while
+  full-fleet delivery gaps regress 2.070x / 2.899x. Chunk member resync next so
+  queries and churn interleave, then gate repeated heterogeneous reloads on
+  completion time, control-query latency, session continuity, and folded
+  advertised-state equivalence. The withdrawn historical `< 1 s` claim remains
+  superseded by the corrected raw receipt, not revived.
 - **Expose groupability before apply.** Config transaction planning now projects
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded
