@@ -780,14 +780,19 @@ owned-state.
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking selection for the family |
 | `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor` or `timer` |
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
-| `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families that exceeded the one-million-identity process ledger and used a complete release sweep |
+| `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore used a complete release sweep |
 
 For active gates, `rbgp neighbor <address>` and
 `NeighborService.GetNeighborState` also show the peer's waiter state, stamped
 session, blocking-waiter count, and remaining time. A released row retains its
 reason for the daemon lifetime. A ledger-overflow warning is emitted once per
 family; release then enumerates the complete Adj-RIB-In and Loc-RIB family so
-withdrawals that already left Adj-RIB-In are still removed before EoR.
+withdrawals that already left Adj-RIB-In are still removed before EoR. The
+64 MiB bound is deterministic accounting for retained key data (including
+nested FlowSpec terms and BGP-LS payload bytes), not a promise about process
+RSS, allocator capacity, or hash-table overhead. An identity that lands exactly
+on either cap is retained; the family of the next identity that would exceed a
+cap enters overflow fallback.
 
 ### BFD
 

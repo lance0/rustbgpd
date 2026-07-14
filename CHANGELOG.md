@@ -187,9 +187,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Planned-restart selection deferral now has a bounded identity ledger.**
   At most one million affected route identities are retained across all gated
-  families. If a family exceeds that process-wide bound, release performs a
-  complete Adj-RIB-In plus Loc-RIB sweep so withdrawals received before EoR
-  cannot leave stale selected or advertised routes. A one-shot warning and
+  families, with an independent 64 MiB process-wide ceiling on deterministic
+  logical retained-key data. This byte accounting includes nested FlowSpec
+  terms and BGP-LS payload bytes; it is not RSS, allocator-capacity, or
+  hash-table-overhead accounting. If retaining a new identity would exceed
+  either process-wide bound, that identity's family enters overflow fallback
+  and release performs a complete Adj-RIB-In plus Loc-RIB sweep so withdrawals
+  received before EoR cannot leave stale selected or advertised routes. A
+  one-shot warning and
   `bgp_selection_deferral_ledger_overflows_total{afi_safi}` expose the fallback.
 
 - **The v1 CLI inventory now covers the complete `rbgp diff` command tree and
