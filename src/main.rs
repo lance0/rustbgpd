@@ -2537,6 +2537,34 @@ async fn run<T>(
             .and_then(|directory| directory.prepare_warm_bundle())
         {
             Ok(directory) => {
+                match directory.scavenge_owned_entries() {
+                    Ok(report) if report.failed() > 0 => {
+                        warn!(
+                            path = %warm_bundle_path.display(),
+                            removed = report.removed(),
+                            failed = report.failed(),
+                            first_error = %report
+                                .first_failure()
+                                .expect("failed cleanup has a first error"),
+                            "warm checkpoint startup cleanup left some stale entries"
+                        );
+                    }
+                    Ok(report) if report.removed() > 0 => {
+                        info!(
+                            path = %warm_bundle_path.display(),
+                            removed = report.removed(),
+                            "removed stale warm checkpoint entries at startup"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            path = %warm_bundle_path.display(),
+                            %error,
+                            "warm checkpoint startup cleanup was skipped; shutdown publication remains available"
+                        );
+                    }
+                }
                 info!(
                     path = %warm_bundle_path.display(),
                     "prepared daemon-private warm checkpoint directory"

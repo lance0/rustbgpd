@@ -610,6 +610,10 @@ a field rename, edit the config file by hand.
 
 Everything in `runtime_state_dir` (default `/var/lib/rustbgpd`):
 
+Assign a distinct `runtime_state_dir` to every concurrently running rustbgpd
+daemon. The directory is single-writer runtime state; sharing it between live
+processes is unsupported even when their configuration files differ.
+
 | File | Purpose | Survives restart |
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |

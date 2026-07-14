@@ -154,7 +154,17 @@ After a new manifest is durably committed, rustbgpd removes superseded
 content-addressed snapshots and recognizable interrupted-write temporary
 files from that pinned private directory. Cleanup failure is logged but does
 not invalidate the current manifest or its snapshot; unknown files are left
-untouched.
+untouched. Startup also performs the same bounded, descriptor-relative cleanup
+before shutdown publication is armed: a structurally valid, byte-stable
+manifest always protects its selected snapshot, a missing manifest permits
+orphan cleanup, and a corrupt, unsafe, oversized, or changed manifest deletes
+nothing. One undeletable stale entry is reported but does not suppress later
+entries in deterministic filename order.
+
+Every concurrently running rustbgpd daemon must use a distinct
+`runtime_state_dir`. Sharing one runtime-state directory between live daemon
+processes is unsupported because the restart marker, warm checkpoint, FIB
+ownership receipt, and Unix socket are all single-writer state.
 
 This option does **not** make startup restore routes: no cached route is loaded,
 selected, installed, or advertised. A successful checkpoint only causes the GR

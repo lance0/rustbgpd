@@ -41,6 +41,12 @@ weaken the existing generationless restart-marker path.
    files. It never selects `manifest.json` or the exact snapshot named by the
    current manifest. Cleanup failure is warned and leaves the new generation
    committed; no background collector or directory-size policy is introduced.
+   Startup reuses the bounded cleanup engine before publication is armed. A
+   missing manifest permits canonical orphan cleanup; a structurally valid,
+   byte-stable manifest protects its exact selected snapshot; and a corrupt,
+   unsafe, oversized, or changed manifest deletes nothing. Entry-local unlink
+   failures are aggregated without suppressing later candidates, while scan,
+   guard, bound, and durability failures abort the pass.
 5. A successful publication binds the exact checkpoint generation into the
    restart marker. Marker v3 normally carries that binding plus a complete
    Linux boottime clock domain; if clock-domain sampling or representation is
@@ -73,3 +79,7 @@ weaken the existing generationless restart-marker path.
 - Restore, adoption, route selection, and forwarding-state validation remain
   deferred; the presence of a valid bundle is not evidence that any route will
   be used after restart.
+- Every concurrently running daemon requires a distinct `runtime_state_dir`.
+  Cross-process sharing is unsupported for the marker, warm bundle, FIB
+  receipt, and Unix socket as a whole; this decision does not add a misleading
+  warm-only lock.

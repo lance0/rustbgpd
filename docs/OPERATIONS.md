@@ -318,6 +318,16 @@ warning when clock-domain sampling, checked arithmetic, or TOML's signed
 integer range forces a complete v1/v2 fallback; partial v3 markers are never
 published.
 
+Each concurrently running daemon requires its own `runtime_state_dir`.
+Sharing the directory across live daemon processes is unsupported: its restart
+marker, optional warm bundle, FIB ownership receipt, and Unix socket all assume
+one writer. At startup, an enabled warm checkpoint runs a bounded cleanup of
+canonical orphan snapshots and interrupted-write temporary files. A valid
+byte-stable manifest protects its selected snapshot; an absent manifest allows
+orphan cleanup; and an invalid or changed manifest deletes nothing. Cleanup
+errors are warnings and do not disable the next coordinated-shutdown
+publication attempt.
+
 **Not restored:** routing state, policy evaluation state, RPKI VRP tables, and
 BMP client state. The optional warm checkpoint persists only eligible
 pre-policy Adj-RIB-In views as a future-use artifact; the daemon does not load,

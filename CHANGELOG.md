@@ -154,8 +154,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   new `manifest.json` rename and directory fsync establish the commit point,
   publication removes superseded content-addressed snapshots and recognizable
   crash-leaked temporary files through the pinned bundle directory. Cleanup
+  continues past entry-local unlink failures and preserves the primary
+  publication error when rollback also fails. Startup performs the same bounded
+  descriptor-relative scavenging without opening or adopting route snapshots:
+  absent manifests permit orphan cleanup, valid byte-stable manifests protect
+  their selection, and invalid or changed manifests delete nothing. Cleanup
   failure is warned but cannot roll back or delete the manifest's current
-  snapshot.
+  snapshot or disable later publication. Concurrent daemons must use distinct
+  `runtime_state_dir` values.
 
 - **The v1 stable-surface release gate now supports patch and major releases.**
   Upgrade exercises remain a contiguous, fail-closed chain of adjacent release
