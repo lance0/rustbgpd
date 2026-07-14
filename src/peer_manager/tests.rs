@@ -7472,6 +7472,59 @@ async fn export_only_snapshot_uses_one_batched_rib_commit_and_preserves_priors()
 }
 
 #[tokio::test]
+async fn export_only_snapshot_skips_probe_without_repeated_policy_pair() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 35, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 35, 0, 2)),
+    ];
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let (_command_tx, command_rx) = mpsc::channel(1);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let mut query_counts = Vec::new();
+    for peer in peers {
+        let (handle, _entered, _release, queries) = stalled_export_policy_test_session(peer);
+        query_counts.push(queries);
+        insert_test_managed_peer(&mut manager, peer, handle, false);
+    }
+
+    let targets = [
+        ResolvedPeerPolicy {
+            address: peers[0],
+            interface: None,
+            import_policy: None,
+            export_policy: Some(deny_policy_chain()),
+        },
+        ResolvedPeerPolicy {
+            address: peers[1],
+            interface: None,
+            import_policy: None,
+            export_policy: Some(validation_policy_chain(ImportValidationDependency::Rpki)),
+        },
+    ];
+    let selected = manager.export_only_policy_cohort_mask(&targets).await;
+
+    assert_eq!(selected, vec![false, false]);
+    assert!(
+        query_counts
+            .iter()
+            .all(|queries| queries.load(Ordering::SeqCst) == 0)
+    );
+
+    drop(manager);
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "the mixed-fleet regression pins cohort selection, reconnect fallback, and prior-token ordering together"

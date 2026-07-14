@@ -286,40 +286,60 @@ impl PeerManager {
         }
     }
 
-    /// Select the first viable export-only cohort in target order. Selection is
-    /// linear: once the first Established local candidate fixes the installed
-    /// and target export chains, later candidates either join that exact pair or
-    /// remain in the authoritative remainder. The RIB independently revalidates
-    /// runtime group identity, ownership, generation, and session state. If a
-    /// selected session changes after this observation, its hot-apply failure is
-    /// restored by the owned cohort transaction; a later RIB divergence hands
-    /// the entire cohort to the authoritative per-peer seam.
-    async fn export_only_policy_cohort_mask(
+    /// Select the first viable export-only cohort in target order. A local-only
+    /// preflight avoids session queries when no installed/target pair occurs
+    /// twice. Once the first Established local candidate fixes that pair, later
+    /// candidates either join it or remain in the authoritative remainder. The
+    /// RIB independently revalidates runtime group identity, ownership,
+    /// generation, and session state. If a selected session changes after this
+    /// observation, its hot-apply failure is restored by the owned cohort
+    /// transaction; a later RIB divergence hands the entire cohort to the
+    /// authoritative per-peer seam.
+    pub(super) async fn export_only_policy_cohort_mask(
         &mut self,
         targets: &[ResolvedPeerPolicy],
     ) -> Vec<bool> {
         let mut selected = vec![false; targets.len()];
+        let has_repeated_pair = targets.iter().enumerate().any(|(index, target)| {
+            let Some((installed, target_chain)) = self.local_export_only_policy_pair(target) else {
+                return false;
+            };
+            targets[index + 1..].iter().any(|candidate| {
+                self.local_export_only_policy_pair(candidate).is_some_and(
+                    |(candidate_installed, candidate_target)| {
+                        candidate_installed == installed && candidate_target == target_chain
+                    },
+                )
+            })
+        });
+        if !has_repeated_pair {
+            return selected;
+        }
+
         let mut anchor: Option<(Option<PolicyChain>, Option<PolicyChain>)> = None;
 
         for (index, target) in targets.iter().enumerate() {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
-            let Some(managed) = self.peers.get(&peer_key) else {
+            let Some((installed, target_chain)) = self.local_export_only_policy_pair(target) else {
                 continue;
             };
-            if managed.import_policy != target.import_policy
-                || managed.export_policy == target.export_policy
-                || managed.pending_refresh
-                || managed.pending_export_apply
-                || anchor.as_ref().is_some_and(|(installed, target_chain)| {
-                    installed != &managed.export_policy || target_chain != &target.export_policy
+            if anchor
+                .as_ref()
+                .is_some_and(|(anchor_installed, anchor_target)| {
+                    anchor_installed != installed || anchor_target != target_chain
                 })
             {
                 continue;
             }
             let prospective_anchor = anchor
                 .is_none()
-                .then(|| (managed.export_policy.clone(), target.export_policy.clone()));
-            let commands = managed.handle.commands_sender();
+                .then(|| (installed.clone(), target_chain.clone()));
+            let commands = self
+                .peers
+                .get(&peer_key)
+                .expect("locally eligible cohort peer exists")
+                .handle
+                .commands_sender();
 
             let established = self
                 .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
@@ -340,6 +360,19 @@ impl PeerManager {
         }
 
         selected
+    }
+
+    fn local_export_only_policy_pair<'a>(
+        &'a self,
+        target: &'a ResolvedPeerPolicy,
+    ) -> Option<(&'a Option<PolicyChain>, &'a Option<PolicyChain>)> {
+        let peer_key = PeerKey::new(target.address, target.interface.clone());
+        let managed = self.peers.get(&peer_key)?;
+        (managed.import_policy == target.import_policy
+            && managed.export_policy != target.export_policy
+            && !managed.pending_refresh
+            && !managed.pending_export_apply)
+            .then_some((&managed.export_policy, &target.export_policy))
     }
 
     /// Apply targets one at a time in their supplied order. This is the
