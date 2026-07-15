@@ -256,6 +256,11 @@ new AFI/SAFI and EVPN dataplane expansion.
   typed API-error migration and decide the v1 posture for live management-plane
   credential rotation and received eBGP-only attributes. Privilege separation
   remains a larger architectural choice, not a release-checkbox claim.
+- **Pilot route-server next-hop ownership after its identity prerequisite.**
+  ADR-0107 documents the current transparent-but-unchecked pipeline and a
+  proposed opt-in strict-peer pilot. Bind its identity to the live session
+  generation; same-AS alternate next hops and explicit authorization remain
+  later modes behind a generation-consistent fleet inventory.
 - **Quantify the single-owner RIB actor ceiling before committing to sharding.**
   The exact-export precommit and the grouped policy transition moved more
   synchronous work onto the single `RibManager` actor — two un-chunked O(table)

@@ -1230,6 +1230,13 @@ This applies to:
 - IPv4 and IPv6 FlowSpec export (`AS_PATH` transparency only; FlowSpec has no
   wire-level `NEXT_HOP`)
 
+Transparent export does not currently verify that an inbound unicast next hop
+belongs to the advertising route-server client. A per-client import policy can
+constrain the primary address where today's exact `match_next_hop` matcher is
+sufficient, but it is not a complete ownership check for every wire form. See
+[ADR-0107](adr/0107-route-server-next-hop-ownership.md); a next-hop rewrite
+alone is not ownership validation.
+
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
 
