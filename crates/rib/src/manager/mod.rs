@@ -472,6 +472,10 @@ pub struct RibManager {
     /// grouped run.
     #[cfg(test)]
     test_force_ungrouped: bool,
+    #[cfg(test)]
+    test_force_exact_export_slow_path: bool,
+    #[cfg(test)]
+    test_exact_export_fast_path_hits: u64,
     /// Test/benchmark-only evidence for the explicit clean policy transition.
     #[cfg(any(test, feature = "bench-internals"))]
     policy_transition_stats: PolicyTransitionStats,
@@ -1009,6 +1013,10 @@ impl RibManager {
             pending_extra_withdraws: HashMap::new(),
             #[cfg(test)]
             test_force_ungrouped: false,
+            #[cfg(test)]
+            test_force_exact_export_slow_path: false,
+            #[cfg(test)]
+            test_exact_export_fast_path_hits: 0,
             #[cfg(any(test, feature = "bench-internals"))]
             policy_transition_stats: PolicyTransitionStats::default(),
             vrp_table: None,

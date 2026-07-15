@@ -315,6 +315,232 @@ async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Strin
     reply_rx.await.unwrap()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ExactUpdateSemantic {
+    snapshot: Option<(u64, u64)>,
+    payload: String,
+}
+fn exact_update_semantic(update: &OutboundRouteUpdate) -> ExactUpdateSemantic {
+    let snapshot = update
+        .exact_export_snapshot
+        .as_ref()
+        .map(|snapshot| (snapshot.owner_id(), snapshot.generation()));
+    ExactUpdateSemantic {
+        snapshot,
+        payload: format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            update.announce_source_exclusion,
+            update.announce,
+            update.withdraw,
+            update.end_of_rib,
+            update.refresh_markers,
+            update.next_hop_override,
+            update.flowspec_announce,
+            update.flowspec_withdraw,
+            update.evpn_announce,
+            update.evpn_withdraw,
+            update.bgpls_announce,
+            update.bgpls_withdraw,
+            update.vpn_announce,
+            update.vpn_withdraw,
+            update.labeled_announce,
+            update.labeled_withdraw,
+            update.rtc_announce,
+            update.rtc_withdraw,
+            update.otc_blocked,
+            update.request_refresh_all_negotiated,
+        ),
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+struct ExactPrecommitState {
+    updates: [ExactUpdateSemantic; 2],
+    overlays: [HashSet<ExactExportKey>; 2],
+    advertised: [Vec<String>; 2],
+    groups: [Option<usize>; 2],
+}
+
+fn register_direct_exact_peer(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 0,
+        encoder,
+    });
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    let eor = outbound_rx.try_recv().unwrap();
+    assert_eq!(eor.end_of_rib, ipv4_sendable());
+    outbound_rx
+}
+
+fn drive_exact_precommit_step(
+    manager: &mut RibManager,
+    peers: [IpAddr; 2],
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>; 2],
+    source: IpAddr,
+    route: Route,
+) -> (ExactPrecommitState, u64) {
+    let hits_before = manager.test_exact_export_fast_path_hits;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    let updates = receivers
+        .each_mut()
+        .map(|receiver| exact_update_semantic(&receiver.try_recv().unwrap()));
+    let rejected = &manager.peer_unexportable;
+    let overlays = peers.map(|peer| rejected.get(&peer).cloned().unwrap_or_default());
+    let advertised = peers.map(|peer| {
+        manager
+            .grouped_advertised_routes(peer)
+            .expect("both targets remain grouped")
+            .iter()
+            .map(|route| format!("{route:?}"))
+            .collect()
+    });
+    let groups = peers.map(|peer| manager.grouped_member_of(peer));
+    let state = ExactPrecommitState {
+        updates,
+        overlays,
+        advertised,
+        groups,
+    };
+    (
+        state,
+        manager.test_exact_export_fast_path_hits - hits_before,
+    )
+}
+
+fn run_exact_precommit_differential(
+    force_slow: bool,
+    routes: &[Route; 3],
+) -> Vec<(ExactPrecommitState, u64)> {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_exact_export_slow_path = force_slow;
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 90, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 90, 0, 2)),
+    ];
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let mut receivers = peers.map(|peer| {
+        let limited = peer == peers[1];
+        register_direct_exact_peer(
+            &mut manager,
+            peer,
+            Arc::new(CohortExactEncoder {
+                owner: if limited { 2 } else { 1 },
+                profile: 90,
+                max_len: if limited { 128 } else { 4_096 },
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        )
+    });
+    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 90));
+    routes
+        .iter()
+        .cloned()
+        .map(|route| drive_exact_precommit_step(&mut manager, peers, &mut receivers, source, route))
+        .collect()
+}
+
+fn assert_plain_unicast_update(
+    actual: &ExactUpdateSemantic,
+    owner: u64,
+    announce: Vec<Route>,
+    withdraw: Vec<(Prefix, u32)>,
+) {
+    let expected = exact_update_semantic(&OutboundRouteUpdate {
+        next_hop_override: vec![None; announce.len()].into(),
+        announce: announce.into(),
+        withdraw,
+        ..OutboundRouteUpdate::default()
+    });
+    assert_eq!(actual.snapshot, Some((owner, 1)));
+    assert_eq!(actual.payload, expected.payload);
+}
+
+/// Load-bearing breaks: disable fast => [0,0,0]; drop success => oversize leak; retain overlay => route absent.
+#[test]
+fn real_caller_grouped_exact_precommit_fast_and_slow_paths_are_equivalent() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let source = Ipv4Addr::new(192, 0, 2, 90);
+    let small = crate::test_support::make_route(prefix, source);
+    let mut oversized = small.clone();
+    Arc::make_mut(&mut oversized.attributes).push(PathAttribute::Communities(vec![0xFDE8_0002]));
+    let routes = [small.clone(), oversized, small];
+    let normal = run_exact_precommit_differential(false, &routes);
+    let forced_slow = run_exact_precommit_differential(true, &routes);
+    let key = ExactExportKey::Unicast(Prefix::V4(prefix), 0);
+
+    let hit_deltas =
+        |steps: &[(ExactPrecommitState, u64)]| steps.iter().map(|step| step.1).collect::<Vec<_>>();
+    assert_eq!(hit_deltas(&normal), [2, 1, 1]);
+    assert_eq!(hit_deltas(&forced_slow), [0, 0, 0]);
+    for (normal, slow) in normal.iter().zip(&forced_slow) {
+        assert_eq!(normal.0, slow.0, "fast/slow semantic states must match");
+        assert_eq!(normal.0.groups, [Some(0), Some(0)]);
+    }
+    assert_eq!(normal[0].0.overlays, [HashSet::new(), HashSet::new()]);
+    assert_eq!(normal[1].0.overlays, [HashSet::new(), HashSet::from([key])]);
+    assert_eq!(normal[2].0.overlays, [HashSet::new(), HashSet::new()]);
+    let advertised = routes.each_ref().map(|route| vec![format!("{route:?}")]);
+    assert_eq!(
+        normal[0].0.advertised,
+        [advertised[0].clone(), advertised[0].clone()]
+    );
+    assert_eq!(
+        normal[1].0.advertised,
+        [vec![format!("{:?}", routes[1])], vec![]]
+    );
+    assert_eq!(
+        normal[2].0.advertised,
+        [advertised[2].clone(), advertised[2].clone()]
+    );
+    assert_plain_unicast_update(&normal[0].0.updates[0], 1, vec![routes[0].clone()], vec![]);
+    assert_plain_unicast_update(&normal[0].0.updates[1], 2, vec![routes[0].clone()], vec![]);
+    assert_plain_unicast_update(&normal[1].0.updates[0], 1, vec![routes[1].clone()], vec![]);
+    assert_plain_unicast_update(
+        &normal[1].0.updates[1],
+        2,
+        vec![],
+        vec![(Prefix::V4(prefix), 0)],
+    );
+    assert_plain_unicast_update(&normal[2].0.updates[0], 1, vec![routes[2].clone()], vec![]);
+    assert_plain_unicast_update(&normal[2].0.updates[1], 2, vec![routes[2].clone()], vec![]);
+}
+
 async fn query_first_export_term_hits(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryExportPolicyTermHits {
