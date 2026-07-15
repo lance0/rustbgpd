@@ -138,7 +138,7 @@ jobs:
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 
-      - name: Assert tarball contains licenses, man pages, and completions
+      - name: Assert tarball has nonempty licenses, man pages, and completions
         run: |
           set -euo pipefail
           SUFFIX=${{ matrix.suffix }}
@@ -154,6 +154,10 @@ jobs:
                    share/completions/rbgp.fish; do
             if ! grep -qxF "$f" <<<"$entries"; then
               echo "::error::${f} missing from dist/rustbgpd-${SUFFIX}.tar.gz"
+              exit 1
+            fi
+            if [ "$(tar -xOzf "dist/rustbgpd-${SUFFIX}.tar.gz" "$f" | wc -c)" -eq 0 ]; then
+              echo "::error::${f} is empty in dist/rustbgpd-${SUFFIX}.tar.gz"
               exit 1
             fi
           done
@@ -183,8 +187,7 @@ jobs:
         # the release body shows the curated notes instead of the
         # auto-generated commit list. Strips the heading line because
         # the GitHub release page already shows the version. If no
-        # matching section exists, write a stub so the action still
-        # has a body to publish (and surface the gap at release time).
+        # matching section exists, fail closed before creating a release.
         #
         # CHANGELOG.md is hard-wrapped (~72-80 cols) for review quality and
         # clean diffs, but GitHub renders release bodies with comment-style

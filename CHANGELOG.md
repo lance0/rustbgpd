@@ -410,6 +410,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
+  exhaustive public `Capability` enum gains the experimental
+  `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived
+  draft-04 wire format using IANA-assigned capability code 76. Downstream
+  exhaustive matches must add an arm. `EvpnRouteKey` also gains the additive
+  `Ord` / `PartialOrd` implementations for deterministic keyed collections.
+
+- **`rustbgpd-fsm` 0.2.0 → 0.3.0 (breaking, prepared for publish).** The FSM's
+  public API now negotiates experimental family-local Paths-Limit state and
+  exports `graceful_restart_preserves_family`. Its new fields are additive
+  behind `#[non_exhaustive]`, but the public surface exposes wire types and now
+  depends on incompatible `rustbgpd-wire ^0.15.0`, requiring the 0.x breaking
+  bump. Wire must be published before the FSM package can be fully verified or
+  published against crates.io.
+
 - **Policy rollback has one aggregate RIB wait budget.** Authoritative
   self-heal and a subsequent cohort unwind now share one lazy absolute
   five-second deadline instead of waiting up to five seconds per peer. Every
