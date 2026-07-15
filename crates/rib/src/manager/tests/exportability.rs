@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
@@ -396,6 +396,75 @@ fn commit_shared_unicast_with_precommit(
             lazy_group_prior,
         }),
     )
+}
+
+#[test]
+fn lazy_clean_group_prior_falls_back_when_identity_or_stage_is_missing() {
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 40));
+    let staged: HashMap<usize, Vec<crate::manager::update_groups::GroupDelta>> = HashMap::new();
+
+    // Restoring either former `expect` makes one of these missing-input
+    // cases panic instead of selecting the eager exact-reconciliation path.
+    assert!(
+        crate::manager::distribution::resolve_lazy_clean_group_prior(
+            true,
+            target,
+            None,
+            |group_id| staged.get(&group_id).map(Vec::as_slice),
+        )
+        .is_none()
+    );
+    assert!(
+        crate::manager::distribution::resolve_lazy_clean_group_prior(
+            true,
+            target,
+            Some(7),
+            |group_id| staged.get(&group_id).map(Vec::as_slice),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 41));
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 41),
+    );
+    let staged = HashMap::from([(
+        7,
+        vec![crate::manager::update_groups::GroupDelta {
+            prefix: route.prefix,
+            path_id: route.path_id,
+            new: Some((route.clone(), None)),
+            old_source: Some(source),
+            policy_label: None,
+        }],
+    )]);
+
+    // Always selecting the eager path makes the eligible assertion fail;
+    // ignoring eligibility makes the second assertion fail.
+    let resolved = crate::manager::distribution::resolve_lazy_clean_group_prior(
+        true,
+        target,
+        Some(7),
+        |group_id| staged.get(&group_id).map(Vec::as_slice),
+    )
+    .expect("an eligible existing stage must be deferred");
+    assert_eq!(resolved.peer, target);
+    assert_eq!(resolved.deltas.len(), 1);
+    assert_eq!(resolved.deltas[0].prefix, route.prefix);
+    assert!(
+        crate::manager::distribution::resolve_lazy_clean_group_prior(
+            false,
+            target,
+            Some(7),
+            |group_id| staged.get(&group_id).map(Vec::as_slice),
+        )
+        .is_none()
+    );
 }
 
 #[test]
