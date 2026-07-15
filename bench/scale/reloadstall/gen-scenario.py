@@ -134,6 +134,11 @@ config = [
     "",
     "[global.telemetry]",
     'log_format = "json"',  # reload wall time comes from the JSON "config reload complete" line
+    # /metrics + /readyz endpoint. The actor-poll histogram
+    # (bgp_rib_policy_transition_actor_poll_duration_seconds, partitioned by
+    # poll_kind bounded/prefix_snapshot/finalize) and the 200 ms core-readiness
+    # probe are scraped here for the actor-ceiling receipt.
+    'prometheus_addr = "127.0.0.1:9179"',
     "",
     "[global.telemetry.grpc_uds]",
     f'path = "{rundir}/grpc.sock"',  # the `rbgp health` control-query probe dials this
