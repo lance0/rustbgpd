@@ -609,6 +609,16 @@ fn llgr_stale_export_suppressed(
         && (is_llgr_stale || communities.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE))
 }
 
+/// RFC 1997 well-known-community export restriction. `NO_ADVERTISE`
+/// means that a route "MUST NOT be advertised to any BGP peer", so the
+/// source route is ineligible before export policy can remove the community,
+/// and a modified route is ineligible when policy adds it. This predicate is
+/// deliberately target-independent: every unicast selection shape applies
+/// both checks.
+pub(super) fn no_advertise_export_suppressed(communities: &[u32]) -> bool {
+    communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+}
+
 /// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
 /// carries OTC must not be propagated toward a Provider, Peer, or Route
 /// Server. The local role names our side of those relationships.

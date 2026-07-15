@@ -1,4 +1,64 @@
 use super::*;
+use rustbgpd_policy::{
+    NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+};
+
+fn no_advertise_chain(peer_context: bool, add: bool) -> PolicyChain {
+    let statement = PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: peer_context.then_some(NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![65100],
+            peer_groups: vec![],
+        }),
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            communities_add: add
+                .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                .into_iter()
+                .collect(),
+            communities_remove: (!add)
+                .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                .into_iter()
+                .collect(),
+            ..RouteModifications::default()
+        },
+    };
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+pub(super) fn no_advertise_removal_chain(peer_context: bool) -> PolicyChain {
+    no_advertise_chain(peer_context, false)
+}
+
+pub(super) fn no_advertise_addition_chain(peer_context: bool) -> PolicyChain {
+    no_advertise_chain(peer_context, true)
+}
+
+pub(super) fn with_no_advertise(mut route: Route) -> Route {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ]));
+    route
+}
 
 fn with_otc(mut route: Route, asn: u32) -> Route {
     Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(asn));
@@ -18,6 +78,199 @@ fn drain_unicast_state(
         }
     }
     state
+}
+
+/// A grouped and a genuinely private single-best target must both apply
+/// RFC 1997 before a permit policy that removes `NO_ADVERTISE`. Replacing
+/// an advertised route with the scoped form withdraws it, clears logical
+/// advertised state, and explains the same pre-policy stop on both paths.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves grouped/private staging, policy order, withdrawal, state, and explain parity"
+)]
+async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let grouped_a: IpAddr = "192.0.2.30".parse().unwrap();
+    let grouped_b: IpAddr = "192.0.2.31".parse().unwrap();
+    let private: IpAddr = "192.0.2.32".parse().unwrap();
+    let mut receivers = Vec::new();
+
+    for (peer, peer_context) in [(grouped_a, false), (grouped_b, false), (private, true)] {
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(no_advertise_removal_chain(peer_context)),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        receivers.push((peer, out_rx));
+    }
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+    let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 10));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![plain.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        let update = out_rx.try_recv().expect("plain route announced after sync");
+        assert_eq!(update.announce.len(), 1);
+        assert!(update.withdraw.is_empty());
+    }
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![with_no_advertise(plain.clone())],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    for (peer, out_rx) in &mut receivers {
+        let update = out_rx
+            .try_recv()
+            .expect("NO_ADVERTISE replacement withdrawn after sync");
+        assert!(
+            update.announce.is_empty(),
+            "{peer} must not receive the route"
+        );
+        assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes { peer: *peer, reply })
+            .await
+            .unwrap();
+        assert!(response.await.unwrap().is_empty());
+
+        let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
+        assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+        assert_eq!(
+            explain.update_group_id.is_some(),
+            *peer != private,
+            "group membership must distinguish shared from private staging"
+        );
+        let stop = explain
+            .gates
+            .iter()
+            .find(|step| step.verdict == crate::update::ExportGateVerdict::Stop)
+            .unwrap();
+        assert_eq!(
+            (stop.gate, stop.code),
+            ("no_advertise", "no_advertise_suppressed")
+        );
+        assert!(
+            explain.modifications.communities_remove.is_empty(),
+            "the pre-policy stop must occur before the configured removal"
+        );
+    }
+
+    // Restore a plain source route under the removal policy, then replace
+    // each target's policy with one that adds NO_ADVERTISE. The post-policy
+    // guard must withdraw the route on both staging shapes.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![plain],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        let update = out_rx
+            .try_recv()
+            .expect("plain replacement announced after query synchronization");
+        assert_eq!(update.announce.len(), 1);
+    }
+
+    for (peer, _) in &receivers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: *peer,
+            export_policy: Some(no_advertise_addition_chain(*peer == private)),
+            reply,
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.await.unwrap(), Ok(()));
+    }
+    let _ = query_best_routes(&tx).await;
+
+    for (peer, out_rx) in &mut receivers {
+        let mut saw_withdraw = false;
+        while let Ok(update) = out_rx.try_recv() {
+            assert!(
+                update.announce.is_empty(),
+                "policy-added NO_ADVERTISE must not be announced to {peer}"
+            );
+            saw_withdraw |= update.withdraw.contains(&(Prefix::V4(prefix), 0));
+        }
+        assert!(saw_withdraw, "policy replacement must withdraw from {peer}");
+
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes { peer: *peer, reply })
+            .await
+            .unwrap();
+        assert!(response.await.unwrap().is_empty());
+
+        let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
+        assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+        assert_eq!(
+            explain.update_group_id.is_some(),
+            *peer != private,
+            "replacement keeps grouped/private staging distinction"
+        );
+        assert_eq!(
+            explain.gates.last().map(|step| (step.gate, step.code)),
+            Some(("no_advertise", "no_advertise_policy_suppressed"))
+        );
+        assert!(
+            explain
+                .modifications
+                .communities_add
+                .contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE),
+            "explain shows the policy modification that triggered suppression"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 #[tokio::test]

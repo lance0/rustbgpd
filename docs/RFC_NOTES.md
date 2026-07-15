@@ -18,7 +18,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Core BGP | RFC 4271, RFC 6793 (4-byte ASN) | FSM + UPDATE validation, dual-stack IPv4/IPv6 unicast (SAFI 1) |
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
-| Communities | RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove |
+| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` egress enforcement for unicast |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
@@ -29,6 +29,25 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Liveness | RFC 5880/5881/5882 (BFD), RFC 9687 (Send Hold Timer) | Single-hop async BFD for static neighbors |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |
 | Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
+
+---
+
+## RFC 1997 — NO_ADVERTISE export restriction
+
+- IPv4/IPv6 unicast routes carrying `NO_ADVERTISE` are ineligible before
+  export policy, and the post-policy route is checked again before Adj-RIB-Out
+  commit. A permit policy cannot remove the community to bypass the
+  restriction; a policy that adds it suppresses the modified route.
+- The same predicate covers grouped and private single-best, Add-Path,
+  RFC 7947 per-client-best, and RFC 9107 ORR. Existing advertisements are
+  withdrawn and logical Adj-RIB-Out state is cleared.
+- Add-Path and per-client-best remove scoped candidates before ranking, so
+  surviving siblings compact normally. They also skip policy-modified
+  candidates whose result carries `NO_ADVERTISE`. ORR first selects its
+  per-vantage best and suppresses that winner without falling back to a
+  different route, whether the community arrived on the source or from policy.
+- This enforcement is currently scoped to IPv4/IPv6 unicast. Other route
+  families retain their existing policy behavior.
 
 ---
 

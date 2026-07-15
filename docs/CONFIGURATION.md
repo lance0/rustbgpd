@@ -267,8 +267,11 @@ RFC 7999 deliberately requires an explicit operator directive before a router
 discards traffic for tagged prefixes. This knob is that directive for the
 control-plane scoping behavior rustbgpd can enforce today: it preserves the
 `BLACKHOLE` marker and adds `NO_ADVERTISE` at the chain tail so a blackhole
-request is not propagated to other peers unless the operator writes a more
-specific policy. Earlier operator denies still short-circuit normally.
+request is not propagated to other peers. RFC 1997 egress enforcement happens
+before export policy, so `set_community_remove = ["NO_ADVERTISE"]` cannot make
+the scoped route exportable. The post-policy result is checked as well, so a
+policy that adds `NO_ADVERTISE` suppresses the modified route instead of
+advertising it. Earlier operator denies still short-circuit normally.
 
 By default this does **not** install a kernel discard/null route. To turn
 local RTBH enforcement on, set both:

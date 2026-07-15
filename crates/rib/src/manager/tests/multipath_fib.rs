@@ -122,6 +122,172 @@ async fn multipath_send_advertises_multiple_routes() {
     handle.await.unwrap();
 }
 
+/// `NO_ADVERTISE` removes one Add-Path candidate before ranking and
+/// export policy. The remaining sibling compacts to rank/path-id 1;
+/// the old rank 2 is withdrawn even when policy would remove the
+/// well-known community and permit the scoped route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves live and explain rank parity before and after policy"
+)]
+#[tokio::test]
+async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source_a = Ipv4Addr::new(10, 0, 1, 1);
+    let source_b = Ipv4Addr::new(10, 0, 1, 2);
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 3));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    for (source, local_pref) in [(source_a, 200), (source_b, 100)] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: vec![make_multipath_route(
+                prefix,
+                source,
+                vec![u32::from(source.octets()[3]) + 65000],
+                local_pref,
+            )],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    let initial = out_rx.recv().await.unwrap();
+    assert_eq!(initial.announce.len(), 2);
+    assert_eq!(
+        initial
+            .announce
+            .iter()
+            .find(|route| route.path_id == 1)
+            .unwrap()
+            .peer,
+        IpAddr::V4(source_a)
+    );
+    drain_eor(&mut out_rx).await;
+
+    let scoped =
+        super::unicast::with_no_advertise(make_multipath_route(prefix, source_a, vec![65001], 200));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source_a),
+        announced: vec![scoped],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+
+    let update = out_rx
+        .try_recv()
+        .expect("rank compaction emitted after query synchronization");
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].peer, IpAddr::V4(source_b));
+    assert_eq!(update.announce[0].path_id, 1);
+    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "one compact delta is sufficient"
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    let advertised = response.await.unwrap();
+    assert_eq!(advertised.len(), 1);
+    assert_eq!(advertised[0].peer, IpAddr::V4(source_b));
+    assert_eq!(advertised[0].path_id, 1);
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known Add-Path peer");
+    let sibling = explain
+        .candidates
+        .iter()
+        .find(|candidate| candidate.route.peer == IpAddr::V4(source_b))
+        .expect("runner-up is present in best-path explain");
+    assert_eq!(
+        sibling.advertised_path_id, 1,
+        "ExplainBestPath applies pre-policy NO_ADVERTISE before rank assignment"
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_addition_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let _ = query_best_routes(&tx).await;
+
+    let update = out_rx
+        .try_recv()
+        .expect("policy-added NO_ADVERTISE withdraws the remaining rank");
+    assert!(update.announce.is_empty());
+    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.unwrap().is_empty());
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known Add-Path peer");
+    let sibling = explain
+        .candidates
+        .iter()
+        .find(|candidate| candidate.route.peer == IpAddr::V4(source_b))
+        .expect("runner-up is present in best-path explain");
+    assert_eq!(
+        sibling.advertised_path_id, 0,
+        "ExplainBestPath skips post-policy NO_ADVERTISE before rank assignment"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn multipath_send_respects_send_max() {
     let (tx, rx) = mpsc::channel(64);

@@ -1011,6 +1011,147 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
     handle.await.unwrap();
 }
 
+/// ORR selects the per-vantage winner before applying RFC 1997. If that
+/// winner becomes `NO_ADVERTISE`, it is withdrawn without falling back
+/// to the runner-up; export explain names the same pre-policy stop even
+/// when policy would remove the community and permit the route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves ORR winner suppression before and after export policy"
+)]
+#[tokio::test]
+async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
+    let (tx, handle) = orr_rr_manager().await;
+    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: client_b,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    announce_divergent_bests(&tx).await;
+    let initial = drain_final_unicast(&mut out_rx);
+    assert_eq!(
+        initial.get(&orr_prefix_key()).map(|route| route.next_hop),
+        Some(orr_nh_y()),
+        "vantage B initially selects the Y exit"
+    );
+
+    let scoped_winner =
+        super::unicast::with_no_advertise(ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_y()));
+    announce_unicast(&tx, ORR_SRC_Y, vec![scoped_winner]).await;
+    let _ = query_best_routes(&tx).await;
+
+    let update = out_rx
+        .try_recv()
+        .expect("ORR withdrawal emitted after query synchronization");
+    assert!(
+        update.announce.is_empty(),
+        "ORR must not fall back to the X runner-up"
+    );
+    assert_eq!(update.withdraw, vec![orr_prefix_key()]);
+    assert!(out_rx.try_recv().is_err());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: client_b,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.unwrap().is_empty());
+
+    let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(explain.orr_vantage, Some(vantage_at_node_b()));
+    assert_eq!(explain.orr_candidates.len(), 2);
+    assert!(explain.orr_candidates[0].selected);
+    assert_eq!(explain.orr_candidates[0].next_hop, orr_nh_y());
+    let stop = explain
+        .gates
+        .iter()
+        .find(|step| step.verdict == crate::update::ExportGateVerdict::Stop)
+        .unwrap();
+    assert_eq!(
+        (stop.gate, stop.code),
+        ("no_advertise", "no_advertise_suppressed")
+    );
+    assert!(
+        explain.modifications.communities_remove.is_empty(),
+        "explain must stop before applying the configured removal"
+    );
+
+    announce_unicast(
+        &tx,
+        ORR_SRC_Y,
+        vec![ibgp_route(orr_prefix(), ORR_SRC_Y, orr_nh_y())],
+    )
+    .await;
+    let _ = query_best_routes(&tx).await;
+    let update = out_rx
+        .try_recv()
+        .expect("plain ORR winner is restored before policy replacement");
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].next_hop, orr_nh_y());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: client_b,
+        export_policy: Some(super::unicast::no_advertise_addition_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let _ = query_best_routes(&tx).await;
+    let update = out_rx
+        .try_recv()
+        .expect("policy-added NO_ADVERTISE withdraws the ORR winner");
+    assert!(update.announce.is_empty());
+    assert_eq!(update.withdraw, vec![orr_prefix_key()]);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: client_b,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.unwrap().is_empty());
+
+    let explain = query_explain_advertised_route(&tx, client_b, Prefix::V4(orr_prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(
+        explain.gates.last().map(|step| (step.gate, step.code)),
+        Some(("no_advertise", "no_advertise_policy_suppressed"))
+    );
+    assert!(
+        explain
+            .modifications
+            .communities_add
+            .contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Regression: a peer with NO ORR vantage gets the pre-ORR explain
 /// shape in the same scenario — Loc-RIB best, no vantage, no candidate
 /// list, no ORR reason codes.
