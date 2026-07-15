@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rustbgpd_event_history::{
     Category, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryManager,
-    EventSubscriptionItem, PayloadCodec, Severity, SubscribeFilter, SubscribeRequest,
+    EventSubscriptionItem, PayloadCodec, QueryFilter, Severity, SubscribeFilter, SubscribeRequest,
 };
 use tempfile::TempDir;
 
@@ -401,10 +401,9 @@ async fn retention_gap_emits_as_leading_subscription_item_race_free() {
     let dir = TempDir::new().unwrap();
     let mut cfg = fast_cfg(dir.path().join("events.db"));
     cfg.max_events = 10;
-    // The default retention interval is 60s; in a test we need the
-    // pass to actually run before we subscribe. 50ms tick + the wait
-    // below give the actor at least one retention round.
-    cfg.retention_interval = Duration::from_millis(50);
+    // Park timer-driven retention so the test controls exactly when
+    // the count-cap pass observes the durable rows below.
+    cfg.retention_interval = Duration::from_secs(3600);
     let manager = EventHistoryManager::start(cfg).await.unwrap();
 
     // Fill past the retention cap so id 1..N have been evicted by the
@@ -418,9 +417,34 @@ async fn retention_gap_emits_as_leading_subscription_item_race_free() {
             }
         }
     }
-    // Wait for the actor to flush, retention to run, and the DB to
-    // settle into the post-eviction state.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait boundedly for all rows to become durable before issuing the
+    // explicit pass. Removing this readiness barrier makes the exact
+    // count-cap assertion below fail when retention races the appends.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let committed = manager
+            .query_persisted(0, u64::MAX, 100, QueryFilter::default())
+            .await
+            .unwrap()
+            .len();
+        if committed == 30 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {committed}/30 events committed before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Run exactly one pass. Removing this pass leaves oldest=1 and
+    // breaks the retained-floor assertion that protects the gap oracle.
+    let outcome = manager.run_retention_pass().await.unwrap();
+    assert_eq!(
+        outcome.evicted_count_cap, 20,
+        "one count-cap pass should evict exactly the 20 oldest rows"
+    );
+
     let oldest_now = manager
         .handle()
         .oldest_retained_event_id()
