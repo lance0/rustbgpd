@@ -255,9 +255,15 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
 /// leaves the exact SAFI-specific key advertised; sticky suppression prevents
 /// the two recovery announcements.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered state-machine regression covers both BGP-LS SAFIs"
+)]
 async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() {
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the per-SAFI sequence proves suppression, withdrawal, and recovery"
+    )]
     async fn exercise(family: crate::route::BgpLsFamily) {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());

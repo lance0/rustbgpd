@@ -4481,7 +4481,10 @@ async fn denied_vpn_add_path_replacements_withdraw_exact_known_identity() {
 /// the overlap and emits a first-seen withdrawal; capturing refresh state
 /// without the synthetic withdrawal leaves the stale count unchanged.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered refresh sequence proves replacement, deduplication, and accounting"
+)]
 async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
     use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, RtcNlri};
 
@@ -4658,7 +4661,10 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
 /// `known_bgpls.remove` duplicates the overlap and emits first-seen state;
 /// omitting the synthetic withdrawal from refresh capture leaves stale count.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered refresh sequence covers both BGP-LS SAFIs"
+)]
 async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_safis() {
     use rustbgpd_rib::BgpLsFamily;
     use rustbgpd_wire::{MpReachNlri, MpUnreachNlri};
@@ -4677,7 +4683,10 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
         .expect("fixture contains one BGP-LS NLRI")
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the per-SAFI sequence proves replacement, deduplication, and accounting"
+    )]
     async fn exercise(safi: Safi) {
         let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
         let afi = Afi::BgpLs;

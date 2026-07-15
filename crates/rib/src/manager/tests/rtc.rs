@@ -198,7 +198,10 @@ async fn rtc_route_reflects_between_ibgp_clients_with_originator_and_cluster_lis
 /// leaves the exact key advertised; making suppression sticky prevents the two
 /// recovery announcements.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered state-machine regression proves suppression, withdrawal, and recovery"
+)]
 async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
