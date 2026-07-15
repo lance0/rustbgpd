@@ -2203,16 +2203,23 @@ fn write_sockaddr(storage: &mut libc::sockaddr_storage, peer: IpAddr, scope_id: 
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "decode the address prefix shared with Linux sockaddr_in and sockaddr_in6"
+)]
 fn read_sockaddr(storage: &libc::sockaddr_storage) -> io::Result<IpAddr> {
     match libc::c_int::from(storage.ss_family) {
         libc::AF_INET => {
+            // SAFETY: AF_INET selects sockaddr_in, whose ABI-compatible prefix
+            // is stored in this kernel-filled sockaddr_storage.
             let sin = unsafe { &*(std::ptr::from_ref(storage).cast::<libc::sockaddr_in>()) };
             Ok(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
                 sin.sin_addr.s_addr,
             ))))
         }
         libc::AF_INET6 => {
+            // SAFETY: AF_INET6 selects sockaddr_in6, whose ABI-compatible
+            // prefix is stored in this kernel-filled sockaddr_storage.
             let sin6 = unsafe { &*(std::ptr::from_ref(storage).cast::<libc::sockaddr_in6>()) };
             Ok(IpAddr::V6(std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
         }
@@ -2317,6 +2324,29 @@ pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::mem;
+
+    // Stable, dependency-free negative trait assertion. If `$ty` implements
+    // `$trait`, both marker implementations apply and inference fails E0283.
+    macro_rules! assert_not_impl {
+        ($ty:ty: $trait:path) => {
+            const _: fn() = || {
+                struct IfImpl;
+                trait Ambiguous<A> {
+                    fn check() {}
+                }
+                impl<T: ?Sized> Ambiguous<()> for T {}
+                impl<T: ?Sized + $trait> Ambiguous<IfImpl> for T {}
+                let _ = <$ty as Ambiguous<_>>::check;
+            };
+        };
+    }
+
+    assert_not_impl!(TcpAoAdd: std::fmt::Debug);
+    assert_not_impl!(TcpAoAdd: Clone);
+    assert_not_impl!(TcpAoGetSockOpt: std::fmt::Debug);
+    assert_not_impl!(TcpAoGetSockOpt: Clone);
+    assert_not_impl!(TcpAoMktCore: std::fmt::Debug);
+    assert_not_impl!(TcpAoMktCore: Clone);
 
     fn base_key() -> TcpAoKey<'static> {
         TcpAoKey {
@@ -2567,11 +2597,14 @@ mod tests {
         assert!(raw.key.iter().all(|byte| *byte == 0));
         assert_eq!(raw.keylen, 0);
 
+        assert!(std::mem::needs_drop::<TcpAoAdd>());
+        assert!(std::mem::needs_drop::<TcpAoGetSockOpt>());
         assert!(std::mem::needs_drop::<TcpAoMktCore>());
         let raw = raw_dump_key(IpAddr::from([192, 0, 2, 1]), "hmac(sha256)", b"secret");
         let core = mkt_core(&raw).unwrap();
         let heap_address = core.key.as_ptr();
         let moved = core;
+        let _: &Zeroizing<Vec<u8>> = &moved.key;
         assert_eq!(
             moved.key.as_ptr(),
             heap_address,
@@ -3053,6 +3086,7 @@ mod tests {
         assert_eq!(add.sndid, 7);
         assert_eq!(add.rcvid, 9);
         assert_eq!(add.maclen, 12);
+        assert_eq!(add.keyflags, 0);
         assert_eq!(add.keylen, 16);
         assert_eq!(add.flags, TCP_AO_ADD_SET_CURRENT | TCP_AO_ADD_SET_RNEXT);
         assert_eq!(&add.key[..16], b"0123456789abcdef");

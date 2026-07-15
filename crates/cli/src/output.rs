@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(value["effective_send_active"], true);
     }
     use serde_json::Value;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn next_step_footer_golden_and_suppressed_under_json() {
@@ -1253,6 +1253,49 @@ mod tests {
         assert_eq!(value["tcp_ao_applied_generation"], 1);
         assert_eq!(value["tcp_ao_rotation_phase"], "add_only");
         assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
+        // Load-bearing: additive fields at either redacted TCP-AO boundary
+        // must be reviewed rather than silently expanding secret exposure.
+        let tcp_ao = value["tcp_ao"]
+            .as_object()
+            .expect("TCP-AO state is an object");
+        assert_eq!(
+            tcp_ao.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "accept_icmps",
+                "ao_required",
+                "current_key_id",
+                "keys",
+                "packets_ao_required",
+                "packets_bad",
+                "packets_dropped_icmp",
+                "packets_good",
+                "packets_key_not_found",
+                "rnext_key_id",
+            ])
+        );
+        let first_key = tcp_ao["keys"][0]
+            .as_object()
+            .expect("TCP-AO key state is an object");
+        assert_eq!(
+            first_key
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "algorithm",
+                "deprecated",
+                "is_current",
+                "is_rnext",
+                "packets_bad",
+                "packets_good",
+                "peer_address",
+                "prefix_length",
+                "preferred",
+                "recv_id",
+                "send_id",
+                "vrf_ifindex",
+            ])
+        );
         assert!(value.to_string().find("secret").is_none());
         assert_eq!(value["otc_routes_blocked"], 3);
         assert_eq!(value["import_policy_routes_permitted"], 8);

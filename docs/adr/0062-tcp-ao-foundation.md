@@ -148,3 +148,27 @@ CRUD, plus peer-group inheritance. API/CLI neighbor state exposes redacted live
 inspection results (KeyIDs, validity flags, per-key inventory, and counters)
 and secret-free desired/applied generation, phase, and failure details for
 static and direct dynamic-prefix protected sessions.
+
+## Linux UAPI secrecy and normalization boundary
+
+The Linux v6.17 [`tcp_ao_add`
+UAPI](https://github.com/torvalds/linux/blob/v6.17/include/uapi/linux/tcp.h#L378-L402)
+defines `keyflags` separately from its selection flags. rustbgpd supplies zero:
+`TCP_AO_KEYF_IFINDEX` and `TCP_AO_KEYF_EXCLUDE_OPT` are both clear, so an MKT is
+not VRF-bound and [TCP options remain covered by
+authentication](https://github.com/torvalds/linux/blob/v6.17/net/ipv4/tcp_ao.c#L600-L602).
+Linux
+[`TCP_AO_GET_KEYS`](https://github.com/torvalds/linux/blob/v6.17/net/ipv4/tcp_ao.c#L2259-L2286)
+zeroes each output record and reconstructs an IPv6 family, port, and address,
+but not `sin6_scope_id`. IPv6 scope therefore remains socket/config authority,
+not an AO MKT selector.
+
+The raw add and GET_KEYS records contain key bytes and algorithm/key-length
+metadata, deliberately implement neither `Debug` nor `Clone`, and scrub those
+fields on drop. Reconciliation copies key bytes only into a
+`Zeroizing<Vec<u8>>` normalized core. The sole raw-address decoding boundary
+reads the `sockaddr_in` or `sockaddr_in6` prefix selected by the kernel-supplied
+family; no raw secret-bearing record crosses into CLI/API state. These rules
+track the [GET_KEYS record](https://github.com/torvalds/linux/blob/v6.17/include/uapi/linux/tcp.h#L438-L465)
+and Linux's [full-header hashing when options are
+included](https://github.com/torvalds/linux/blob/v6.17/net/ipv4/tcp_ao.c#L526-L551).
