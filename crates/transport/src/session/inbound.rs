@@ -742,9 +742,13 @@ impl PeerSession {
             let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+            let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_l3vpn_rejected: Vec<VpnRibRouteKey> = Vec::new();
             let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
+            let mut loop_labeled_rejected: Vec<LabeledRibRouteKey> = Vec::new();
             let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
+            let mut loop_rtc_rejected: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -792,44 +796,47 @@ impl PeerSession {
                         }
                     }
                 }
-                // VPN announcements in a loop-detected UPDATE are treated as
-                // withdrawals of any previously accepted version of the same
-                // RD+prefix, so a looped re-announcement can't strand a stale
-                // route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| {
+                        BgpLsRouteKey {
+                            family: bgpls_family,
+                            nlri: nlri.key(),
+                            path_id: 0,
+                        }
+                    }));
+                }
+                // A loop-rejected announcement replaces only an exact route
+                // that this session previously accepted.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::MplsVpn
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
+                    loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
                             nlri_key: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
                 }
-                // Labeled announcements in a loop-detected UPDATE are
-                // likewise treated as withdrawals of any previously accepted
-                // version of the same prefix, so a looped re-announcement
-                // can't strand a stale route in the Adj-RIB-In.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::LabeledUnicast
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_labeled_withdrawn.extend(mp.labeled_announced.iter().map(|entry| {
+                    loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
                         LabeledRibRouteKey {
                             prefix: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
                 }
-                // RTC announcements in a loop-detected UPDATE are likewise
-                // treated as withdrawals of any previously accepted version
-                // of the same membership NLRI.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::RtConstrain
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_rtc_withdrawn.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
+                    loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
                         nlri: *nlri,
                         path_id: 0,
                     }));
@@ -867,14 +874,34 @@ impl PeerSession {
             for key in &loop_bgpls_withdrawn {
                 self.known_bgpls.remove(key);
             }
+            for key in loop_bgpls_rejected {
+                if self.known_bgpls.remove(&key) {
+                    loop_bgpls_withdrawn.push(key);
+                }
+            }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in loop_l3vpn_rejected {
+                if self.known_vpn.remove(&key) {
+                    loop_l3vpn_withdrawn.push(key);
+                }
             }
             for key in &loop_labeled_withdrawn {
                 self.known_labeled.remove(key);
             }
+            for key in loop_labeled_rejected {
+                if self.known_labeled.remove(&key) {
+                    loop_labeled_withdrawn.push(key);
+                }
+            }
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
+            }
+            for key in loop_rtc_rejected {
+                if self.known_rtc.remove(&key) {
+                    loop_rtc_withdrawn.push(key);
+                }
             }
             if !loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -1025,9 +1052,13 @@ impl PeerSession {
             let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
             let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+            let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
             let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+            let mut loop_l3vpn_rejected: Vec<VpnRibRouteKey> = Vec::new();
             let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
+            let mut loop_labeled_rejected: Vec<LabeledRibRouteKey> = Vec::new();
             let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
+            let mut loop_rtc_rejected: Vec<RtcRibRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
@@ -1075,44 +1106,47 @@ impl PeerSession {
                         }
                     }
                 }
-                // VPN announcements in a loop-detected UPDATE are treated as
-                // withdrawals of any previously accepted version of the same
-                // RD+prefix, so a looped re-announcement can't strand a stale
-                // route in the Adj-RIB-In.
+                if let PathAttribute::MpReachNlri(mp) = attr
+                    && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
+                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
+                {
+                    loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| {
+                        BgpLsRouteKey {
+                            family: bgpls_family,
+                            nlri: nlri.key(),
+                            path_id: 0,
+                        }
+                    }));
+                }
+                // A loop-rejected announcement replaces only an exact route
+                // that this session previously accepted.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::MplsVpn
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_l3vpn_withdrawn.extend(mp.vpn_announced.iter().map(|entry| {
+                    loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| {
                         VpnRibRouteKey {
                             nlri_key: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
                 }
-                // Labeled announcements in a loop-detected UPDATE are
-                // likewise treated as withdrawals of any previously accepted
-                // version of the same prefix, so a looped re-announcement
-                // can't strand a stale route in the Adj-RIB-In.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::LabeledUnicast
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_labeled_withdrawn.extend(mp.labeled_announced.iter().map(|entry| {
+                    loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
                         LabeledRibRouteKey {
                             prefix: entry.nlri.key(),
                             path_id: entry.path_id,
                         }
                     }));
                 }
-                // RTC announcements in a loop-detected UPDATE are likewise
-                // treated as withdrawals of any previously accepted version
-                // of the same membership NLRI.
                 if let PathAttribute::MpReachNlri(mp) = attr
                     && mp.safi == Safi::RtConstrain
                     && self.negotiated_families.contains(&(mp.afi, mp.safi))
                 {
-                    loop_rtc_withdrawn.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
+                    loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
                         nlri: *nlri,
                         path_id: 0,
                     }));
@@ -1150,14 +1184,34 @@ impl PeerSession {
             for key in &loop_bgpls_withdrawn {
                 self.known_bgpls.remove(key);
             }
+            for key in loop_bgpls_rejected {
+                if self.known_bgpls.remove(&key) {
+                    loop_bgpls_withdrawn.push(key);
+                }
+            }
             for key in &loop_l3vpn_withdrawn {
                 self.known_vpn.remove(key);
+            }
+            for key in loop_l3vpn_rejected {
+                if self.known_vpn.remove(&key) {
+                    loop_l3vpn_withdrawn.push(key);
+                }
             }
             for key in &loop_labeled_withdrawn {
                 self.known_labeled.remove(key);
             }
+            for key in loop_labeled_rejected {
+                if self.known_labeled.remove(&key) {
+                    loop_labeled_withdrawn.push(key);
+                }
+            }
             for key in &loop_rtc_withdrawn {
                 self.known_rtc.remove(key);
+            }
+            for key in loop_rtc_rejected {
+                if self.known_rtc.remove(&key) {
+                    loop_rtc_withdrawn.push(key);
+                }
             }
             if !loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
