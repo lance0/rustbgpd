@@ -819,9 +819,10 @@ impl Config {
     /// RFC 7999 leaves honoring semantics to explicit operator policy. This
     /// built-in receiver rule does the safe control-plane half only: it keeps
     /// the `BLACKHOLE` marker present even if an earlier policy tried to
-    /// remove it, and adds `NO_ADVERTISE` so the request stays local unless an
-    /// operator deliberately writes a different policy. Kernel discard route
-    /// installation is a separate `install_blackhole_discard` opt-in.
+    /// remove it, and adds `NO_ADVERTISE` so the request stays local. RFC 1997
+    /// egress enforcement runs before export policy, so a policy cannot make
+    /// the scoped route exportable by removing `NO_ADVERTISE`. Kernel discard
+    /// route installation is a separate `install_blackhole_discard` opt-in.
     fn build_implicit_blackhole_policy() -> Policy {
         Policy {
             entries: vec![PolicyStatement {

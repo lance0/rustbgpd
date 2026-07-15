@@ -47,7 +47,7 @@ fn orr_candidates<'a>(
 /// Candidate paths for `prefix` visible to `target_peer` in the live
 /// multipath / per-client-best collector: [`orr_candidates`]'
 /// split-horizon and RFC 4456 reflection filter plus the per-candidate
-/// RFC 9494 §4.4 LLGR export gate. Shared by
+/// RFC 1997 `NO_ADVERTISE` and RFC 9494 §4.4 LLGR export gates. Shared by
 /// `distribute_multipath_prefix` and the per-client-best explain arm so
 /// explain walks exactly the candidate set live staging walks.
 #[expect(
@@ -77,6 +77,12 @@ fn multipath_candidates<'a>(
         cluster_id,
     )
     .filter(move |route| {
+        // RFC 1997: NO_ADVERTISE is selection ineligibility, not a
+        // post-policy attribute rewrite. A permit policy that removes
+        // the community must not make the route exportable.
+        if super::no_advertise_export_suppressed(route.communities()) {
+            return false;
+        }
         // RFC 9494 §4.4: each staged candidate is gated individually —
         // a stale candidate must not occupy an Add-Path rank (or the
         // filtered-best slot) toward a non-LLGR eBGP peer.
@@ -99,10 +105,11 @@ impl RibManager {
     /// the Loc-RIB best / their staging is multipath). Candidate
     /// collection is shared with live distribution (`orr_candidates` /
     /// `multipath_candidates`), and every gate reuses the same helper
-    /// the live bodies call (`llgr_stale_export_suppressed`,
-    /// `OrfFilterSet::permits`, `rr_suppression_reason`,
-    /// `routes_equal`), in the live bodies' evaluation order (family →
-    /// ORF → selection → LLGR → policy → Adj-RIB-Out diff).
+    /// the live bodies call (`no_advertise_export_suppressed`,
+    /// `llgr_stale_export_suppressed`, `OrfFilterSet::permits`,
+    /// `rr_suppression_reason`, `routes_equal`), in the live bodies'
+    /// evaluation order (family → ORF → selection → LLGR /
+    /// `NO_ADVERTISE` → policy → Adj-RIB-Out diff).
     ///
     /// `per_client_best` selects the RFC 7947 §2.3.2 arm: rank the live
     /// collector's candidate set with the Loc-RIB comparator and take
@@ -363,8 +370,8 @@ impl RibManager {
             ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b));
             if ranked.is_empty() {
                 let message = "no candidate for this prefix survives split-horizon / \
-                               reflection / LLGR filtering for this per-client best-path \
-                               peer"
+                               reflection / NO_ADVERTISE / LLGR filtering for this per-client \
+                               best-path peer"
                     .to_string();
                 gate(
                     &mut explain.gates,
@@ -382,6 +389,8 @@ impl RibManager {
             let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
             let total = ranked.len();
             let mut winner = None;
+            let mut policy_memo = super::ExportMemo::default();
+            let mut first_no_advertise_suppression = None;
             for (index, &candidate) in ranked.iter().enumerate() {
                 // Per-candidate export-policy verdict — the same
                 // context the live per-candidate walk builds, evaluated
@@ -421,7 +430,32 @@ impl RibManager {
                     Some(chain) => {
                         let (result, evaluation) = chain.compiled().evaluate_with_attribution(&ctx);
                         if result.action == PolicyAction::Permit {
-                            true
+                            let (modified, _) = policy_memo.apply(candidate, &result.modifications);
+                            if super::no_advertise_export_suppressed(modified.communities()) {
+                                let label = super::policy_label_with_term(
+                                    export_pol,
+                                    &ctx,
+                                    evaluation.matched_policy.as_deref(),
+                                );
+                                if first_no_advertise_suppression.is_none() {
+                                    first_no_advertise_suppression =
+                                        Some((result.modifications.clone(), label.clone()));
+                                }
+                                explain.reasons.push(ExplainReason {
+                                    code: "per_client_candidate_no_advertise",
+                                    message: format!(
+                                        "candidate {rank} of {total} (from {peer}, next hop \
+                                         {next_hop}) suppressed after export policy {label:?} \
+                                         added NO_ADVERTISE",
+                                        rank = index + 1,
+                                        peer = candidate.peer,
+                                        next_hop = candidate.next_hop,
+                                    ),
+                                });
+                                false
+                            } else {
+                                true
+                            }
                         } else {
                             let label = super::policy_label_with_term(
                                 export_pol,
@@ -448,11 +482,40 @@ impl RibManager {
                     break;
                 }
             }
+            if winner.is_none()
+                && let Some((modifications, label)) = first_no_advertise_suppression
+            {
+                explain.decision = ExplainDecision::Deny;
+                explain.modifications = modifications;
+                gate(
+                    &mut explain.gates,
+                    "export_policy",
+                    "policy_permitted",
+                    Pass,
+                    format!("export policy {label:?} permitted a ranked candidate"),
+                );
+                let message = "no candidate is exportable; at least one export-policy Permit \
+                               result carried NO_ADVERTISE, which RFC 1997 forbids advertising \
+                               to any BGP peer"
+                    .to_string();
+                gate(
+                    &mut explain.gates,
+                    "no_advertise",
+                    "no_advertise_policy_suppressed",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "no_advertise_policy_suppressed",
+                    message,
+                });
+                return explain;
+            }
             let Some((rank, winner)) = winner else {
                 explain.decision = ExplainDecision::Deny;
                 let message = format!(
-                    "all {total} candidate(s) denied by export policy — per-client \
-                     best-path (RFC 7947 §2.3.2) advertises nothing"
+                    "all {total} candidate(s) denied by export policy — per-client best-path \
+                     (RFC 7947 §2.3.2) advertises nothing"
                 );
                 gate(
                     &mut explain.gates,
@@ -611,6 +674,27 @@ impl RibManager {
             "route is not suppressed by the RFC 9494 LLGR export restriction".to_string(),
         );
 
+        // RFC 1997 — a route carrying NO_ADVERTISE is ineligible before
+        // export policy, so a permit policy cannot remove the community
+        // and bypass the well-known-community restriction.
+        if super::no_advertise_export_suppressed(best.communities()) {
+            explain.decision = ExplainDecision::Deny;
+            let message = "route carries NO_ADVERTISE and RFC 1997 forbids advertisement to any \
+                           BGP peer"
+                .to_string();
+            gate(
+                &mut explain.gates,
+                "no_advertise",
+                "no_advertise_suppressed",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "no_advertise_suppressed",
+                message,
+            });
+            return explain;
+        }
         let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
             best.as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
@@ -695,9 +779,27 @@ impl RibManager {
         }
 
         explain.modifications = result.modifications.clone();
-        let mut otc_memo = super::ExportMemo::default();
-        let (otc_candidate, _) = otc_memo.apply(best, &result.modifications);
-        if super::otc_egress_blocked(&otc_candidate, target_local_role) {
+        let mut post_policy_memo = super::ExportMemo::default();
+        let (post_policy_candidate, _) = post_policy_memo.apply(best, &result.modifications);
+        if super::no_advertise_export_suppressed(post_policy_candidate.communities()) {
+            explain.decision = ExplainDecision::Deny;
+            let message = "export policy produced a route carrying NO_ADVERTISE; RFC 1997 \
+                           forbids advertisement to any BGP peer"
+                .to_string();
+            gate(
+                &mut explain.gates,
+                "no_advertise",
+                "no_advertise_policy_suppressed",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "no_advertise_policy_suppressed",
+                message,
+            });
+            return explain;
+        }
+        if super::otc_egress_blocked(&post_policy_candidate, target_local_role) {
             explain.decision = ExplainDecision::Deny;
             let message = "route already carries Only-To-Customer and RFC 9234 forbids propagation toward this Provider, Peer, or Route Server".to_string();
             gate(
@@ -1168,6 +1270,9 @@ impl RibManager {
             // post-modification attribute Arc across every (route, peer)
             // with the same source attrs and equal modifications.
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                continue;
+            }
             modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
 
             // Only announce if different from what's already in AdjRibOut.
@@ -1381,6 +1486,20 @@ impl RibManager {
             });
         }
 
+        // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
+        // The group and private single-best paths share this body, so
+        // both withdraw existing state before a policy can remove it.
+        if super::no_advertise_export_suppressed(best.communities()) {
+            target.gate("no_advertise", "no_advertise_suppressed", Stop, || {
+                "route carries NO_ADVERTISE and RFC 1997 forbids advertisement to any BGP \
+                     peer"
+                    .to_string()
+            });
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
         // Export policy check. Group staging passes no peer-context
         // fields: a chain that reads them disqualifies its peers from
         // grouping (`requires_peer_context`), so the verdict here is
@@ -1473,6 +1592,26 @@ impl RibManager {
         // source Arc as before.
         let (mut modified, nh_action) = memo.apply(best, &result.modifications);
         modified.path_id = 0;
+
+        // Export policy may add NO_ADVERTISE to an otherwise eligible
+        // route. Enforce the resulting RFC 1997 state before committing
+        // grouped or private Adj-RIB-Out state.
+        if super::no_advertise_export_suppressed(modified.communities()) {
+            target.gate(
+                "no_advertise",
+                "no_advertise_policy_suppressed",
+                Stop,
+                || {
+                    "export policy produced a route carrying NO_ADVERTISE; RFC 1997 forbids \
+                     advertisement to any BGP peer"
+                        .to_string()
+                },
+            );
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
 
         // RFC 9234 §5 egress enforcement belongs before the advertised-state
         // diff. Group staging and explain carry their group-uniform/local
@@ -1683,6 +1822,16 @@ impl RibManager {
             return;
         }
 
+        // RFC 1997: select the per-vantage winner first, then suppress
+        // that winner before policy. ORR does not fall back to its
+        // runner-up merely because the selected best is NO_ADVERTISE.
+        if super::no_advertise_export_suppressed(best.communities()) {
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+
         // Export policy check — same tail as `distribute_single_best_prefix`.
         let aspath_str = export_pol
             .is_some_and(PolicyChain::requires_as_path_string)
@@ -1734,6 +1883,13 @@ impl RibManager {
         // independent of which candidate won.
         let (mut modified, nh_action) = memo.apply(best, &result.modifications);
         modified.path_id = 0;
+
+        if super::no_advertise_export_suppressed(modified.communities()) {
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
 
         // `force` semantics as in `distribute_single_best_prefix`.
         let changed = force

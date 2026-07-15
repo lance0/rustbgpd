@@ -51,10 +51,21 @@ allows explicit operator import policy to reject unsafe prefixes first
 and still lets the implicit rule add the scoping community to accepted
 routes.
 
-The rule is EBGP-only. iBGP propagation inside the local AS should carry
-the already-scoped route; reapplying the receiver rule at every iBGP hop
-would make local route-server and route-reflector behavior harder to
-reason about.
+RFC 1997 `NO_ADVERTISE` is enforced as pre-export-policy route
+ineligibility for IPv4/IPv6 unicast. Grouped and private single-best,
+Add-Path, per-client-best, and ORR therefore cannot be made to propagate
+the scoped route by an export policy that removes the community. The
+post-policy result is checked again before Adj-RIB-Out commit, so a policy
+that adds `NO_ADVERTISE` suppresses rather than leaks the modified route.
+A route that becomes scoped is withdrawn from any existing Adj-RIB-Out
+state; ORR suppresses its selected per-vantage winner rather than
+substituting a runner-up, while Add-Path and per-client-best filter
+individual candidates before ranking and after policy modification.
+
+Automatic insertion of the RFC 7999 receiver rule is EBGP-only; it is not
+reapplied on iBGP ingress. That boundary does not permit onward iBGP
+propagation: the independent RFC 1997 egress rule above suppresses an
+already-scoped unicast route toward every BGP peer.
 
 ### 4. SIGHUP hot-applies the policy-only knob
 

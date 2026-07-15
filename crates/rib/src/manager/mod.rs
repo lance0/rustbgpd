@@ -2844,9 +2844,10 @@ impl RibManager {
         // each candidate can be tagged with its `advertised_path_id`.
         // The selection mirrors `distribute_multipath_prefix` exactly:
         // family check → split-horizon → iBGP/RR suppression → export
-        // policy → top-N by best-path. Mirroring the contract is
-        // deliberate — operators trust explain only if it produces
-        // the same selection that distribution would, modulo state
+        // eligibility (including source `NO_ADVERTISE`) → export policy →
+        // modified-route `NO_ADVERTISE` → top-N by best-path. Mirroring the
+        // contract is deliberate — operators trust explain only if it
+        // produces the same selection that distribution would, modulo state
         // changes between the two calls.
         let mut advertised: Vec<(IpAddr, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
@@ -2925,6 +2926,7 @@ impl RibManager {
                 let needs_as_path_string =
                     export_pol.is_some_and(PolicyChain::requires_as_path_string);
                 let mut next_rank: u32 = 1;
+                let mut export_memo = distribution::ExportMemo::default();
                 for cand in &filtered {
                     if (next_rank as usize) > limit {
                         break;
@@ -2958,7 +2960,15 @@ impl RibManager {
                         local_pref: cand.local_pref_attr(),
                         med: cand.med_attr(),
                     };
-                    if evaluate_chain(export_pol, &ctx).action != PolicyAction::Permit {
+                    if distribution::no_advertise_export_suppressed(cand.communities()) {
+                        continue;
+                    }
+                    let result = evaluate_chain(export_pol, &ctx);
+                    if result.action != PolicyAction::Permit {
+                        continue;
+                    }
+                    let (modified, _) = export_memo.apply(cand, &result.modifications);
+                    if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
                     let outbound_rank = next_rank;

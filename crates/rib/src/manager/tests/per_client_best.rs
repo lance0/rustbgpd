@@ -212,6 +212,120 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     handle.await.unwrap();
 }
 
+/// A per-client-best target treats `NO_ADVERTISE` as candidate
+/// ineligibility before policy. When the current winner becomes scoped,
+/// the next permitted candidate replaces it at path-id 0 without a
+/// withdraw/announce gap, even if policy would remove the community.
+#[tokio::test]
+async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let initial_best = ebgp_route(prefix(), SOURCE_A, vec![65001], vec![]);
+    announce_from(&tx, SOURCE_A, vec![initial_best]).await;
+    announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+    sync(&tx).await;
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 40));
+    let mut out_rx = client_peer_up(
+        &tx,
+        target,
+        Some(super::unicast::no_advertise_removal_chain(false)),
+        true,
+    )
+    .await;
+    let initial = out_rx.recv().await.unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].peer, IpAddr::V4(SOURCE_A));
+    assert_eq!(initial.announce[0].path_id, 0);
+    drain_eor(&mut out_rx).await;
+
+    announce_from(
+        &tx,
+        SOURCE_A,
+        vec![ebgp_route(
+            prefix(),
+            SOURCE_A,
+            vec![65001],
+            vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE],
+        )],
+    )
+    .await;
+    sync(&tx).await;
+
+    let replacement = out_rx
+        .try_recv()
+        .expect("runner-up replacement emitted after query synchronization");
+    assert_eq!(replacement.announce.len(), 1);
+    assert_eq!(replacement.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(replacement.announce[0].path_id, 0);
+    assert!(
+        replacement.withdraw.is_empty(),
+        "path-id 0 replacement is an implicit withdraw"
+    );
+    assert!(out_rx.try_recv().is_err());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    let advertised = response.await.unwrap();
+    assert_eq!(advertised.len(), 1);
+    assert_eq!(advertised[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(advertised[0].path_id, 0);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_addition_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    sync(&tx).await;
+
+    let update = out_rx
+        .try_recv()
+        .expect("policy-added NO_ADVERTISE withdraws the per-client winner");
+    assert!(update.announce.is_empty());
+    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix()), 0)]);
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedRoutes {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.unwrap().is_empty());
+
+    let explain = query_explain_advertised_route(&tx, target, Prefix::V4(prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(
+        explain.gates.last().map(|step| (step.gate, step.code)),
+        Some(("no_advertise", "no_advertise_policy_suppressed"))
+    );
+    assert!(
+        explain
+            .modifications
+            .communities_add
+            .contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+    );
+    assert!(
+        explain
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "per_client_candidate_no_advertise")
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Split horizon inside the collector: the member sourcing the Loc-RIB
 /// best receives the runner-up (its own path is excluded from its
 /// candidate set), where single-best would have sent nothing.

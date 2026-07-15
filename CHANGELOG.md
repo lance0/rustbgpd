@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
+  policy.** IPv4/IPv6 unicast checks both the stored source route before export
+  policy and the modified route after policy across grouped and private
+  single-best, Add-Path, RFC 7947 per-client-best, and RFC 9107 ORR. Policy
+  cannot remove the community to make a scoped route exportable, and a
+  policy-added community suppresses the resulting route before Adj-RIB-Out
+  commit. Scoped replacements withdraw existing state; candidate modes compact
+  surviving siblings, while ORR suppresses its selected winner without falling
+  back.
+  Terminal export explain reports suppression and, for a post-policy stop,
+  shows the triggering modification; Add-Path best-path explain mirrors the
+  compacted advertised ranks.
+
 ### Added
 
 - **Planned-restart markers resist wall-clock steps across a daemon restart on Linux.**
