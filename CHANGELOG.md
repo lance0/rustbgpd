@@ -9,45 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **The route-server starter now applies documented dual-stack ingress
-  hygiene.** Its policy rejects both default routes and a dated 2025-10-09
-  snapshot of active IANA special-purpose rows marked non-globally reachable,
-  while preserving active globally reachable or N/A children of broader
-  rejected parents. Production-loader tests pin the complete snapshot, parent
-  exceptions, chain order, and later RPKI, ASPA, and prefix-length guards.
-  M83 retains an explicitly reduced IPv4 lab projection because its
-  deterministic probes use RFC 6598 and TEST-NET-3 space. (LAN-437)
-
-- **The committed July RIB rebaseline receipt is self-verifying again.** The
-  eight CPU derivatives now match the current classifier, and CI replays both
-  checksum envelopes plus every CPU, DHAT, and sanitized CSV derivative. No
-  benchmark was rerun and no measured value or performance claim changed.
-  (LAN-405)
-
-- **The v1 stable-surface gate now covers all inventoried contextual defaults.**
-  The dynamic-neighbor cap and address-/inheritance-dependent family set join
-  the existing resolver checks; the gate distinguishes their schema omission
-  representations from runtime values and pins `PeerManager` to the shared cap
-  resolver.
-
-- **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
-  policy.** IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS
-  SAFI 71/72 check both the stored source route before export policy and the
-  modified route after policy across their supported export shapes. Unicast
-  also covers grouped/private, RFC
-  7947 per-client-best, and RFC 9107 ORR; VPN covers grouped/private, and
-  labeled-unicast covers RFC 9107 ORR. Policy cannot remove the community to
-  make a scoped route exportable, and a policy-added community suppresses the
-  resulting route before Adj-RIB-Out commit. Scoped replacements withdraw
-  existing state; candidate modes compact surviving siblings, while ORR
-  suppresses its selected winner without falling back.
-  For unicast and VPN, terminal export explain reports suppression and, for a
-  post-policy stop, shows the triggering modification; unicast Add-Path
-  best-path explain mirrors the compacted advertised ranks.
-
 ### Added
+
+- **Marker-backed planned-restart selection deferral.** After a valid restart
+  marker is consumed, rustbgpd freezes the eligible GR restarting-speaker
+  roster per family and withholds selection and outbound propagation until
+  every current-session EoR arrives or the bounded timer expires.
+  `NeighborState` protobuf field 31 (`selection_deferral`) and `rbgp neighbor`
+  human/JSON output expose family state; the original
+  `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
+  `bgp_selection_deferral_releases_total`, and
+  `bgp_selection_deferral_timeouts_total` metrics expose the gate. (#861)
 
 - **Exact-export rejection is pinned against independent stacks.** Hosted M87
   drives a legal 4,095-byte GoBGP 4.6 UPDATE through a sink-only route-server
@@ -186,6 +158,47 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected ranges and overlaps. (#158)
 
 ### Fixed
+
+- **The route-server starter now applies documented dual-stack ingress
+  hygiene.** Its policy rejects both default routes and a dated 2025-10-09
+  snapshot of active IANA special-purpose rows marked non-globally reachable,
+  while preserving active globally reachable or N/A children of broader
+  rejected parents. Production-loader tests pin the complete snapshot, parent
+  exceptions, chain order, and later RPKI, ASPA, and prefix-length guards.
+  M83 retains an explicitly reduced IPv4 lab projection because its
+  deterministic probes use RFC 6598 and TEST-NET-3 space. (LAN-437)
+
+- **The committed July RIB rebaseline receipt is self-verifying again.** The
+  eight CPU derivatives now match the current classifier, and CI replays both
+  checksum envelopes plus every CPU, DHAT, and sanitized CSV derivative. No
+  benchmark was rerun and no measured value or performance claim changed.
+  (LAN-405)
+
+- **The v1 stable-surface gate now covers all inventoried contextual defaults.**
+  The dynamic-neighbor cap and address-/inheritance-dependent family set join
+  the existing resolver checks; the gate distinguishes their schema omission
+  representations from runtime values and pins `PeerManager` to the shared cap
+  resolver.
+
+- **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
+  policy.** IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS
+  SAFI 71/72 check both the stored source route before export policy and the
+  modified route after policy across their supported export shapes. Unicast
+  also covers grouped/private, RFC
+  7947 per-client-best, and RFC 9107 ORR; VPN covers grouped/private, and
+  labeled-unicast covers RFC 9107 ORR. Policy cannot remove the community to
+  make a scoped route exportable, and a policy-added community suppresses the
+  resulting route before Adj-RIB-Out commit. Scoped replacements withdraw
+  existing state; candidate modes compact surviving siblings, while ORR
+  suppresses its selected winner without falling back.
+  For unicast and VPN, terminal export explain reports suppression and, for a
+  post-policy stop, shows the triggering modification; unicast Add-Path
+  best-path explain mirrors the compacted advertised ranks.
+
+- **Foreign-family Paths-Limit tuples cannot widen Add-Path state.** Received
+  limits outside the peer's negotiated Add-Path send families are ignored, so
+  they cannot activate Add-Path for another family or trigger an initial-table
+  replay. (#864)
 
 - **Pre-policy safety rejections withdraw prior accepted paths.** OTC rejects
   retire exact accepted unicast `(prefix, path_id)` identities. AS_PATH-loop
