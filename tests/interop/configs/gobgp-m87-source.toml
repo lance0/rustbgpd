@@ -1,0 +1,20 @@
+# M87 — GoBGP 4.6 source member.  The driver injects and replaces the
+# 203.0.113.0/24 route through the CLI so the large-attribute boundary is
+# deterministic.
+
+[global.config]
+as = 65002
+router-id = "10.87.1.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.87.1.1"
+peer-as = 65500
+description = "rustbgpd-route-server"
+
+[neighbors.timers.config]
+hold-time = 90
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
