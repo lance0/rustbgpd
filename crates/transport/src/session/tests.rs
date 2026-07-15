@@ -1982,33 +1982,80 @@ fn otc_egress_blocks_unicast_to_provider_peer_or_route_server_client() {
         }
     }
 }
+/// Mutant: selecting Add-Path accounting from `path_id != 0`, or treating
+/// absent/Send negotiation as Receive, makes at least one storage tuple differ.
 #[test]
-fn known_prefix_count_deduplicates_multiple_paths() {
+fn negotiated_receive_direction_selects_unicast_accounting_storage() {
+    for (mode, expected_storage) in [
+        (None, (1, 0, 0, 0)),
+        (Some(AddPathMode::Send), (1, 0, 0, 0)),
+        (Some(AddPathMode::Receive), (0, 2, 1, 2)),
+        (Some(AddPathMode::Both), (0, 2, 1, 2)),
+    ] {
+        let mut session = make_test_session(65001, 65002);
+        let mut negotiated = negotiated_session(65002, false);
+        if let Some(mode) = mode {
+            negotiated
+                .add_path_families
+                .insert((Afi::Ipv4, Safi::Unicast), mode);
+        }
+        install_test_negotiated_session(&mut session, negotiated);
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        assert!(session.remember_known_path(prefix, 0));
+        let second_inserted = session.remember_known_path(prefix, 7);
+        assert_eq!(second_inserted, expected_storage.1 == 2, "mode {mode:?}");
+        assert_eq!(
+            session.known_unicast_storage_counts(),
+            expected_storage,
+            "mode {mode:?}"
+        );
+        assert_eq!(session.known_prefix_count(), 1, "mode {mode:?}");
+    }
+}
+
+/// Mutant: removing tuple deduplication increments the Add-Path refcount for
+/// the repeated identity and makes the refcount total three instead of two.
+#[test]
+fn known_prefix_count_deduplicates_multiple_add_paths() {
     let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Receive);
+    install_test_negotiated_session(&mut session, negotiated);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-    assert!(session.remember_known_path(prefix, 1));
+    assert!(session.remember_known_path(prefix, 0));
     assert!(session.remember_known_path(prefix, 2));
     assert!(
         !session.remember_known_path(prefix, 2),
         "duplicate path announcements must not bump the refcount"
     );
+    assert_eq!(session.known_unicast_storage_counts(), (0, 2, 1, 2));
     assert_eq!(session.known_prefix_count(), 1);
 }
+
+/// Mutant: deleting the per-prefix Add-Path refcount, or removing the prefix
+/// on the first path withdrawal, makes the intermediate count zero.
 #[test]
 fn known_prefix_refcount_tracks_add_path_withdrawals() {
     let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+    install_test_negotiated_session(&mut session, negotiated);
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-    session.remember_known_path(prefix, 1);
+    session.remember_known_path(prefix, 0);
     session.remember_known_path(prefix, 2);
     assert_eq!(session.known_prefix_count(), 1);
-    assert!(session.forget_known_path(prefix, 1));
+    assert!(session.forget_known_path(prefix, 0));
     assert_eq!(
         session.known_prefix_count(),
         1,
         "withdrawing one Add-Path path keeps the prefix counted"
     );
     assert!(
-        !session.forget_known_path(prefix, 1),
+        !session.forget_known_path(prefix, 0),
         "duplicate withdrawals must not decrement the refcount"
     );
     assert_eq!(session.known_prefix_count(), 1);
@@ -2018,6 +2065,32 @@ fn known_prefix_refcount_tracks_add_path_withdrawals() {
         0,
         "the last path withdrawal removes the unique prefix"
     );
+}
+
+/// Mutant: counting only the plain set or only the Add-Path refcount map makes
+/// this mixed-family total smaller than the two unique prefixes.
+#[test]
+fn mixed_family_modes_share_one_unique_prefix_count() {
+    let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Send);
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+    assert!(session.remember_known_path(v4, 0));
+    assert!(session.remember_known_path(v4, 7));
+    assert!(session.remember_known_path(v6, 99));
+    assert!(!session.remember_known_path(v6, 100));
+
+    assert_eq!(session.known_unicast_storage_counts(), (1, 2, 1, 2));
+    assert_eq!(session.known_prefix_count(), 2);
 }
 
 #[tokio::test]
@@ -2200,6 +2273,8 @@ async fn duplicate_borr_resnapshots_routes_replayed_in_the_prior_window() {
     assert_eq!(session.known_prefix_count(), 0);
 }
 
+/// Mutant: snapshotting plain ERR state as `(prefix, path_id)` identities fails
+/// to retire the omitted compact prefix at `EoRR`, leaving the count at two.
 #[tokio::test]
 async fn eorr_reconciles_omitted_prefix_before_later_max_prefix_check() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -2250,25 +2325,39 @@ async fn eorr_reconciles_omitted_prefix_before_later_max_prefix_check() {
     assert_eq!(session.known_prefix_count(), 2);
 }
 
+/// Mutant: collapsing Add-Path ERR state to a plain prefix makes replay of
+/// valid path ID zero preserve the omitted path ID two as well.
 #[tokio::test]
 async fn add_path_partial_replay_sweeps_only_omitted_identity_and_keeps_prefix_count() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    negotiated.peer_enhanced_route_refresh = true;
     negotiated
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
     install_test_negotiated_session(&mut session, negotiated);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-    session.remember_known_path(Prefix::V4(prefix), 1);
+    session.remember_known_path(Prefix::V4(prefix), 0);
     session.remember_known_path(Prefix::V4(prefix), 2);
     session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
-    session.process_update(ipv4_announce(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
     assert!(matches!(
         rib_rx.try_recv(),
         Ok(RibUpdate::RoutesReceived { .. })
     ));
-    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
-    assert!(session.known_paths.contains(&(Prefix::V4(prefix), 1)));
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::EoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::EndRouteRefresh { .. })
+    ));
+    assert!(session.known_paths.contains(&(Prefix::V4(prefix), 0)));
     assert!(!session.known_paths.contains(&(Prefix::V4(prefix), 2)));
     assert_eq!(session.known_prefix_count(), 1);
 }
@@ -2319,6 +2408,8 @@ async fn ordinary_withdrawal_retires_refresh_stale_identity() {
     assert_eq!(session.known_prefix_count(), 0);
 }
 
+/// Mutant: sweeping before a timed-out RIB boundary is accepted removes the
+/// compact plain prefix despite the closed channel and makes the count zero.
 #[tokio::test(start_paused = true)]
 async fn closed_rib_timeout_preserves_refresh_window_and_live_count() {
     let mut session = make_test_session(65001, 65002);
@@ -2336,9 +2427,17 @@ async fn closed_rib_timeout_preserves_refresh_window_and_live_count() {
     );
 }
 
+/// Mutant: using one untyped unicast ERR snapshot either leaves the plain IPv4
+/// prefix or mishandles Add-Path ID zero when the staggered windows expire.
 #[tokio::test(start_paused = true)]
 async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Receive);
+    install_test_negotiated_session(&mut session, negotiated);
     let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
     let v6 = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
     session.remember_known_path(v4, 0);
@@ -2362,7 +2461,7 @@ async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
             ..
         })
     ));
-    assert!(!session.known_paths.contains(&(v4, 0)));
+    assert!(!session.known_plain_prefixes.contains(&v4));
     assert!(session.known_paths.contains(&(v6, 0)));
     assert!(!session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
     assert!(session.refresh_accounting_has_window((Afi::Ipv6, Safi::Unicast)));
@@ -2411,6 +2510,8 @@ async fn quiet_run_loop_expires_refresh_accounting() {
     task.await.unwrap();
 }
 
+/// Mutant: applying the buffered UPDATE before the ordered timeout boundary
+/// leaves the stale compact prefix present after the task completes.
 #[tokio::test(start_paused = true)]
 async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() {
     let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
@@ -2470,7 +2571,7 @@ async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() 
             if announced.iter().any(|route| route.prefix == Prefix::V4(second))
     ));
     let session = task.await.unwrap();
-    assert!(!session.known_paths.contains(&(Prefix::V4(stale), 0)));
+    assert!(!session.known_plain_prefixes.contains(&Prefix::V4(stale)));
     assert_eq!(session.known_prefix_count(), 2);
 }
 
@@ -2664,14 +2765,18 @@ async fn stray_eorr_is_a_local_noop_after_ordered_rib_acceptance() {
     assert_eq!(session.known_prefix_count(), 1);
     assert!(session.read_half.is_some());
 }
-/// Regression: `Action::SessionDown` must clear `known_flowspec` and
-/// `known_evpn` alongside unicast path accounting. Reconnects previously inherited
-/// stale accounting, which could trip false max-prefix violations on the
-/// next session because `known_prefix_count` sums all three sets.
+/// Regression: `SessionDown` must clear `FlowSpec` and `EVPN` alongside unicast
+/// accounting; otherwise reconnect inherits stale counts and can trip a false
+/// max-prefix violation. Mutant: omitting either plain or Add-Path storage from
+/// `clear_known_routes` leaves the corresponding assertion non-empty.
 #[tokio::test]
 async fn session_down_clears_all_known_sets() {
     let mut session = make_test_session(65001, 65002);
     let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Receive);
     negotiated.peer_gr_capable = true;
     negotiated
         .peer_capabilities
@@ -2681,11 +2786,13 @@ async fn session_down_clears_all_known_sets() {
             restart_time: 120,
             families: vec![],
         });
-    session.negotiated = Some(negotiated);
+    install_test_negotiated_session(&mut session, negotiated);
     session.config.peer.graceful_restart = true;
     session.established_at = Some(Instant::now());
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
-    session.remember_known_path(prefix, 1);
+    session.remember_known_path(prefix, 0);
+    let add_path_prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+    session.remember_known_path(add_path_prefix, 0);
     let fs_prefix =
         rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
     session.known_flowspec.insert(rustbgpd_rib::FlowSpecKey {
@@ -2708,6 +2815,10 @@ async fn session_down_clears_all_known_sets() {
     session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
     assert!(session.known_prefix_count() >= 3);
     session.execute_actions(vec![Action::SessionDown]).await;
+    assert!(
+        session.known_plain_prefixes.is_empty(),
+        "known_plain_prefixes must clear"
+    );
     assert!(session.known_paths.is_empty(), "known_paths must clear");
     assert!(
         session.known_prefix_refcounts.is_empty(),

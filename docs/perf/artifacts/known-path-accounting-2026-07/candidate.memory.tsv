@@ -1,0 +1,17 @@
+component	live_at_t_gmax_bytes	share_percent
+Group RIB-Out table	46399748	23.191395
+Loc-RIB best-path map	44302352	22.143080
+Adj-RIB-In route storage	33556528	16.772132
+Transport known-path memory	4980768	2.489474
+Announcing-peers index	14942224	7.468381
+Transport session buffers/scratch	3187310	1.593073
+Prefix-trie index - Adj-RIB-In	17219712	8.606709
+Prefix-trie index - group table	17215552	8.604630
+Daemon core	4633596	2.315951
+Transport import-decision cache	5002096	2.500134
+RIB other	678836	0.339294
+API / peer-manager	2523257	1.261167
+Per-peer Adj-RIB-Out	98688	0.049326
+Telemetry / tokio / rest	5332337	2.665194
+other	120	0.000060
+TOTAL	200073124	100.000000

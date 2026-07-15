@@ -1,0 +1,7 @@
+order	run	variant	convergence_seconds	total_seconds	max_mem_gb	raw_peak_rss_bytes	received	tester_errors	tester_timeouts
+1	release-b1	baseline	3	12.34	0.234	251789312	200000	0	0
+2	release-c1	candidate	3	12.19	0.223	239202304	200000	0	0
+3	release-c2	candidate	3	12.22	0.226	242790400	200000	0	0
+4	release-b2	baseline	3	12.26	0.235	252059648	200000	0	0
+5	release-b3	baseline	3	12.20	0.237	254681088	200000	0	0
+6	release-c3	candidate	3	12.21	0.224	240840704	200000	0	0

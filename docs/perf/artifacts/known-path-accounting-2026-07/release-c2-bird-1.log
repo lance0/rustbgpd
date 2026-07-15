@@ -1,0 +1,11 @@
+2026-07-15 02:31:31.800 <TRACE> device1: Initializing
+2026-07-15 02:31:31.800 <TRACE> bgp1: Initializing
+2026-07-15 02:31:31.800 <TRACE> static1: Initializing
+2026-07-15 02:31:31.800 <TRACE> device1: Starting
+2026-07-15 02:31:31.800 <TRACE> device1: State changed to up
+2026-07-15 02:31:31.800 <TRACE> bgp1: Starting
+2026-07-15 02:31:31.800 <TRACE> bgp1: State changed to start
+2026-07-15 02:31:31.800 <TRACE> static1: Starting
+2026-07-15 02:31:31.800 <TRACE> static1: State changed to up
+2026-07-15 02:31:31.800 <INFO> Started
+2026-07-15 02:31:32.731 <TRACE> bgp1: State changed to up
