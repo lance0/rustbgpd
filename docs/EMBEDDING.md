@@ -16,8 +16,8 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 
 | Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
 |--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
-| `rustbgpd-wire`          | **Yes** (crates.io, latest 0.13.0) | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | **Yes** (crates.io, latest 0.1.0) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-wire`          | **Yes** (crates.io `0.14.1`; repository prepared as `0.15.0`, not yet published) | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
+| `rustbgpd-fsm`           | **Yes** (crates.io `0.2.0`; repository prepared as `0.3.0`, not yet published) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
 | `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | Publish next     | VRP table + RTR client. |
 | `rustbgpd-rib`           | No           | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
 | `rustbgpd-policy`        | No           | wire                              | —                          | Later            | Import/export policy. |
@@ -29,9 +29,11 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 | `rustbgpd-evpn-linux`    | No           | (internal)                        | `rtnetlink`, `nix`         | Never (Linux-specific) | Kernel dataplane. |
 | `rustbgpd` (daemon bin)  | No (`publish = false`) | all                            | —                          | N/A              | The daemon. Not a library. |
 
-**Publish order and why:** `wire` and `fsm` are published; `rpki` is the next
-natural candidate. The dependency DAG drives the order: `fsm` depends only on
-`wire`; `rpki` depends only on `wire`; `rib` depends on
+**Publish order and why:** `wire` and `fsm` are published; the repository has
+prepared their next versions, but the versions shown in the dependency
+examples below remain the versions available from crates.io. `rpki` is the
+next natural candidate. The dependency DAG drives the order: `fsm` depends
+only on `wire`; `rpki` depends only on `wire`; `rib` depends on
 `wire + policy + telemetry + rpki`. Publishing in this order means each
 published crate has only *already-published* (or external) dependencies, which
 is a hard crates.io requirement. `fsm` shipped before `rpki` because it is the
@@ -57,7 +59,8 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   `peek_message_length(&Bytes) -> Option<usize>` (transport framing).
 - **`Message`** enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`.
 - **`OpenMessage`** — capabilities negotiation; `Capability` enum (MP-BGP,
-  4-octet AS, Add-Path, GR/LLGR, ORF, BGP Roles, Extended Messages, ...).
+  4-octet AS, Add-Path, experimental Paths-Limit via `PathsLimitFamily`,
+  GR/LLGR, ORF, BGP Roles, Extended Messages, ...).
 - **`UpdateMessage`** — raw wire framing + `parse()` → `ParsedUpdate`
   (decoded NLRI + `Vec<PathAttribute>`).
 - **`PathAttribute`** — 14 typed variants + `Unknown` pass-through (`AsPath`,
@@ -65,7 +68,8 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   `OnlyToCustomer`, ...).
 - **`Prefix`** (`V4(Ipv4Prefix)` / `V6(Ipv6Prefix)`), `NlriEntry`, Add-Path IDs.
 - **`Afi` / `Safi`** — IANA address-family identifiers.
-- **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5), **FlowSpec** (`FlowSpecRule`),
+- **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5; route keys implement `Ord`),
+  **FlowSpec** (`FlowSpecRule`),
   **VPNv4/v6** (`vpn` module), **BGP-LS** (`bgpls` module), **ORF** (`orf` module),
   **PMSI Tunnel**, **Route Distinguisher**.
 - **Well-known community constants** (`COMMUNITY_NO_EXPORT`, `COMMUNITY_BLACKHOLE`,
@@ -100,20 +104,18 @@ policy (`docs/RELEASE_CHECKLIST.md` §"Wire crate semver"):
 - **Minor**: new message types, attributes, helper methods, additive API changes.
 - **Major**: breaking API changes, changed method signatures, enum shape changes.
 
-**The 0.13.0 breaking change and `#[non_exhaustive]`:** Adding `Afi::BgpLs` and
-`Safi::BgpLs` / `Safi::BgpLsVpn` variants to the `Afi`/`Safi` enums is a breaking
-change because those enums are **not** `#[non_exhaustive]` (verified:
-`crates/wire/src/capability.rs:8-66`). The 0.12.0 → 0.13.0 bump correctly went to
-a major (0.x major = minor-number bump). The README and CHANGELOG call out that
-exhaustive downstream matches must add arms.
+**The prepared 0.15.0 change:** `Capability` is exhaustive, so adding
+`Capability::PathsLimit` is breaking for downstream exhaustive matches even
+though the new `PathsLimitFamily` codec is otherwise additive. The repository
+therefore prepares `0.15.0`, not a `0.14.x` patch. It also adds the additive
+`Ord` implementation on `EvpnRouteKey`. The published crates.io release remains
+`0.14.1` until the separate publish step completes.
 
-**Forward fix (first patch after publish):** Add `#[non_exhaustive]` to `Afi`
-and `Safi` (and any other IANA-registry-backed enum that can grow, e.g.
-`PmsiTunnelType` already uses an `Other(u8)` catch-all; `NotificationCode` is a
-candidate). Adding `#[non_exhaustive]` to an *existing* exhaustive enum is
-itself a breaking change, so this must land in the *next* major bump (0.14.0 or
-1.0.0), *not* a patch. Once marked, future IANA additions become minor bumps.
-See §5 of the strategy memo.
+The same rule applies to adding `#[non_exhaustive]` to an existing exhaustive
+enum: forcing downstream matches to add a wildcard arm is itself breaking.
+Future forward-compatibility work on `Afi`, `Safi`, `Capability`, and other
+wire enums therefore belongs in a later breaking release, not this packaging
+change.
 
 ---
 
@@ -127,7 +129,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.13"
+rustbgpd-wire = "0.14.1"
 bytes = "1"
 ```
 
@@ -187,8 +189,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.13"
-rustbgpd-fsm = "0.1"
+rustbgpd-wire = "0.14.1"
+rustbgpd-fsm = "0.2.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -199,24 +201,8 @@ use rustbgpd_wire::{Afi, Safi, encode_message, Message};
 use rustbgpd_fsm::{PeerConfig, Session, Event, Action, SessionState};
 
 // 1. Configure the peer (4-byte AS, IPv4 unicast, hold 90s).
-let cfg = PeerConfig {
-    local_asn: 65000,
-    remote_asn: 65001,
-    local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-    hold_time: 90,
-    connect_retry_secs: 120,
-    families: vec![(Afi::Ipv4, Safi::Unicast)],
-    graceful_restart: false,
-    gr_restart_time: 0,
-    llgr_stale_time: 0,
-    add_path_receive: false,
-    add_path_send: false,
-    add_path_send_max: 0,
-    local_role: None,
-    strict_role: false,
-    prefix_orf_receive: false,
-    disable_ipv4_unicast: false,
-};
+let mut cfg = PeerConfig::new(65000, 65001, Ipv4Addr::new(10, 0, 0, 1));
+cfg.families = vec![(Afi::Ipv4, Safi::Unicast)];
 
 // 2. Create the FSM. Starts in Idle.
 let mut sm = Session::new(cfg);
@@ -272,12 +258,18 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as 0.13.0).** Already on crates.io; the 0.13.0
-   breaking bump carried BGP-LS Afi/Safi plus fallible `try_build`. This is the
-   foundation — nothing else can publish before it because every internal crate
-   depends on it.
+1. **`rustbgpd-wire` (published as `0.14.1`; `0.15.0` prepared).** The prepared
+   breaking bump adds the exhaustive `Capability::PathsLimit` variant and its
+   `PathsLimitFamily` entry type (experimental capability code 76), plus an
+   additive `Ord` implementation for `EvpnRouteKey`. This is the foundation —
+   dependent crate versions cannot publish before their wire dependency exists
+   on crates.io.
 
-2. **`rustbgpd-fsm` (published as decoupled `0.1.0`).** Why it was second:
+2. **`rustbgpd-fsm` (published as `0.2.0`; `0.3.0` prepared).** Its own new
+   fields are additive behind `#[non_exhaustive]`, but its public API exposes
+   wire types and the dependency moves from `^0.14` to incompatible `^0.15`.
+   The prepared FSM release therefore also needs a breaking 0.x bump. Why the
+   FSM was the second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
@@ -331,16 +323,17 @@ GoBGP's library moat is not its codec; it is that the *whole daemon* is a Go
 library (`github.com/osrg/gobgp`), so Cilium imports the package and gets a
 session runtime + RIB + policy + gRPC server in-process. rustbgpd's
 complementary moat is the opposite and narrower: a *pure, memory-safe,
-zero-dep codec* that any Rust project can link without dragging in a runtime.
+runtime-free codec with no internal-crate dependencies* that any Rust project
+can link without dragging in the daemon stack.
 
 To be the de facto Rust BGP codec, the concrete gaps:
 
-1. **Make the enums forward-compatible.** Mark `Afi`, `Safi`, `Event`, `Action`,
-   `PathAttribute`, `Capability`, `Message`, `NotificationCode` and any
-   IANA-registry-backed enum `#[non_exhaustive]` in the next major bump. Today,
-   every new AFI/SAFI is a breaking change — that is a tax on adopters and on
-   us. (Verified: none are `#[non_exhaustive]` today.) This is the single
-   highest-leverage stability fix.
+1. **Finish the wire-enum forward-compatibility audit.** `Event` and `Action`
+   are already `#[non_exhaustive]`; wire enums such as `Afi`, `Safi`,
+   `PathAttribute`, `Capability`, `Message`, and `NotificationCode` still need
+   an intentional breaking-release plan. Every new variant on an exhaustive
+   enum is a breaking change — the exact reason Paths-Limit requires wire
+   `0.15.0`.
 2. **Ship an in-tree embedder as proof.** Add `examples/peer-loop/`: a ~150-line
    binary that links `wire + fsm`, opens one TCP session to a configured peer,
    drives the FSM, and prints every received UPDATE. This is the "it works"
@@ -368,28 +361,20 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ---
 
-## 7. File-level checklist (execution)
+## 7. Published-crate release boundary
 
-- [ ] `crates/wire/Cargo.toml` — bump to `0.13.0` is staged; verify
-      `description`, `readme`, `keywords`, `categories` are present (they are).
-- [ ] `crates/wire/src/capability.rs` — add `#[non_exhaustive]` to `Afi` (line 9)
-      and `Safi` (line 37) in the *next* major bump (0.14.0 / 1.0.0), not 0.13.x.
-- [ ] `crates/wire/src/lib.rs` — add `#[non_exhaustive]` audit to the enums
-      listed in §6.1 above; add `tokio_util::codec` impl behind a feature.
-- [x] `crates/fsm/Cargo.toml` — published as independent `0.1.0` with
-      `description`, `readme`, `keywords`, and `categories`.
-- [x] `crates/fsm/src/config.rs` — `PeerConfig` is `#[non_exhaustive]` and has
-      constructor/default paths for external users.
-- [x] `crates/fsm/src/{event.rs,action.rs}` — `Event`, `Action`, and
-      `NegotiatedSession` are `#[non_exhaustive]`; `SessionState` remains the
-      exact RFC 4271 state enum.
-- [ ] `crates/rpki/Cargo.toml` — remove `publish = false`; decouple version.
-- [ ] `docs/RELEASE_CHECKLIST.md` — add a "library crate publish" sub-section
-      that runs `cargo semver-checks` and verifies docs.rs renders.
-- [ ] `examples/peer-loop/` — new example binary linking `wire + fsm`
-      (the embedding proof).
-- [ ] `.github/workflows/ci.yml` — gate `cargo semver-checks` on
-      `crates/wire/**` and `crates/fsm/**` path changes.
+- [x] Repository manifests prepare `rustbgpd-wire 0.15.0` and
+      `rustbgpd-fsm 0.3.0`; both retain their package metadata and README.
+- [x] The workspace dependency floors match the prepared versions.
+- [ ] Publish `rustbgpd-wire 0.15.0`, then verify it is registry-visible.
+- [ ] Only after that wire publish, run the fully verified package/dry-run gate
+      for `rustbgpd-fsm 0.3.0` and publish it. Cargo normalizes the FSM's path
+      dependency to `rustbgpd-wire = "^0.15.0"`, so a full FSM package verify
+      cannot resolve before wire is present in the registry.
+- [ ] Keep the dependency examples in §3 pinned to the versions actually
+      available from crates.io until the corresponding publish succeeds.
+- [ ] Treat the remaining wire-enum `#[non_exhaustive]` audit and any new
+      published crate as separate, demand-gated work.
 
 ---
 

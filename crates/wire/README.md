@@ -61,7 +61,15 @@ analyzers, test harnesses, MRT readers, etc.
 | 9494 | Long-lived graceful restart capability |
 | 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche. Typed topology read accessors now live in the crate (the `bgpls_topo` module); outbound reflection and topology production remain outside the wire crate |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
+| draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
+
+### 0.15.0 compatibility note
+
+`Capability` is exhaustive, so adding `Capability::PathsLimit` makes 0.15.0 a
+breaking release for downstream exhaustive matches. Code 76 now decodes to
+typed `PathsLimitFamily` entries and is available as
+`constants::capability_code::PATHS_LIMIT`.
 
 ## Usage
 
@@ -127,10 +135,14 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's
   RIB, policy, transport, and RPKI crates
-- **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, Outbound Route Filtering, etc.
+- **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path,
+  experimental Paths-Limit (`Capability::PathsLimit` / `PathsLimitFamily`,
+  code 76), graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §5.2 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
-- **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
+- **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with
+  full payloads (RFC 7432, RFC 9136); `EvpnRouteKey` implements `Ord` for
+  deterministic keyed collections
 - **`vpn` module** — VPNv4/VPNv6 labeled NLRI substrate, including label-stack
   validation, Route Distinguisher, and IPv4/IPv6 prefix payloads
 - **`bgpls` module** — BGP-LS/BGP-LS-VPN NLRI and TLV codec, preserving
