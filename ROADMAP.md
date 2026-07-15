@@ -271,12 +271,15 @@ new AFI/SAFI and EVPN dataplane expansion.
 - **Prove recently hardened transition paths against independent stacks before
   broadening support claims.** Live TCP-AO rotation (M43) and GR helper /
   graceful shutdown (M11/M35) have real-peer labs, but graceful-restart
-  selection-deferral / collision-failback (the one place a real regression landed
-  this cycle) and exact-export single-NLRI rejection still rest on internal tests.
-  Add GoBGP/FRR/BIRD receipts where each behavior is supported, asserting the
-  wire-observable outcome (LAN-434). Experimental Paths-Limit has its own
-  FRR-based cross-vendor receipt item below and remains outside the v1 stable
-  contract.
+  selection-deferral / collision-failback (the one place a real regression
+  landed this cycle) still rests on internal tests. Exact-export single-NLRI
+  rejection is now externally pinned by M87: a GoBGP 4.6 source drives a legal
+  4,095-byte UPDATE through sink-only policy to a 4,107-byte candidate, and BIRD
+  2.0.12 proves the stale prior advertisement is withdrawn while the session
+  stays up and later recovers (LAN-434). Add the remaining GR/collision receipt
+  only when an incumbent exposes a deterministic trigger. Experimental
+  Paths-Limit has its own FRR-based cross-vendor receipt item below and remains
+  outside the v1 stable contract.
 
 ### Next (research-shaped, July 2026)
 

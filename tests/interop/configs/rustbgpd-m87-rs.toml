@@ -1,0 +1,44 @@
+# M87 — transparent route server between a GoBGP source and BIRD sink.
+#
+# BGP Roles are intentionally omitted.  The receipt isolates exact-export
+# size rejection from OTC, while route_server_client preserves the member's
+# AS_PATH and NEXT_HOP.  The sink-only export policy adds exactly one 12-byte
+# Large Community to the source's 4,095-byte UPDATE.
+
+[global]
+asn = 65500
+router_id = "10.87.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy.definitions.m87-add-sink-marker]
+default_action = "permit"
+
+[[policy.definitions.m87-add-sink-marker.statements]]
+prefix = "203.0.113.0/24"
+action = "permit"
+set_community_add = ["LC:65500:87:1"]
+
+[[neighbors]]
+address = "10.87.1.2"
+remote_asn = 65002
+description = "m87-gobgp-source"
+hold_time = 90
+route_server_client = true
+
+[[neighbors]]
+address = "10.87.2.2"
+remote_asn = 65003
+description = "m87-bird-sink"
+hold_time = 90
+route_server_client = true
+export_policy_chain = ["m87-add-sink-marker"]

@@ -1,0 +1,63 @@
+# Containerlab topology: GoBGP source -> rustbgpd route server -> BIRD sink
+# (M87 — exact-export rejection / stale-route withdrawal receipt)
+#
+# The GoBGP member originates a legal 4,095-byte IPv4 UPDATE.  A
+# sink-specific rustbgpd export policy adds one Large Community, producing a
+# 4,107-byte candidate for a BIRD session capped at the classic 4,096-byte
+# maximum.  The receipt proves that rustbgpd rejects the exact post-policy
+# wire image, withdraws the previously advertised route, keeps the BIRD sink
+# session up, and recovers when the source replaces the route with a small
+# UPDATE.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   containerlab deploy -t tests/interop/m87-exact-export-rejection.clab.yml
+#   bash tests/interop/scripts/test-m87-exact-export-rejection.sh
+#   containerlab destroy -t tests/interop/m87-exact-export-rejection.clab.yml
+
+name: m87-exact-export-rejection
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m87-rs.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.87.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.87.2.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    gobgp-source:
+      kind: linux
+      image: gobgp:bgpls
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m87-source.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.87.1.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.87.2.0/24 via 10.87.1.1
+
+    bird-sink:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m87-sink.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.87.2.2/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp-source:eth1"]
+    - endpoints: ["rustbgpd:eth2", "bird-sink:eth1"]

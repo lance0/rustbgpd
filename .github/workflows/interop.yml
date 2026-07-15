@@ -387,7 +387,7 @@ jobs:
           script: tests/interop/scripts/test-m17-addpath-frr.sh
 
   m73:
-    name: M73 — BGP-LS reflection (GoBGP 4.6.0)
+    name: M73/M87 — GoBGP BGP-LS + exact-export/BIRD
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -418,12 +418,22 @@ jobs:
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
 
+      - name: Build bird:2-bookworm
+        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
       - name: Run M73 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
           label: M73
           topology: tests/interop/m73-bgpls-reflection-gobgp.clab.yml
           script: tests/interop/scripts/test-m73-bgpls-reflection-gobgp.sh
+
+      - name: Run M87 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M87
+          topology: tests/interop/m87-exact-export-rejection.clab.yml
+          script: tests/interop/scripts/test-m87-exact-export-rejection.sh
 
   m74:
     name: M74 — VPNv4 route reflection (GoBGP 3.x)

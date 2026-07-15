@@ -26,6 +26,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Exact-export rejection is pinned against independent stacks.** Hosted M87
+  drives a legal 4,095-byte GoBGP 4.6 UPDATE through a sink-only route-server
+  policy that produces a 4,107-byte candidate for a BIRD 2.0.12 session capped
+  at 4,096 bytes. The receipt proves the production exact encoder rejects once,
+  withdraws the previously advertised BIRD route, keeps rejected state out of
+  Adj-RIB-Out with an `exact_export_rejected` explanation, preserves BIRD
+  session continuity, recovers on a small replacement, and converges on source
+  withdrawal. Mutation proofs make the independent BIRD stale-route check and
+  rejection evidence fail when their production guards are removed. (LAN-434)
+
 - **Planned-restart markers resist wall-clock steps across a daemon restart on Linux.**
   Marker v3 records a complete boot/time-namespace identity and checked
   `CLOCK_BOOTTIME` deadline alongside its bounded wall fallback. Startup uses
