@@ -1,0 +1,56 @@
+# IXP import hygiene (rpol policy language, ADR-0096).
+#
+# Referenced from config.toml via `[policy] rpol_files` and the import
+# chain; edits hot-apply via SIGHUP. Run the in-language tests below
+# with `rbgp policy check hygiene.rpol`.
+
+policy ixp-hygiene {
+    # Reject routes carrying an AS_SET (deprecated by RFC 9774; common
+    # IXP hygiene, arouteserver rejects them too). AS_PATHs render
+    # AS_SETs in braces — "65001 {65002 65003}" — so a literal `{`
+    # (escaped for the regex) matches any AS_SET segment.
+    term reject-as-set { if route.as-path matches "\\{" { reject } }
+    # Reject ASPA-invalid AS paths (draft-ietf-sidrops-aspa-verification).
+    # Inert (state = unknown) until ASPA objects are loaded from the
+    # RPKI cache; activates automatically once they are.
+    term reject-aspa-invalid { if route.aspa == invalid { reject } }
+    # Tag the RPKI origin-validation outcome as an RFC 8097 extended
+    # community (non-transitive opaque, type 0x43) so route-server
+    # clients can act on it without running their own validator.
+    # OV_INVALID never reaches clients here — the TOML import chain
+    # drops rpki-invalid routes — but tagging is harmless and keeps
+    # the terms uniform if that drop is ever relaxed.
+    term tag-ov-valid { if route.rpki == valid { add ext-community OV_VALID } }
+    term tag-ov-not-found { if route.rpki == not-found { add ext-community OV_NOT_FOUND } }
+    term tag-ov-invalid { if route.rpki == invalid { add ext-community OV_INVALID } }
+}
+
+test as-set-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501 {64502 64503}" }
+    expect ixp-hygiene == reject
+}
+
+test aspa-invalid-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501"; aspa invalid }
+    expect ixp-hygiene == reject
+}
+
+test clean-route-falls-through {
+    route { prefix 203.0.113.0/24; as-path "64501 64510" }
+    expect ixp-hygiene == accept
+}
+
+test rpki-valid-is-tagged-ov-valid {
+    route { prefix 203.0.113.0/24; as-path "64501"; rpki valid }
+    expect ixp-hygiene == accept with ext-community OV_VALID
+}
+
+test rpki-not-found-is-tagged-ov-not-found {
+    route { prefix 203.0.113.0/24; as-path "64501" }
+    expect ixp-hygiene == accept with ext-community OV_NOT_FOUND
+}
+
+test rpki-invalid-is-tagged-ov-invalid {
+    route { prefix 203.0.113.0/24; as-path "64501"; rpki invalid }
+    expect ixp-hygiene == accept with ext-community OV_INVALID
+}
