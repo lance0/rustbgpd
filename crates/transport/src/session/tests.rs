@@ -11,7 +11,7 @@ use rustbgpd_wire::{
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
     NumericMatch, OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin,
     PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
-    bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri},
+    bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri, decode_bgpls_vpn_nlri},
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -4470,6 +4470,377 @@ async fn denied_vpn_add_path_replacements_withdraw_exact_known_identity() {
 
     exercise(Afi::Ipv4).await;
     exercise(Afi::Ipv6).await;
+}
+
+/// Import-policy denial retires an accepted RTC identity exactly once,
+/// deduplicates an overlapping explicit withdrawal, keeps first-seen denials
+/// silent, and reconciles max-prefix plus Enhanced Refresh accounting.
+///
+/// Break-to-red: deleting denied-key collection leaves the accepted route and
+/// stale refresh identity live; appending without `known_rtc.remove` duplicates
+/// the overlap and emits a first-seen withdrawal; capturing refresh state
+/// without the synthetic withdrawal leaves the stale count unchanged.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
+    use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, RtcNlri};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let family = (Afi::Ipv4, Safi::RtConstrain);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![family];
+    negotiated.peer_route_refresh = true;
+    negotiated.peer_enhanced_route_refresh = true;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let nlri =
+        |admin: u16| RtcNlri::new(65002, 0x0002_FDEA_0000_0000 | u64::from(admin), 96).unwrap();
+    let first = nlri(11);
+    let overlap = nlri(22);
+    let first_seen = nlri(33);
+    let key = |nlri| rustbgpd_rib::RtcRibRouteKey { nlri, path_id: 0 };
+    let base_attrs = || {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]
+    };
+    let reach = |nlris: Vec<RtcNlri>| {
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: nlris,
+        })
+    };
+    let unreach = |nlris: Vec<RtcNlri>| {
+        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            labeled_withdrawn: vec![],
+            vpn_withdrawn: vec![],
+            rtc_withdrawn: nlris,
+        })
+    };
+    let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
+        attributes.push(reach_attr);
+        if let Some(unreach_attr) = unreach_attr {
+            attributes.push(unreach_attr);
+        }
+        UpdateMessage::build(&[], &[], &attributes, true, false, Ipv4UnicastMode::Body)
+    };
+
+    session
+        .process_update(update(base_attrs(), reach(vec![first, overlap]), None))
+        .await;
+    let RibUpdate::RtcRoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("accepted RTC routes reach the RIB")
+    else {
+        panic!("expected RtcRoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert!(withdrawn.is_empty());
+    assert_eq!(session.known_prefix_count(), 2);
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::RtConstrain,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::BeginRouteRefresh {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            ..
+        })
+    ));
+    assert_eq!(session.refresh_accounting_stale_count(family), Some(2));
+
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])));
+
+    session
+        .process_update(update(base_attrs(), reach(vec![first]), None))
+        .await;
+    let RibUpdate::RtcRoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("denied RTC replacement reaches the RIB")
+    else {
+        panic!("expected RtcRoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![key(first)]);
+    assert_eq!(session.known_prefix_count(), 1);
+    assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+    session
+        .process_update(update(
+            base_attrs(),
+            reach(vec![overlap]),
+            Some(unreach(vec![overlap])),
+        ))
+        .await;
+    let RibUpdate::RtcRoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("overlap reaches the RIB once")
+    else {
+        panic!("expected RtcRoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![key(overlap)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.refresh_accounting_stale_count(family), Some(0));
+
+    session
+        .process_update(update(base_attrs(), reach(vec![first_seen]), None))
+        .await;
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "first-seen RTC denial is silent"
+    );
+    assert!(!session.known_rtc.contains(&key(first_seen)));
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.refresh_accounting_stale_count(family), Some(0));
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::RtConstrain,
+        RouteRefreshSubtype::EoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::EndRouteRefresh {
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+            ..
+        })
+    ));
+    assert_eq!(session.refresh_accounting_window_count(), 0);
+}
+
+/// Import-policy denial retires an accepted BGP-LS identity exactly once for
+/// SAFI 71 and 72, deduplicates an overlapping explicit withdrawal, keeps
+/// first-seen denials silent, and reconciles max-prefix plus Enhanced Refresh.
+///
+/// Break-to-red: deleting denied-key collection leaves the accepted topology
+/// object and stale refresh identity live; appending without
+/// `known_bgpls.remove` duplicates the overlap and emits first-seen state;
+/// omitting the synthetic withdrawal from refresh capture leaves stale count.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_safis() {
+    use rustbgpd_rib::BgpLsFamily;
+    use rustbgpd_wire::{MpReachNlri, MpUnreachNlri};
+
+    fn nlri(safi: Safi, suffix: u8) -> BgpLsNlri {
+        match safi {
+            Safi::BgpLs => decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, suffix]),
+            Safi::BgpLsVpn => decode_bgpls_vpn_nlri(&[
+                0xfd, 0xe8, 0, 11, // 8-byte RD + 3-byte opaque payload
+                0, 0, 0xfd, 0xea, 0, 0, 0, 44, 0xaa, 0xbb, suffix,
+            ]),
+            _ => unreachable!("fixture covers only BGP-LS SAFIs"),
+        }
+        .expect("fixture BGP-LS NLRI decodes")
+        .pop()
+        .expect("fixture contains one BGP-LS NLRI")
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn exercise(safi: Safi) {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let afi = Afi::BgpLs;
+        let family = (afi, safi);
+        let bgpls_family = BgpLsFamily::from_afi_safi(afi, safi).unwrap();
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        negotiated.peer_route_refresh = true;
+        negotiated.peer_enhanced_route_refresh = true;
+        install_test_negotiated_session(&mut session, negotiated);
+
+        let first = nlri(safi, 11);
+        let overlap = nlri(safi, 22);
+        let first_seen = nlri(safi, 33);
+        let key = |nlri: &BgpLsNlri| rustbgpd_rib::BgpLsRouteKey {
+            family: bgpls_family,
+            nlri: nlri.key(),
+            path_id: 0,
+        };
+        let base_attrs = || {
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+            ]
+        };
+        let reach = |nlris: Vec<BgpLsNlri>| {
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi,
+                safi,
+                next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: nlris,
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            })
+        };
+        let unreach = |nlris: Vec<BgpLsNlri>| {
+            PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi,
+                safi,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: nlris,
+                labeled_withdrawn: vec![],
+                vpn_withdrawn: vec![],
+                rtc_withdrawn: vec![],
+            })
+        };
+        let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
+            attributes.push(reach_attr);
+            if let Some(unreach_attr) = unreach_attr {
+                attributes.push(unreach_attr);
+            }
+            UpdateMessage::build(&[], &[], &attributes, true, false, Ipv4UnicastMode::Body)
+        };
+
+        session
+            .process_update(update(
+                base_attrs(),
+                reach(vec![first.clone(), overlap.clone()]),
+                None,
+            ))
+            .await;
+        let RibUpdate::BgpLsRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("accepted BGP-LS routes reach RIB")
+        else {
+            panic!("expected BgpLsRoutesReceived");
+        };
+        assert_eq!(announced.len(), 2);
+        assert!(withdrawn.is_empty());
+        assert_eq!(session.known_prefix_count(), 2);
+
+        buffer_route_refresh(&mut session, afi, safi, RouteRefreshSubtype::BoRR);
+        session.process_read_buffer().await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::BeginRouteRefresh {
+                afi: Afi::BgpLs,
+                safi: marker_safi,
+                ..
+            }) if marker_safi == safi
+        ));
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(2));
+
+        session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+            entries: vec![],
+            default_action: PolicyAction::Deny,
+        }])));
+
+        session
+            .process_update(update(base_attrs(), reach(vec![first.clone()]), None))
+            .await;
+        let RibUpdate::BgpLsRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("denied BGP-LS replacement reaches RIB")
+        else {
+            panic!("expected BgpLsRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(&first)]);
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        session
+            .process_update(update(
+                base_attrs(),
+                reach(vec![overlap.clone()]),
+                Some(unreach(vec![overlap.clone()])),
+            ))
+            .await;
+        let RibUpdate::BgpLsRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("BGP-LS overlap reaches RIB once")
+        else {
+            panic!("expected BgpLsRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(&overlap)]);
+        assert_eq!(session.known_prefix_count(), 0);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(0));
+
+        session
+            .process_update(update(base_attrs(), reach(vec![first_seen.clone()]), None))
+            .await;
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "first-seen BGP-LS denial is silent"
+        );
+        assert!(!session.known_bgpls.contains(&key(&first_seen)));
+        assert_eq!(session.known_prefix_count(), 0);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(0));
+
+        buffer_route_refresh(&mut session, afi, safi, RouteRefreshSubtype::EoRR);
+        session.process_read_buffer().await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::EndRouteRefresh {
+                afi: Afi::BgpLs,
+                safi: marker_safi,
+                ..
+            }) if marker_safi == safi
+        ));
+        assert_eq!(session.refresh_accounting_window_count(), 0);
+    }
+
+    exercise(Safi::BgpLs).await;
+    exercise(Safi::BgpLsVpn).await;
 }
 
 /// iBGP reflection of a VPN route on an RR adds `ORIGINATOR_ID` and

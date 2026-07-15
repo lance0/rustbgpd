@@ -33,9 +33,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolver.
 
 - **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
-  policy.** IPv4/IPv6 unicast, VPNv4/VPNv6, and labeled-unicast check both the
-  stored source route before export policy and the modified route after policy
-  across single-best plus Add-Path. Unicast also covers grouped/private, RFC
+  policy.** IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS
+  SAFI 71/72 check both the stored source route before export policy and the
+  modified route after policy across their supported export shapes. Unicast
+  also covers grouped/private, RFC
   7947 per-client-best, and RFC 9107 ORR; VPN covers grouped/private, and
   labeled-unicast covers RFC 9107 ORR. Policy cannot remove the community to
   make a scoped route exportable, and a policy-added community suppresses the
@@ -187,10 +188,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   OTC, AS_PATH-loop, and route-reflector-loop rejects now retire the exact
   accepted `(prefix, path_id)` while first-seen rejects remain filter-only.
 
-- **Import-policy-denied unicast, VPN, and labeled-unicast replacements
+- **Import-policy-denied unicast, VPN, labeled-unicast, RTC, and BGP-LS replacements
   withdraw prior accepted paths.** Classic and MP-unicast updates retire the
   exact `(prefix, path_id)`; VPNv4/VPNv6 retire `(RD + prefix, path_id)`, and
-  labeled-unicast retires `(prefix, path_id)` previously accepted from that
+  labeled-unicast retires `(prefix, path_id)`, RTC retires `(NLRI, path_id)`,
+  and BGP-LS retires `(family, NLRI, path_id)` previously accepted from that
   peer. The removal reaches the RIB immediately. First-seen denials remain
   filter-only, explicit withdrawals are deduplicated, and Add-Path siblings
   stay intact.

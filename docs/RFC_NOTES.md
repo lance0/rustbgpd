@@ -34,32 +34,34 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ## RFC 1997 — NO_ADVERTISE export restriction
 
-- IPv4/IPv6 unicast, VPNv4/VPNv6, and labeled-unicast routes carrying
-  `NO_ADVERTISE` are ineligible before export policy, and the post-policy route
-  is checked again before Adj-RIB-Out commit. A permit policy cannot remove the
-  community to bypass the restriction; a policy that adds it suppresses the
-  modified route.
+- IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS SAFI 71/72
+  routes carrying `NO_ADVERTISE` are ineligible before export policy, and the
+  post-policy route is checked again before Adj-RIB-Out commit. A permit policy
+  cannot remove the community to bypass the restriction; a policy that adds it
+  suppresses the modified route.
 - The same predicate covers single-best plus Add-Path for unicast, VPN, and
   labeled routes; grouped/private and RFC 7947 per-client-best shapes apply to
   unicast, grouped/private applies to VPN, and RFC 9107 ORR applies to unicast
-  and labeled-unicast. Existing advertisements are withdrawn and logical
-  Adj-RIB-Out state is cleared.
+  and labeled-unicast. RTC and both BGP-LS SAFIs use their single-best export
+  paths. Existing advertisements are withdrawn and logical Adj-RIB-Out state is
+  cleared.
 - Add-Path and per-client-best remove scoped candidates before ranking, so
   surviving siblings compact normally. They also skip policy-modified
   candidates whose result carries `NO_ADVERTISE`. ORR first selects its
   per-vantage best and suppresses that winner without falling back to a
   different route, whether the community arrived on the source or from policy.
-- `NO_ADVERTISE` enforcement for other non-unicast families remains deferred.
+- `NO_ADVERTISE` enforcement for EVPN and FlowSpec remains deferred.
 
 ---
 
 ## Inbound import-policy replacement semantics
 
 - Import-policy denial of a replacement retires the exact previously accepted
-  VPN `(RD + prefix, path_id)` or labeled-unicast `(prefix, path_id)` identity.
-  First-seen denials remain filter-only, explicit overlapping withdrawals are
-  deduplicated, and Add-Path siblings remain intact. Other non-unicast families
-  retain their existing policy behavior.
+  VPN `(RD + prefix, path_id)`, labeled-unicast `(prefix, path_id)`, RTC
+  `(NLRI, path_id)`, or BGP-LS `(family, NLRI, path_id)` identity. First-seen
+  denials remain filter-only, explicit overlapping withdrawals are deduplicated,
+  and Add-Path siblings remain intact. EVPN and FlowSpec retain their existing
+  policy behavior.
 
 ---
 

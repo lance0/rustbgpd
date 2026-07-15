@@ -1505,6 +1505,7 @@ impl PeerSession {
         let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
         let mut bgpls_announced: Vec<BgpLsRibRoute> = Vec::new();
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+        let mut denied_bgpls: Vec<BgpLsRouteKey> = Vec::new();
         let mut vpn_announced: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
         let mut denied_vpn: Vec<VpnRibRouteKey> = Vec::new();
@@ -1513,6 +1514,7 @@ impl PeerSession {
         let mut denied_labeled: Vec<LabeledRibRouteKey> = Vec::new();
         let mut rtc_announced: Vec<RtcRibRoute> = Vec::new();
         let mut rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
+        let mut denied_rtc: Vec<RtcRibRouteKey> = Vec::new();
         for attr in &parsed.attributes {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
@@ -1746,6 +1748,12 @@ impl PeerSession {
                                     is_llgr_stale: false,
                                     path_id: 0,
                                 });
+                            } else {
+                                denied_bgpls.push(BgpLsRouteKey {
+                                    family: bgpls_family,
+                                    nlri: nlri.key(),
+                                    path_id: 0,
+                                });
                             }
                         }
                         continue;
@@ -1946,6 +1954,11 @@ impl PeerSession {
                                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                     is_stale: false,
                                     is_llgr_stale: false,
+                                    path_id: 0,
+                                });
+                            } else {
+                                denied_rtc.push(RtcRibRouteKey {
+                                    nlri: *nlri,
                                     path_id: 0,
                                 });
                             }
@@ -2190,6 +2203,11 @@ impl PeerSession {
         for key in &bgpls_withdrawn {
             self.known_bgpls.remove(key);
         }
+        for key in denied_bgpls {
+            if self.known_bgpls.remove(&key) {
+                bgpls_withdrawn.push(key);
+            }
+        }
         for route in &bgpls_announced {
             self.known_bgpls.insert(route.key());
         }
@@ -2224,6 +2242,11 @@ impl PeerSession {
         }
         for key in &rtc_withdrawn {
             self.known_rtc.remove(key);
+        }
+        for key in denied_rtc {
+            if self.known_rtc.remove(&key) {
+                rtc_withdrawn.push(key);
+            }
         }
         for route in &rtc_announced {
             self.known_rtc.insert(route.key());
