@@ -12,7 +12,7 @@ use rustbgpd_policy::{
     RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{OtcBlockReason, RrLoopReason};
-use rustbgpd_wire::AspaValidationContext;
+use rustbgpd_wire::{AspaValidationContext, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
@@ -335,6 +335,39 @@ pub fn materialize_attrs(
     }
 }
 impl PeerSession {
+    /// Return unicast announcement identities that this session would accept
+    /// from the UPDATE's wire surfaces before policy or safety checks.
+    fn eligible_unicast_announcements(&self, parsed: &ParsedUpdate) -> Vec<(Prefix, u32)> {
+        let mut identities = if self.is_scoped_link_local_peer() {
+            Vec::new()
+        } else {
+            parsed
+                .announced
+                .iter()
+                .map(|entry| (Prefix::V4(entry.prefix), entry.path_id))
+                .collect()
+        };
+        for attr in &parsed.attributes {
+            let PathAttribute::MpReachNlri(mp) = attr else {
+                continue;
+            };
+            let family = (mp.afi, mp.safi);
+            if mp.safi != Safi::Unicast
+                || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                || !self.negotiated_families.contains(&family)
+                || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
+            {
+                continue;
+            }
+            identities.extend(
+                mp.announced
+                    .iter()
+                    .map(|entry| (entry.prefix, entry.path_id)),
+            );
+        }
+        identities
+    }
+
     /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
     /// drop (ADR-0078). The fast path is a `try_send`; when the channel
     /// is full the saturation counter increments and the session task
@@ -582,6 +615,11 @@ impl PeerSession {
         );
         let otc_drop_unicast_announcements =
             matches!(otc_action, OtcIngressAction::DropUnicastAnnouncements(_));
+        let otc_rejected_unicast = if otc_drop_unicast_announcements {
+            self.eligible_unicast_announcements(&parsed)
+        } else {
+            Vec::new()
+        };
         if let OtcIngressAction::DropUnicastAnnouncements(reason) = otc_action {
             // Count every unicast prefix the OTC rule rejected: body NLRI
             // (always IPv4) plus IPv4/IPv6 unicast MP_REACH_NLRI. Other
@@ -667,6 +705,7 @@ impl PeerSession {
             }
         });
         if as_path_loop {
+            let rejected_unicast = self.eligible_unicast_announcements(&parsed);
             // Count rejected announced prefixes (body NLRI + MP_REACH_NLRI)
             let rejected_count = parsed.announced.len()
                 + parsed
@@ -798,6 +837,26 @@ impl PeerSession {
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.forget_known_path(prefix, path_id);
+            }
+            for (prefix, path_id) in rejected_unicast {
+                if self.forget_known_path(prefix, path_id) {
+                    loop_withdrawn.push((prefix, path_id));
+                }
+            }
+            if self.import_explain_enabled {
+                for &(prefix, path_id) in &loop_withdrawn {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.import_decision_cache
+                        .mark_withdrawn(&ImportDecisionKey {
+                            afi,
+                            safi: Safi::Unicast,
+                            prefix,
+                            path_id,
+                        });
+                }
             }
             for rule in &loop_fs_withdrawn {
                 self.known_flowspec.remove(rule);
@@ -942,6 +1001,7 @@ impl PeerSession {
                 .any(|a| matches!(a, PathAttribute::ClusterList(ids) if ids.contains(&cluster_id)))
         });
         if originator_loop || cluster_loop {
+            let rejected_unicast = self.eligible_unicast_announcements(&parsed);
             let reason = if originator_loop {
                 RrLoopReason::OriginatorId
             } else {
@@ -1060,6 +1120,26 @@ impl PeerSession {
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.forget_known_path(prefix, path_id);
+            }
+            for (prefix, path_id) in rejected_unicast {
+                if self.forget_known_path(prefix, path_id) {
+                    loop_withdrawn.push((prefix, path_id));
+                }
+            }
+            if self.import_explain_enabled {
+                for &(prefix, path_id) in &loop_withdrawn {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.import_decision_cache
+                        .mark_withdrawn(&ImportDecisionKey {
+                            afi,
+                            safi: Safi::Unicast,
+                            prefix,
+                            path_id,
+                        });
+                }
             }
             for rule in &loop_fs_withdrawn {
                 self.known_flowspec.remove(rule);
@@ -2051,6 +2131,27 @@ impl PeerSession {
         //    cap by flooding a non-unicast family.
         for &(prefix, path_id) in &withdrawn {
             self.forget_known_path(prefix, path_id);
+        }
+        // A pre-policy safety rejection replaces any prior accepted route
+        // under the same wire identity. Explicit withdrawals above win on
+        // overlap; first-seen rejected announcements remain silent.
+        for (prefix, path_id) in otc_rejected_unicast {
+            if self.forget_known_path(prefix, path_id) {
+                withdrawn.push((prefix, path_id));
+                if explain_enabled {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.import_decision_cache
+                        .mark_withdrawn(&ImportDecisionKey {
+                            afi,
+                            safi: Safi::Unicast,
+                            prefix,
+                            path_id,
+                        });
+                }
+            }
         }
         // `forget_known_path` gates first-seen denies and also deduplicates an
         // explicit withdrawal for the same identity in this UPDATE.

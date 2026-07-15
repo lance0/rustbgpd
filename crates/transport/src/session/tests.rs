@@ -6377,6 +6377,158 @@ async fn otc_ingress_provider_drops_tagged_unicast_from_customer_but_keeps_withd
         );
     }
 }
+
+/// An OTC safety rejection replaces accepted classic and MP-unicast routes
+/// with exact withdrawals. First-seen rejected identities remain silent.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins classic and MP replacement withdrawal, first-seen gating, accounting, and explain state"
+)]
+#[tokio::test]
+async fn otc_replacements_withdraw_accepted_classic_and_mp_routes_only() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Provider);
+    session.import_explain_enabled = true;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let accepted_v4 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let first_seen_v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let accepted_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:440:1::".parse().unwrap(), 64));
+    let first_seen_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:440:2::".parse().unwrap(), 64));
+    let attrs = |mp_announced: Vec<NlriEntry>, blocked: bool| {
+        let mut attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        if blocked {
+            attrs.push(PathAttribute::OnlyToCustomer(65002));
+        }
+        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: None,
+            announced: mp_announced,
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }));
+        attrs
+    };
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: accepted_v4,
+            }],
+            &[],
+            &attrs(
+                vec![NlriEntry {
+                    path_id: 0,
+                    prefix: accepted_v6,
+                }],
+                false,
+            ),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected accepted classic and MP routes");
+    };
+    assert_eq!(announced.len(), 2);
+
+    session
+        .process_update(UpdateMessage::build(
+            &[
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: accepted_v4,
+                },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: first_seen_v4,
+                },
+            ],
+            &[],
+            &attrs(
+                vec![
+                    NlriEntry {
+                        path_id: 0,
+                        prefix: accepted_v6,
+                    },
+                    NlriEntry {
+                        path_id: 0,
+                        prefix: first_seen_v6,
+                    },
+                ],
+                true,
+            ),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("accepted OTC replacements must become withdrawals")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn.len(), 2);
+    assert!(withdrawn.contains(&(Prefix::V4(accepted_v4), 0)));
+    assert!(withdrawn.contains(&(accepted_v6, 0)));
+    assert_eq!(session.known_prefix_count(), 0);
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "first-seen rejects must stay silent"
+    );
+
+    let key = |prefix| ImportDecisionKey {
+        afi: match prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        },
+        safi: Safi::Unicast,
+        prefix,
+        path_id: 0,
+    };
+    for prefix in [Prefix::V4(accepted_v4), accepted_v6] {
+        match session
+            .import_decision_cache
+            .lookup(&key(prefix), session.import_policy_generation)
+        {
+            LookupResult::Hit(decision) => {
+                assert_eq!(decision.outcome, CachedOutcome::Withdrawn);
+            }
+            other => panic!("expected OTC-withdrawn {prefix}, got {other:?}"),
+        }
+    }
+    for prefix in [Prefix::V4(first_seen_v4), first_seen_v6] {
+        assert!(matches!(
+            session
+                .import_decision_cache
+                .lookup(&key(prefix), session.import_policy_generation),
+            LookupResult::NotSeen
+        ));
+    }
+}
 #[tokio::test]
 async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -6406,13 +6558,44 @@ async fn otc_ingress_peer_drops_tagged_unicast_from_wrong_as() {
     );
 }
 #[tokio::test]
-async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdrawals() {
+async fn otc_ingress_malformed_length_withdraws_a_real_accepted_replacement() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
-    session.negotiated = Some(negotiated_session(65002, false));
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
     let announced_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let attrs = vec![
+    let overlap_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let accepted_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: announced_prefix,
+                },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: overlap_prefix,
+                },
+            ],
+            &[],
+            &accepted_attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial accepted route");
+    };
+    assert_eq!(announced.len(), 2);
+
+    let malformed_attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -6426,15 +6609,21 @@ async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdraw
         }),
     ];
     let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: announced_prefix,
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: overlap_prefix,
+            },
+        ],
         &[Ipv4NlriEntry {
             path_id: 0,
-            prefix: announced_prefix,
+            prefix: overlap_prefix,
         }],
-        &[Ipv4NlriEntry {
-            path_id: 0,
-            prefix: withdrawn_prefix,
-        }],
-        &attrs,
+        &malformed_attrs,
         true,
         false,
         Ipv4UnicastMode::Body,
@@ -6452,7 +6641,10 @@ async fn otc_ingress_malformed_length_drops_unicast_announces_but_keeps_withdraw
         announced.is_empty(),
         "malformed OTC length must use treat-as-withdraw behavior for unicast"
     );
-    assert_eq!(withdrawn, vec![(Prefix::V4(withdrawn_prefix), 0)]);
+    assert_eq!(withdrawn.len(), 2);
+    assert!(withdrawn.contains(&(Prefix::V4(announced_prefix), 0)));
+    assert!(withdrawn.contains(&(Prefix::V4(overlap_prefix), 0)));
+    assert_eq!(session.known_prefix_count(), 0);
 }
 // ---------------------------------------------------------------------
 // ADR-0072 follow-up — structured OTC route-leak event publishing
@@ -10223,6 +10415,280 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
     );
     session.end_refresh_accounting(Afi::L2Vpn, Safi::Evpn);
     assert!(session.known_evpn.is_empty());
+}
+
+/// An AS_PATH-loop replacement is an implicit withdrawal only when its exact
+/// wire identity was previously accepted. A first-seen rejected identity must
+/// remain silent.
+#[tokio::test]
+async fn as_path_loop_replacement_withdraws_accepted_classic_identity_only() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.import_explain_enabled = true;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let first_seen = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let attrs = |path: Vec<u32>| {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(path)],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ]
+    };
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: accepted,
+            }],
+            &[],
+            &attrs(vec![65002]),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected accepted route");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session
+        .process_update(UpdateMessage::build(
+            &[
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: accepted,
+                },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: first_seen,
+                },
+            ],
+            &[],
+            &attrs(vec![65002, 65001]),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("accepted looped replacement must reach the RIB as a withdrawal")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(accepted), 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "first-seen reject must stay silent"
+    );
+
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(accepted),
+        path_id: 0,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&key, session.import_policy_generation)
+    {
+        LookupResult::Hit(decision) => assert_eq!(decision.outcome, CachedOutcome::Withdrawn),
+        other => panic!("expected safety-withdrawn explain outcome, got {other:?}"),
+    }
+    let first_seen_key = ImportDecisionKey {
+        prefix: Prefix::V4(first_seen),
+        ..key
+    };
+    assert!(matches!(
+        session
+            .import_decision_cache
+            .lookup(&first_seen_key, session.import_policy_generation),
+        LookupResult::NotSeen
+    ));
+}
+
+/// `ORIGINATOR_ID` rejection must retire exact IPv6 Add-Path identities before
+/// later ERR/GR lifecycle messages, without duplicating an explicit overlap or
+/// touching an accepted sibling path.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins RR-loop replacement identity, overlap, ERR accounting, explain state, and GR channel ordering"
+)]
+#[tokio::test]
+async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibling() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+    use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.import_explain_enabled = true;
+    session.config.peer.graceful_restart = true;
+    let mut negotiated = negotiated_session(65001, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Both);
+    negotiated.peer_route_refresh = true;
+    negotiated.peer_enhanced_route_refresh = true;
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_restart_time = 120;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:440::".parse().unwrap(), 64));
+    let nlri = |path_id| NlriEntry { path_id, prefix };
+    let reach = |announced| {
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: None,
+            announced,
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        })
+    };
+    let base_attrs = || {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+        ]
+    };
+    let mut initial_attrs = base_attrs();
+    initial_attrs.push(reach(vec![nlri(11), nlri(22), nlri(33)]));
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &initial_attrs,
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial Add-Path routes");
+    };
+    assert_eq!(announced.len(), 3);
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv6,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::BeginRouteRefresh {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            ..
+        })
+    ));
+    assert_eq!(
+        session.refresh_accounting_stale_count((Afi::Ipv6, Safi::Unicast)),
+        Some(3)
+    );
+
+    let mut loop_attrs = base_attrs();
+    loop_attrs.push(PathAttribute::OriginatorId(
+        session.config.peer.local_router_id,
+    ));
+    loop_attrs.push(reach(vec![nlri(11), nlri(22), nlri(44)]));
+    loop_attrs.push(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        withdrawn: vec![nlri(22)],
+        flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
+        labeled_withdrawn: vec![],
+        vpn_withdrawn: vec![],
+        rtc_withdrawn: vec![],
+    }));
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &loop_attrs,
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        mut withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("RR-loop withdrawals must precede lifecycle messages")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    withdrawn.sort_unstable_by_key(|(_, path_id)| *path_id);
+    assert_eq!(withdrawn, vec![(prefix, 11), (prefix, 22)]);
+    assert!(!session.known_paths.contains(&(prefix, 11)));
+    assert!(!session.known_paths.contains(&(prefix, 22)));
+    assert!(session.known_paths.contains(&(prefix, 33)));
+    assert!(!session.known_paths.contains(&(prefix, 44)));
+    assert_eq!(session.known_prefix_count(), 1);
+    assert_eq!(
+        session.refresh_accounting_stale_count((Afi::Ipv6, Safi::Unicast)),
+        Some(1)
+    );
+
+    let key = |path_id| ImportDecisionKey {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        prefix,
+        path_id,
+    };
+    for path_id in [11, 22] {
+        match session
+            .import_decision_cache
+            .lookup(&key(path_id), session.import_policy_generation)
+        {
+            LookupResult::Hit(decision) => {
+                assert_eq!(decision.outcome, CachedOutcome::Withdrawn);
+            }
+            other => panic!("expected withdrawn path {path_id}, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        session
+            .import_decision_cache
+            .lookup(&key(44), session.import_policy_generation),
+        LookupResult::NotSeen
+    ));
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+    match rib_rx
+        .try_recv()
+        .expect("GR lifecycle message must follow route withdrawal")
+    {
+        RibUpdate::PeerGracefulRestart { peer, .. } => assert_eq!(peer, session.peer_ip),
+        _ => panic!("expected PeerGracefulRestart after route withdrawal"),
+    }
 }
 /// ADR-0051: when the writer's bulk channel saturates, the session must
 /// emit a `Cease` / `Out of Resources` (RFC 4486 §4 subcode 8)

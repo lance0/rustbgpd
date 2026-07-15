@@ -151,6 +151,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Pre-policy safety rejections withdraw prior accepted unicast paths.**
+  OTC, AS_PATH-loop, and route-reflector-loop rejects now retire the exact
+  accepted `(prefix, path_id)` while first-seen rejects remain filter-only.
+
 - **Import-policy-denied unicast replacements withdraw prior accepted paths.**
   Classic and MP-unicast updates denied on import now retire the exact
   `(prefix, path_id)` previously accepted from that peer and send the removal
