@@ -3,6 +3,11 @@ ingest + Adj-RIB-In insert	415	2.239853
 recompute	255	1.376295
 group-table commit	0	0.000000
 member-emit	0	0.000000
+exact encode	0	0.000000
+ceiling reuse	0	0.000000
+overlay reconciliation	0	0.000000
+group-prior materialization	0	0.000000
+channel enqueue	0	0.000000
 distribute residual	17553	94.737694
 event-publish	58	0.313040
 staging walk	106	0.572107

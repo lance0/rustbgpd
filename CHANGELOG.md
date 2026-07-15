@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The committed July RIB rebaseline receipt is self-verifying again.** The
+  eight CPU derivatives now match the current classifier, and CI replays both
+  checksum envelopes plus every CPU, DHAT, and sanitized CSV derivative. No
+  benchmark was rerun and no measured value or performance claim changed.
+  (LAN-405)
+
 - **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
   policy.** IPv4/IPv6 unicast checks both the stored source route before export
   policy and the modified route after policy across grouped and private
