@@ -69,7 +69,7 @@
     "tester_timeout_evidence": "Unsupported: the pinned BIRD adapter inherits a constant-zero timeout counter. No independent timeout count is claimed."
   },
   "classifiers": {
-    "classify_cpu.py": "eee305c347fb6549f4814fbd13616c3fdc7ca17987b7c9643d652a80909259c1",
+    "classify_cpu.py": "57f8073eec28538a1ec3348b4f8305de1d29fb50fdc497c3d19535ec3f33b00e",
     "classify_dhat.py": "09b87e50867679f16c51d1f6440ada06c776e14f34b4a085cf665227cdb04381",
     "sanitize_bgperf_csv.py": "969dbc4b8d33f13e1282223d5cda18a4fa7b1e1397b1bde9124378990c60fc22"
   },

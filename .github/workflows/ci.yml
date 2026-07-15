@@ -63,6 +63,26 @@ jobs:
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
+      - name: Verify committed RIB rebaseline receipt
+        run: |
+          set -euo pipefail
+          receipt=docs/perf/artifacts/rib-rebaseline-2026-07-13
+          cpu_dir="$RUNNER_TEMP/rib-rebaseline-cpu"
+          (cd "$receipt" && sha256sum -c SHA256SUMS)
+          mkdir "$cpu_dir"
+          tar -xzf "$receipt/cpu-folded-profiles.tar.gz" -C "$cpu_dir"
+          (cd "$cpu_dir" && sha256sum -c folded-SHA256SUMS)
+          for profile in "$cpu_dir"/*.folded; do
+            stem=$(basename "$profile" .folded)
+            python3 bench/scale/rebaseline/classify_cpu.py "$profile" \
+              --check "$receipt/$stem.cpu.tsv"
+          done
+          python3 bench/scale/rebaseline/classify_dhat.py \
+            --from-derivative "$receipt/2p-100k.dhat-derivative.tsv" \
+            --check "$receipt/2p-100k.memory.tsv"
+          python3 bench/scale/rebaseline/sanitize_bgperf_csv.py \
+            --from-sanitized "$receipt/2p-100k.csv" \
+            --check "$receipt/2p-100k.csv"
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail
