@@ -2912,6 +2912,25 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_completions_match_current_cli() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (shell, relative_path) in [
+            (Shell::Bash, "examples/completions/rbgp.bash"),
+            (Shell::Zsh, "examples/completions/_rbgp"),
+            (Shell::Fish, "examples/completions/rbgp.fish"),
+        ] {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated);
+            let checked_in = std::fs::read(repository.join(relative_path))
+                .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
+            assert!(
+                generated == checked_in,
+                "{relative_path} is stale; regenerate it with `rbgp completions {shell}`"
+            );
+        }
+    }
+
+    #[test]
     fn test_man_page_is_roff_and_covers_nested_subcommands() {
         let mut output = Vec::new();
         generate_man(BINARY_NAME, &mut output).unwrap();

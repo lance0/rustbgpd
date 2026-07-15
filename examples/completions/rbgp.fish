@@ -148,6 +148,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l role -d 'Local BGP Role for RFC 9234 route-leak protection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l add-path-send-max -d 'Max paths per prefix for Add-Path send' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
@@ -206,6 +207,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l role -d 'Local BGP Role for RFC 9234 route-leak protection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l add-path-send-max -d 'Max paths per prefix for Add-Path send' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'

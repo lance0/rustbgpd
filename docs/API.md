@@ -55,10 +55,10 @@ unverified clients at the TLS layer before any gRPC handler runs.
 
 PEM material is pre-flight-validated at config load and `--check`
 time, so a successful `--check` rules out cert-rotation surprises
-at startup. Adding, removing, or rotating the TLS files is
-**restart-required** — SIGHUP reload pins the runtime listener
-config back to the live values and surfaces the drift in
-`rustbgpd --diff` until the daemon is restarted.
+at startup. Valid credential bytes behind unchanged TLS paths rotate on SIGHUP.
+Adding or removing TLS, changing a configured TLS path, or changing TLS/auth
+mode remains **restart-required**; runtime config pins that drift to the live
+values until the daemon is restarted.
 
 Native gNMI is available on the local UDS listener and on TCP listeners only
 when mTLS is configured. Plaintext or bearer-token-only TCP listeners serve the
