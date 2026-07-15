@@ -4,7 +4,7 @@
 //! identities, not operation ordering. The ignored extension sweeps those same
 //! schedules under hard parameter/operation caps on a weekly hosted runner.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -98,13 +98,13 @@ enum ComparisonMode {
     SemanticFold,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FamilySet {
     Unicast,
     VpnRtc,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PolicySpec {
     Permit,
     DenyOne(Ipv4Prefix),
@@ -112,7 +112,7 @@ enum PolicySpec {
     PeerContext,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MembershipExpectation {
     SharedGroup,
     PeerContextFallback,
@@ -120,7 +120,7 @@ enum MembershipExpectation {
     OrfFallback,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Op {
     PeerUp {
         peer: Ipv4Addr,
@@ -182,6 +182,12 @@ enum Op {
         peer: Ipv4Addr,
         expectation: MembershipExpectation,
     },
+    AssertAnnouncedPaths {
+        peer: Ipv4Addr,
+        prefix: Ipv4Prefix,
+        expected: usize,
+    },
+    AssertLocRibAbsent(Ipv4Prefix),
     RtcDefaultAnnounce {
         peer: Ipv4Addr,
         generation: u64,
@@ -229,12 +235,19 @@ fn sentinel() -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(10, 255, 255, 0), 24)
 }
 
-fn seed_octet(seed: u64, byte: usize) -> u8 {
-    seed.to_le_bytes()[byte] | 1
+fn seed_octet(seed: u64, lane: usize) -> u8 {
+    // SplitMix64's stable finalizer makes every fixture lane depend on the
+    // whole seed; consecutive extended-corpus seeds therefore do not leave
+    // the high-byte lanes unchanged.
+    let lane = u64::try_from(lane).expect("fixture lanes fit in u64");
+    let mut mixed = seed ^ lane.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (mixed ^ (mixed >> 31)).to_le_bytes()[0] | 1
 }
 
-fn distinct_seed_octet(seed: u64, byte: usize, other: u8) -> u8 {
-    let candidate = seed_octet(seed, byte);
+fn distinct_seed_octet(seed: u64, lane: usize, other: u8) -> u8 {
+    let candidate = seed_octet(seed, lane);
     if candidate == other {
         candidate.wrapping_add(2)
     } else {
@@ -242,8 +255,8 @@ fn distinct_seed_octet(seed: u64, byte: usize, other: u8) -> u8 {
     }
 }
 
-fn distinct_seed_octet_from(seed: u64, byte: usize, others: &[u8]) -> u8 {
-    let mut candidate = seed_octet(seed, byte);
+fn distinct_seed_octet_from(seed: u64, lane: usize, others: &[u8]) -> u8 {
+    let mut candidate = seed_octet(seed, lane);
     while others.contains(&candidate) {
         candidate = candidate.wrapping_add(2);
     }
@@ -410,6 +423,14 @@ async fn assert_membership(
     }
 }
 
+fn announced_paths(messages: &[NormMsg], prefix: Ipv4Prefix) -> HashSet<(u32, IpAddr)> {
+    messages
+        .iter()
+        .flat_map(|message| &message.announce)
+        .filter_map(|route| (route.0 == Prefix::V4(prefix)).then_some((route.1, route.3)))
+        .collect()
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the exhaustive fault-script interpreter keeps every operation's behavior in one auditable match"
@@ -572,6 +593,28 @@ async fn apply(oracle: &mut Oracle, op: &Op, force_ungrouped: bool) {
         }
         Op::AssertMembership { peer, expectation } => {
             assert_membership(oracle, *peer, *expectation, force_ungrouped).await;
+        }
+        Op::AssertAnnouncedPaths {
+            peer,
+            prefix,
+            expected,
+        } => {
+            let messages = oracle.drain_peer_available(*peer).await;
+            let paths = announced_paths(&messages, *prefix);
+            assert_eq!(
+                paths.len(),
+                *expected,
+                "unexpected newly announced Add-Path identities for {prefix}: {paths:?}"
+            );
+        }
+        Op::AssertLocRibAbsent(prefix) => {
+            let routes = oracle.best_routes().await;
+            assert!(
+                routes
+                    .iter()
+                    .all(|route| route.prefix != Prefix::V4(*prefix)),
+                "stale-session replacement route reached the Loc-RIB: {prefix}"
+            );
         }
         Op::RtcDefaultAnnounce { peer, generation } => {
             oracle
@@ -996,6 +1039,14 @@ fn add_path_membership_schedule(seed: u64) -> Schedule {
                 peer: RIGHT,
                 expectation: MembershipExpectation::AddPathFallback,
             },
+            // Removing initial Add-Path fanout or rank compaction makes these
+            // operation-boundary counts fail instead of merely comparing two
+            // equally incomplete terminal folds.
+            Op::AssertAnnouncedPaths {
+                peer: RIGHT,
+                prefix,
+                expected: 2,
+            },
             // The predecessor generation cannot narrow the active session's
             // cap or trigger its replay.
             Op::AddPathLimit {
@@ -1003,10 +1054,20 @@ fn add_path_membership_schedule(seed: u64) -> Schedule {
                 generation: 2,
                 limit: 1,
             },
+            Op::AssertAnnouncedPaths {
+                peer: RIGHT,
+                prefix,
+                expected: 0,
+            },
             Op::AddPathLimit {
                 peer: RIGHT,
                 generation: 3,
                 limit: 1,
+            },
+            Op::AssertAnnouncedPaths {
+                peer: RIGHT,
+                prefix,
+                expected: 1,
             },
             Op::Withdraw {
                 peer: SOURCE,
@@ -1191,6 +1252,9 @@ fn replacement_during_resync_schedule(seed: u64) -> Schedule {
                 prefix: stale,
                 local_pref: 250,
             },
+            // Removing the received-route generation fence exposes this
+            // superseded session's higher-preference route in the Loc-RIB.
+            Op::AssertLocRibAbsent(stale),
             Op::AdvanceRetry,
             Op::AssertMembership {
                 peer: RIGHT,
@@ -1305,8 +1369,6 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
     let empty: Streams = [(IpAddr::V4(LEFT), vec![]), (IpAddr::V4(RIGHT), vec![])]
         .into_iter()
         .collect();
-    assert_eq!(semantic_effects(&empty), semantic_effects(&empty));
-    assert_eq!(fold(&empty), fold(&empty));
     assert!(
         validate_terminal_stream(&empty).is_err(),
         "equal empty streams must not pass the differential oracle"
@@ -1319,8 +1381,6 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
     ]
     .into_iter()
     .collect();
-    assert_eq!(semantic_effects(&truncated), semantic_effects(&truncated));
-    assert_eq!(fold(&truncated), fold(&truncated));
     assert!(
         validate_terminal_stream(&truncated).is_err(),
         "equal nonempty streams truncated before convergence must not pass"
@@ -1343,6 +1403,30 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
         validate_terminal_stream(&complete).is_err(),
         "a sentinel from a superseded connection cannot complete the current session"
     );
+}
+
+#[test]
+fn extended_seed_sweep_varies_every_schedule_operation_fixture() {
+    let baseline = schedules(DEFAULT_SEED_START);
+    let mut varied = [false; 6];
+    for offset in 1..DEFAULT_SEED_COUNT {
+        let seed = DEFAULT_SEED_START
+            + u64::try_from(offset).expect("extended seed count is capped at 64");
+        let candidate = schedules(seed);
+        for (index, (baseline, candidate)) in baseline.iter().zip(candidate.iter()).enumerate() {
+            varied[index] |= baseline.ops != candidate.ops;
+        }
+    }
+
+    // Reverting the mixer to raw little-endian seed bytes leaves four of
+    // these six actual operation fixtures unchanged across the default sweep.
+    for (schedule, varied) in baseline.iter().zip(varied) {
+        assert!(
+            varied,
+            "extended seeds did not vary operations for {}",
+            schedule.name
+        );
+    }
 }
 
 #[tokio::test]

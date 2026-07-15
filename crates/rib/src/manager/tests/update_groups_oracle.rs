@@ -889,17 +889,24 @@ impl Oracle {
         reply_rx.await.unwrap().unwrap();
     }
 
-    /// Round-trip a query on the primary channel: the run loop only
-    /// handles it after every prior update (and its route chunks) has
-    /// been fully processed, so all resulting outbound sends have
-    /// happened by the time the reply arrives.
-    pub(super) async fn quiesce(&mut self) {
+    /// Return the current Loc-RIB best routes after a FIFO round trip on
+    /// the primary channel. The reply is also an ordering barrier for all
+    /// prior updates and their resulting outbound sends.
+    pub(super) async fn best_routes(&mut self) -> Vec<Route> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
             .await
             .unwrap();
-        let _ = reply_rx.await.unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    /// Round-trip a query on the primary channel: the run loop only
+    /// handles it after every prior update (and its route chunks) has
+    /// been fully processed, so all resulting outbound sends have
+    /// happened by the time the reply arrives.
+    pub(super) async fn quiesce(&mut self) {
+        let _ = self.best_routes().await;
     }
 
     /// Drain one pending message from a peer's channel (channel-fill
@@ -918,6 +925,24 @@ impl Oracle {
             .or_default()
             .push(normalize(&update));
         update
+    }
+
+    /// After a FIFO barrier, drain only one peer's currently available
+    /// messages. Each update is normalized once and retained in the full
+    /// collected history as well as returned to the operation-level oracle.
+    pub(super) async fn drain_peer_available(&mut self, peer: Ipv4Addr) -> Vec<NormMsg> {
+        self.quiesce().await;
+        let peer = IpAddr::V4(peer);
+        let rx = self.outs.get_mut(&peer).expect("peer registered");
+        let mut drained = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            drained.push(normalize(&update));
+        }
+        self.collected
+            .entry(peer)
+            .or_default()
+            .extend(drained.iter().cloned());
+        drained
     }
 
     /// Drain every currently available message without waiting for a send.
