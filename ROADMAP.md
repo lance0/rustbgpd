@@ -216,11 +216,12 @@ The next product milestone is operational trust for the route-server / route-
 reflector beachhead, not another breadth sprint. Work in this section outranks
 new AFI/SAFI and EVPN dataplane expansion.
 
-- **Define the narrow v1 role contract.** Freeze only the configuration and API
-  used by IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA,
-  Roles/OTC, transactions, BMP/MRT/events, and the already-proven RR/controller-
-  feed families. Publish explicit stability, migration, deprecation, and
-  compatibility rules. Keep EVPN VTEP/IRB alpha and out of this first contract.
+- **Maintain the narrow v1 role contract.** The shipped machine-checked
+  inventory (#862; LAN-355) pins only the configuration and API used by
+  IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC,
+  transactions, BMP/MRT/events, and the already-proven RR/controller-feed
+  families. Keep its stability, migration, deprecation, and compatibility
+  rules current while EVPN VTEP/IRB remains alpha and outside this contract.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while

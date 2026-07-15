@@ -214,7 +214,7 @@ gRPC request
 | FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
 | FSM state transitions | `crates/fsm/src/lib.rs` |
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
-| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `tests.rs`) |
+| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `export.rs`, `refresh_accounting.rs`, `tests.rs`) |
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
 | Policy evaluation | `crates/policy/src/engine.rs` |
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
