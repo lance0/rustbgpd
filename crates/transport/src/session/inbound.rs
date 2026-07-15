@@ -1285,6 +1285,9 @@ impl PeerSession {
         // per-route context / modification clone never happens
         // (ADR-0073 write-path cost control).
         let mut import_decisions: Vec<(ImportDecisionKey, CachedDecision)> = Vec::new();
+        // A denied announcement replaces any prior accepted path under the
+        // same wire identity; retire it after explicit withdrawals below.
+        let mut denied_unicast: Vec<(Prefix, u32)> = Vec::new();
         let mut announced: Vec<Route> =
             if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
                 Vec::new()
@@ -1361,6 +1364,7 @@ impl PeerSession {
                             ));
                         }
                         if result.action != rustbgpd_policy::PolicyAction::Permit {
+                            denied_unicast.push((prefix, entry.path_id));
                             return None;
                         }
                         let (attrs, nh_action) =
@@ -1960,6 +1964,8 @@ impl PeerSession {
                                 aspa_state: mp_aspa_state,
                                 aspa_context,
                             });
+                        } else {
+                            denied_unicast.push((entry.prefix, entry.path_id));
                         }
                     }
                 }
@@ -2045,6 +2051,13 @@ impl PeerSession {
         //    cap by flooding a non-unicast family.
         for &(prefix, path_id) in &withdrawn {
             self.forget_known_path(prefix, path_id);
+        }
+        // `forget_known_path` gates first-seen denies and also deduplicates an
+        // explicit withdrawal for the same identity in this UPDATE.
+        for (prefix, path_id) in denied_unicast {
+            if self.forget_known_path(prefix, path_id) {
+                withdrawn.push((prefix, path_id));
+            }
         }
         for route in &announced {
             self.remember_known_path(route.prefix, route.path_id);

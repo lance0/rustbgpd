@@ -136,6 +136,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Import-policy-denied unicast replacements withdraw prior accepted paths.**
+  Classic and MP-unicast updates denied on import now retire the exact
+  `(prefix, path_id)` previously accepted from that peer and send the removal
+  to the RIB immediately. First-seen denials remain filter-only, explicit
+  withdrawals are deduplicated, and Add-Path siblings stay intact.
+
 - **Enhanced-refresh omissions no longer poison max-prefix accounting.**
   Inbound RFC 7313 windows now mirror exact typed route identities across every
   counted family, retire replayed or withdrawn identities only after ordered

@@ -2363,7 +2363,7 @@ async fn add_path_partial_replay_sweeps_only_omitted_identity_and_keeps_prefix_c
 }
 
 #[tokio::test]
-async fn import_policy_denial_does_not_mark_refresh_stale_identity_replayed() {
+async fn import_policy_denial_retires_refresh_stale_identity() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
@@ -2376,10 +2376,21 @@ async fn import_policy_denial_does_not_mark_refresh_stale_identity_replayed() {
     session
         .process_update(ipv4_announce(prefix, 0, false))
         .await;
-    assert!(rib_rx.try_recv().is_err());
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("denied replacement must emit a withdrawal")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
     assert_eq!(
         session.refresh_accounting_stale_count((Afi::Ipv4, Safi::Unicast)),
-        Some(1)
+        Some(0)
     );
     session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
     assert_eq!(session.known_prefix_count(), 0);
@@ -7423,8 +7434,13 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         "IPv6 unicast must not reuse the IPv4 ENHE scoped link-local relaxation"
     );
 }
-/// Import policy is applied before `RoutesReceived` reaches the RIB.
-/// Denied routes are filtered locally in transport and never forwarded.
+/// Import policy is applied before `RoutesReceived` reaches the RIB. A
+/// first-seen denial has no prior accepted identity, so it must produce
+/// neither an announcement nor a synthetic withdrawal.
+#[expect(
+    clippy::too_many_lines,
+    reason = "covers a mixed first-seen permit/deny batch and exact RIB payload assertions"
+)]
 #[tokio::test]
 async fn import_policy_denied_routes_do_not_reach_rib() {
     // Create a session with import policy that denies 198.51.100.0/24
@@ -7513,9 +7529,16 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     assert_eq!(session.import_policy_routes_denied, 1);
     // Drain any messages — there may be zero or one RoutesReceived
     let mut all_announced = vec![];
+    let mut all_withdrawn = vec![];
     while let Ok(msg) = rib_rx.try_recv() {
-        if let RibUpdate::RoutesReceived { announced, .. } = msg {
+        if let RibUpdate::RoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = msg
+        {
             all_announced.extend(announced);
+            all_withdrawn.extend(withdrawn);
         }
     }
     // Only the permitted prefix should reach the RIB; denied prefix filtered
@@ -7526,6 +7549,10 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         all_announced.len()
     );
     assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
+    assert!(
+        all_withdrawn.is_empty(),
+        "a first-seen policy denial has no accepted route to withdraw"
+    );
 }
 
 /// LAN-291: a `FlowSpec` rule without a destination-prefix component is
@@ -8605,12 +8632,15 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
     assert_eq!(route.communities(), &[0xFDE9_0064]);
 }
 #[tokio::test]
-async fn update_import_policy_applies_to_future_updates() {
+async fn denied_classic_replacement_withdraws_exact_route_and_remains_explainable() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
-    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.explain_enabled = true;
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
@@ -8640,28 +8670,8 @@ async fn update_import_policy_applies_to_future_updates() {
     };
     assert_eq!(announced.len(), 1);
     let deny_chain = PolicyChain::new(vec![Policy {
-        entries: vec![PolicyStatement {
-            prefix: Some(Prefix::V4(prefix)),
-            ge: None,
-            le: None,
-            action: PolicyAction::Deny,
-            match_community: vec![],
-            match_as_path: None,
-            match_neighbor_set: None,
-            match_route_type: None,
-            match_evpn_route_type: None,
-            match_rpki_validation: None,
-            match_aspa_validation: None,
-            match_as_path_length_ge: None,
-            match_as_path_length_le: None,
-            match_local_pref_ge: None,
-            match_local_pref_le: None,
-            match_med_ge: None,
-            match_med_le: None,
-            match_next_hop: None,
-            modifications: RouteModifications::default(),
-        }],
-        default_action: PolicyAction::Permit,
+        entries: vec![],
+        default_action: PolicyAction::Deny,
     }]);
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
@@ -8673,71 +8683,199 @@ async fn update_import_policy_applies_to_future_updates() {
     assert_eq!(flow, ControlFlow::Continue(()));
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
     session.process_update(update).await;
-    assert!(rib_rx.try_recv().is_err());
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("denied replacement must reach RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![(Prefix::V4(prefix), 0)],
+        "a previously accepted classic NLRI denied on replacement must be withdrawn exactly"
+    );
+    assert_eq!(
+        session.known_prefix_count(),
+        0,
+        "the denied replacement must retire max-prefix accounting"
+    );
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&key, session.import_policy_generation)
+    {
+        LookupResult::Hit(decision) => assert_eq!(decision.outcome, CachedOutcome::Deny),
+        other => panic!("expected the replacement Deny to remain explainable, got {other:?}"),
+    }
 }
-/// End-to-end ERR + import policy interaction:
-/// a stale route that is "replaced" by an inbound UPDATE denied by import
-/// policy is not reinstalled, so the stale entry is swept at `EoRR`.
+
+/// A denied MP-unicast replacement retires only its exact RFC 7911 identity.
+/// An explicit `MP_UNREACH` for another denied identity in the same UPDATE must
+/// not be duplicated, and an untouched sibling path must remain accepted.
 #[expect(
     clippy::too_many_lines,
-    reason = "regression test pins ERR stale-sweep behavior after import-policy denial"
+    reason = "covers MP Add-Path replacement, overlap deduplication, sibling retention, and explain outcomes"
 )]
 #[tokio::test]
-async fn err_denied_replacement_is_swept_at_eorr() {
+async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overlap() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+    use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Both);
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:439::".parse().unwrap(), 64));
+    let nlri = |path_id| NlriEntry { path_id, prefix };
+    let base_attrs = || {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+        ]
+    };
+
+    let mut attrs = base_attrs();
+    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: "2001:db8::2".parse().unwrap(),
+        link_local_next_hop: None,
+        announced: vec![nlri(11), nlri(22), nlri(33)],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    }));
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } =
+        rib_rx.try_recv().expect("initial paths must reach RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 3);
+
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])));
+
+    let mut replacement_attrs = base_attrs();
+    replacement_attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        next_hop: "2001:db8::3".parse().unwrap(),
+        link_local_next_hop: None,
+        announced: vec![nlri(11), nlri(22)],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    }));
+    replacement_attrs.push(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        withdrawn: vec![nlri(22)],
+        flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
+        labeled_withdrawn: vec![],
+        vpn_withdrawn: vec![],
+        rtc_withdrawn: vec![],
+    }));
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &replacement_attrs,
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        mut withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("denied replacements must reach RIB as withdrawals")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    withdrawn.sort_unstable_by_key(|(_, path_id)| *path_id);
+    assert_eq!(withdrawn, vec![(prefix, 11), (prefix, 22)]);
+    assert!(!session.known_paths.contains(&(prefix, 11)));
+    assert!(!session.known_paths.contains(&(prefix, 22)));
+    assert!(session.known_paths.contains(&(prefix, 33)));
+    assert_eq!(session.known_prefix_count(), 1);
+
+    let decision = |path_id| ImportDecisionKey {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        prefix,
+        path_id,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&decision(11), session.import_policy_generation)
+    {
+        LookupResult::Hit(entry) => assert_eq!(entry.outcome, CachedOutcome::Deny),
+        other => panic!("expected synthetic withdrawal to preserve Deny, got {other:?}"),
+    }
+    match session
+        .import_decision_cache
+        .lookup(&decision(22), session.import_policy_generation)
+    {
+        LookupResult::Hit(entry) => assert_eq!(entry.outcome, CachedOutcome::Withdrawn),
+        other => panic!("expected explicit withdrawal tombstone, got {other:?}"),
+    }
+}
+
+/// End-to-end ERR/GR + import-policy interaction: a denied replacement must
+/// remove the accepted route immediately, before `EoRR`, so neither refresh nor
+/// subsequent graceful-restart retention can keep it alive.
+#[expect(
+    clippy::too_many_lines,
+    reason = "regression test pins denied replacement removal across ERR and GR boundaries"
+)]
+#[tokio::test]
+async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let (_, query_rx) = mpsc::channel(1);
     let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
     let manager_handle = tokio::spawn(manager.run());
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-    // Seed the RIB with an existing route that will become refresh-stale.
-    rib_tx
-        .send(RibUpdate::RoutesReceived {
-            session_id: 0,
-            peer,
-            announced: vec![Route {
-                prefix: Prefix::V4(denied_prefix),
-                next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-                link_local_next_hop: None,
-                next_hop_scope: None,
-                peer,
-                attributes: Arc::new(vec![
-                    PathAttribute::Origin(Origin::Igp),
-                    PathAttribute::AsPath(AsPath {
-                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
-                    }),
-                    PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-                ]),
-                received_at: Instant::now(),
-                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
-                peer_router_id: Ipv4Addr::UNSPECIFIED,
-                is_stale: false,
-                is_llgr_stale: false,
-                path_id: 0,
-                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
-            }],
-            withdrawn: vec![],
-            flowspec_announced: vec![],
-            flowspec_withdrawn: vec![],
-            evpn_announced: vec![],
-            evpn_withdrawn: vec![],
-        })
-        .await
-        .unwrap();
-    // Start the ERR refresh window for IPv4 unicast.
-    rib_tx
-        .send(RibUpdate::BeginRouteRefresh {
-            session_id: 0,
-            peer,
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-        })
-        .await
-        .unwrap();
-    // Session import policy denies the stale prefix, but permits the new one.
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -8745,36 +8883,12 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
-    let deny_policy = PolicyChain::new(vec![Policy {
-        entries: vec![PolicyStatement {
-            prefix: Some(Prefix::V4(denied_prefix)),
-            ge: None,
-            le: None,
-            action: PolicyAction::Deny,
-            match_community: vec![],
-            match_as_path: None,
-            match_neighbor_set: None,
-            match_route_type: None,
-            match_evpn_route_type: None,
-            match_rpki_validation: None,
-            match_aspa_validation: None,
-            match_as_path_length_ge: None,
-            match_as_path_length_le: None,
-            match_local_pref_ge: None,
-            match_local_pref_le: None,
-            match_med_ge: None,
-            match_med_le: None,
-            match_next_hop: None,
-            modifications: RouteModifications::default(),
-        }],
-        default_action: PolicyAction::Permit,
-    }]);
     let mut session = PeerSession::new(
         config,
         metrics,
         cmd_rx,
         rib_tx.clone(),
-        Some(deny_policy),
+        None,
         None,
         None,
         None,
@@ -8782,11 +8896,17 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         false,
     );
     let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
     negotiated.peer_enhanced_route_refresh = true;
-    session
-        .negotiated_families
-        .clone_from(&negotiated.negotiated_families);
-    session.negotiated = Some(negotiated);
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_restart_time = 120;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    install_test_negotiated_session(&mut session, negotiated);
+    session.config.peer.graceful_restart = true;
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -8794,36 +8914,19 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
     ];
-    // The denied prefix is filtered by import policy, so only the permitted
-    // replacement reaches the RIB during the refresh window.
-    let update = UpdateMessage::build(
-        &[
-            Ipv4NlriEntry {
-                path_id: 0,
-                prefix: denied_prefix,
-            },
-            Ipv4NlriEntry {
-                path_id: 0,
-                prefix: permitted_prefix,
-            },
-        ],
+    let accepted = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: denied_prefix,
+        }],
         &[],
         &attrs,
         true,
         false,
         Ipv4UnicastMode::Body,
     );
-    session.process_update(update).await;
-    // Close the refresh window; the unreplaced stale route should be swept.
-    rib_tx
-        .send(RibUpdate::EndRouteRefresh {
-            session_id: 0,
-            peer,
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-        })
-        .await
-        .unwrap();
+    session.process_update(accepted.clone()).await;
+    assert_eq!(session.known_prefix_count(), 1);
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
         .send(RibUpdate::QueryReceivedRoutes {
@@ -8832,9 +8935,88 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         })
         .await
         .unwrap();
-    let received = reply_rx.await.unwrap();
-    assert_eq!(received.len(), 1);
-    assert_eq!(received[0].prefix, Prefix::V4(permitted_prefix));
+    let initially_received = reply_rx.await.unwrap();
+    assert_eq!(initially_received.len(), 1);
+    assert_eq!(initially_received[0].prefix, Prefix::V4(denied_prefix));
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.refresh_accounting_stale_count((Afi::Ipv4, Safi::Unicast)),
+        Some(1)
+    );
+
+    let deny_policy = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateImportPolicy {
+                policy: Some(deny_policy),
+                reply: reply_tx,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+
+    // Re-advertise the accepted identity inside ERR. The replacement now
+    // evaluates Deny and must become an immediate exact withdrawal.
+    session.process_update(accepted).await;
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(
+        session.refresh_accounting_stale_count((Afi::Ipv4, Safi::Unicast)),
+        Some(0),
+        "the synthetic withdrawal must retire the ERR stale identity"
+    );
+
+    // The denial itself must remove the old accepted route. Waiting for EoRR
+    // would leave a policy-rejected route usable throughout a long refresh.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryReceivedRoutes {
+            peer: Some(peer),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+    assert!(
+        reply_rx.await.unwrap().is_empty(),
+        "denied route must be absent before EoRR closes the refresh window"
+    );
+
+    // EoRR (including a duplicate) is now an idempotent boundary: there is no
+    // denied route left to sweep locally or in the RIB.
+    for _ in 0..2 {
+        buffer_route_refresh(
+            &mut session,
+            Afi::Ipv4,
+            Safi::Unicast,
+            RouteRefreshSubtype::EoRR,
+        );
+        session.process_read_buffer().await;
+    }
+    assert_eq!(session.refresh_accounting_window_count(), 0);
+    assert_eq!(session.known_prefix_count(), 0);
+
+    // A subsequent GR teardown cannot mark the already removed route stale.
+    session.execute_actions(vec![Action::SessionDown]).await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryReceivedRoutes {
+            peer: Some(peer),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+    assert!(reply_rx.await.unwrap().is_empty());
     drop(session);
     drop(rib_tx);
     manager_handle.await.unwrap();
