@@ -3,6 +3,15 @@
 - **Status:** Accepted
 - **Date:** 2026-03-06
 
+> **Current status (2026-07-15):** Native mTLS subsequently shipped. SIGHUP now
+> publishes bearer-token and mTLS credential bytes atomically across all
+> listeners from unchanged startup-captured paths before later config
+> reconciliation. New bearer-authenticated RPCs use the new token, including on
+> existing HTTP/2 connections; new TLS accepts use the new mTLS generation,
+> while existing streams and TLS connections survive. Listener, path,
+> auth-mode, principal, role, and access changes remain restart-required. The
+> decision record below preserves the original scope and tradeoffs.
+
 ## Context
 
 The gRPC management API exposes privileged operations: peer lifecycle, route

@@ -249,6 +249,7 @@ _arguments "${_arguments_options[@]}" : \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
 '--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
+'--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -392,6 +393,7 @@ _arguments "${_arguments_options[@]}" : \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
 '--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
+'--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

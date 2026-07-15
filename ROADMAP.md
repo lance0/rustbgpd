@@ -253,9 +253,11 @@ new AFI/SAFI and EVPN dataplane expansion.
   an operator-readable rollback record.
 - **Tighten lifecycle security without reopening scope.** Preserve the shipped
   unprivileged base service and opt-in dataplane capability profile; finish
-  typed API-error migration and decide the v1 posture for live management-plane
-  credential rotation and received eBGP-only attributes. Privilege separation
-  remains a larger architectural choice, not a release-checkbox claim.
+  typed API-error migration and decide the v1 posture for received eBGP-only
+  attributes. Management-plane bearer and mTLS bytes behind unchanged paths now
+  rotate atomically on SIGHUP; listener, path, auth-mode, principal, role, and
+  access changes remain restart-required. Privilege separation remains a
+  larger architectural choice, not a release-checkbox claim.
 - **Pilot route-server next-hop ownership after its identity prerequisite.**
   ADR-0107 documents the current transparent-but-unchecked pipeline and a
   proposed opt-in strict-peer pilot. Bind its identity to the live session
@@ -1258,9 +1260,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   live neighbor API/CLI inspection are shipped. Ordered startup keyrings allow
   a restart-coordinated rollover: every key is installed, with a preferred or
   declaration-order-selected non-deprecated key used for startup transmission.
-  Live key rotation without a daemon restart (LAN-16 / #159), runtime
-  protected-range CRUD, and per-socket metrics remain demand-shaped rather
-  than core-feature blockers.
+  SIGHUP can also append non-preferred successors while owner sets and existing
+  key entries, order, and selection remain unchanged. Selection, deprecation,
+  removal, and edits/reordering (LAN-16 / #159), protected-owner CRUD, and
+  per-socket metrics remain demand-shaped rather than core-feature blockers.
 - **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
   `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager
   + RIB responsiveness within a 200 ms deadline — and deliberately excludes the

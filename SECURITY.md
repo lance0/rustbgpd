@@ -59,15 +59,29 @@ input from the network. It runs under continuous fuzzing in CI.
 
 - **TCP MD5 (RFC 2385):** Supported. Linux only.
 - **GTSM (RFC 5082):** Supported. Configurable per peer.
-- **TCP-AO (RFC 5925):** Supported for static neighbors and direct dynamic-prefix listener keys on Linux (ADR-0062), including ordered startup keyrings, fail-closed accepted-socket owned-union validation, and live API/CLI health. Static-exact selection precedes dynamic longest-prefix-match; overlapping protected owners require directionally disjoint KeyIDs, AO/plaintext or AO/MD5 overlaps are rejected, and listener inventories are capped at 4,096 MKTs per address family. Keyring edits require a daemon restart; live rotation remains tracked in LAN-16 / #159.
+- **TCP-AO (RFC 5925):** Supported for static neighbors and direct
+  dynamic-prefix listener keys on Linux (ADR-0062), including ordered startup
+  keyrings, fail-closed accepted-socket owned-union validation, and live
+  API/CLI health. SIGHUP can append non-preferred successor keys to unchanged
+  owners. Selection, deprecation, deletion, editing/reordering, and protected-
+  owner changes remain restart-required. Static-exact selection precedes
+  dynamic longest-prefix-match; overlapping protected owners require
+  directionally disjoint KeyIDs, AO/plaintext or AO/MD5 overlaps are rejected,
+  and listener inventories are capped at 4,096 MKTs per address family.
 - **gRPC:** Unix domain socket by default (local-only). TCP listeners
   are opt-in via config. Per-listener bearer-token authentication is
   available via `token_file`. Native mTLS terminates in-process on TCP
   listeners via tonic + rustls/ring — configure `tls_cert_file`,
   `tls_key_file`, and `tls_client_ca_file` together on
   `[global.telemetry.grpc_tcp]` (partial config is rejected at config
-  load). An mTLS proxy front-end (see `examples/envoy-mtls/`) remains a
-  valid alternative for multi-host fan-out. Per-RPC authorization tiers
+  load). SIGHUP re-reads credential bytes from unchanged startup-captured
+  paths and publishes one atomic generation across all listeners before later
+  config reconciliation. New RPCs, including on existing HTTP/2 connections,
+  use the new bearer token; new TLS accepts use the new mTLS material, while
+  existing streams and TLS connections survive. Listener, path, auth-mode,
+  principal, role, and access changes remain restart-required. An mTLS proxy
+  front-end (see `examples/envoy-mtls/`) remains a valid alternative for
+  multi-host fan-out. Per-RPC authorization tiers
   (ADR-0064, enforced by default since v0.24.0) classify each method on
   top of the listener split; see [docs/SECURITY.md](docs/SECURITY.md) and
   [docs/grpc-method-inventory.md](docs/grpc-method-inventory.md).
