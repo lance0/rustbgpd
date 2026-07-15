@@ -250,7 +250,6 @@ assert_session_continuity() {
     fi
 }
 
-preflight
 resolve_grpc_addr
 start_rustbgpd 'exec /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml >/tmp/rustbgpd.log 2>&1'
 start_gobgpd
@@ -424,10 +423,4 @@ else
 fi
 assert_session_continuity "$flaps_before" "$uptime_before" "source withdrawal"
 
-echo
-# `pass` and `fail` are initialized by the sourced shared test library.
-# shellcheck disable=SC2154
-echo "M87 results: $pass passed, $fail failed"
-if [ "$fail" -gt 0 ]; then
-    exit 1
-fi
+print_summary
