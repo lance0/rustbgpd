@@ -27,7 +27,8 @@ struct RefreshMaxPrefixWindow {
 }
 
 enum RefreshStaleIdentities {
-    Unicast(HashSet<(Prefix, u32)>),
+    UnicastPlain(HashSet<Prefix>),
+    UnicastAddPath(HashSet<(Prefix, u32)>),
     FlowSpec(HashSet<FlowSpecKey>),
     Evpn(HashSet<EvpnRouteKey>),
     BgpLs(HashSet<BgpLsRouteKey>),
@@ -58,11 +59,20 @@ impl PeerSession {
     pub(super) fn begin_refresh_accounting(&mut self, afi: Afi, safi: Safi) {
         let family = (afi, safi);
         let stale = match family {
-            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => RefreshStaleIdentities::Unicast(
-                self.known_paths
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) if self.receives_add_path_for_family(family) => {
+                RefreshStaleIdentities::UnicastAddPath(
+                    self.known_paths
+                        .iter()
+                        .copied()
+                        .filter(|(prefix, _)| unicast_family(*prefix) == family)
+                        .collect(),
+                )
+            }
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => RefreshStaleIdentities::UnicastPlain(
+                self.known_plain_prefixes
                     .iter()
                     .copied()
-                    .filter(|(prefix, _)| unicast_family(*prefix) == family)
+                    .filter(|prefix| unicast_family(*prefix) == family)
                     .collect(),
             ),
             (_, Safi::FlowSpec) => RefreshStaleIdentities::FlowSpec(
@@ -199,9 +209,14 @@ impl PeerSession {
 
     fn sweep_refresh_accounting(&mut self, stale: RefreshStaleIdentities) {
         match stale {
-            RefreshStaleIdentities::Unicast(keys) => {
+            RefreshStaleIdentities::UnicastPlain(keys) => {
+                for prefix in keys {
+                    self.known_plain_prefixes.remove(&prefix);
+                }
+            }
+            RefreshStaleIdentities::UnicastAddPath(keys) => {
                 for (prefix, path_id) in keys {
-                    self.forget_known_path(prefix, path_id);
+                    self.forget_known_add_path(prefix, path_id);
                 }
             }
             RefreshStaleIdentities::FlowSpec(keys) => {
@@ -374,15 +389,20 @@ impl PeerSession {
 
     pub(super) fn apply_refresh_accounting_delta(&mut self, delta: RefreshAccountingDelta) {
         for (prefix, path_id) in delta.unicast {
-            if let Some(RefreshMaxPrefixWindow {
-                stale: RefreshStaleIdentities::Unicast(stale),
-                ..
-            }) = self
+            if let Some(window) = self
                 .refresh_accounting
                 .windows
                 .get_mut(&unicast_family(prefix))
             {
-                stale.remove(&(prefix, path_id));
+                match &mut window.stale {
+                    RefreshStaleIdentities::UnicastPlain(stale) => {
+                        stale.remove(&prefix);
+                    }
+                    RefreshStaleIdentities::UnicastAddPath(stale) => {
+                        stale.remove(&(prefix, path_id));
+                    }
+                    _ => debug_assert!(false, "unicast family has non-unicast ERR snapshot"),
+                }
             }
         }
         for key in delta.flowspec {
@@ -467,7 +487,8 @@ impl PeerSession {
             .windows
             .get(&family)
             .map(|window| match &window.stale {
-                RefreshStaleIdentities::Unicast(keys) => keys.len(),
+                RefreshStaleIdentities::UnicastPlain(keys) => keys.len(),
+                RefreshStaleIdentities::UnicastAddPath(keys) => keys.len(),
                 RefreshStaleIdentities::FlowSpec(keys) => keys.len(),
                 RefreshStaleIdentities::Evpn(keys) => keys.len(),
                 RefreshStaleIdentities::BgpLs(keys) => keys.len(),

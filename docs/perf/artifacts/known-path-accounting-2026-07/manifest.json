@@ -1,0 +1,98 @@
+{
+  "receipt_version": 1,
+  "control_source_sha": "f9b762db4f9ccec85040bb68136e818ff8ba53fd",
+  "candidate_patch_sha256": "47fdbb8473822bfd14b1a66080966ffdfc86f8f42119e6f05cfb4609f835d8a5",
+  "candidate_source_archive_sha256": "ba9109228441312521c7d35462fdb5beb9a48033d80f44f34ae9243c43dc125e",
+  "candidate_snapshot_byte_equal_to_measured_code_diff": true,
+  "measured_code_paths": [
+    "crates/transport/src/session/inbound.rs",
+    "crates/transport/src/session/mod.rs",
+    "crates/transport/src/session/refresh_accounting.rs",
+    "crates/transport/src/session/tests.rs"
+  ],
+  "host": {
+    "cpu": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "physical_cores": 32,
+    "logical_cpus": 64,
+    "memory_bytes": 134532804608,
+    "kernel": "Linux 6.17.0-35-generic #35~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 19:30:42 UTC 2 x86_64",
+    "cpu_governor": "performance"
+  },
+  "build": {
+    "cargo_lock_sha256": "3b37ed8efeed6e7b44052aec4f5fc4991d4439cd745828f0c071b2d4423c29fb",
+    "bgperf2_revision": "fe4fdab9f7efb56e2e98ad6e6bcffeda047761a9",
+    "rust_toolchain": "1.95",
+    "builder_base": "rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+    "runtime_base": "debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    "no_cache": true,
+    "images": {
+      "baseline_release": "sha256:39f721b235eea80d07e89f61f8a6d24d7c329242eb3ee3b0b22977d37dc696ff",
+      "candidate_release": "sha256:97932766748b4d834ff41c92f0884e6533a61e04f5355139bf7986beb12d22b4",
+      "baseline_dhat": "sha256:ff478114f21689c50828f724c4c487e2d99d7d3b17b9dc7a7565a5a169901985",
+      "candidate_dhat": "sha256:d837ad4ffc5e1fad7bf2c9fcf7236a20b41cbdbf9844ebb960e0ff1f19500eac"
+    }
+  },
+  "workload": {
+    "tester": "BIRD",
+    "tester_peers": 2,
+    "prefixes_per_peer": 100000,
+    "unique_ipv4_prefixes": 200000,
+    "monitor": "GoBGP",
+    "required_routes": 200000,
+    "add_path_configured": false
+  },
+  "release_matrix": {
+    "admitted_order": ["release-b1", "release-c1", "release-c2", "release-b2", "release-b3", "release-c3"],
+    "all_received": 200000,
+    "all_tester_errors": 0,
+    "all_tester_timeouts_reported": 0,
+    "baseline_mean_total_seconds": 12.2666666667,
+    "candidate_mean_total_seconds": 12.2066666667,
+    "candidate_total_time_delta_percent": -0.4891304348,
+    "baseline_median_rss_bytes": 252059648,
+    "candidate_median_rss_bytes": 240840704,
+    "candidate_rss_delta_percent": -4.4509083818,
+    "rejected_attempts": [
+      {"slot": "release-c1", "tester_errors": 2, "reason": "BGP connection-collision RMT"},
+      {"slot": "release-c1", "tester_errors": 1, "reason": "BGP connection-collision RMT"},
+      {"slot": "release-b3", "tester_errors": 1, "reason": "BGP connection-collision RMT"},
+      {"slot": "release-b3", "tester_errors": 1, "reason": "BGP connection-collision RMT"}
+    ],
+    "excluded_recovery_warmup": {
+      "slot": "release-b1",
+      "tester_errors": 1,
+      "reason": "collision record and no retained final result row"
+    }
+  },
+  "dhat": {
+    "baseline": {
+      "received": 200000,
+      "tester_errors": 0,
+      "known_path_bytes": 15204416,
+      "total_tracked_live_heap_bytes": 210602454
+    },
+    "candidate": {
+      "received": 200000,
+      "tester_errors": 0,
+      "known_path_bytes": 4980768,
+      "total_tracked_live_heap_bytes": 200073124
+    },
+    "known_path_reduction_percent": 67.241307,
+    "total_tracked_heap_reduction_percent": 4.999624
+  },
+  "gates": {
+    "known_path_reduction_at_least_40_percent": true,
+    "total_tracked_heap_reduction_at_least_3_percent": true,
+    "no_confirmed_throughput_regression_at_least_3_percent": true
+  },
+  "classifiers": {
+    "classify_dhat.py": "09b87e50867679f16c51d1f6440ada06c776e14f34b4a085cf665227cdb04381",
+    "sanitize_bgperf_csv.py": "969dbc4b8d33f13e1282223d5cda18a4fa7b1e1397b1bde9124378990c60fc22"
+  },
+  "raw_inputs_committed": {
+    "dhat_json": false,
+    "bgperf_samples": false,
+    "daemon_logs": false,
+    "rejected_attempts": false
+  }
+}

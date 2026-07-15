@@ -228,12 +228,18 @@ pub(crate) struct PeerSession {
     /// Last session-down cause for BMP Peer Down reason classification.
     /// Set by `SendNotification` (local) or inbound Notification (remote).
     last_down_reason: Option<PeerDownReason>,
-    /// Accepted unicast paths keyed by `(prefix, path_id)`.
+    /// Accepted plain (non-Add-Path receive) unicast prefixes.
+    ///
+    /// The negotiated receive direction, not the wire `path_id` value, selects
+    /// this compact store. In particular, Add-Path identity zero is valid and
+    /// must remain in `known_paths` instead.
+    known_plain_prefixes: HashSet<Prefix>,
+    /// Accepted Add-Path receive unicast paths keyed by `(prefix, path_id)`.
     ///
     /// This remains the authoritative Add-Path identity set; the unique-prefix
     /// max-prefix count is maintained in `known_prefix_refcounts`.
     known_paths: HashSet<(Prefix, u32)>,
-    /// Reference count of accepted unicast paths per prefix.
+    /// Reference count of accepted Add-Path receive unicast paths per prefix.
     ///
     /// Kept in sync with `known_paths` so max-prefix enforcement can count
     /// unique prefixes without rebuilding a temporary set on every UPDATE.
@@ -459,7 +465,8 @@ impl PeerSession {
     /// RT-Constrain membership. Used by max-prefix enforcement so a peer cannot
     /// slip past the cap by flooding non-unicast NLRI.
     pub(super) fn known_prefix_count(&self) -> usize {
-        self.known_prefix_refcounts.len()
+        self.known_plain_prefixes.len()
+            + self.known_prefix_refcounts.len()
             + self.known_flowspec.len()
             + self.known_evpn.len()
             + self.known_bgpls.len()
@@ -468,7 +475,41 @@ impl PeerSession {
             + self.known_rtc.len()
     }
 
+    fn receives_add_path_for_family(&self, family: (Afi, Safi)) -> bool {
+        self.add_path_receive_families.contains(&family)
+    }
+
+    fn receives_add_path_for_prefix(&self, prefix: Prefix) -> bool {
+        self.receives_add_path_for_family(match prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        })
+    }
+
+    #[cfg(test)]
+    fn known_unicast_storage_counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.known_plain_prefixes.len(),
+            self.known_paths.len(),
+            self.known_prefix_refcounts.len(),
+            self.known_prefix_refcounts.values().sum(),
+        )
+    }
+
     fn remember_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.receives_add_path_for_prefix(prefix) {
+            let inserted = self.known_plain_prefixes.insert(prefix);
+            debug_assert!(
+                !self.known_prefix_refcounts.contains_key(&prefix)
+                    && !self
+                        .known_paths
+                        .iter()
+                        .any(|(known_prefix, _)| *known_prefix == prefix),
+                "plain unicast prefix leaked into Add-Path accounting"
+            );
+            return inserted;
+        }
+
         if !self.known_paths.insert((prefix, path_id)) {
             return false;
         }
@@ -477,6 +518,14 @@ impl PeerSession {
     }
 
     fn forget_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.receives_add_path_for_prefix(prefix) {
+            return self.known_plain_prefixes.remove(&prefix);
+        }
+
+        self.forget_known_add_path(prefix, path_id)
+    }
+
+    fn forget_known_add_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
         if !self.known_paths.remove(&(prefix, path_id)) {
             return false;
         }
@@ -503,6 +552,7 @@ impl PeerSession {
     }
 
     fn clear_known_routes(&mut self) {
+        self.known_plain_prefixes.clear();
         self.known_paths.clear();
         self.known_prefix_refcounts.clear();
         self.known_flowspec.clear();
@@ -672,6 +722,7 @@ impl PeerSession {
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,
+            known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),
@@ -803,6 +854,7 @@ impl PeerSession {
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,
+            known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
             known_flowspec: HashSet::new(),

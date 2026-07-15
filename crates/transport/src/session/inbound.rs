@@ -2038,11 +2038,11 @@ impl PeerSession {
                     });
             }
         }
-        // 4. Max-prefix enforcement — maintain the per-prefix refcount
-        //    (`known_prefix_refcounts`) alongside the Add-Path identity set.
-        //    Counts unicast unique prefixes + FlowSpec rules + EVPN keys
-        //    so a peer can't bypass the cap by flooding a non-unicast
-        //    family.
+        // 4. Max-prefix enforcement — ordinary unicast uses the compact
+        //    prefix set; negotiated Add-Path receive families retain exact
+        //    identities plus per-prefix refcounts. Counts unicast unique
+        //    prefixes + FlowSpec rules + EVPN keys so a peer can't bypass the
+        //    cap by flooding a non-unicast family.
         for &(prefix, path_id) in &withdrawn {
             self.forget_known_path(prefix, path_id);
         }
