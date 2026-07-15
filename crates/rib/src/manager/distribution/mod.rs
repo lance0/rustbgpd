@@ -78,6 +78,17 @@ pub(in crate::manager) struct LazyCleanGroupPrior<'a> {
     pub(in crate::manager) deltas: &'a [super::update_groups::GroupDelta],
 }
 
+pub(in crate::manager) fn resolve_lazy_clean_group_prior<'a>(
+    eligible: bool,
+    peer: IpAddr,
+    group_id: Option<usize>,
+    staged_deltas: impl FnOnce(usize) -> Option<&'a [super::update_groups::GroupDelta]>,
+) -> Option<LazyCleanGroupPrior<'a>> {
+    let group_id = eligible.then_some(group_id).flatten()?;
+    let deltas = staged_deltas(group_id)?;
+    Some(LazyCleanGroupPrior { peer, deltas })
+}
+
 /// One-pass state shared by ordinary clean members of an update group.
 pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
     pub(in crate::manager) group_id: usize,
@@ -3800,11 +3811,25 @@ impl RibManager {
                 // regroup, overlay, VPN-bearing, or mixed-family envelope
                 // retains the existing eager prior and authoritative slow
                 // path.
-                let defer_clean_group_prior = !resync
+                let lazy_group_prior_eligible = !resync
                     && shared_unicast_cache_group.is_some()
                     && !has_non_unicast_route_payload
                     && !self.pending_regroup_baseline.contains_key(&peer)
                     && !self.peer_unexportable.contains_key(&peer);
+                // Resolve the optional borrowed stage before deciding whether
+                // eager prior construction may be suppressed. Missing group
+                // identity or staging must take the authoritative slow path.
+                let lazy_group_prior = resolve_lazy_clean_group_prior(
+                    lazy_group_prior_eligible,
+                    peer,
+                    shared_unicast_cache_group,
+                    |group_id| {
+                        group_stage
+                            .get(&group_id)
+                            .map(|stage| stage.deltas.as_slice())
+                    },
+                );
+                let defer_clean_group_prior = lazy_group_prior.is_some();
                 let group_prior = if let Some(gid) = member_of {
                     let mut prior = HashSet::new();
                     if is_dirty {
@@ -3869,17 +3894,6 @@ impl RibManager {
                 } else {
                     HashSet::new()
                 };
-                let lazy_group_prior = defer_clean_group_prior.then(|| {
-                    let gid = shared_unicast_cache_group
-                        .expect("deferred clean prior requires a shared update group");
-                    LazyCleanGroupPrior {
-                        peer,
-                        deltas: &group_stage
-                            .get(&gid)
-                            .expect("shared update-group payload requires staged deltas")
-                            .deltas,
-                    }
-                });
                 if self.try_send_and_commit_outbound_update_with_group_prior(
                     peer,
                     nh_override_flags,
