@@ -1,6 +1,437 @@
 use super::*;
 
+fn with_labeled_no_advertise(
+    mut route: crate::route::LabeledRibRoute,
+) -> crate::route::LabeledRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ]));
+    route
+}
+
+fn labeled_route_at(
+    peer: Ipv4Addr,
+    prefix: Prefix,
+    next_hop: IpAddr,
+    local_pref: u32,
+) -> crate::route::LabeledRibRoute {
+    let mut route = make_labeled_rib_route(peer, 42, 4093, local_pref);
+    route.nlri.prefix = prefix;
+    route.next_hop = next_hop;
+    route
+}
+
+fn add_no_advertise_for_next_hop(next_hop: IpAddr) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(next_hop),
+            modifications: rustbgpd_policy::RouteModifications {
+                communities_add: vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE],
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+fn drain_labeled_delta(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    state: &mut HashMap<crate::route::LabeledRibRouteKey, crate::route::LabeledRibRoute>,
+) -> (
+    Vec<crate::route::LabeledRibRoute>,
+    Vec<crate::route::LabeledRibRouteKey>,
+) {
+    let mut announced = Vec::new();
+    let mut withdrawn = Vec::new();
+    while let Ok(update) = rx.try_recv() {
+        for route in update.labeled_announce {
+            state.insert(route.key(), route.clone());
+            announced.push(route);
+        }
+        for key in update.labeled_withdraw {
+            state.remove(&key);
+            withdrawn.push(key);
+        }
+    }
+    (announced, withdrawn)
+}
+
 // --- Receive / reflect / withdraw (the SAFI 4 mirror of tests/vpn.rs) ---
+
+/// A resolved ORR client selects the vantage-closest labeled winner while a
+/// plain client keeps the Loc-RIB winner. Source- and policy-produced
+/// `NO_ADVERTISE` withdraw that selected winner without falling back, for both
+/// labeled IPv4 and IPv6, and clearing the restriction restores it.
+///
+/// Break-to-red: deleting either single-best guard advertises the scoped Y
+/// winner; moving the source guard into ORR candidate filtering announces X;
+/// deleting `withdraw_existing` loses the exact path-0 withdrawals and leaves
+/// the state non-empty or prevents the identical winner from recovering.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stateful scenario pins dual-AFI plain/ORR winner suppression, zero fallback, exact withdrawal, and recovery"
+)]
+async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn() {
+    use crate::orr::fixtures::{A, B, X, Y};
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 1)),
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    feed_square_topology(&tx, feed).await;
+
+    let next_hop_x = IpAddr::V4(Ipv4Addr::new(10, 0, X, A));
+    let next_hop_y = IpAddr::V4(Ipv4Addr::new(10, 0, Y, A));
+    let vantage_b = IpAddr::V4(Ipv4Addr::new(10, 0, B, X));
+    let source_x = Ipv4Addr::new(192, 0, 2, 1);
+    let source_y = Ipv4Addr::new(192, 0, 2, 2);
+    let families = vec![
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::LabeledUnicast),
+    ];
+    let plain = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 30));
+    let orr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 31));
+    let mut receivers = Vec::new();
+    for (peer, vantage) in [(plain, None), (orr, Some(vantage_b))] {
+        let (out_tx, mut out_rx) = mpsc::channel(32);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+            sendable_families: families.clone(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: vantage,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        receivers.push((peer, out_rx, HashMap::new()));
+    }
+    let status = query_orr_status(&tx).await;
+    assert!(
+        status
+            .vantages
+            .iter()
+            .any(|entry| entry.vantage == vantage_b && entry.resolved),
+        "the ORR differential requires a resolved vantage"
+    );
+
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:442::".parse().unwrap(), 64));
+    let routes_x = vec![
+        labeled_route_at(source_x, v4, next_hop_x, 100),
+        labeled_route_at(source_x, v6, next_hop_x, 100),
+    ];
+    let routes_y = vec![
+        labeled_route_at(source_y, v4, next_hop_y, 100),
+        labeled_route_at(source_y, v6, next_hop_y, 100),
+    ];
+    let expected_keys: HashSet<_> = routes_x
+        .iter()
+        .map(crate::route::LabeledRibRoute::key)
+        .collect();
+    for (peer, routes) in [(source_x, routes_x.clone()), (source_y, routes_y.clone())] {
+        tx.send(RibUpdate::LabeledRoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            announced: routes,
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let _ = query_labeled_routes(&tx).await;
+    for (peer, out_rx, state) in &mut receivers {
+        let (announced, withdrawn) = drain_labeled_delta(out_rx, state);
+        assert!(!announced.is_empty(), "baseline must stage real output");
+        assert!(withdrawn.is_empty());
+        assert_eq!(state.keys().copied().collect::<HashSet<_>>(), expected_keys);
+        let expected_source = if *peer == plain { source_x } else { source_y };
+        assert!(
+            state
+                .values()
+                .all(|route| route.peer == IpAddr::V4(expected_source))
+        );
+    }
+
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source_y),
+        announced: routes_y
+            .iter()
+            .cloned()
+            .map(with_labeled_no_advertise)
+            .collect(),
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (_, plain_rx, plain_state) = &mut receivers[0];
+    let (announced, withdrawn) = drain_labeled_delta(plain_rx, plain_state);
+    assert!(announced.is_empty() && withdrawn.is_empty());
+    assert_eq!(plain_state.len(), 2);
+    let (_, orr_rx, orr_state) = &mut receivers[1];
+    let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
+    assert!(announced.is_empty(), "ORR must not fall back to X");
+    assert_eq!(withdrawn.len(), 2);
+    assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
+    assert!(
+        orr_state.is_empty(),
+        "withdrawals clear the stateful oracle"
+    );
+
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source_y),
+        announced: routes_y.clone(),
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
+    assert_eq!(announced.len(), 2);
+    assert!(withdrawn.is_empty());
+    assert!(
+        orr_state
+            .values()
+            .all(|route| route.peer == IpAddr::V4(source_y))
+    );
+
+    for (peer, _, _) in &receivers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: *peer,
+            export_policy: Some(add_no_advertise_for_next_hop(next_hop_y)),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+    }
+    let _ = query_labeled_routes(&tx).await;
+    let (_, plain_rx, plain_state) = &mut receivers[0];
+    let (announced, withdrawn) = drain_labeled_delta(plain_rx, plain_state);
+    assert!(announced.is_empty() && withdrawn.is_empty());
+    assert!(
+        plain_state
+            .values()
+            .all(|route| route.peer == IpAddr::V4(source_x))
+    );
+    let (_, orr_rx, orr_state) = &mut receivers[1];
+    let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
+    assert!(
+        announced.is_empty(),
+        "policy-scoped ORR winner has no fallback"
+    );
+    assert_eq!(withdrawn.len(), 2);
+    assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
+    assert!(orr_state.is_empty());
+
+    for (peer, _, _) in &receivers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: *peer,
+            export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+    }
+    let _ = query_labeled_routes(&tx).await;
+    let (_, plain_rx, plain_state) = &mut receivers[0];
+    let (announced, withdrawn) = drain_labeled_delta(plain_rx, plain_state);
+    assert!(announced.is_empty() && withdrawn.is_empty());
+    let (_, orr_rx, orr_state) = &mut receivers[1];
+    let (announced, withdrawn) = drain_labeled_delta(orr_rx, orr_state);
+    assert_eq!(announced.len(), 2);
+    assert!(withdrawn.is_empty());
+    assert_eq!(
+        orr_state.keys().copied().collect::<HashSet<_>>(),
+        expected_keys
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Labeled Add-Path removes scoped candidates before assigning outbound ranks,
+/// compacts surviving ranks, withdraws stale ranks, and restores the full set.
+///
+/// Break-to-red: deleting either Add-Path guard, moving it after the rank
+/// increment, or deleting stale-rank cleanup changes the raw rank-1 announce,
+/// loses the exact rank-2/rank-1 withdrawal, or prevents full recovery.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stateful scenario proves source and policy suppression, compact ranks, exact stale cleanup, and recovery"
+)]
+async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 40));
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        sendable_families: labeled_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: labeled_sendable(),
+        add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let best = make_labeled_rib_route(Ipv4Addr::new(192, 0, 2, 11), 43, 100, 200);
+    let second = make_labeled_rib_route(Ipv4Addr::new(192, 0, 2, 12), 43, 200, 100);
+    let prefix = best.nlri.key();
+    for route in [&best, &second] {
+        tx.send(RibUpdate::LabeledRoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let _ = query_labeled_routes(&tx).await;
+    let mut state = HashMap::new();
+    let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
+    assert!(!announced.is_empty(), "baseline must begin non-empty");
+    assert!(withdrawn.is_empty());
+    assert_eq!(state.len(), 2);
+    assert_eq!(
+        state[&crate::route::LabeledRibRouteKey { prefix, path_id: 1 }].peer,
+        best.peer
+    );
+    assert_eq!(
+        state[&crate::route::LabeledRibRouteKey { prefix, path_id: 2 }].peer,
+        second.peer
+    );
+
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer: best.peer,
+        announced: vec![with_labeled_no_advertise(best.clone())],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
+    assert_eq!(announced.len(), 1);
+    assert_eq!((announced[0].path_id, announced[0].peer), (1, second.peer));
+    assert_eq!(
+        withdrawn,
+        vec![crate::route::LabeledRibRouteKey { prefix, path_id: 2 }]
+    );
+    assert_eq!(state.len(), 1);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_addition_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![crate::route::LabeledRibRouteKey { prefix, path_id: 1 }]
+    );
+    assert!(state.is_empty());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
+    assert_eq!(announced.len(), 1);
+    assert_eq!((announced[0].path_id, announced[0].peer), (1, second.peer));
+    assert!(withdrawn.is_empty());
+
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer: best.peer,
+        announced: vec![best.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_labeled_routes(&tx).await;
+    let (announced, withdrawn) = drain_labeled_delta(&mut out_rx, &mut state);
+    assert_eq!(announced.len(), 2);
+    assert!(withdrawn.is_empty());
+    assert_eq!(state.len(), 2);
+    assert_eq!(
+        state[&crate::route::LabeledRibRouteKey { prefix, path_id: 1 }].peer,
+        best.peer
+    );
+    assert_eq!(
+        state[&crate::route::LabeledRibRouteKey { prefix, path_id: 2 }].peer,
+        second.peer
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
 
 /// A received labeled route must be reflected to an eligible (eBGP-export)
 /// peer, and a withdrawal must be staged with the prefix + path-id key.

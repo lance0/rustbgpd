@@ -189,6 +189,10 @@ impl RibManager {
                         continue;
                     }
 
+                    if super::no_advertise_export_suppressed(candidate.communities()) {
+                        continue;
+                    }
+
                     let aspath_str = if needs_as_path_string {
                         candidate
                             .as_path()
@@ -242,6 +246,9 @@ impl RibManager {
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
+                    }
+                    if super::no_advertise_export_suppressed(modified.communities()) {
+                        continue;
                     }
                     modified.path_id = next_rank;
 
@@ -345,6 +352,11 @@ impl RibManager {
                 continue;
             }
 
+            if super::no_advertise_export_suppressed(best.communities()) {
+                withdraw_existing(labeled_withdraw, existing_path_ids);
+                continue;
+            }
+
             let aspath_str = if needs_as_path_string {
                 best.as_path()
                     .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
@@ -391,6 +403,10 @@ impl RibManager {
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
+            }
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                withdraw_existing(labeled_withdraw, existing_path_ids);
+                continue;
             }
             modified.path_id = 0;
 
