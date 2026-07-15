@@ -17,6 +17,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   benchmark was rerun and no measured value or performance claim changed.
   (LAN-405)
 
+- **The v1 stable-surface gate now covers all inventoried contextual defaults.**
+  The dynamic-neighbor cap and address-/inheritance-dependent family set join
+  the existing resolver checks; the gate distinguishes their schema omission
+  representations from runtime values and pins `PeerManager` to the shared cap
+  resolver.
+
 - **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
   policy.** IPv4/IPv6 unicast checks both the stored source route before export
   policy and the modified route after policy across grouped and private

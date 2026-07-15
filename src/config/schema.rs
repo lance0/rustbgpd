@@ -13,6 +13,8 @@ use rustbgpd_wire::BgpRole;
 /// exactly one place (completes the LAN-211 dedup; `PeerConfig::default()`
 /// and the gRPC send-hold-time validation use the same constant).
 pub(super) const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
+/// Runtime cap used when `global.dynamic_neighbor_limit` is omitted.
+pub(super) const DEFAULT_DYNAMIC_NEIGHBOR_LIMIT: u32 = 100;
 pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
 
