@@ -115,6 +115,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 |
 | [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 |
 | [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 |
+| [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Proposed | 2026-07-15 |
 
 ## Template
 

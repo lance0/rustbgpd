@@ -25,6 +25,10 @@ surfaces; it does not promote the rest of the project out of alpha.
   are excluded fail-closed, while Flex-Algorithm data is ignored and no
   selectable non-default/Flex SPF is implemented.
 - Confederations are not implemented.
+- Transparent route-server export preserves the accepted route's next hop but
+  does not yet verify that the advertising client owns the wire next hop. See
+  the proposed, opt-in design in
+  [ADR-0107](adr/0107-route-server-next-hop-ownership.md).
 
 ## EVPN
 
