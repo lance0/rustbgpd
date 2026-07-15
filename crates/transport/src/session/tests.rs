@@ -10925,6 +10925,531 @@ async fn evpn_routes_counted_toward_max_prefix() {
         "teardown must clear max-prefix accounting"
     );
 }
+#[derive(Clone, Copy, Debug)]
+enum NonUnicastSafetyLoop {
+    AsPath,
+    Originator,
+}
+
+fn nonunicast_safety_session(
+    family: (Afi, Safi),
+    add_path: bool,
+    trigger: NonUnicastSafetyLoop,
+) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+    let remote_asn = match trigger {
+        NonUnicastSafetyLoop::AsPath => 65002,
+        NonUnicastSafetyLoop::Originator => 65001,
+    };
+    let (mut session, rib_rx) = make_test_session_with_rib(65001, remote_asn);
+    let mut negotiated = negotiated_session(remote_asn, false);
+    negotiated.negotiated_families = vec![family];
+    if add_path {
+        negotiated
+            .add_path_families
+            .insert(family, AddPathMode::Both);
+    }
+    negotiated.peer_route_refresh = true;
+    negotiated.peer_enhanced_route_refresh = true;
+    install_test_negotiated_session(&mut session, negotiated);
+    (session, rib_rx)
+}
+
+fn nonunicast_accepted_attrs() -> Vec<PathAttribute> {
+    vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]
+}
+
+fn nonunicast_safety_attrs(
+    session: &PeerSession,
+    trigger: NonUnicastSafetyLoop,
+) -> Vec<PathAttribute> {
+    let mut attrs = vec![PathAttribute::Origin(Origin::Igp)];
+    match trigger {
+        NonUnicastSafetyLoop::AsPath => attrs.push(PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65001])],
+        })),
+        NonUnicastSafetyLoop::Originator => {
+            attrs.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
+            attrs.push(PathAttribute::OriginatorId(
+                session.config.peer.local_router_id,
+            ));
+        }
+    }
+    attrs
+}
+
+fn empty_nonunicast_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> rustbgpd_wire::MpReachNlri {
+    rustbgpd_wire::MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        link_local_next_hop: None,
+        announced: vec![],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+        bgpls_announced: vec![],
+        labeled_announced: vec![],
+        vpn_announced: vec![],
+        rtc_announced: vec![],
+    }
+}
+
+fn empty_nonunicast_unreach(afi: Afi, safi: Safi) -> rustbgpd_wire::MpUnreachNlri {
+    rustbgpd_wire::MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
+        labeled_withdrawn: vec![],
+        vpn_withdrawn: vec![],
+        rtc_withdrawn: vec![],
+    }
+}
+
+fn nonunicast_update(
+    mut attrs: Vec<PathAttribute>,
+    reach: rustbgpd_wire::MpReachNlri,
+    unreach: Option<rustbgpd_wire::MpUnreachNlri>,
+    add_path: bool,
+) -> UpdateMessage {
+    attrs.push(PathAttribute::MpReachNlri(reach));
+    if let Some(unreach) = unreach {
+        attrs.push(PathAttribute::MpUnreachNlri(unreach));
+    }
+    UpdateMessage::build(&[], &[], &attrs, true, add_path, Ipv4UnicastMode::Body)
+}
+
+/// Both pre-policy loop rejections retire only exact accepted VPN Add-Path
+/// identities. A distinct explicit withdrawal is preserved, while novel and
+/// repeated rejected announcements remain silent.
+///
+/// Break-to-red: blindly appending rejected keys emits the novel identity;
+/// gating the explicit withdrawal drops it; omitting the synthetic withdrawal
+/// leaves known/max-prefix/refresh state at two.
+#[tokio::test]
+async fn safety_loop_vpn_replacements_are_presence_gated_for_both_afis() {
+    async fn exercise(afi: Afi, trigger: NonUnicastSafetyLoop) {
+        let family = (afi, Safi::MplsVpn);
+        let (mut session, mut rib_rx) = nonunicast_safety_session(family, true, trigger);
+        let prefix = match afi {
+            Afi::Ipv4 => VpnPrefix::v4(Ipv4Addr::new(10, 44, 5, 0), 24).unwrap(),
+            Afi::Ipv6 => VpnPrefix::v6("2001:db8:445::".parse().unwrap(), 64).unwrap(),
+            _ => unreachable!("fixture covers VPNv4/v6"),
+        };
+        let nlri = VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 45]),
+            prefix,
+        };
+        let key = |path_id| rustbgpd_rib::VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id,
+        };
+        let next_hop = match afi {
+            Afi::Ipv4 => IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            Afi::Ipv6 => IpAddr::V6("2001:db8::7".parse().unwrap()),
+            _ => unreachable!(),
+        };
+        let reach = |path_ids: &[u32]| {
+            let mut mp = empty_nonunicast_reach(afi, Safi::MplsVpn, next_hop);
+            mp.vpn_announced = path_ids
+                .iter()
+                .map(|path_id| rustbgpd_wire::VpnNlriEntry {
+                    path_id: *path_id,
+                    nlri: nlri.clone(),
+                })
+                .collect();
+            mp
+        };
+        let explicit = || {
+            let mut mp = empty_nonunicast_unreach(afi, Safi::MplsVpn);
+            mp.vpn_withdrawn = vec![rustbgpd_wire::VpnNlriEntry {
+                path_id: 22,
+                nlri: VpnNlri {
+                    labels: vec![],
+                    route_distinguisher: nlri.route_distinguisher,
+                    prefix: nlri.prefix,
+                },
+            }];
+            mp
+        };
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_accepted_attrs(),
+                reach(&[11, 33]),
+                None,
+                true,
+            ))
+            .await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::VpnRoutesReceived { ref announced, .. }) if announced.len() == 2
+        ));
+        session.begin_refresh_accounting(afi, Safi::MplsVpn);
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(&[11, 44]),
+                Some(explicit()),
+                true,
+            ))
+            .await;
+        let RibUpdate::VpnRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("VPN safety withdrawals reach RIB")
+        else {
+            panic!("expected VpnRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(22), key(11)]);
+        assert!(!session.known_vpn.contains(&key(44)));
+        assert!(session.known_vpn.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(&[11, 44]),
+                None,
+                true,
+            ))
+            .await;
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "repeated/novel rejects stay silent"
+        );
+    }
+
+    for trigger in [
+        NonUnicastSafetyLoop::AsPath,
+        NonUnicastSafetyLoop::Originator,
+    ] {
+        exercise(Afi::Ipv4, trigger).await;
+        exercise(Afi::Ipv6, trigger).await;
+    }
+}
+
+/// VPN-equivalent safety semantics apply to labeled-unicast without losing
+/// the Add-Path identity.
+///
+/// Break-to-red: removing the presence gate emits path 44; dropping the
+/// labeled rejected collection leaves path 11 known and refresh-stale.
+#[tokio::test]
+async fn safety_loop_labeled_replacements_are_presence_gated_for_both_afis() {
+    async fn exercise(afi: Afi, trigger: NonUnicastSafetyLoop) {
+        let family = (afi, Safi::LabeledUnicast);
+        let (mut session, mut rib_rx) = nonunicast_safety_session(family, true, trigger);
+        let prefix = match afi {
+            Afi::Ipv4 => Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 6, 0), 24)),
+            Afi::Ipv6 => Prefix::V6(Ipv6Prefix::new("2001:db8:446::".parse().unwrap(), 64)),
+            _ => unreachable!("fixture covers labeled IPv4/IPv6"),
+        };
+        let nlri = rustbgpd_wire::LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(4092, 0, true).unwrap()],
+            prefix,
+        };
+        let key = |path_id| rustbgpd_rib::LabeledRibRouteKey { prefix, path_id };
+        let next_hop = match afi {
+            Afi::Ipv4 => IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8)),
+            Afi::Ipv6 => IpAddr::V6("2001:db8::8".parse().unwrap()),
+            _ => unreachable!(),
+        };
+        let reach = |path_ids: &[u32]| {
+            let mut mp = empty_nonunicast_reach(afi, Safi::LabeledUnicast, next_hop);
+            mp.labeled_announced = path_ids
+                .iter()
+                .map(|path_id| rustbgpd_wire::LabeledNlriEntry {
+                    path_id: *path_id,
+                    nlri: nlri.clone(),
+                })
+                .collect();
+            mp
+        };
+        let explicit = || {
+            let mut mp = empty_nonunicast_unreach(afi, Safi::LabeledUnicast);
+            mp.labeled_withdrawn = vec![rustbgpd_wire::LabeledNlriEntry {
+                path_id: 22,
+                nlri: rustbgpd_wire::LabeledNlri {
+                    labels: vec![],
+                    prefix,
+                },
+            }];
+            mp
+        };
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_accepted_attrs(),
+                reach(&[11, 33]),
+                None,
+                true,
+            ))
+            .await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::LabeledRoutesReceived { ref announced, .. }) if announced.len() == 2
+        ));
+        session.begin_refresh_accounting(afi, Safi::LabeledUnicast);
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(&[11, 44]),
+                Some(explicit()),
+                true,
+            ))
+            .await;
+        let RibUpdate::LabeledRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("labeled safety withdrawals reach RIB")
+        else {
+            panic!("expected LabeledRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(22), key(11)]);
+        assert!(!session.known_labeled.contains(&key(44)));
+        assert!(session.known_labeled.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(&[11, 44]),
+                None,
+                true,
+            ))
+            .await;
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "repeated/novel rejects stay silent"
+        );
+    }
+
+    for trigger in [
+        NonUnicastSafetyLoop::AsPath,
+        NonUnicastSafetyLoop::Originator,
+    ] {
+        exercise(Afi::Ipv4, trigger).await;
+        exercise(Afi::Ipv6, trigger).await;
+    }
+}
+
+/// RTC loop rejection is presence-gated for both `AS_PATH` and RR-loop paths.
+///
+/// Break-to-red: deleting RTC rejected collection leaves the accepted NLRI
+/// live; blind append emits the novel NLRI; excluding the synthesized key from
+/// refresh capture leaves two stale identities.
+#[tokio::test]
+async fn safety_loop_rtc_replacements_are_presence_gated() {
+    use rustbgpd_wire::RtcNlri;
+
+    for trigger in [
+        NonUnicastSafetyLoop::AsPath,
+        NonUnicastSafetyLoop::Originator,
+    ] {
+        let family = (Afi::Ipv4, Safi::RtConstrain);
+        let (mut session, mut rib_rx) = nonunicast_safety_session(family, false, trigger);
+        let nlri =
+            |id: u16| RtcNlri::new(65002, 0x0002_FDEA_0000_0000 | u64::from(id), 96).unwrap();
+        let accepted = nlri(11);
+        let explicit = nlri(22);
+        let sibling = nlri(33);
+        let novel = nlri(44);
+        let key = |nlri| rustbgpd_rib::RtcRibRouteKey { nlri, path_id: 0 };
+        let reach = |nlris| {
+            let mut mp = empty_nonunicast_reach(
+                Afi::Ipv4,
+                Safi::RtConstrain,
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+            );
+            mp.rtc_announced = nlris;
+            mp
+        };
+        let unreach = |nlris| {
+            let mut mp = empty_nonunicast_unreach(Afi::Ipv4, Safi::RtConstrain);
+            mp.rtc_withdrawn = nlris;
+            mp
+        };
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_accepted_attrs(),
+                reach(vec![accepted, sibling]),
+                None,
+                false,
+            ))
+            .await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::RtcRoutesReceived { ref announced, .. }) if announced.len() == 2
+        ));
+        session.begin_refresh_accounting(Afi::Ipv4, Safi::RtConstrain);
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(vec![accepted, novel]),
+                Some(unreach(vec![explicit])),
+                false,
+            ))
+            .await;
+        let RibUpdate::RtcRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("RTC safety withdrawals reach RIB")
+        else {
+            panic!("expected RtcRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(explicit), key(accepted)]);
+        assert!(!session.known_rtc.contains(&key(novel)));
+        assert!(session.known_rtc.contains(&key(sibling)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(vec![accepted, novel]),
+                None,
+                false,
+            ))
+            .await;
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "repeated/novel rejects stay silent"
+        );
+    }
+}
+
+/// Both BGP-LS SAFIs use their SAFI-derived identity under both safety-loop
+/// branches; explicit withdrawals remain independent of rejected `MP_REACH`.
+///
+/// Break-to-red: deleting either branch's BGP-LS collection leaves the exact
+/// accepted topology object known and refresh-stale; blind append emits the
+/// novel object.
+#[tokio::test]
+async fn safety_loop_bgpls_replacements_are_presence_gated_for_both_safis() {
+    use rustbgpd_rib::BgpLsFamily;
+
+    fn nlri(safi: Safi, suffix: u8) -> BgpLsNlri {
+        match safi {
+            Safi::BgpLs => decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xcc, suffix]),
+            Safi::BgpLsVpn => decode_bgpls_vpn_nlri(&[
+                0xfd, 0xe8, 0, 11, 0, 0, 0xfd, 0xea, 0, 0, 0, 46, 0xaa, 0xcc, suffix,
+            ]),
+            _ => unreachable!("fixture covers BGP-LS SAFIs"),
+        }
+        .unwrap()
+        .pop()
+        .unwrap()
+    }
+
+    async fn exercise(safi: Safi, trigger: NonUnicastSafetyLoop) {
+        let afi = Afi::BgpLs;
+        let family = (afi, safi);
+        let typed_family = BgpLsFamily::from_afi_safi(afi, safi).unwrap();
+        let (mut session, mut rib_rx) = nonunicast_safety_session(family, false, trigger);
+        let accepted = nlri(safi, 11);
+        let explicit = nlri(safi, 22);
+        let sibling = nlri(safi, 33);
+        let novel = nlri(safi, 44);
+        let key = |nlri: &BgpLsNlri| rustbgpd_rib::BgpLsRouteKey {
+            family: typed_family,
+            nlri: nlri.key(),
+            path_id: 0,
+        };
+        let reach = |nlris| {
+            let mut mp =
+                empty_nonunicast_reach(afi, safi, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+            mp.bgpls_announced = nlris;
+            mp
+        };
+        let unreach = |nlris| {
+            let mut mp = empty_nonunicast_unreach(afi, safi);
+            mp.bgpls_withdrawn = nlris;
+            mp
+        };
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_accepted_attrs(),
+                reach(vec![accepted.clone(), sibling.clone()]),
+                None,
+                false,
+            ))
+            .await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::BgpLsRoutesReceived { ref announced, .. }) if announced.len() == 2
+        ));
+        session.begin_refresh_accounting(afi, safi);
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(vec![accepted.clone(), novel.clone()]),
+                Some(unreach(vec![explicit.clone()])),
+                false,
+            ))
+            .await;
+        let RibUpdate::BgpLsRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("BGP-LS safety withdrawals reach RIB")
+        else {
+            panic!("expected BgpLsRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(&explicit), key(&accepted)]);
+        assert!(!session.known_bgpls.contains(&key(&novel)));
+        assert!(session.known_bgpls.contains(&key(&sibling)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        session
+            .process_update(nonunicast_update(
+                nonunicast_safety_attrs(&session, trigger),
+                reach(vec![accepted, novel]),
+                None,
+                false,
+            ))
+            .await;
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "repeated/novel rejects stay silent"
+        );
+    }
+
+    for trigger in [
+        NonUnicastSafetyLoop::AsPath,
+        NonUnicastSafetyLoop::Originator,
+    ] {
+        exercise(Safi::BgpLs, trigger).await;
+        exercise(Safi::BgpLsVpn, trigger).await;
+    }
+}
+
 /// A loop-detected UPDATE (RR cluster-list loop) must synthesize RTC
 /// withdrawals from both the `MP_UNREACH` withdrawals and the discarded
 /// `MP_REACH` announcements, so a looped re-announcement cannot strand a

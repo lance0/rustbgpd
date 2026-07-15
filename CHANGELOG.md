@@ -184,9 +184,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Pre-policy safety rejections withdraw prior accepted unicast paths.**
-  OTC, AS_PATH-loop, and route-reflector-loop rejects now retire the exact
-  accepted `(prefix, path_id)` while first-seen rejects remain filter-only.
+- **Pre-policy safety rejections withdraw prior accepted paths.** OTC rejects
+  retire exact accepted unicast `(prefix, path_id)` identities. AS_PATH-loop
+  and route-reflector-loop rejects also retire exact VPN, labeled-unicast, RTC,
+  and BGP-LS identities while preserving distinct explicit withdrawals and
+  Add-Path siblings. First-seen and repeated rejects remain filter-only.
 
 - **Import-policy-denied unicast, VPN, labeled-unicast, RTC, and BGP-LS replacements
   withdraw prior accepted paths.** Classic and MP-unicast updates retire the

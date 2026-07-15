@@ -54,7 +54,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ---
 
-## Inbound import-policy replacement semantics
+## Inbound filtered-replacement semantics
 
 - Import-policy denial of a replacement retires the exact previously accepted
   VPN `(RD + prefix, path_id)`, labeled-unicast `(prefix, path_id)`, RTC
@@ -62,6 +62,11 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   denials remain filter-only, explicit overlapping withdrawals are deduplicated,
   and Add-Path siblings remain intact. EVPN and FlowSpec retain their existing
   policy behavior.
+- `AS_PATH`-loop and route-reflector-loop rejection likewise retires an exact
+  previously accepted VPN, labeled-unicast, RTC, or BGP-LS replacement.
+  First-seen and repeated rejected announcements remain silent, distinct valid
+  `MP_UNREACH_NLRI` withdrawals still propagate, and exact Add-Path siblings
+  remain intact.
 
 ---
 
