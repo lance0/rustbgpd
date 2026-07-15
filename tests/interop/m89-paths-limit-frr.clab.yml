@@ -1,0 +1,87 @@
+# Containerlab topology: 3x FRR sources -> rustbgpd route server -> FRR sink
+# (M89 -- experimental Paths-Limit capability 76)
+
+name: m89-paths-limit-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m89-paths-limit.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.89.1.1/24 dev eth1
+        - ip -6 addr add fd89:1::1/64 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.89.2.1/24 dev eth2
+        - ip -6 addr add fd89:2::1/64 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.89.3.1/24 dev eth3
+        - ip -6 addr add fd89:3::1/64 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.89.4.1/24 dev eth4
+        - ip -6 addr add fd89:4::1/64 dev eth4
+        - ip link set eth4 up
+      env:
+        RUST_LOG: info
+
+    source-a:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m89-source-a.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.89.1.2/24 dev eth1
+        - ip -6 addr add fd89:1::2/64 dev eth1
+        - ip link set eth1 up
+
+    source-b:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m89-source-b.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.89.2.2/24 dev eth1
+        - ip -6 addr add fd89:2::2/64 dev eth1
+        - ip link set eth1 up
+
+    source-c:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m89-source-c.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.89.3.2/24 dev eth1
+        - ip -6 addr add fd89:3::2/64 dev eth1
+        - ip link set eth1 up
+
+    sink:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m89-sink.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.89.4.2/24 dev eth1
+        - ip -6 addr add fd89:4::2/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "source-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "source-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "source-c:eth1"]
+    - endpoints: ["rustbgpd:eth4", "sink:eth1"]
+
+# All BGP sessions use IPv4 transport and negotiate IPv4 + IPv6 unicast.
+# Distinct source ASNs originate the same prefix in both families. The sink's
+# per-family receive limits are the independent FRR oracle for rustbgpd's cap.
