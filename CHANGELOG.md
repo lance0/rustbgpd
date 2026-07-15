@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The route-server starter now applies documented dual-stack ingress
+  hygiene.** Its policy rejects both default routes and a dated 2025-10-09
+  snapshot of active IANA special-purpose rows marked non-globally reachable,
+  while preserving active globally reachable or N/A children of broader
+  rejected parents. Production-loader tests pin the complete snapshot, parent
+  exceptions, chain order, and later RPKI, ASPA, and prefix-length guards.
+  M83 retains an explicitly reduced IPv4 lab projection because its
+  deterministic probes use RFC 6598 and TEST-NET-3 space. (LAN-437)
+
 - **The committed July RIB rebaseline receipt is self-verifying again.** The
   eight CPU derivatives now match the current classifier, and CI replays both
   checksum envelopes plus every CPU, DHAT, and sanitized CSV derivative. No

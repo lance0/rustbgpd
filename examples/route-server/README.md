@@ -7,7 +7,32 @@ with OTC, RPKI origin validation, and both path-hiding mitigations.
 | File | Purpose |
 |---|---|
 | `config.toml` | Daemon config: two members, RPKI, policy chain |
-| `hygiene.rpol` | Import hygiene in the rpol policy language: reject AS_SET, reject ASPA-invalid, tag RPKI outcomes as RFC 8097 `OV_*` extended communities — with in-language tests |
+| `hygiene.rpol` | Import hygiene in the rpol policy language: reject AS_SET and ASPA-invalid paths, reject a dated dual-stack special-purpose prefix snapshot, and tag RPKI outcomes as RFC 8097 `OV_*` extended communities — with in-language tests |
+
+## Special-purpose prefix starter
+
+`hygiene.rpol` carries a curated starter snapshot of the IANA IPv4 and IPv6
+Special-Purpose Address Registries, both updated 2025-10-09 and reviewed for
+this example on 2026-07-15. It rejects the two default routes and active rows
+whose `Globally Reachable` value is `False`. Active `True` or `N/A` children of
+a rejected parent are accepted first. This is not a complete or live bogon
+feed: terminated rows, unallocated address space, multicast, and unrelated
+`True`/`N/A` rows are deliberately outside its scope.
+
+Treat the list as deployment data. Before rollout, compare both IANA
+registries with local exchange policy, update the snapshot/review dates and
+the two prefix sets together, then run:
+
+```bash
+rbgp policy fmt --check hygiene.rpol
+rbgp policy check hygiene.rpol
+rustbgpd --check config.toml
+```
+
+The long-prefix guard remains a separate, later chain member. If the exchange
+accepts RFC 7999 BLACKHOLE more-specifics, do not add a blanket bypass: put a
+narrow member/prefix-authorized exception inside that length policy, before
+its generic deny, and test both the exception and an unauthorized control.
 
 ## Path-hiding (RFC 7947 §2.3), both mitigations
 

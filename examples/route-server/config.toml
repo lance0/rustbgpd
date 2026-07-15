@@ -6,7 +6,8 @@
 #   role capability negotiated when the member also sets its role)
 # - dual-stack (IPv4 + IPv6 unicast)
 # - RPKI origin validation (drop invalid, prefer valid) and import
-#   hygiene (reject AS_SET, reject ASPA-invalid — see hygiene.rpol)
+#   hygiene (reject AS_SET, ASPA-invalid, and a dated dual-stack
+#   special-purpose prefix snapshot — see hygiene.rpol)
 #
 # Path-hiding mitigation (RFC 7947 §2.3.2), both flavors:
 # - member-alpha negotiates Add-Path send: it sees all candidate paths
@@ -60,24 +61,6 @@ address = "127.0.0.1:3323"       # Routinator, rpki-client, etc.
 match_rpki_validation = "invalid"
 action = "deny"
 
-[policy.definitions.reject-bogon-prefixes]
-default_action = "permit"
-[[policy.definitions.reject-bogon-prefixes.statements]]
-prefix = "0.0.0.0/0"
-action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
-prefix = "10.0.0.0/8"
-le = 32
-action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
-prefix = "172.16.0.0/12"
-le = 32
-action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
-prefix = "192.168.0.0/16"
-le = 32
-action = "deny"
-
 [policy.definitions.reject-long-prefixes]
 default_action = "permit"
 [[policy.definitions.reject-long-prefixes.statements]]
@@ -102,13 +85,13 @@ action = "permit"
 set_local_pref = 100
 
 [policy]
-# ixp-hygiene (reject AS_SET, reject ASPA-invalid) lives in hygiene.rpol;
-# rpol and TOML policies share one namespace and compose in one chain.
+# ixp-hygiene and reject-special-purpose live in hygiene.rpol; rpol and
+# TOML policies share one namespace and compose in one ordered chain.
 rpol_files = ["hygiene.rpol"]
 import_chain = [
     "reject-rpki-invalid",
     "ixp-hygiene",
-    "reject-bogon-prefixes",
+    "reject-special-purpose",
     "reject-long-prefixes",
     "prefer-rpki-valid",
 ]
