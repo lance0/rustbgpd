@@ -155,9 +155,11 @@ fn route_server_test_prefix(value: &str) -> Prefix {
         .unwrap_or_else(|error| panic!("test prefix {value:?} has an invalid address: {error}"))
     {
         std::net::IpAddr::V4(address) => {
+            assert!(length <= 32, "IPv4 test prefix {value:?} exceeds /32");
             Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(address, length))
         }
         std::net::IpAddr::V6(address) => {
+            assert!(length <= 128, "IPv6 test prefix {value:?} exceeds /128");
             Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(address, length))
         }
     }
@@ -184,7 +186,10 @@ fn route_server_test_context(
         peer_asn: None,
         peer_group: None,
         route_type: None,
-        family: None,
+        family: Some(match prefix {
+            Prefix::V4(_) => rustbgpd_policy::RouteFamily::Ipv4Unicast,
+            Prefix::V6(_) => rustbgpd_policy::RouteFamily::Ipv6Unicast,
+        }),
         evpn_route_type: None,
         local_pref: None,
         med: None,
@@ -227,7 +232,10 @@ fn assert_route_server_prefix_set(
 )]
 fn route_server_example_special_purpose_snapshot() {
     let config = route_server_example_config();
-    let neighbor = &config.neighbors[0];
+    let neighbor = config
+        .neighbors
+        .first()
+        .expect("route-server example has a neighbor");
     let (import, _) = config
         .effective_policy_chains_for_neighbor(neighbor)
         .expect("route-server example policy chains resolve");
@@ -360,7 +368,10 @@ fn route_server_example_special_purpose_snapshot() {
 )]
 fn route_server_example_exception_chain_preserves_later_guards() {
     let config = route_server_example_config();
-    let neighbor = &config.neighbors[0];
+    let neighbor = config
+        .neighbors
+        .first()
+        .expect("route-server example has a neighbor");
     let (import, _) = config
         .effective_policy_chains_for_neighbor(neighbor)
         .expect("route-server example policy chains resolve");
