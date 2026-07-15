@@ -255,6 +255,28 @@ new AFI/SAFI and EVPN dataplane expansion.
   typed API-error migration and decide the v1 posture for live management-plane
   credential rotation and received eBGP-only attributes. Privilege separation
   remains a larger architectural choice, not a release-checkbox claim.
+- **Quantify the single-owner RIB actor ceiling before committing to sharding.**
+  The exact-export precommit and the grouped policy transition moved more
+  synchronous work onto the single `RibManager` actor — two un-chunked O(table)
+  snapshot polls plus an O(outbound-peers + table × dirty/forced-peers) finalize
+  tail, recorded as explicit bounds in ADR-0105.
+  `bgp_rib_policy_transition_actor_poll_duration_seconds` now instruments it, but
+  no run has exercised it at internet-table scale. Measure the worst-case actor
+  poll under a ~1M-route reload/churn to settle whether a single poll can exceed
+  the readiness deadline and to produce the named-workload number that gates
+  ADR-0100 parallel-RibManager (LAN-433). Sharding stays measurement-gated; the
+  cheaper alternative — chunking the two snapshot polls — is the first candidate
+  if a poll breaches readiness but the end-to-end evidence still does not justify
+  sharding.
+- **Prove recently hardened transition paths against independent stacks before
+  broadening support claims.** Live TCP-AO rotation (M43) and GR helper /
+  graceful shutdown (M11/M35) have real-peer labs, but graceful-restart
+  selection-deferral / collision-failback (the one place a real regression landed
+  this cycle) and exact-export single-NLRI rejection still rest on internal tests.
+  Add GoBGP/FRR/BIRD receipts where each behavior is supported, asserting the
+  wire-observable outcome (LAN-434). Experimental Paths-Limit has its own
+  FRR-based cross-vendor receipt item below and remains outside the v1 stable
+  contract.
 
 ### Next (research-shaped, July 2026)
 
