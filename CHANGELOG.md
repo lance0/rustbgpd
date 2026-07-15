@@ -33,14 +33,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolver.
 
 - **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
-  policy.** IPv4/IPv6 unicast checks both the stored source route before export
-  policy and the modified route after policy across grouped and private
-  single-best, Add-Path, RFC 7947 per-client-best, and RFC 9107 ORR. Policy
-  cannot remove the community to make a scoped route exportable, and a
-  policy-added community suppresses the resulting route before Adj-RIB-Out
-  commit. Scoped replacements withdraw existing state; candidate modes compact
-  surviving siblings, while ORR suppresses its selected winner without falling
-  back.
+  policy.** IPv4/IPv6 unicast and VPNv4/VPNv6 check both the stored source
+  route before export policy and the modified route after policy across grouped
+  and private single-best plus Add-Path; unicast also covers RFC 7947
+  per-client-best and RFC 9107 ORR. Policy cannot remove the community to make
+  a scoped route exportable, and a policy-added community suppresses the
+  resulting route before Adj-RIB-Out commit. Scoped replacements withdraw
+  existing state; candidate modes compact surviving siblings, while ORR
+  suppresses its selected winner without falling back.
   Terminal export explain reports suppression and, for a post-policy stop,
   shows the triggering modification; Add-Path best-path explain mirrors the
   compacted advertised ranks.
@@ -186,11 +186,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   OTC, AS_PATH-loop, and route-reflector-loop rejects now retire the exact
   accepted `(prefix, path_id)` while first-seen rejects remain filter-only.
 
-- **Import-policy-denied unicast replacements withdraw prior accepted paths.**
-  Classic and MP-unicast updates denied on import now retire the exact
-  `(prefix, path_id)` previously accepted from that peer and send the removal
-  to the RIB immediately. First-seen denials remain filter-only, explicit
-  withdrawals are deduplicated, and Add-Path siblings stay intact.
+- **Import-policy-denied unicast and VPN replacements withdraw prior accepted
+  paths.** Classic and MP-unicast updates retire the exact `(prefix, path_id)`;
+  VPNv4/VPNv6 updates retire the exact `(RD + prefix, path_id)` previously
+  accepted from that peer and send the removal to the RIB immediately.
+  First-seen denials remain filter-only, explicit withdrawals are deduplicated,
+  and Add-Path siblings stay intact.
 
 - **Enhanced-refresh omissions no longer poison max-prefix accounting.**
   Inbound RFC 7313 windows now mirror exact typed route identities across every

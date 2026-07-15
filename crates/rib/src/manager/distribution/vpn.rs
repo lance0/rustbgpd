@@ -228,6 +228,10 @@ impl RibManager {
                         continue;
                     }
 
+                    if super::no_advertise_export_suppressed(candidate.communities()) {
+                        continue;
+                    }
+
                     let aspath_str = if needs_as_path_string {
                         candidate
                             .as_path()
@@ -276,6 +280,9 @@ impl RibManager {
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
+                    }
+                    if super::no_advertise_export_suppressed(modified.communities()) {
+                        continue;
                     }
                     modified.path_id = next_rank;
 
@@ -517,6 +524,20 @@ impl RibManager {
                 || "iBGP split-horizon / RFC 4456 reflection rules permit this route".to_string(),
             );
 
+            if super::no_advertise_export_suppressed(best.communities()) {
+                target.gate(
+                    "no_advertise",
+                    "no_advertise_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "source route carries NO_ADVERTISE; RFC 1997 forbids advertising it"
+                            .to_string()
+                    },
+                );
+                withdraw_existing(vpn_withdraw, existing_path_ids);
+                continue;
+            }
+
             let aspath_str = if needs_as_path_string {
                 best.as_path()
                     .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
@@ -603,6 +624,19 @@ impl RibManager {
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
+            }
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                target.gate(
+                    "no_advertise",
+                    "no_advertise_policy_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "export policy produced NO_ADVERTISE; RFC 1997 forbids advertising it"
+                            .to_string()
+                    },
+                );
+                withdraw_existing(vpn_withdraw, existing_path_ids);
+                continue;
             }
             modified.path_id = 0;
 

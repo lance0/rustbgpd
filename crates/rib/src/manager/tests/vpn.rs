@@ -1,5 +1,63 @@
 use super::*;
 
+fn with_vpn_no_advertise(mut route: VpnRibRoute) -> VpnRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ]));
+    route
+}
+
+fn make_vpn_v6_rib_route(peer: Ipv4Addr, local_pref: u32) -> VpnRibRoute {
+    VpnRibRoute {
+        nlri: VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(300, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 2]),
+            prefix: VpnPrefix::v6("2001:db8:442::".parse().unwrap(), 64).unwrap(),
+        },
+        next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    }
+}
+
+fn drain_vpn_delta(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> (Vec<VpnRibRoute>, Vec<crate::route::VpnRibRouteKey>) {
+    let mut announced = Vec::new();
+    let mut withdrawn = Vec::new();
+    while let Ok(update) = rx.try_recv() {
+        announced.extend(update.vpn_announce);
+        withdrawn.extend(update.vpn_withdraw);
+    }
+    (announced, withdrawn)
+}
+
+async fn query_vpn_group_label(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+        .await
+        .unwrap();
+    response.await.unwrap()
+}
+
+async fn query_vpn_advertised(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<(String, IpAddr)> {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryVpnAdvertised { peer, reply })
+        .await
+        .unwrap();
+    response.await.unwrap()
+}
+
 /// A peer entering GR with (IPv4, `MplsVpn`) in its capability keeps its VPN
 /// routes as stale. Staleness demotes the tiebreak rank, so a fresh route
 /// from another peer takes over; with every candidate stale the normal
@@ -353,6 +411,412 @@ async fn vpn_gr_consecutive_restart_deletes_stale_routes() {
     assert!(
         query_vpn_routes(&tx).await.is_empty(),
         "a route still stale at the next restart must be deleted, not re-marked"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Grouped and private VPN targets enforce RFC 1997 before and after export
+/// policy for both `VPNv4` and `VPNv6`, withdraw prior state, and recover when the
+/// restriction is removed.
+///
+/// Break-to-red: removing either single-best guard in `stage_vpn_routes`, or
+/// retaining the guard while deleting its `withdraw_existing`, makes the
+/// corresponding source/policy phase advertise or retain both exact keys.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario pins both VPN families across grouped/private source and policy transitions"
+)]
+async fn vpn_no_advertise_withdraws_grouped_and_private_single_best() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let grouped_a: IpAddr = "192.0.2.30".parse().unwrap();
+    let grouped_b: IpAddr = "192.0.2.31".parse().unwrap();
+    let private: IpAddr = "192.0.2.32".parse().unwrap();
+    let families = vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)];
+    let mut receivers = Vec::new();
+
+    for (peer, peer_context) in [(grouped_a, false), (grouped_b, false), (private, true)] {
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            session_id: 0,
+            peer,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(super::unicast::no_advertise_removal_chain(peer_context)),
+            sendable_families: families.clone(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        receivers.push((peer, out_rx));
+    }
+
+    let group = query_vpn_group_label(&tx, grouped_a).await;
+    assert!(group.starts_with("group:"));
+    assert_eq!(query_vpn_group_label(&tx, grouped_b).await, group);
+    assert_eq!(
+        query_vpn_group_label(&tx, private).await,
+        "policy_peer_context"
+    );
+
+    let source = Ipv4Addr::new(198, 51, 100, 10);
+    let v4 = make_vpn_rib_route(source, 42, 200, 200);
+    let v6 = make_vpn_v6_rib_route(source, 200);
+    let expected_keys: HashSet<_> = [v4.key(), v6.key()].into_iter().collect();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![v4.clone(), v6.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        let (announced, withdrawn) = drain_vpn_delta(out_rx);
+        assert_eq!(announced.len(), 2);
+        assert!(withdrawn.is_empty());
+    }
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![
+            with_vpn_no_advertise(v4.clone()),
+            with_vpn_no_advertise(v6.clone()),
+        ],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    for (peer, out_rx) in &mut receivers {
+        let (announced, withdrawn) = drain_vpn_delta(out_rx);
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 2, "each VPN identity withdraws once");
+        assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
+        assert!(query_vpn_advertised(&tx, *peer).await.is_empty());
+    }
+    for route in [&v4, &v6] {
+        let grouped_explain = query_explain_advertised_vpn_route(
+            &tx,
+            grouped_a,
+            route.inner_prefix(),
+            route.nlri.route_distinguisher,
+        )
+        .await;
+        let private_explain = query_explain_advertised_vpn_route(
+            &tx,
+            private,
+            route.inner_prefix(),
+            route.nlri.route_distinguisher,
+        )
+        .await;
+        assert!(grouped_explain.update_group_id.is_some());
+        assert!(private_explain.update_group_id.is_none());
+        assert_eq!(
+            grouped_explain.decision,
+            crate::update::ExplainDecision::Deny
+        );
+        assert_eq!(private_explain.decision, grouped_explain.decision);
+        assert_eq!(
+            grouped_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code)),
+            Some(("no_advertise", "no_advertise_suppressed"))
+        );
+        assert_eq!(
+            private_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code)),
+            grouped_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code))
+        );
+        assert!(grouped_explain.modifications.communities_remove.is_empty());
+    }
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![v4.clone(), v6.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        let (announced, withdrawn) = drain_vpn_delta(out_rx);
+        assert_eq!(announced.len(), 2);
+        assert!(withdrawn.is_empty());
+    }
+
+    for (peer, _) in &receivers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: *peer,
+            export_policy: Some(super::unicast::no_advertise_addition_chain(
+                *peer == private,
+            )),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+    }
+    let _ = query_vpn_routes(&tx).await;
+    for (peer, out_rx) in &mut receivers {
+        let (announced, withdrawn) = drain_vpn_delta(out_rx);
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 2, "each VPN identity withdraws once");
+        assert_eq!(withdrawn.into_iter().collect::<HashSet<_>>(), expected_keys);
+        assert!(query_vpn_advertised(&tx, *peer).await.is_empty());
+    }
+    for route in [&v4, &v6] {
+        let grouped_explain = query_explain_advertised_vpn_route(
+            &tx,
+            grouped_a,
+            route.inner_prefix(),
+            route.nlri.route_distinguisher,
+        )
+        .await;
+        let private_explain = query_explain_advertised_vpn_route(
+            &tx,
+            private,
+            route.inner_prefix(),
+            route.nlri.route_distinguisher,
+        )
+        .await;
+        assert!(grouped_explain.update_group_id.is_some());
+        assert!(private_explain.update_group_id.is_none());
+        assert_eq!(
+            grouped_explain.decision,
+            crate::update::ExplainDecision::Deny
+        );
+        assert_eq!(private_explain.decision, grouped_explain.decision);
+        assert_eq!(
+            grouped_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code)),
+            Some(("no_advertise", "no_advertise_policy_suppressed"))
+        );
+        assert_eq!(
+            private_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code)),
+            grouped_explain
+                .gates
+                .last()
+                .map(|gate| (gate.gate, gate.code))
+        );
+        assert!(
+            grouped_explain
+                .modifications
+                .communities_add
+                .contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+        );
+    }
+
+    for (peer, _) in &receivers {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: *peer,
+            export_policy: Some(super::unicast::no_advertise_removal_chain(*peer == private)),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+    }
+    let _ = query_vpn_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        let (announced, withdrawn) = drain_vpn_delta(out_rx);
+        assert_eq!(announced.len(), 2);
+        assert!(withdrawn.is_empty());
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// VPN Add-Path removes source- and policy-scoped candidates before assigning
+/// outbound ranks, compacts survivors, and withdraws stale ranks.
+///
+/// Break-to-red: deleting either Add-Path guard, or moving it after the rank
+/// increment, leaves the scoped best/rank hole or retains a policy-scoped rank.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves source suppression, policy suppression, rank compaction, stale cleanup, and recovery"
+)]
+async fn vpn_add_path_no_advertise_compacts_and_withdraws_ranks() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.40".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vpn_sendable(),
+        add_path_send_max: 2,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    assert_eq!(query_vpn_group_label(&tx, target).await, "add_path_send");
+
+    let best = make_vpn_rib_route(Ipv4Addr::new(198, 51, 100, 11), 43, 100, 200);
+    let second = make_vpn_rib_route(Ipv4Addr::new(198, 51, 100, 12), 43, 200, 100);
+    let nlri_key = best.nlri.key();
+    for route in [&best, &second] {
+        tx.send(RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let _ = query_vpn_routes(&tx).await;
+    let initial = drain_final_vpn(&mut out_rx);
+    assert_eq!(initial.len(), 2);
+    assert_eq!(
+        initial[&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1
+        }]
+            .peer,
+        best.peer
+    );
+    assert_eq!(
+        initial[&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 2
+        }]
+            .peer,
+        second.peer
+    );
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: best.peer,
+        announced: vec![with_vpn_no_advertise(best.clone())],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].path_id, 1);
+    assert_eq!(announced[0].peer, second.peer);
+    assert_eq!(
+        withdrawn,
+        vec![crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 2
+        }]
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_addition_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1
+        }]
+    );
+    assert!(query_vpn_advertised(&tx, target).await.is_empty());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(super::unicast::no_advertise_removal_chain(false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    let recovered = drain_final_vpn(&mut out_rx);
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1
+        }]
+            .peer,
+        second.peer
+    );
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: best.peer,
+        announced: vec![best.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_vpn_routes(&tx).await;
+    let recovered = drain_final_vpn(&mut out_rx);
+    assert_eq!(recovered.len(), 2);
+    assert_eq!(
+        recovered[&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 1
+        }]
+            .peer,
+        best.peer
+    );
+    assert_eq!(
+        recovered[&crate::route::VpnRibRouteKey {
+            nlri_key,
+            path_id: 2
+        }]
+            .peer,
+        second.peer
     );
 
     drop(tx);

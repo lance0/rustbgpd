@@ -1507,6 +1507,7 @@ impl PeerSession {
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
         let mut vpn_announced: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+        let mut denied_vpn: Vec<VpnRibRouteKey> = Vec::new();
         let mut labeled_announced: Vec<LabeledRibRoute> = Vec::new();
         let mut labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
         let mut rtc_announced: Vec<RtcRibRoute> = Vec::new();
@@ -1807,6 +1808,11 @@ impl PeerSession {
                                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                     is_stale: false,
                                     is_llgr_stale: false,
+                                    path_id: entry.path_id,
+                                });
+                            } else {
+                                denied_vpn.push(VpnRibRouteKey {
+                                    nlri_key: entry.nlri.key(),
                                     path_id: entry.path_id,
                                 });
                             }
@@ -2183,6 +2189,11 @@ impl PeerSession {
         }
         for key in &vpn_withdrawn {
             self.known_vpn.remove(key);
+        }
+        for key in denied_vpn {
+            if self.known_vpn.remove(&key) {
+                vpn_withdrawn.push(key);
+            }
         }
         for route in &vpn_announced {
             // Keyed by (RD+prefix, path_id): under VPN Add-Path each received
