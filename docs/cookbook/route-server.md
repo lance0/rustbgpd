@@ -20,10 +20,13 @@ reject-at-import with `rbgp policy explain`, and the §2.3 path-hiding
 contrast live (single-best hides / per-client-best advertises the
 runner-up / Add-Path carries both). Also
 [M19](../RECEIPTS.md#interop-labs--manual--local-gates) (transparent
-route server vs FRR: no ASN prepend, NEXT_HOP preservation). Config
-shape derived from
-[`examples/route-server/`](../../examples/route-server/) — the same
-config the M83 lab runs.
+route server vs FRR: no ASN prepend, NEXT_HOP preservation). The config
+shape is derived from
+[`examples/route-server/`](../../examples/route-server/). M83 uses the same
+route-server architecture but a pinned, reduced IPv4 lab policy: its
+deterministic probes intentionally occupy RFC 6598 Shared Address Space and
+TEST-NET-3, so it does not load the public example's dual-stack
+special-purpose snapshot.
 
 ## Quickstart
 
@@ -82,14 +85,26 @@ operator = "operator"
 address = "127.0.0.1:3323"       # Routinator, rpki-client, StayRTR, etc.
 
 # --- Import hygiene, applied to every member ---
-# reject-rpki-invalid and prefer-rpki-valid are TOML policies; ixp-hygiene
-# (reject AS_SET, reject ASPA-invalid, tag routes with their RFC 8097
-# OV_* extended community) lives in hygiene.rpol. rpol and TOML policies
-# share one namespace and compose in one chain — see
-# examples/route-server/ for the full policy set.
+# reject-rpki-invalid, reject-long-prefixes, and prefer-rpki-valid are TOML
+# policies. ixp-hygiene plus the dated dual-stack reject-special-purpose
+# starter live in hygiene.rpol. rpol and TOML policies share one namespace
+# and compose in one chain — see examples/route-server/ for the prefix sets.
 [policy.definitions.reject-rpki-invalid]
 [[policy.definitions.reject-rpki-invalid.statements]]
 match_rpki_validation = "invalid"
+action = "deny"
+
+[policy.definitions.reject-long-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "::/0"
+ge = 49
+le = 128
 action = "deny"
 
 [policy.definitions.prefer-rpki-valid]
@@ -104,7 +119,13 @@ set_local_pref = 100
 
 [policy]
 rpol_files = ["hygiene.rpol"]
-import_chain = ["reject-rpki-invalid", "ixp-hygiene", "prefer-rpki-valid"]
+import_chain = [
+    "reject-rpki-invalid",
+    "ixp-hygiene",
+    "reject-special-purpose",
+    "reject-long-prefixes",
+    "prefer-rpki-valid",
+]
 
 # --- Members ---
 

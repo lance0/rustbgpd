@@ -137,6 +137,351 @@ fn config_examples_parse() {
     }
 }
 
+fn route_server_example_config() -> Config {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/route-server/config.toml");
+    Config::load_with_diagnostics(path.to_str().expect("route-server example path is UTF-8"))
+        .expect("route-server example loads through the production config path")
+}
+
+fn route_server_test_prefix(value: &str) -> Prefix {
+    let (address, length) = value
+        .split_once('/')
+        .unwrap_or_else(|| panic!("test prefix {value:?} has no length"));
+    let length = length
+        .parse::<u8>()
+        .unwrap_or_else(|error| panic!("test prefix {value:?} has an invalid length: {error}"));
+    match address
+        .parse::<std::net::IpAddr>()
+        .unwrap_or_else(|error| panic!("test prefix {value:?} has an invalid address: {error}"))
+    {
+        std::net::IpAddr::V4(address) => {
+            assert!(length <= 32, "IPv4 test prefix {value:?} exceeds /32");
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(address, length))
+        }
+        std::net::IpAddr::V6(address) => {
+            assert!(length <= 128, "IPv6 test prefix {value:?} exceeds /128");
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(address, length))
+        }
+    }
+}
+
+fn route_server_test_context(
+    prefix: Prefix,
+    validation_state: rustbgpd_wire::RpkiValidation,
+    aspa_state: rustbgpd_wire::AspaValidation,
+) -> rustbgpd_policy::RouteContext<'static> {
+    rustbgpd_policy::RouteContext {
+        prefix: Some(prefix),
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path: None,
+        as_path_len: 0,
+        origin_asn: None,
+        validation_state,
+        aspa_state,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        family: Some(match prefix {
+            Prefix::V4(_) => rustbgpd_policy::RouteFamily::Ipv4Unicast,
+            Prefix::V6(_) => rustbgpd_policy::RouteFamily::Ipv6Unicast,
+        }),
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    }
+}
+
+fn assert_route_server_prefix_set(
+    compiled: &rustbgpd_policy::ir::CompiledChain,
+    name: &str,
+    expected: &[(&str, Option<u8>, Option<u8>, &str)],
+) {
+    let index = compiled
+        .prefix_set_names
+        .iter()
+        .position(|candidate| candidate.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("compiled policy has no {name} prefix set"));
+    let expected =
+        rustbgpd_policy::sets::PrefixSet::new(expected.iter().map(|(prefix, ge, le, _)| {
+            rustbgpd_policy::sets::PrefixSetEntry {
+                prefix: route_server_test_prefix(prefix),
+                ge: *ge,
+                le: *le,
+            }
+        }));
+    assert_eq!(
+        compiled.prefix_sets[index].entries(),
+        expected.entries(),
+        "compiled {name} inventory must match the dated snapshot exactly"
+    );
+}
+
+/// LAN-437 load-bearing proof: removing any retained IANA snapshot row or
+/// parent exception changes its table row; breaking `rpol_files` or the chain
+/// reference makes the real example fail to load. The ordinary-global and
+/// 6to4 controls turn red if the starter expands into a blanket bogon filter.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the complete dated registry snapshot stays visible as one load-bearing table"
+)]
+fn route_server_example_special_purpose_snapshot() {
+    let config = route_server_example_config();
+    let neighbor = config
+        .neighbors
+        .first()
+        .expect("route-server example has a neighbor");
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(neighbor)
+        .expect("route-server example policy chains resolve");
+    let import = import.expect("route-server example has an import chain");
+    let member = import
+        .policies
+        .iter()
+        .find(|member| member.name.as_deref() == Some("reject-special-purpose"))
+        .expect("resolved import chain contains reject-special-purpose")
+        .clone();
+    let compiled = member
+        .rpol
+        .as_ref()
+        .expect("special-purpose policy is .rpol-backed")
+        .clone();
+    let special_purpose = rustbgpd_policy::PolicyChain::from_named(vec![member]);
+
+    let report = config.policy.rpol.policies["reject-special-purpose"]
+        .file
+        .run_tests();
+    assert!(
+        report.all_passed(),
+        "route-server in-language policy tests failed: {:?}",
+        report.failures
+    );
+
+    let rejected = [
+        ("0.0.0.0/0", None, None, "0.0.0.0/0"),
+        ("0.0.0.0/8", None, Some(32), "0.1.0.0/16"),
+        ("10.0.0.0/8", None, Some(32), "10.1.0.0/16"),
+        ("100.64.0.0/10", None, Some(32), "100.65.0.0/24"),
+        ("127.0.0.0/8", None, Some(32), "127.1.0.0/16"),
+        ("169.254.0.0/16", None, Some(32), "169.254.1.0/24"),
+        ("172.16.0.0/12", None, Some(32), "172.17.0.0/16"),
+        ("192.0.0.0/24", None, Some(32), "192.0.0.128/25"),
+        ("192.0.2.0/24", None, Some(32), "192.0.2.0/25"),
+        ("192.88.99.2/32", None, None, "192.88.99.2/32"),
+        ("192.168.0.0/16", None, Some(32), "192.168.1.0/24"),
+        ("198.18.0.0/15", None, Some(32), "198.18.1.0/24"),
+        ("198.51.100.0/24", None, Some(32), "198.51.100.0/25"),
+        ("203.0.113.0/24", None, Some(32), "203.0.113.0/25"),
+        ("240.0.0.0/4", None, Some(32), "250.0.0.0/8"),
+        ("::/0", None, None, "::/0"),
+        ("::/128", None, None, "::/128"),
+        ("::1/128", None, None, "::1/128"),
+        ("::ffff:0:0/96", None, Some(128), "::ffff:192.0.2.0/120"),
+        ("64:ff9b:1::/48", None, Some(128), "64:ff9b:1:1::/64"),
+        ("100::/64", None, Some(128), "100::/65"),
+        ("100:0:0:1::/64", None, Some(128), "100:0:0:1::/65"),
+        ("2001::/23", None, Some(128), "2001:100::/32"),
+        ("2001:db8::/32", None, Some(128), "2001:db8:1::/48"),
+        ("3fff::/20", None, Some(128), "3fff:1::/32"),
+        ("5f00::/16", None, Some(128), "5f00:1::/32"),
+        ("fc00::/7", None, Some(128), "fd00:1::/48"),
+        ("fe80::/10", None, Some(128), "fe80:1::/64"),
+    ];
+    assert_route_server_prefix_set(&compiled, "non-global-special-purpose", &rejected);
+    for (prefix, _, _, probe) in rejected {
+        let context = route_server_test_context(
+            route_server_test_prefix(probe),
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+        );
+        let (result, evaluation) =
+            rustbgpd_policy::evaluate_chain_with_attribution(Some(&special_purpose), &context);
+        assert_eq!(
+            result.action,
+            rustbgpd_policy::PolicyAction::Deny,
+            "retained snapshot row {prefix} must be rejected"
+        );
+        assert_eq!(
+            evaluation.matched_policy.as_deref(),
+            Some("reject-special-purpose"),
+            "retained snapshot row {prefix} must attribute the rejection"
+        );
+    }
+
+    let exceptions = [
+        ("192.0.0.9/32", None, None, "192.0.0.9/32"),
+        ("192.0.0.10/32", None, None, "192.0.0.10/32"),
+        ("2001::/32", None, Some(128), "2001:0:1234::/48"),
+        ("2001:1::1/128", None, None, "2001:1::1/128"),
+        ("2001:1::2/128", None, None, "2001:1::2/128"),
+        ("2001:1::3/128", None, None, "2001:1::3/128"),
+        ("2001:3::/32", None, Some(128), "2001:3:1234::/48"),
+        ("2001:4:112::/48", None, Some(128), "2001:4:112::1/128"),
+        ("2001:20::/28", None, Some(128), "2001:20:abcd::/48"),
+        ("2001:30::/28", None, Some(128), "2001:30:abcd::/48"),
+    ];
+    assert_route_server_prefix_set(&compiled, "special-purpose-parent-exceptions", &exceptions);
+    for (prefix, _, _, probe) in exceptions {
+        let context = route_server_test_context(
+            route_server_test_prefix(probe),
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+        );
+        let (result, _) =
+            rustbgpd_policy::evaluate_chain_with_attribution(Some(&special_purpose), &context);
+        assert_eq!(
+            result.action,
+            rustbgpd_policy::PolicyAction::Permit,
+            "active child {prefix} must precede and escape its rejected parent"
+        );
+    }
+
+    for prefix in ["8.8.8.0/24", "2001:4860::/32", "2002::/16"] {
+        let context = route_server_test_context(
+            route_server_test_prefix(prefix),
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+        );
+        let (result, _) =
+            rustbgpd_policy::evaluate_chain_with_attribution(Some(&special_purpose), &context);
+        assert_eq!(
+            result.action,
+            rustbgpd_policy::PolicyAction::Permit,
+            "out-of-snapshot control {prefix} must fall through"
+        );
+    }
+}
+
+/// LAN-437 load-bearing proof: the exact chain order keeps RPKI and ASPA
+/// rejection ahead of parent exceptions and prefix-length caps after them.
+/// Removing or reordering any member makes its attributed case fail; removing
+/// the special-purpose member makes the representative/default cases permit.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one explicit matrix pins every ordered route-server import guard"
+)]
+fn route_server_example_exception_chain_preserves_later_guards() {
+    let config = route_server_example_config();
+    let neighbor = config
+        .neighbors
+        .first()
+        .expect("route-server example has a neighbor");
+    let (import, _) = config
+        .effective_policy_chains_for_neighbor(neighbor)
+        .expect("route-server example policy chains resolve");
+    let import = import.expect("route-server example has an import chain");
+    assert_eq!(
+        import
+            .policies
+            .iter()
+            .map(|member| member.name.as_deref().expect("every member is named"))
+            .collect::<Vec<_>>(),
+        [
+            "reject-rpki-invalid",
+            "ixp-hygiene",
+            "reject-special-purpose",
+            "reject-long-prefixes",
+            "prefer-rpki-valid",
+        ]
+    );
+
+    let cases = [
+        (
+            "0.0.0.0/0",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-special-purpose",
+            None,
+        ),
+        (
+            "::/0",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-special-purpose",
+            None,
+        ),
+        (
+            "100.65.0.0/24",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-special-purpose",
+            None,
+        ),
+        (
+            "fd00:1::/48",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-special-purpose",
+            None,
+        ),
+        (
+            "2001:4:112::/48",
+            rustbgpd_wire::RpkiValidation::Invalid,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-rpki-invalid",
+            None,
+        ),
+        (
+            "2001::/32",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Invalid,
+            rustbgpd_policy::PolicyAction::Deny,
+            "ixp-hygiene",
+            None,
+        ),
+        (
+            "192.0.0.9/32",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-long-prefixes",
+            None,
+        ),
+        (
+            "2001:4:112::1/128",
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Deny,
+            "reject-long-prefixes",
+            None,
+        ),
+        (
+            "2001:4:112::/48",
+            rustbgpd_wire::RpkiValidation::Valid,
+            rustbgpd_wire::AspaValidation::Unknown,
+            rustbgpd_policy::PolicyAction::Permit,
+            "prefer-rpki-valid",
+            Some(200),
+        ),
+    ];
+    for (prefix, rpki, aspa, action, matched_policy, local_pref) in cases {
+        let context = route_server_test_context(route_server_test_prefix(prefix), rpki, aspa);
+        let (result, evaluation) =
+            rustbgpd_policy::evaluate_chain_with_attribution(Some(&import), &context);
+        assert_eq!(result.action, action, "unexpected decision for {prefix}");
+        assert_eq!(
+            evaluation.matched_policy.as_deref(),
+            Some(matched_policy),
+            "unexpected deciding policy for {prefix}"
+        );
+        assert_eq!(
+            result.modifications.set_local_pref, local_pref,
+            "unexpected local-pref modification for {prefix}"
+        );
+    }
+}
+
 #[test]
 fn v1_stable_v0_50_route_server_fixture_parses() {
     let fixture =

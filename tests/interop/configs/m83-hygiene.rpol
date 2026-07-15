@@ -1,8 +1,8 @@
-# M83 — IXP import hygiene (the examples/route-server hygiene.rpol
-# shape). Referenced from rustbgpd-m83-rs.toml via `[policy]
-# rpol_files` and the import chain. The driver copies this next to
-# /tmp/config.toml; the policy-reload stability phase edits the copy
-# and SIGHUPs.
+# M83 — pinned, reduced IPv4 lab hygiene projection. Referenced from
+# rustbgpd-m83-rs.toml via `[policy] rpol_files` and the import chain.
+# The driver copies this next to
+# /tmp/config.toml. Its reload-stability phase edits the TOML
+# local-preference policy and SIGHUPs; this rpol fixture stays unchanged.
 
 policy ixp-hygiene {
     # Reject routes carrying an AS_SET (deprecated by RFC 9774).

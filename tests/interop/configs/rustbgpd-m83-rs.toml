@@ -2,6 +2,9 @@
 # Mirrors the examples/route-server profile shape: transparent
 # route_server_client members, role = route_server (RFC 9234 OTC on
 # egress), ROV reject-at-import + rpol hygiene in the import chain.
+# This is a reduced IPv4 lab policy, not the public example's dated
+# dual-stack special-purpose snapshot: M83 deliberately uses RFC 6598
+# Shared Address Space and TEST-NET-3 prefixes as deterministic probes.
 #
 # STAYRTR_ADDR is patched to the StayRTR management IP at test time;
 # the driver seds this file into /tmp/config.toml and runs the daemon
@@ -31,27 +34,27 @@ refresh_interval = 30
 retry_interval = 5
 expire_interval = 120
 
-# --- Named policy definitions (the examples/route-server shape) ---
+# --- Named policy definitions (the pinned, reduced M83 lab projection) ---
 
 [policy.definitions.reject-rpki-invalid]
 [[policy.definitions.reject-rpki-invalid.statements]]
 match_rpki_validation = "invalid"
 action = "deny"
 
-[policy.definitions.reject-bogon-prefixes]
+[policy.definitions.reject-ipv4-default-and-rfc1918]
 default_action = "permit"
-[[policy.definitions.reject-bogon-prefixes.statements]]
+[[policy.definitions.reject-ipv4-default-and-rfc1918.statements]]
 prefix = "0.0.0.0/0"
 action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
+[[policy.definitions.reject-ipv4-default-and-rfc1918.statements]]
 prefix = "10.0.0.0/8"
 le = 32
 action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
+[[policy.definitions.reject-ipv4-default-and-rfc1918.statements]]
 prefix = "172.16.0.0/12"
 le = 32
 action = "deny"
-[[policy.definitions.reject-bogon-prefixes.statements]]
+[[policy.definitions.reject-ipv4-default-and-rfc1918.statements]]
 prefix = "192.168.0.0/16"
 le = 32
 action = "deny"
@@ -94,7 +97,7 @@ rpol_files = ["m83-hygiene.rpol"]
 import_chain = [
     "reject-rpki-invalid",
     "ixp-hygiene",
-    "reject-bogon-prefixes",
+    "reject-ipv4-default-and-rfc1918",
     "reject-long-prefixes",
     "prefer-rpki-valid",
 ]
