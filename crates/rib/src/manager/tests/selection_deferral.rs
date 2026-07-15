@@ -1513,12 +1513,15 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
     }
 }
 
-#[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one overflow fixture pins complete sweep, ordering, and byte reclamation"
+    reason = "one parameterized overflow receipt pins admission, complete sweep, and release ordering"
 )]
-fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
+fn collision_failback_overflow_receipt(
+    identity_cap: usize,
+    logical_byte_cap: usize,
+    expect_retained_identity: bool,
+) {
     let source = peer(1);
     let observer = peer(2);
     let (_tx, rx) = mpsc::channel(32);
@@ -1561,17 +1564,24 @@ fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
     assert!(manager.loc_rib.get(&prefix_b).is_some());
     while observer_rx.try_recv().is_ok() {}
 
-    // Model a route restored before the planned-restart gate is installed.
-    // Only one identity fits in this test ledger. The second marks the family
-    // overflowed, after which later identities for that family are not retained.
-    // Release must use the frozen Loc-RIB as the fail-safe identity source.
+    // Model routes restored before the planned-restart gate is installed.
+    // Either admission cap marks the family overflowed; the receipt below
+    // distinguishes whether one identity fit before overflow. Release must use
+    // the full frozen Loc-RIB union as the fail-safe identity source.
     manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
-    manager.set_deferred_selection_limits_for_test(1, 64 * 1024 * 1024);
+    manager.set_deferred_selection_limits_for_test(identity_cap, logical_byte_cap);
     manager.record_deferred_unicast(&HashSet::from([prefix_a, prefix_b]));
     assert_counter_value(
         &metrics,
         "bgp_selection_deferral_ledger_overflows_total",
         1.0,
+    );
+    let (retained_bytes, overflowed) = manager.deferred_selection_ledger_state_for_test(FAMILY);
+    assert!(overflowed, "the selected admission cap must overflow");
+    assert_eq!(
+        retained_bytes > 0,
+        expect_retained_identity,
+        "the receipt must distinguish identity-cap overflow after one admission from logical-byte overflow before admission"
     );
     manager.enqueue_routes_received(
         source,
@@ -1638,6 +1648,16 @@ fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
         .end_route_refresh(source, 8, FAMILY, &metrics)
         .into_iter();
     manager.apply_selection_deferral_transitions(completed, "test refresh completion");
+    let released = manager
+        .selection_deferral
+        .as_ref()
+        .unwrap()
+        .peer_snapshot(source)
+        .into_iter()
+        .find(|row| (row.afi, row.safi) == FAMILY)
+        .expect("the IPv4-unicast selection-deferral row must remain observable");
+    assert!(!released.active, "the complete family gate must release");
+    assert_eq!(released.release_reason, "collision_refresh");
     loop {
         let update = observer_rx.try_recv().unwrap();
         if update.end_of_rib.contains(&FAMILY) {
@@ -1652,8 +1672,18 @@ fn collision_failback_overflow_sweeps_and_reclaims_before_release_eor() {
     assert_eq!(
         manager.deferred_selection_ledger_state_for_test(FAMILY),
         (0, false),
-        "complete failback release must reclaim the family byte charge and sticky overflow state"
+        "complete release must reclaim retained bytes and sticky overflow state"
     );
+}
+
+#[test]
+fn collision_failback_identity_cap_sweeps_full_unicast_union_before_release_eor() {
+    collision_failback_overflow_receipt(1, usize::MAX, true);
+}
+
+#[test]
+fn collision_failback_logical_byte_cap_sweeps_full_unicast_union_before_release_eor() {
+    collision_failback_overflow_receipt(usize::MAX, 0, false);
 }
 
 #[test]
