@@ -1,0 +1,52 @@
+[global]
+asn = 65001
+router_id = "10.89.1.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.89.1.2"
+remote_asn = 65002
+description = "m89-source-a"
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd89:1::1"
+route_server_client = true
+
+[[neighbors]]
+address = "10.89.2.2"
+remote_asn = 65003
+description = "m89-source-b"
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd89:2::1"
+route_server_client = true
+
+[[neighbors]]
+address = "10.89.3.2"
+remote_asn = 65004
+description = "m89-source-c"
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd89:3::1"
+route_server_client = true
+
+[[neighbors]]
+address = "10.89.4.2"
+remote_asn = 65005
+description = "m89-sink"
+families = ["ipv4_unicast", "ipv6_unicast"]
+local_ipv6_nexthop = "fd89:4::1"
+route_server_client = true
+
+[neighbors.add_path]
+receive = true
+send = true
+send_max = 4
+receive_max = 7
+
+[security.grpc]
+enforcement = "legacy"

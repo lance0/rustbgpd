@@ -27,9 +27,10 @@ matrix below runs on the hosted kernel-dataplane workflow or manual gates).
   ADR-0096 `.rpol` policy-parity receipt): **M1**, **M13**, **M15**, **M80**.
 - **Address-family + topology** — MP-BGP, RR, multi-path, BGP-LS reflection,
   VPNv4 reflection, RT-Constrain filtering, ORR divergent-best, RR-family
-  GR/LLGR stale preservation, multi-cluster ORR, labeled-unicast
-  reflection: **M10**, **M14**, **M17**, **M73**, **M74**,
-  **M75**, **M76**, **M77**, **M78**, **M79**.
+  GR/LLGR stale preservation, multi-cluster ORR, labeled-unicast reflection,
+  and experimental Paths-Limit against real FRR: **M10**, **M14**, **M17**,
+  **M73**, **M74**,
+  **M75**, **M76**, **M77**, **M78**, **M79**, **M89**.
 - **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**, and the BMP trio + BMPv4 receipt **M81**.
 - **BGP Roles + OTC** — RFC 9234 role negotiation and Only-To-Customer leak prevention against an FRR 10.3.1 peer: **M55**.
 - **Outbound Route Filtering** — RFC 5291/5292 receive-side prefix ORF against an FRR 10.3.1 peer: **M57**.
@@ -112,6 +113,7 @@ the protected BIRD TCP-AO smoke and M73 BGP-LS receipt).
 | FRR (bgpd) | 10.3.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16) | LLGR (RFC 9494) | GR→LLGR transition, stale clearing | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m17-addpath-frr.clab.yml` | Tested (M17) | Add-Path (RFC 7911) | Multi-path send, distinct path_ids | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m89-paths-limit-frr.clab.yml` | Tested (M89) | Experimental Paths-Limit (IANA capability 76; expired `draft-abraitis-idr-addpath-paths-limit-04`) | Unequal IPv4/IPv6 receive limits cap Add-Path export at 2/3 | Digest-pinned image; outside v1 contract |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
@@ -1914,14 +1916,35 @@ is missing. Prioritized by risk.
 
 ### Experimental Paths-Limit validation
 
-The code-76 tuple codec, negotiation, family-local initial/incremental export,
-withdraw re-ranking, and route-refresh replay are covered in-tree. A dedicated
-bounded M-slot remains deferred so the experimental extension does not dilute
-M17's stable RFC 7911 receipt. That follow-up will configure FRR 10.3.1 with
-`addpath-rx-paths-limit`, assert the `pathsLimit` fields in
-`show bgp neighbor json`, and verify received path counts for unequal IPv4 and
-IPv6 limits. Until that receipt lands, rustbgpd makes no cross-vendor
-interoperability claim for Paths-Limit.
+M89 is the bounded real-FRR receipt for the shipped experimental extension:
+IANA-assigned capability 76 from the expired
+`draft-abraitis-idr-addpath-paths-limit-04`. It deliberately remains separate
+from M17's stable RFC 7911 receipt and outside the v1 contract.
+
+Three digest-pinned FRR 10.3.1 source ASes each advertise the same IPv4 and
+IPv6 prefix over IPv4 sessions to a rustbgpd route server. Before inspecting
+limits, the driver proves exactly three rustbgpd Adj-RIB-In candidates per
+family with the exact peer/AS mapping. A fourth real FRR node advertises
+`addpath-rx-paths-limit 2` for IPv4 and `3` for IPv6 while rustbgpd configures
+`send_max = 4` and advertises receive preference 7. Typed FRR capability JSON
+must report 2/7 and 3/7; rustbgpd must report configured, advertised, received,
+and effective values exactly. Adj-RIB-Out and the independent FRR RIB must then
+contain exactly 2/3 paths with nonzero unique Add-Path receive IDs and the
+expected source-AS membership. All four sessions are rechecked at the end.
+
+The driver uses one aggregate session deadline and one aggregate proof deadline;
+there are no fixed settling sleeps or permissive count comparisons. Its two
+load-bearing proofs are production mutations in `crates/fsm/src/negotiation.rs`:
+bypassing the family lookup makes the exact IPv4 count 3 instead of 2, while
+forcing every lookup through IPv4 makes the exact IPv6 count 2 instead of 3.
+Each mutation makes M89 red; the production file is restored before the final
+green run.
+
+```bash
+containerlab deploy -t tests/interop/m89-paths-limit-frr.clab.yml
+bash tests/interop/scripts/test-m89-paths-limit-frr.sh
+containerlab destroy -t tests/interop/m89-paths-limit-frr.clab.yml --cleanup
+```
 
 ### P1.5 — EVPN Route Reflector validation depth
 

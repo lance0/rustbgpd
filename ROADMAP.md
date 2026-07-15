@@ -277,10 +277,12 @@ new AFI/SAFI and EVPN dataplane expansion.
   rejection is now externally pinned by M87: a GoBGP 4.6 source drives a legal
   4,095-byte UPDATE through sink-only policy to a 4,107-byte candidate, and BIRD
   2.0.12 proves the stale prior advertisement is withdrawn while the session
-  stays up and later recovers (LAN-434). Add the remaining GR/collision receipt
-  only when an incumbent exposes a deterministic trigger. Experimental
-  Paths-Limit has its own FRR-based cross-vendor receipt item below and remains
-  outside the v1 stable contract.
+  stays up and later recovers (LAN-434). The proposed M88 GR selection-deferral
+  receipt remains explicitly deferred; add collision-failback coverage only
+  when an incumbent exposes a deterministic trigger. Experimental Paths-Limit
+  (IANA-assigned capability 76 from the expired
+  `draft-abraitis-idr-addpath-paths-limit-04`) now has a real-FRR receipt (M89)
+  and remains outside the v1 stable contract.
 
 ### Next (research-shaped, July 2026)
 
@@ -348,11 +350,6 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **ASPA/RTRv2 conformance refresh** against the latest drafts — cheap
   insurance for a day-one-RFC-compliant claim while BIRD's ASPA sits in a
   side branch and FRR has none.
-- **Paths-Limit cross-vendor receipt**
-  (draft-abraitis-idr-addpath-paths-limit) — the capability is shipped as an
-  experimental RR-relevant Add-Path fanout bound. The FRR 10.1 receipt remains
-  pending.
-
 **The route-server (IXP) track** — the core is shipped; remaining work is
 adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 `per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
