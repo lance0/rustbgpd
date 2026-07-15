@@ -47,6 +47,12 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   candidates whose result carries `NO_ADVERTISE`. ORR first selects its
   per-vantage best and suppresses that winner without falling back to a
   different route, whether the community arrived on the source or from policy.
+- `NO_ADVERTISE` enforcement for other non-unicast families remains deferred.
+
+---
+
+## Inbound import-policy replacement semantics
+
 - Import-policy denial of a replacement retires the exact previously accepted
   VPN `(RD + prefix, path_id)` identity. First-seen denials remain filter-only,
   explicit overlapping withdrawals are deduplicated, and Add-Path siblings
