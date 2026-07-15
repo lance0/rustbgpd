@@ -76,6 +76,15 @@ impl RibManager {
                 continue;
             };
 
+            // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
+            // Policy cannot remove it to make the source route exportable.
+            if super::no_advertise_export_suppressed(best.communities()) {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
             // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
             if super::llgr_stale_export_suppressed(
@@ -178,6 +187,15 @@ impl RibManager {
                 }
             }
             modified.path_id = 0;
+
+            // Export policy may scope an otherwise eligible route by adding
+            // NO_ADVERTISE. Stop it before the Adj-RIB-Out commit.
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                if rib_out.get_rtc(key).is_some() {
+                    rtc_withdraw.push(key.clone());
+                }
+                continue;
+            }
 
             if !force
                 && rib_out

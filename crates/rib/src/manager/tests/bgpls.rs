@@ -1,5 +1,67 @@
 use super::*;
 
+fn with_bgpls_no_advertise(mut route: crate::route::BgpLsRibRoute) -> crate::route::BgpLsRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ]));
+    route
+}
+
+fn bgpls_no_advertise_policy(next_hop: IpAddr, add: bool) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(next_hop),
+            modifications: rustbgpd_policy::RouteModifications {
+                communities_add: add
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                communities_remove: (!add)
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+fn make_bgpls_policy_route(
+    family: crate::route::BgpLsFamily,
+    peer: Ipv4Addr,
+) -> crate::route::BgpLsRibRoute {
+    let mut route = make_bgpls_route(peer, 42, 100);
+    route.family = family;
+    if family == crate::route::BgpLsFamily::LinkStateVpn {
+        route.nlri = rustbgpd_wire::bgpls::decode_bgpls_vpn_nlri(&[
+            0xfd, 0xe8, 0, 11, // 8-byte RD + 3-byte opaque payload
+            0, 0, 0xfd, 0xe8, 0, 0, 0, 42, 0xaa, 0xbb, 0x2a,
+        ])
+        .expect("fixture BGP-LS VPN NLRI decodes")
+        .pop()
+        .expect("fixture contains one BGP-LS VPN NLRI");
+    }
+    route
+}
+
 #[tokio::test]
 async fn bgpls_routes_received_recompute_and_withdraw() {
     let (tx, rx) = mpsc::channel(64);
@@ -181,6 +243,134 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// Both BGP-LS SAFIs enforce RFC 1997 before and after export policy,
+/// withdraw the exact prior Adj-RIB-Out identity, and recover when the source
+/// or policy scope is removed.
+///
+/// Break-to-red: deleting the pre-policy guard lets the removal policy export
+/// the source-scoped route; deleting the post-policy guard retains the route
+/// when policy adds `NO_ADVERTISE`; deleting either existing-state withdrawal
+/// leaves the exact SAFI-specific key advertised; sticky suppression prevents
+/// the two recovery announcements.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() {
+    #[allow(clippy::too_many_lines)]
+    async fn exercise(family: crate::route::BgpLsFamily) {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+        let source = Ipv4Addr::new(198, 51, 100, 11);
+        let source_ip = IpAddr::V4(source);
+        let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            per_client_best: false,
+            session_id: 0,
+            peer: target,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(bgpls_no_advertise_policy(source_ip, false)),
+            sendable_families: vec![family.to_afi_safi()],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        let route = make_bgpls_policy_route(family, source);
+        let key = route.key();
+        tx.send(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: source_ip,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_bgpls_routes(&tx).await;
+        let initial = out_rx
+            .try_recv()
+            .expect("plain BGP-LS route must be announced");
+        assert_eq!(initial.bgpls_announce.len(), 1);
+        assert_eq!(initial.bgpls_announce[0].key(), key);
+
+        tx.send(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: source_ip,
+            announced: vec![with_bgpls_no_advertise(route.clone())],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_bgpls_routes(&tx).await;
+        let source_scoped = out_rx
+            .try_recv()
+            .expect("source NO_ADVERTISE must withdraw the prior BGP-LS route");
+        assert!(source_scoped.bgpls_announce.is_empty());
+        assert_eq!(source_scoped.bgpls_withdraw, vec![key.clone()]);
+
+        tx.send(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer: source_ip,
+            announced: vec![route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_bgpls_routes(&tx).await;
+        let source_recovered = out_rx.try_recv().expect("plain BGP-LS route must recover");
+        assert_eq!(source_recovered.bgpls_announce.len(), 1);
+        assert!(source_recovered.bgpls_withdraw.is_empty());
+
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: target,
+            export_policy: Some(bgpls_no_advertise_policy(source_ip, true)),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+        let _ = query_bgpls_routes(&tx).await;
+        let policy_scoped = out_rx
+            .try_recv()
+            .expect("policy-added NO_ADVERTISE must withdraw BGP-LS");
+        assert!(policy_scoped.bgpls_announce.is_empty());
+        assert_eq!(policy_scoped.bgpls_withdraw, vec![key]);
+
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::ReplacePeerExportPolicy {
+            peer: target,
+            export_policy: Some(bgpls_no_advertise_policy(source_ip, false)),
+            reply,
+        })
+        .await
+        .unwrap();
+        response.await.unwrap().unwrap();
+        let _ = query_bgpls_routes(&tx).await;
+        let policy_recovered = out_rx
+            .try_recv()
+            .expect("removing policy-added NO_ADVERTISE must re-announce BGP-LS");
+        assert_eq!(policy_recovered.bgpls_announce.len(), 1);
+        assert!(policy_recovered.bgpls_withdraw.is_empty());
+        assert!(out_rx.try_recv().is_err());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    exercise(crate::route::BgpLsFamily::LinkState).await;
+    exercise(crate::route::BgpLsFamily::LinkStateVpn).await;
 }
 
 #[tokio::test]
