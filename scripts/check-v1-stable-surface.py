@@ -33,7 +33,9 @@ JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
 V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
 EXPECTED_EFFECTIVE_DEFAULT_PATHS = (
     "Global.cluster_id",
+    "Global.dynamic_neighbor_limit",
     "Neighbor.disable_ipv4_unicast",
+    "Neighbor.families",
     "Neighbor.gr_restart_time",
     "Neighbor.gr_stale_routes_time",
     "Neighbor.graceful_restart",
@@ -41,10 +43,30 @@ EXPECTED_EFFECTIVE_DEFAULT_PATHS = (
     "Neighbor.llgr_stale_time",
     "Neighbor.send_hold_time",
 )
+EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS = tuple(
+    path for path in EXPECTED_EFFECTIVE_DEFAULT_PATHS if path != "Neighbor.families"
+)
+EXPECTED_SCHEMA_REPRESENTATION_DEFAULTS = {
+    "Global.dynamic_neighbor_limit": None,
+    "Neighbor.families": [],
+}
+EXPECTED_EFFECTIVE_FAMILY_CASES = (
+    '"bare_ipv4",bare.transport_config.peer.families,&[(Afi::Ipv4,Safi::Unicast)]',
+    '"bare_ipv6",bare_ipv6.transport_config.peer.families,'
+    '&[(Afi::Ipv4,Safi::Unicast),(Afi::Ipv6,Safi::Unicast)]',
+    '"group_overrides_address_default",inherited.transport_config.peer.families,'
+    '&[(Afi::Ipv6,Safi::Unicast)]',
+    '"neighbor_overrides_group",overridden.transport_config.peer.families,'
+    '&[(Afi::Ipv4,Safi::Unicast)]',
+)
 EFFECTIVE_DEFAULT_ASSERTION_MACRO = "assert_v1_effective_default"
 EFFECTIVE_DEFAULT_ASSERTION_RE = re.compile(
     rf'\b{EFFECTIVE_DEFAULT_ASSERTION_MACRO}!\(\s*"([^"\\]+)"\s*,\s*'
     r"([a-z][a-z0-9_]*)\s*,\s*(None|true|false|\d+|\(\d+\s*,\s*\d+\))\s*\);"
+)
+EFFECTIVE_FAMILY_ASSERTION_MACRO = "assert_v1_family_case"
+EFFECTIVE_FAMILY_ASSERTION_RE = re.compile(
+    rf"\b{EFFECTIVE_FAMILY_ASSERTION_MACRO}!\((.*?)\);", re.DOTALL
 )
 
 
@@ -161,22 +183,78 @@ def check_effective_default_assertion_block(test_region: str, test: str) -> None
             "assertion macro"
         )
     assertions = EFFECTIVE_DEFAULT_ASSERTION_RE.findall(test_region)
-    if [path for path, _, _ in assertions] != list(EXPECTED_EFFECTIVE_DEFAULT_PATHS):
+    if [path for path, _, _ in assertions] != list(
+        EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS
+    ):
         fail(
             f"effective-default validation test {test!r} must assert exactly the "
-            "eight scoped full paths in sorted order"
+            "nine scalar scoped full paths in sorted order"
         )
     for path, actual, _ in assertions:
         field = path.partition(".")[2]
+        runtime_field = (
+            "effective_dynamic_neighbor_limit"
+            if path == "Global.dynamic_neighbor_limit"
+            else field
+        )
         extraction = (
             rf"\blet\s+{re.escape(actual)}\s*=\s*"
-            rf"[^;\n]*\b{re.escape(field)}\b[^;\n]*;"
+            rf"[^;]*\b{re.escape(runtime_field)}\b[^;]*;"
         )
         if actual != field or not re.search(extraction, test_region):
             fail(
                 f"effective-default validation test {test!r} assertion for {path!r} "
                 "is not bound to that runtime field"
             )
+
+    if not re.search(
+        rf"""
+        macro_rules!\s+{EFFECTIVE_FAMILY_ASSERTION_MACRO}\s*\{{\s*
+        \(\s*\$case:literal\s*,\s*\$actual:expr\s*,\s*\$expected:expr\s*\)\s*=>\s*\{{\s*
+        assert_eq!\(\s*\$actual\.as_slice\(\)\s*,\s*\$expected\s*,.*?\);\s*
+        \}}\s*;\s*
+        \}}
+        """,
+        test_region,
+        flags=re.DOTALL | re.VERBOSE,
+    ):
+        fail(
+            f"effective-default validation test {test!r} has no typed "
+            "runtime-vs-expected family assertion macro"
+        )
+    family_cases = tuple(
+        re.sub(r"\s+", "", invocation)
+        for invocation in EFFECTIVE_FAMILY_ASSERTION_RE.findall(test_region)
+    )
+    if family_cases != EXPECTED_EFFECTIVE_FAMILY_CASES:
+        fail(
+            f"effective-default validation test {test!r} must assert exactly the "
+            "four typed family-resolution cases"
+        )
+
+
+def check_dynamic_neighbor_limit_linkage(
+    config_source: str, peer_manager_source: str
+) -> None:
+    if not re.search(
+        r"pub\(crate\)\s+fn\s+effective_dynamic_neighbor_limit\s*\(\s*&self\s*\)"
+        r"\s*->\s*u32\s*\{\s*self\.global\s*\.dynamic_neighbor_limit\s*"
+        r"\.unwrap_or\(DEFAULT_DYNAMIC_NEIGHBOR_LIMIT\)\s*\}",
+        config_source,
+        flags=re.DOTALL,
+    ):
+        fail(
+            "Config::effective_dynamic_neighbor_limit must resolve the shared "
+            "DEFAULT_DYNAMIC_NEIGHBOR_LIMIT"
+        )
+    if not re.search(
+        r"dynamic_neighbor_limit:\s*current_config"
+        r"\.effective_dynamic_neighbor_limit\(\)",
+        peer_manager_source,
+    ):
+        fail(
+            "PeerManager must consume Config::effective_dynamic_neighbor_limit"
+        )
 
 
 def check_effective_defaults(
@@ -185,11 +263,16 @@ def check_effective_defaults(
     effective = inventory["config"].get("effective_defaults")
     if not isinstance(effective, dict):
         fail("config.effective_defaults must be an object")
-    required_keys = {"paths", "validation_source", "validation_test"}
+    required_keys = {
+        "paths",
+        "schema_representation_defaults",
+        "validation_source",
+        "validation_test",
+    }
     if set(effective) != required_keys:
         fail(
-            "config.effective_defaults must contain exactly paths, validation_source, "
-            "and validation_test"
+            "config.effective_defaults must contain exactly paths, "
+            "schema_representation_defaults, validation_source, and validation_test"
         )
 
     paths = effective["paths"]
@@ -199,13 +282,25 @@ def check_effective_defaults(
         fail("config.effective_defaults.paths must be a non-empty string list")
     require_sorted_unique(paths, "config.effective_defaults.paths")
     if paths != list(EXPECTED_EFFECTIVE_DEFAULT_PATHS):
-        fail("config.effective_defaults.paths must match the exact eight-path scoped set")
+        fail("config.effective_defaults.paths must match the exact ten-path scoped set")
+    schema_defaults = effective["schema_representation_defaults"]
+    if schema_defaults != EXPECTED_SCHEMA_REPRESENTATION_DEFAULTS:
+        fail(
+            "config.effective_defaults.schema_representation_defaults must match "
+            "the exact two-path representation map"
+        )
     for path in paths:
         definition, separator, field = path.partition(".")
         if not separator or "." in field or path not in stable_paths:
             fail(f"effective default path {path!r} is not a stable config field")
         property_schema = schema_definition(schema, definition)["properties"][field]
-        if "default" in property_schema:
+        if path in schema_defaults:
+            if property_schema.get("default", object()) != schema_defaults[path]:
+                fail(
+                    f"schema representation default for {path!r} drifted from the "
+                    "pinned non-effective value"
+                )
+        elif "default" in property_schema:
             fail(
                 f"contextual effective default {path!r} must not claim a static JSON Schema default"
             )
@@ -234,7 +329,7 @@ def check_effective_defaults(
         lambda: check_effective_default_assertion_block(
             EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
         ),
-        "must assert exactly the eight scoped full paths",
+        "must assert exactly the nine scalar scoped full paths",
         "missing effective-default runtime assertion block",
     )
     for broken_macro, label in (
@@ -260,11 +355,41 @@ def check_effective_defaults(
             "no runtime-vs-expected assertion macro",
             label,
         )
+    expect_checker_failure(
+        lambda: check_effective_default_assertion_block(
+            EFFECTIVE_FAMILY_ASSERTION_RE.sub("", test_region), test
+        ),
+        "must assert exactly the four typed family-resolution cases",
+        "missing effective-family runtime rows",
+    )
+    expect_checker_failure(
+        lambda: check_effective_default_assertion_block(
+            test_region.replace("$actual.as_slice()", "$expected", 1), test
+        ),
+        "no typed runtime-vs-expected family assertion macro",
+        "vacuous effective-family macro",
+    )
     for linkage in ("parse_strict(", "resolve_neighbor("):
         if linkage not in test_region:
             fail(
                 f"effective-default validation test {test!r} does not exercise {linkage[:-1]}"
             )
+
+    config_source = (ROOT / "src/config/mod.rs").read_text()
+    peer_manager_source = (ROOT / "src/peer_manager/mod.rs").read_text()
+    check_dynamic_neighbor_limit_linkage(config_source, peer_manager_source)
+    expect_checker_failure(
+        lambda: check_dynamic_neighbor_limit_linkage(
+            config_source,
+            peer_manager_source.replace(
+                "current_config.effective_dynamic_neighbor_limit()",
+                "current_config.global.dynamic_neighbor_limit.unwrap_or(100)",
+                1,
+            ),
+        ),
+        "PeerManager must consume Config::effective_dynamic_neighbor_limit",
+        "bypassed dynamic-neighbor-limit accessor",
+    )
 
 
 def check_config(inventory: dict, schema: dict) -> None:

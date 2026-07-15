@@ -210,6 +210,10 @@ gr_restart_time = 240
 gr_stale_routes_time = 720
 llgr_stale_time = 60
 disable_ipv4_unicast = false
+
+[[neighbors]]
+address = "2001:db8::5"
+remote_asn = 65005
 "#;
 
 const V1_CLUSTER_ID_DEFAULTS_TOML: &str = r#"
@@ -233,6 +237,10 @@ remote_asn = 65001
 peer_group = "rr"
 "#;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the v1 inventory checker requires all contextual-default proofs in one named test"
+)]
 #[test]
 fn v1_stable_effective_defaults_match_runtime_resolution() {
     macro_rules! assert_v1_effective_default {
@@ -244,9 +252,26 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
             );
         };
     }
+    macro_rules! assert_v1_family_case {
+        ($case:literal, $actual:expr, $expected:expr) => {
+            assert_eq!(
+                $actual.as_slice(),
+                $expected,
+                "runtime effective family default drifted for {}",
+                $case
+            );
+        };
+    }
 
     let config =
         parse_strict(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
+    let explicit_dynamic_limit_toml = V1_EFFECTIVE_DEFAULTS_TOML.replacen(
+        "listen_port = 179",
+        "listen_port = 179\ndynamic_neighbor_limit = 500",
+        1,
+    );
+    let explicit_dynamic_limit = parse_strict(&explicit_dynamic_limit_toml)
+        .expect("explicit dynamic-neighbor limit fixture must load");
     let bare = config
         .resolve_neighbor(&config.neighbors[0])
         .expect("bare neighbor must resolve");
@@ -256,9 +281,17 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     let overridden = config
         .resolve_neighbor(&config.neighbors[2])
         .expect("direct-override neighbor must resolve");
+    let bare_ipv6 = config
+        .resolve_neighbor(&config.neighbors[3])
+        .expect("bare IPv6 neighbor must resolve");
     let bare_peer = &bare.transport_config.peer;
     let bare_transport = &bare.transport_config;
     let cluster_id = config.cluster_id();
+    let explicit_dynamic_neighbor_limit = explicit_dynamic_limit.effective_dynamic_neighbor_limit();
+    let dynamic_neighbor_limit = (
+        config.effective_dynamic_neighbor_limit(),
+        explicit_dynamic_neighbor_limit,
+    );
     let disable_ipv4_unicast = bare_peer.disable_ipv4_unicast;
     let gr_restart_time = bare_peer.gr_restart_time;
     let gr_stale_routes_time = bare_transport.gr_stale_routes_time;
@@ -270,6 +303,11 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     // Mutation-red: each full path is bound to its actual production-resolved
     // value and an explicit expected value; deleting or weakening any row is red.
     assert_v1_effective_default!("Global.cluster_id", cluster_id, None);
+    assert_v1_effective_default!(
+        "Global.dynamic_neighbor_limit",
+        dynamic_neighbor_limit,
+        (100, 500)
+    );
     assert_v1_effective_default!("Neighbor.disable_ipv4_unicast", disable_ipv4_unicast, false);
     assert_v1_effective_default!("Neighbor.gr_restart_time", gr_restart_time, 120);
     assert_v1_effective_default!("Neighbor.gr_stale_routes_time", gr_stale_routes_time, 360);
@@ -277,6 +315,30 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     assert_v1_effective_default!("Neighbor.hold_time", hold_time, 90);
     assert_v1_effective_default!("Neighbor.llgr_stale_time", llgr_stale_time, (0, 0));
     assert_v1_effective_default!("Neighbor.send_hold_time", send_hold_time, 480);
+
+    // Mutation-red: changing the address-derived default, removing peer-group
+    // inheritance, or making the group outrank a neighbor override changes one
+    // of these typed rows.
+    assert_v1_family_case!(
+        "bare_ipv4",
+        bare.transport_config.peer.families,
+        &[(Afi::Ipv4, Safi::Unicast)]
+    );
+    assert_v1_family_case!(
+        "bare_ipv6",
+        bare_ipv6.transport_config.peer.families,
+        &[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    );
+    assert_v1_family_case!(
+        "group_overrides_address_default",
+        inherited.transport_config.peer.families,
+        &[(Afi::Ipv6, Safi::Unicast)]
+    );
+    assert_v1_family_case!(
+        "neighbor_overrides_group",
+        overridden.transport_config.peer.families,
+        &[(Afi::Ipv4, Safi::Unicast)]
+    );
 
     let effective = |resolved: &ResolvedNeighbor| {
         let transport = &resolved.transport_config;

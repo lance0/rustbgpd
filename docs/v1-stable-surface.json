@@ -97,7 +97,9 @@
     "effective_defaults": {
       "paths": [
         "Global.cluster_id",
+        "Global.dynamic_neighbor_limit",
         "Neighbor.disable_ipv4_unicast",
+        "Neighbor.families",
         "Neighbor.gr_restart_time",
         "Neighbor.gr_stale_routes_time",
         "Neighbor.graceful_restart",
@@ -105,6 +107,10 @@
         "Neighbor.llgr_stale_time",
         "Neighbor.send_hold_time"
       ],
+      "schema_representation_defaults": {
+        "Global.dynamic_neighbor_limit": null,
+        "Neighbor.families": []
+      },
       "validation_source": "src/config/tests.rs",
       "validation_test": "v1_stable_effective_defaults_match_runtime_resolution"
     },

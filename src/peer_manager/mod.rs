@@ -536,7 +536,7 @@ impl PeerManager {
             config_snapshot_staged: false,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
-            dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
+            dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
             dead_lettered_pending: HashMap::new(),
             dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,

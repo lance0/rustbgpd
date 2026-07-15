@@ -32,7 +32,9 @@ pub use schema::*;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
 use self::parse::{ChainDirection, parse_families, parse_policy, resolve_chain};
-use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
+use self::schema::{
+    BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_DYNAMIC_NEIGHBOR_LIMIT, DEFAULT_HOLD_TIME,
+};
 
 #[cfg(test)]
 use self::parse::parse_named_policy;
@@ -713,6 +715,14 @@ impl Config {
             return Some(router_id);
         }
         None
+    }
+
+    /// Resolve the process-wide cap for accepted dynamic neighbors.
+    #[must_use]
+    pub(crate) fn effective_dynamic_neighbor_limit(&self) -> u32 {
+        self.global
+            .dynamic_neighbor_limit
+            .unwrap_or(DEFAULT_DYNAMIC_NEIGHBOR_LIMIT)
     }
 
     /// Emit the startup warning for the pre-ADR-0064 legacy gRPC
