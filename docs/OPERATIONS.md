@@ -310,13 +310,24 @@ chain, etc.).
 The GR marker format is versioned. V1 is generationless and wall-clock-only;
 v2 adds a required checkpoint generation; v3 adds a complete Linux boot and
 time-namespace identity plus an absolute `CLOCK_BOOTTIME` deadline, with an
-optional checkpoint generation. Startup trusts the v3 boottime deadline only
-when the live boot ID, current time-namespace device/inode, and both offset
-components match exactly. Otherwise it uses the marker's wall deadline,
-bounded by the current maximum configured restart time. Publication logs a
-warning when clock-domain sampling, checked arithmetic, or TOML's signed
-integer range forces a complete v1/v2 fallback; partial v3 markers are never
-published.
+optional checkpoint generation. Full v3 protection requires Linux 5.6+ built
+with `CONFIG_TIME_NS`, a readable valid
+`/proc/sys/kernel/random/boot_id`, inspectable `/proc/self/ns/time`
+device/inode, readable valid `/proc/self/timens_offsets`, and a sampleable
+`CLOCK_BOOTTIME` value, with the overall marker identity and deadline fitting
+their serialized representations. A missing or access-restricted procfs input
+cannot establish clock-domain continuity; it selects the fallback rather than
+proving that no time namespace exists.
+
+Startup trusts the v3 boottime deadline only when the live boot ID, current
+time-namespace device/inode, and both boottime-offset components match exactly.
+Only that exact-domain path protects the shutdown-to-startup interval from
+discontinuous `CLOCK_REALTIME` steps. Otherwise the daemon uses the marker's
+wall deadline, bounded by the current maximum configured restart time. A
+forward wall-clock step can therefore shorten or expire that wall fallback,
+including the v1/v2 publication fallback. Publication logs a warning when
+clock-domain sampling, checked arithmetic, or TOML's signed integer range
+forces a complete v1/v2 fallback; partial v3 markers are never published.
 
 Each concurrently running daemon requires its own `runtime_state_dir`.
 Sharing the directory across live daemon processes is unsupported: its restart
@@ -353,10 +364,17 @@ rustbgpd still advertises `forwarding_preserved = false`; use a drained
 route-server pair or another traffic-shift procedure when forwarding
 continuity matters.
 
-Marker v3 makes the shutdown-to-startup deadline resistant to wall-clock steps
-and includes suspend time before the new process resolves it. The daemon then
-uses its normal process-local monotonic timer for the remaining live window; it
-does not claim suspend-inclusive timing after startup.
+In a matching domain, marker v3 makes the shutdown-to-startup deadline
+resistant to discontinuous `CLOCK_REALTIME` steps and includes suspend time
+before the new process resolves it. The daemon then uses its normal
+process-local monotonic timer for the remaining live window; it does not claim
+suspend-inclusive timing after startup.
+
+Rolling back to a binary that predates marker v3 is a cold-start compatibility
+event: that binary rejects the v3 marker and starts without restarting-speaker
+mode. This does not guarantee a traffic blackhole; impact depends on peer and
+topology behavior. Operators requiring continuity should still use the drained
+route-server-pair procedure below.
 
 For zero-downtime upgrades in a route-server pair, drain traffic to the
 standby, upgrade, then swap.

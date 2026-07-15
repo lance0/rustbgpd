@@ -59,15 +59,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawal. Mutation proofs make the independent BIRD stale-route check and
   rejection evidence fail when their production guards are removed. (LAN-434)
 
-- **Planned-restart markers resist wall-clock steps across a daemon restart on Linux.**
-  Marker v3 records a complete boot/time-namespace identity and checked
-  `CLOCK_BOOTTIME` deadline alongside its bounded wall fallback. Startup uses
-  boottime only when the live clock domain matches exactly; legacy markers,
-  mismatches, and sampling failures retain the bounded wall path. Publication
-  degrades atomically to complete v1/v2 markers when the domain cannot be
-  sampled or represented, and logs the actual visible version, checkpoint
-  binding, and directory-sync durability state. Runtime expiry remains
-  process-local monotonic time after startup.
+- **Planned-restart marker v3 resists discontinuous wall-clock steps in a
+  matched Linux clock domain.** On Linux 5.6+ with `CONFIG_TIME_NS`, this
+  requires a readable valid boot ID, inspectable time-namespace device/inode,
+  readable valid time-namespace offsets, and a sampleable and representable
+  `CLOCK_BOOTTIME` deadline. Startup uses boottime only when that complete
+  domain matches exactly, protecting against discontinuous `CLOCK_REALTIME`
+  steps between shutdown and startup. Legacy markers, mismatches, and sampling
+  failures use the wall deadline, bounded by the current configured maximum;
+  a forward wall-clock step can shorten or expire that fallback. Publication
+  degrades atomically to complete v1/v2 markers when necessary and logs the
+  actual visible version, checkpoint binding, and directory-sync durability
+  state. Runtime expiry remains process-local monotonic time after startup.
 
 - **Coordinated shutdown can publish a bounded warm checkpoint.** The
   restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
