@@ -148,6 +148,11 @@ of adjacent minor release lines from the canonical `v0.50.0` history origin,
 with an explicit transition into a new major. Future stable-surface migrations
 add a new consecutive-release fixture rather than overwriting this receipt.
 
+The v0.51.0 route-server example is also staged byte-for-byte under
+`tests/fixtures/v1-stable/v0.51.0/` and exercised by the current parser. This
+is only a current-parser proof: it is not yet an accepted v0.51.0-to-v0.52.0
+upgrade exercise and does not extend the inventory's accepted release chain.
+
 ## Release gate
 
 Run:
@@ -156,6 +161,7 @@ Run:
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
 cargo test -p rustbgpd v1_stable_v0_50_route_server_fixture_parses
+cargo test -p rustbgpd v1_stable_v0_51_route_server_fixture_parses
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 
