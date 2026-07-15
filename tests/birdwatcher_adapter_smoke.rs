@@ -1,5 +1,6 @@
-//! Smoke test: the external birdwatcher-adapter serves the
-//! birdwatcher REST contract from a live rustbgpd gRPC endpoint.
+//! Smoke test: the external birdwatcher-adapter serves its
+//! Birdwatcher-shaped status/peer/accepted-route subset from a live rustbgpd
+//! gRPC endpoint.
 //! (The adapter replaced the removed in-daemon looking glass server;
 //! this test pins the REST surface operators migrate to.)
 //!
@@ -234,7 +235,7 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 }
 
 #[test]
-fn adapter_serves_birdwatcher_contract() {
+fn adapter_serves_birdwatcher_shaped_status_peer_and_accepted_route_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let grpc_port = free_port();
     let adapter_port = free_port();

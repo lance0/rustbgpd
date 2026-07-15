@@ -1671,13 +1671,16 @@ plus the compared values behind it (e.g., `local_pref 100 < 200`),
 the step that selected the winner over the runner-up, and whether each
 loser would survive the equal-cost multipath cut.
 
-### Looking glass (birdwatcher-compatible REST API)
+### Looking glass (Birdwatcher-shaped REST subset)
 
-For external looking glass frontends (Alice-LG, etc.), run the external
-`examples/birdwatcher-adapter` binary — it serves the birdwatcher REST
-endpoints (`/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
-`/routes/peer/{peer}`) from the daemon's gRPC API. The in-daemon
-`[global.telemetry.looking_glass]` server has been removed.
+For status, peer, and accepted-route views in external looking glass
+frontends, run the external `examples/birdwatcher-adapter` binary. It serves the
+Birdwatcher-shaped endpoints (`/status`, `/protocols/bgp`,
+`/routes/protocol/{id}`, `/routes/peer/{peer}`) from the daemon's gRPC API.
+Alice-LG consumes these shapes, but this is not a usable complete backend:
+Alice-LG also fetches filtered and noexport route views that are not exposed,
+and the public API does not yet provide structured reject reasons. The
+in-daemon `[global.telemetry.looking_glass]` server has been removed.
 
 ### EVPN Route Reflector + Bidirectional VTEP
 

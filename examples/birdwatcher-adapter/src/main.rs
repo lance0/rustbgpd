@@ -1,10 +1,11 @@
-//! Birdwatcher-compatible REST looking glass adapter for rustbgpd.
+//! Birdwatcher-shaped REST looking glass adapter for rustbgpd.
 //!
-//! Standalone HTTP server that serves the birdwatcher API contract
-//! consumed by Alice-LG and similar looking glass frontends, sourcing
-//! all data from a running rustbgpd over gRPC. This replaces the
-//! removed in-daemon `[global.telemetry.looking_glass]` server;
-//! endpoint paths and response shapes are identical.
+//! Standalone HTTP server that serves the status, peer, and accepted-route
+//! subset consumed by Alice-LG and similar looking glass frontends, sourcing
+//! all data from a running rustbgpd over gRPC. This replaces the removed
+//! in-daemon `[global.telemetry.looking_glass]` server's four endpoints. It is
+//! not a complete Alice-LG backend: filtered/noexport views and structured
+//! reject reasons are not exposed.
 //!
 //! **Supported endpoints** (single-table mode):
 //! - `GET /status` — daemon status
@@ -12,9 +13,9 @@
 //! - `GET /routes/protocol/{id}` — received routes by neighbor address
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
 //!
-//! Response shapes match birdwatcher field names so Alice-LG can parse
-//! them without adapter code. Fields that have no rustbgpd equivalent
-//! are present but empty/zero.
+//! Response shapes use Birdwatcher field names so Alice-LG can parse this
+//! subset without adapter code. Fields that have no rustbgpd equivalent are
+//! present but empty/zero.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -30,7 +31,7 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[command(
     name = "birdwatcher-adapter",
-    about = "Birdwatcher-compatible REST looking glass, served from rustbgpd's gRPC API"
+    about = "Birdwatcher-shaped status, peer, and accepted-route REST subset, served from rustbgpd's gRPC API"
 )]
 struct Args {
     /// rustbgpd gRPC endpoint, e.g. `http://127.0.0.1:50051`.
@@ -78,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/routes/peer/{peer}", get(routes_peer))
         .with_state(state);
 
-    info!(addr = %args.listen, "starting birdwatcher-compatible looking glass");
+    info!(addr = %args.listen, "starting Birdwatcher-shaped looking glass subset");
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -92,8 +93,8 @@ fn bad_gateway(context: &str, status: &tonic::Status) -> StatusCode {
 }
 
 // ---------------------------------------------------------------------------
-// Birdwatcher-compatible response pieces (shapes match the removed
-// in-daemon looking glass server this adapter replaced).
+// Birdwatcher-shaped response pieces for the status/peer/accepted-route subset
+// (shapes match the removed in-daemon looking glass server).
 // ---------------------------------------------------------------------------
 
 /// Top-level `api` block included in every birdwatcher response.
@@ -188,8 +189,8 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
 }
 
 // ---------------------------------------------------------------------------
-// GET /routes/protocol/{id}  — Alice-LG single-table mode
-// GET /routes/peer/{peer}    — Alice-LG multi-table mode
+// GET /routes/protocol/{id}  — Alice-LG accepted-route single-table view
+// GET /routes/peer/{peer}    — Alice-LG accepted-route multi-table view
 //                            →  RibService.ListReceivedRoutes
 // ---------------------------------------------------------------------------
 

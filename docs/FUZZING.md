@@ -31,6 +31,7 @@ network — so it has no fuzz surface.
 | `decode_rtc` | wire | RFC 4684 RT-Constrain NLRI (AFI 1/SAFI 132), default + 32..96-bit prefixes | lossless round-trip |
 | `parse_rd` | wire | Route Distinguisher `FromStr` | Display→FromStr lossless |
 | `rpol_compile` | policy | `.rpol` lexer, parser, typechecker, lowering, and the in-language `test`-block runner (eval engine on fuzzer-authored programs) | returns `Diagnostics`, never panics/aborts/hangs |
+| `dataset_parse` | policy | operator-fed prefix, ASN, and community dataset text, including comments and malformed lines | returns a result, never panics/aborts/hangs |
 | `parse_rt` | evpn | Route Target `FromStr` over arbitrary UTF-8 | Display→FromStr lossless |
 | `snapshot_reader_drain` | mrt | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
 | `warm_bundle_manifest` | mrt | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
@@ -62,7 +63,8 @@ A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
   configs). Fix any fuzzer-found bug by adding its minimized reproducer here
   as a regression seed.
 - `fuzz/corpus/<target>/` — the growing machine-generated corpus,
-  **gitignored**; CI and OSS-Fuzz grow their own from the seeds.
+  **gitignored**; CI grows its own from the seeds, and OSS-Fuzz will do the
+  same after onboarding completes.
 
 ## CI
 
@@ -79,24 +81,11 @@ The standard OSS-Fuzz project files are staged in `fuzz/oss-fuzz/`
 crates with `cargo fuzz build -O --debug-assertions` and ships each
 `fuzz/seeds/<target>/` directory as a `<target>_seed_corpus.zip`.
 
-Remaining manual steps (maintainer-submitted):
-
-1. Fork <https://github.com/google/oss-fuzz>, create
-   `projects/rustbgpd/`, and copy the three files from `fuzz/oss-fuzz/`.
-2. Verify locally from the oss-fuzz checkout:
-   ```sh
-   python infra/helper.py build_image rustbgpd
-   python infra/helper.py build_fuzzers --sanitizer address rustbgpd
-   python infra/helper.py check_build rustbgpd
-   python infra/helper.py run_fuzzer rustbgpd decode_update
-   ```
-3. Open the PR against google/oss-fuzz. The `primary_contact`
-   (lancey3@gmail.com) must be a Google-account email able to access the
-   ClusterFuzz dashboard; add any `auto_ccs` in `project.yaml` at that
-   point.
-4. After the first build goes green, confirm crash notifications arrive
-   and mirror any OSS-Fuzz-found reproducers into `fuzz/seeds/` as
-   regression seeds.
+[google/oss-fuzz#15874](https://github.com/google/oss-fuzz/pull/15874) has
+been submitted and its OSS-Fuzz build/check helpers pass. Onboarding is still
+pending upstream review, merge, and the first green hosted build. After that
+first hosted build, confirm crash notifications reach the primary contact and
+mirror any OSS-Fuzz-found reproducers into `fuzz/seeds/` as regression seeds.
 
 Keep `fuzz/oss-fuzz/` in sync when adding fuzz crates: `build.sh` discovers
 targets per crate automatically, but a new fuzz *directory* must be added to

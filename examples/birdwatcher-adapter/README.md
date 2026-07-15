@@ -1,12 +1,11 @@
 # birdwatcher-adapter — external looking glass REST adapter
 
-Standalone HTTP server that exposes rustbgpd through the
-**birdwatcher-compatible REST contract** consumed by
-[Alice-LG](https://github.com/alice-lg/alice-lg) and similar looking
-glass frontends. All data is sourced from a running rustbgpd over
-gRPC; endpoint paths and response shapes are identical to the
-removed in-daemon `[global.telemetry.looking_glass]` server this
-adapter replaces.
+Standalone HTTP server that exposes a **Birdwatcher-shaped read-only subset**
+for [Alice-LG](https://github.com/alice-lg/alice-lg) and similar looking glass
+frontends. It serves status, peer, and accepted-route views from a running
+rustbgpd over gRPC. The four endpoint paths and response shapes match the
+removed in-daemon `[global.telemetry.looking_glass]` server this adapter
+replaces; this is not a complete Alice-LG backend.
 
 Rationale: the daemon's durable API identity is **gRPC + `rbgp`**.
 Partial compatibility with someone else's REST API inside daemon core
@@ -44,16 +43,26 @@ every RPC the adapter calls is a read.
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 
-Every endpoint of the in-daemon server is fully servable over today's
-gRPC API — there are no 501 endpoints. Route `age` is served from the
-`Route.received_at_epoch_seconds` proto field (RIB receive time), the
-same source the in-daemon server reads.
+All four endpoints from the removed in-daemon server are servable over today's
+gRPC API — there are no placeholder 501 responses. Route `age` is served from
+the `Route.received_at_epoch_seconds` proto field (RIB receive time), the same
+source the in-daemon server used.
+
+The scope is status, peer, and accepted-route views only. Alice-LG's
+filtered/noexport views are not implemented, and the public API does not yet
+provide the structured per-route reject reasons needed to implement them
+honestly.
 
 ### Field-level gaps
 
-| Field                  | In-daemon server                  | Adapter                              |
-|------------------------|-----------------------------------|--------------------------------------|
-| status `last_reconfig` | `""` (not tracked)                | `""` (unchanged)                     |
+| Field | Adapter value | Limitation |
+|---|---|---|
+| status `last_reconfig` | `""` | Reconfiguration time is not tracked. |
+| protocol `routes.filtered` | `0` | Sentinel only; this is not a filtered-route count. |
+| protocol `routes.preferred` | `0` | Sentinel only; preferred-route count is not exposed. |
+| route `interface` | `""` | Interface identity is not exposed for these routes. |
+| route `metric` | `0` | Sentinel only; this is not an IGP metric. |
+| route `primary` | `false` | Sentinel only; primary-route status is not exposed. |
 
 Error behavior differs only on failure: when the daemon is unreachable
 the adapter returns `502 Bad Gateway` (the in-daemon server returned
@@ -62,6 +71,6 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
 ## Testing
 
 - Unit tests: `cargo test -p birdwatcher-adapter`
-- End-to-end smoke test comparing adapter output against the in-daemon
-  server for the same state: `cargo test --test birdwatcher_adapter_smoke`
-  (root package; spawns a real daemon plus this adapter).
+- End-to-end smoke test of the status/peer/accepted-route subset:
+  `cargo test --test birdwatcher_adapter_smoke` (root package; spawns a real
+  daemon plus this adapter).

@@ -346,14 +346,14 @@ same listener serves `/metrics`, `/livez`, and `/readyz`.
 
 ### `[global.telemetry.looking_glass]` (removed)
 
-The in-daemon birdwatcher-compatible looking glass HTTP server has been
-removed. The daemon's durable API is gRPC + `rbgp`; the birdwatcher REST
-surface lives in a maintained external adapter, `examples/birdwatcher-adapter`,
-which serves the identical endpoints and response shapes (`/status`,
-`/protocols/bgp`, `/routes/protocol/{id}`, `/routes/peer/{peer}`) from the
-daemon's gRPC API. A config that still sets `[global.telemetry.looking_glass]`
-fails to load with a migration error. See the adapter README for the
-endpoint→gRPC mapping.
+The in-daemon Birdwatcher-shaped looking glass HTTP server has been removed.
+The daemon's durable API is gRPC + `rbgp`; its four status, peer, and
+accepted-route endpoints (`/status`, `/protocols/bgp`,
+`/routes/protocol/{id}`, `/routes/peer/{peer}`) now live in the maintained
+external `examples/birdwatcher-adapter`. This is not yet a complete Alice-LG
+backend: filtered/noexport views and structured reject reasons are absent. A
+config that still sets `[global.telemetry.looking_glass]` fails to load with a
+migration error. See the adapter README for the endpoint→gRPC mapping.
 
 gRPC listeners are configured with optional subtables:
 

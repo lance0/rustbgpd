@@ -406,9 +406,11 @@ IX peer C  ──┘
   with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
 - **BMP export** — stream to OpenBMP or pmacct for long-term archival
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
-- **Birdwatcher-compatible REST API** — the external
+- **Birdwatcher-shaped REST subset** — the external
   [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) serves
-  Alice-LG and similar looking glass frontends from the gRPC API
+  accepted-route, peer, and status views from the gRPC API; filtered/noexport
+  views and structured reject reasons remain before it is a complete Alice-LG
+  backend
 - **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 

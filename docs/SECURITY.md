@@ -163,11 +163,11 @@ to gRPC.
 
 ## Looking glass adapter
 
-The in-daemon looking glass HTTP server has been removed. The
-birdwatcher-compatible REST surface is served by the external
-`examples/birdwatcher-adapter` binary over the daemon's gRPC API. The
-adapter is read-only and unauthenticated: it exposes neighbor state,
-received routes, and peer addresses, so apply the same network-level
+The in-daemon looking glass HTTP server has been removed. The external
+`examples/birdwatcher-adapter` binary serves a Birdwatcher-shaped read-only
+status, peer, and accepted-route subset over the daemon's gRPC API. It is not a
+complete Alice-LG backend. The adapter is unauthenticated and exposes neighbor
+state, received routes, and peer addresses, so apply the same network-level
 access controls as Prometheus.
 
 ## TCP MD5 and GTSM
