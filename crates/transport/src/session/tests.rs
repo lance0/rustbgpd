@@ -4080,6 +4080,182 @@ async fn process_update_threads_vpn_add_path_ids_into_rib_keys() {
         }]
     );
 }
+
+/// Import-policy denial retires an accepted VPN Add-Path identity exactly,
+/// deduplicates an overlapping explicit withdrawal, preserves siblings, and
+/// keeps first-seen denials silent for both `VPNv4` and `VPNv6`.
+///
+/// Break-to-red: deleting denied-key collection or its presence-gated
+/// `known_vpn.remove` leaves the denied path accepted; blindly appending the
+/// key duplicates the overlap and emits the first-seen path.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario pins exact VPN identity and accounting across both address families"
+)]
+async fn denied_vpn_add_path_replacements_withdraw_exact_known_identity() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the shared dual-AFI fixture keeps all identity transitions in one stateful session"
+    )]
+    async fn exercise(afi: Afi) {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let family = (afi, Safi::MplsVpn);
+        let mut negotiated = negotiated_session(65002, true);
+        negotiated.negotiated_families = vec![family];
+        negotiated
+            .add_path_families
+            .insert(family, AddPathMode::Both);
+        install_test_negotiated_session(&mut session, negotiated);
+
+        let prefix = match afi {
+            Afi::Ipv4 => VpnPrefix::v4(Ipv4Addr::new(10, 44, 2, 0), 24).unwrap(),
+            Afi::Ipv6 => VpnPrefix::v6("2001:db8:442::".parse().unwrap(), 64).unwrap(),
+            _ => unreachable!("test covers IP VPN families"),
+        };
+        let nlri = VpnNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 44]),
+            prefix,
+        };
+        let next_hop = match afi {
+            Afi::Ipv4 => IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            Afi::Ipv6 => IpAddr::V6("2001:db8::7".parse().unwrap()),
+            _ => unreachable!("test covers IP VPN families"),
+        };
+        let base_attrs = || {
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+            ]
+        };
+        let reach = |path_ids: &[u32]| {
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi,
+                safi: Safi::MplsVpn,
+                next_hop,
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: path_ids
+                    .iter()
+                    .map(|path_id| rustbgpd_wire::VpnNlriEntry {
+                        path_id: *path_id,
+                        nlri: nlri.clone(),
+                    })
+                    .collect(),
+                rtc_announced: vec![],
+            })
+        };
+        let unreach = |path_id| {
+            PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi,
+                safi: Safi::MplsVpn,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
+                vpn_withdrawn: vec![rustbgpd_wire::VpnNlriEntry {
+                    path_id,
+                    nlri: VpnNlri {
+                        labels: vec![],
+                        route_distinguisher: nlri.route_distinguisher,
+                        prefix: nlri.prefix,
+                    },
+                }],
+                rtc_withdrawn: vec![],
+            })
+        };
+        let update = |attributes: Vec<PathAttribute>| {
+            UpdateMessage::build(&[], &[], &attributes, true, true, Ipv4UnicastMode::Body)
+        };
+        let key = |path_id| rustbgpd_rib::VpnRibRouteKey {
+            nlri_key: nlri.key(),
+            path_id,
+        };
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[11, 22, 33]));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("accepted VPN paths reach the RIB")
+        else {
+            panic!("expected VpnRoutesReceived");
+        };
+        assert_eq!(announced.len(), 3);
+        assert!(withdrawn.is_empty());
+        assert_eq!(session.known_prefix_count(), 3);
+        for path_id in [11, 22, 33] {
+            assert!(session.known_vpn.contains(&key(path_id)));
+        }
+
+        session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+            entries: vec![],
+            default_action: PolicyAction::Deny,
+        }])));
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[11]));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("denied replacement reaches the RIB")
+        else {
+            panic!("expected VpnRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(11)]);
+        assert!(!session.known_vpn.contains(&key(11)));
+        assert!(session.known_vpn.contains(&key(22)));
+        assert!(session.known_vpn.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 2);
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[22]));
+        attributes.push(unreach(22));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("overlapping withdrawal reaches the RIB")
+        else {
+            panic!("expected VpnRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 1, "overlap must not duplicate the key");
+        assert_eq!(withdrawn, vec![key(22)]);
+        assert!(!session.known_vpn.contains(&key(22)));
+        assert!(session.known_vpn.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 1);
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[44]));
+        session.process_update(update(attributes)).await;
+        assert!(rib_rx.try_recv().is_err(), "first-seen denial stays silent");
+        assert!(!session.known_vpn.contains(&key(44)));
+        assert_eq!(session.known_prefix_count(), 1);
+    }
+
+    exercise(Afi::Ipv4).await;
+    exercise(Afi::Ipv6).await;
+}
+
 /// iBGP reflection of a VPN route on an RR adds `ORIGINATOR_ID` and
 /// `CLUSTER_LIST`, keeps `LOCAL_PREF`, and never emits inline `NextHop`/MP attrs.
 #[test]
