@@ -1,5 +1,51 @@
 use super::*;
 
+fn with_rtc_no_advertise(mut route: crate::route::RtcRibRoute) -> crate::route::RtcRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    ]));
+    route
+}
+
+fn rtc_no_advertise_policy(next_hop: IpAddr, add: bool) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(next_hop),
+            modifications: rustbgpd_policy::RouteModifications {
+                communities_add: add
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                communities_remove: (!add)
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+        }],
+        // The locally originated default RTC NLRI has an unspecified next
+        // hop, so this narrow fixture never changes or suppresses it.
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
 /// Received RTC routes land in the typed Adj-RIB-In / Loc-RIB and are
 /// queryable through `QueryRtcRoutes`.
 #[tokio::test]
@@ -137,6 +183,131 @@ async fn rtc_route_reflects_between_ibgp_clients_with_originator_and_cluster_lis
         crate::route::RouteOrigin::Ibgp,
         "reflected route keeps iBGP origin so transport attaches ORIGINATOR_ID/CLUSTER_LIST"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RT-Constrain enforces RFC 1997 before and after export policy, withdraws
+/// the exact prior Adj-RIB-Out identity, and re-announces after either scope is
+/// removed without disturbing the locally originated default RTC NLRI.
+///
+/// Break-to-red: deleting the pre-policy guard lets the removal policy export
+/// the source-scoped route; deleting the post-policy guard retains the route
+/// when policy adds `NO_ADVERTISE`; deleting either existing-state withdrawal
+/// leaves the exact key advertised; making suppression sticky prevents the two
+/// recovery announcements.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered state-machine regression proves suppression, withdrawal, and recovery"
+)]
+async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = Ipv4Addr::new(198, 51, 100, 10);
+    let source_ip = IpAddr::V4(source);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(rtc_no_advertise_policy(source_ip, false)),
+        sendable_families: rtc_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_rtc_initial_dump(&mut out_rx).await;
+
+    let route = make_rtc_rib_route(source, 442, 100);
+    let key = route.key();
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_rtc_routes(&tx).await;
+    let initial = out_rx
+        .try_recv()
+        .expect("plain RTC route must be announced");
+    assert_eq!(initial.rtc_announce.len(), 1);
+    assert_eq!(initial.rtc_announce[0].key(), key);
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![with_rtc_no_advertise(route.clone())],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_rtc_routes(&tx).await;
+    let source_scoped = out_rx
+        .try_recv()
+        .expect("source NO_ADVERTISE must withdraw the prior RTC route");
+    assert!(source_scoped.rtc_announce.is_empty());
+    assert_eq!(source_scoped.rtc_withdraw, vec![key.clone()]);
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![route],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_rtc_routes(&tx).await;
+    let source_recovered = out_rx.try_recv().expect("plain RTC route must recover");
+    assert_eq!(source_recovered.rtc_announce.len(), 1);
+    assert!(source_recovered.rtc_withdraw.is_empty());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(rtc_no_advertise_policy(source_ip, true)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_rtc_routes(&tx).await;
+    let policy_scoped = out_rx
+        .try_recv()
+        .expect("policy-added NO_ADVERTISE must withdraw the RTC route");
+    assert!(policy_scoped.rtc_announce.is_empty());
+    assert_eq!(policy_scoped.rtc_withdraw, vec![key]);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(rtc_no_advertise_policy(source_ip, false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_rtc_routes(&tx).await;
+    let policy_recovered = out_rx
+        .try_recv()
+        .expect("removing policy-added NO_ADVERTISE must re-announce RTC");
+    assert_eq!(policy_recovered.rtc_announce.len(), 1);
+    assert!(policy_recovered.rtc_withdraw.is_empty());
+    assert!(out_rx.try_recv().is_err(), "default RTC must not churn");
 
     drop(tx);
     handle.await.unwrap();
