@@ -18,7 +18,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Core BGP | RFC 4271, RFC 6793 (4-byte ASN) | FSM + UPDATE validation, dual-stack IPv4/IPv6 unicast (SAFI 1) |
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
-| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` egress enforcement for unicast and VPNv4/VPNv6 |
+| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` egress enforcement for unicast, VPNv4/VPNv6, and labeled-unicast |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
@@ -34,14 +34,16 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ## RFC 1997 — NO_ADVERTISE export restriction
 
-- IPv4/IPv6 unicast and VPNv4/VPNv6 routes carrying `NO_ADVERTISE` are
-  ineligible before export policy, and the post-policy route is checked again
-  before Adj-RIB-Out commit. A permit policy cannot remove the community to
-  bypass the restriction; a policy that adds it suppresses the modified route.
-- The same predicate covers grouped and private single-best plus Add-Path for
-  unicast and VPN routes, and RFC 7947 per-client-best plus RFC 9107 ORR for
-  unicast. Existing advertisements are withdrawn and logical Adj-RIB-Out state
-  is cleared.
+- IPv4/IPv6 unicast, VPNv4/VPNv6, and labeled-unicast routes carrying
+  `NO_ADVERTISE` are ineligible before export policy, and the post-policy route
+  is checked again before Adj-RIB-Out commit. A permit policy cannot remove the
+  community to bypass the restriction; a policy that adds it suppresses the
+  modified route.
+- The same predicate covers single-best plus Add-Path for unicast, VPN, and
+  labeled routes; grouped/private and RFC 7947 per-client-best shapes apply to
+  unicast, grouped/private applies to VPN, and RFC 9107 ORR applies to unicast
+  and labeled-unicast. Existing advertisements are withdrawn and logical
+  Adj-RIB-Out state is cleared.
 - Add-Path and per-client-best remove scoped candidates before ranking, so
   surviving siblings compact normally. They also skip policy-modified
   candidates whose result carries `NO_ADVERTISE`. ORR first selects its
@@ -54,10 +56,10 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 ## Inbound import-policy replacement semantics
 
 - Import-policy denial of a replacement retires the exact previously accepted
-  VPN `(RD + prefix, path_id)` identity. First-seen denials remain filter-only,
-  explicit overlapping withdrawals are deduplicated, and Add-Path siblings
-  remain intact. Other non-unicast families retain their existing policy
-  behavior.
+  VPN `(RD + prefix, path_id)` or labeled-unicast `(prefix, path_id)` identity.
+  First-seen denials remain filter-only, explicit overlapping withdrawals are
+  deduplicated, and Add-Path siblings remain intact. Other non-unicast families
+  retain their existing policy behavior.
 
 ---
 

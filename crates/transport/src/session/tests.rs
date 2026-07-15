@@ -3725,6 +3725,222 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
         }]
     );
 }
+
+/// Import-policy denial retires an exact accepted labeled Add-Path identity,
+/// deduplicates an overlapping explicit withdrawal, preserves siblings, keeps
+/// first-seen denials silent, and reconciles Enhanced Refresh accounting for
+/// both labeled IPv4 and IPv6.
+///
+/// Break-to-red: deleting denied-key collection/presence-gated removal leaves
+/// known/max-prefix/refresh state stale; appending without the membership gate
+/// duplicates the overlap and emits the first-seen denial; applying refresh
+/// capture before the synthetic withdrawal leaves the stale count unchanged.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dual-AFI stateful scenario pins exact denial, overlap, accounting, and Enhanced Refresh transitions"
+)]
+async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the shared per-AFI fixture keeps every identity transition inside one refresh window"
+    )]
+    async fn exercise(afi: Afi) {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let family = (afi, Safi::LabeledUnicast);
+        let mut negotiated = negotiated_session(65002, true);
+        negotiated.negotiated_families = vec![family];
+        negotiated
+            .add_path_families
+            .insert(family, AddPathMode::Both);
+        negotiated.peer_route_refresh = true;
+        negotiated.peer_enhanced_route_refresh = true;
+        install_test_negotiated_session(&mut session, negotiated);
+
+        let prefix = match afi {
+            Afi::Ipv4 => Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 3, 0), 24)),
+            Afi::Ipv6 => Prefix::V6(Ipv6Prefix::new("2001:db8:443::".parse().unwrap(), 64)),
+            _ => unreachable!("test covers IP labeled-unicast families"),
+        };
+        let nlri = rustbgpd_wire::LabeledNlri {
+            labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+            prefix,
+        };
+        let next_hop = match afi {
+            Afi::Ipv4 => IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            Afi::Ipv6 => IpAddr::V6("2001:db8::7".parse().unwrap()),
+            _ => unreachable!("test covers IP labeled-unicast families"),
+        };
+        let base_attrs = || {
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+            ]
+        };
+        let reach = |path_ids: &[u32]| {
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi,
+                safi: Safi::LabeledUnicast,
+                next_hop,
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                vpn_announced: vec![],
+                labeled_announced: path_ids
+                    .iter()
+                    .map(|path_id| rustbgpd_wire::LabeledNlriEntry {
+                        path_id: *path_id,
+                        nlri: nlri.clone(),
+                    })
+                    .collect(),
+                rtc_announced: vec![],
+            })
+        };
+        let unreach = |path_id| {
+            PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi,
+                safi: Safi::LabeledUnicast,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
+                vpn_withdrawn: vec![],
+                labeled_withdrawn: vec![rustbgpd_wire::LabeledNlriEntry {
+                    path_id,
+                    nlri: rustbgpd_wire::LabeledNlri {
+                        labels: vec![],
+                        prefix,
+                    },
+                }],
+                rtc_withdrawn: vec![],
+            })
+        };
+        let update = |attributes: Vec<PathAttribute>| {
+            UpdateMessage::build(&[], &[], &attributes, true, true, Ipv4UnicastMode::Body)
+        };
+        let key = |path_id| rustbgpd_rib::LabeledRibRouteKey { prefix, path_id };
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[11, 22, 33]));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::LabeledRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("accepted labeled paths reach the RIB")
+        else {
+            panic!("expected LabeledRoutesReceived");
+        };
+        assert_eq!(announced.len(), 3);
+        assert!(withdrawn.is_empty());
+        assert_eq!(session.known_prefix_count(), 3);
+        for path_id in [11, 22, 33] {
+            assert!(session.known_labeled.contains(&key(path_id)));
+        }
+
+        buffer_route_refresh(
+            &mut session,
+            afi,
+            Safi::LabeledUnicast,
+            RouteRefreshSubtype::BoRR,
+        );
+        session.process_read_buffer().await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::BeginRouteRefresh {
+                afi: marker_afi,
+                safi: Safi::LabeledUnicast,
+                ..
+            }) if marker_afi == afi
+        ));
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(3));
+
+        session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+            entries: vec![],
+            default_action: PolicyAction::Deny,
+        }])));
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[11]));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::LabeledRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx
+            .try_recv()
+            .expect("denied labeled replacement reaches the RIB")
+        else {
+            panic!("expected LabeledRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![key(11)]);
+        assert!(!session.known_labeled.contains(&key(11)));
+        assert!(session.known_labeled.contains(&key(22)));
+        assert!(session.known_labeled.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 2);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(2));
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[22]));
+        attributes.push(unreach(22));
+        session.process_update(update(attributes)).await;
+        let RibUpdate::LabeledRoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("overlap reaches the RIB once")
+        else {
+            panic!("expected LabeledRoutesReceived");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 1, "overlap must not duplicate the key");
+        assert_eq!(withdrawn, vec![key(22)]);
+        assert!(!session.known_labeled.contains(&key(22)));
+        assert!(session.known_labeled.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+
+        let mut attributes = base_attrs();
+        attributes.push(reach(&[44]));
+        session.process_update(update(attributes)).await;
+        assert!(rib_rx.try_recv().is_err(), "first-seen denial stays silent");
+        assert!(!session.known_labeled.contains(&key(44)));
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+        assert_eq!(session.import_policy_routes_permitted, 3);
+        assert_eq!(session.import_policy_routes_denied, 3);
+
+        buffer_route_refresh(
+            &mut session,
+            afi,
+            Safi::LabeledUnicast,
+            RouteRefreshSubtype::EoRR,
+        );
+        session.process_read_buffer().await;
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::EndRouteRefresh {
+                afi: marker_afi,
+                safi: Safi::LabeledUnicast,
+                ..
+            }) if marker_afi == afi
+        ));
+        assert_eq!(session.refresh_accounting_window_count(), 0);
+        assert!(!session.known_labeled.contains(&key(33)));
+        assert_eq!(session.known_prefix_count(), 0);
+    }
+
+    exercise(Afi::Ipv4).await;
+    exercise(Afi::Ipv6).await;
+}
+
 /// iBGP reflection of a labeled route on an RR adds `ORIGINATOR_ID` and
 /// `CLUSTER_LIST`, keeps `LOCAL_PREF`, and never emits inline `NextHop`/MP attrs.
 #[test]

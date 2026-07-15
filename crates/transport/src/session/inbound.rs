@@ -1510,6 +1510,7 @@ impl PeerSession {
         let mut denied_vpn: Vec<VpnRibRouteKey> = Vec::new();
         let mut labeled_announced: Vec<LabeledRibRoute> = Vec::new();
         let mut labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
+        let mut denied_labeled: Vec<LabeledRibRouteKey> = Vec::new();
         let mut rtc_announced: Vec<RtcRibRoute> = Vec::new();
         let mut rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
         for attr in &parsed.attributes {
@@ -1881,6 +1882,11 @@ impl PeerSession {
                                     is_llgr_stale: false,
                                     path_id: entry.path_id,
                                 });
+                            } else {
+                                denied_labeled.push(LabeledRibRouteKey {
+                                    prefix: entry.nlri.key(),
+                                    path_id: entry.path_id,
+                                });
                             }
                         }
                         continue;
@@ -2204,6 +2210,11 @@ impl PeerSession {
         }
         for key in &labeled_withdrawn {
             self.known_labeled.remove(key);
+        }
+        for key in denied_labeled {
+            if self.known_labeled.remove(&key) {
+                labeled_withdrawn.push(key);
+            }
         }
         for route in &labeled_announced {
             // Keyed by (prefix, path_id): under labeled Add-Path each

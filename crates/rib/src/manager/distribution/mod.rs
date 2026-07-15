@@ -613,8 +613,8 @@ fn llgr_stale_export_suppressed(
 /// means that a route "MUST NOT be advertised to any BGP peer", so the
 /// source route is ineligible before export policy can remove the community,
 /// and a modified route is ineligible when policy adds it. This predicate is
-/// deliberately target-independent: every supported unicast and VPN selection
-/// shape applies both checks.
+/// deliberately target-independent: every supported unicast, VPN, and
+/// labeled-unicast selection shape applies both checks.
 pub(super) fn no_advertise_export_suppressed(communities: &[u32]) -> bool {
     communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
 }
