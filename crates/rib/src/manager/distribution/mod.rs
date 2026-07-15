@@ -1918,6 +1918,15 @@ impl RibManager {
                     .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
                 && probe_results.iter().all(Result::is_ok)
                 && !self.peer_unexportable.contains_key(&peer);
+            #[cfg(test)]
+            let fast_path = {
+                let enabled = fast_path && !self.test_force_exact_export_slow_path;
+                if enabled {
+                    self.test_exact_export_fast_path_hits =
+                        self.test_exact_export_fast_path_hits.saturating_add(1);
+                }
+                enabled
+            };
 
             if !fast_path {
                 // Keys and prior advertised state are fallback-only. A clean

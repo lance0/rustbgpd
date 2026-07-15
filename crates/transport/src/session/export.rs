@@ -810,9 +810,7 @@ impl SessionExportProfile {
         }
     }
 
-    /// Return the prepared attributes for one unicast route, memoized by every
-    /// route/profile input that changes attribute construction. Both live
-    /// envelope encoding and exact precommit probes use this implementation.
+    /// Memoize route-varying inputs in one immutable profile; fixed fields are omitted, so never reuse across peers/generations; live and probe paths share this.
     pub(super) fn prepared_unicast_attributes_cached<'a>(
         &self,
         cache: &'a mut PreparedAttrCache,
@@ -820,8 +818,10 @@ impl SessionExportProfile {
         local_ipv4: Ipv4Addr,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> &'a PreparedUnicastAttributes {
+        #[cfg(debug_assertions)]
+        cache.bind(self.owner_id, self.generation);
         let key = self.prepared_attr_cache_key(route, local_ipv4, next_hop_override);
-        cache.entry(key).or_insert_with(|| {
+        cache.entries.entry(key).or_insert_with(|| {
             self.prepare_unicast_attribute_bundle(route, local_ipv4, next_hop_override)
         })
     }
@@ -1424,7 +1424,29 @@ pub(super) struct PreparedAttrCacheKey {
     next_hop_override: NextHopOverrideKey,
 }
 
-pub(super) type PreparedAttrCache = FxHashMap<PreparedAttrCacheKey, PreparedUnicastAttributes>;
+#[derive(Default)]
+pub(super) struct PreparedAttrCache {
+    entries: FxHashMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
+    #[cfg(debug_assertions)]
+    snapshot: Option<(u64, u64)>,
+}
+
+impl PreparedAttrCache {
+    #[cfg(debug_assertions)]
+    fn bind(&mut self, owner_id: u64, generation: u64) {
+        match self.snapshot {
+            Some(snapshot) => {
+                debug_assert_eq!(snapshot, (owner_id, generation), "cache snapshot mismatch");
+            }
+            None => self.snapshot = Some((owner_id, generation)),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 pub(super) struct PreparedMpCandidate<T> {
     pub(super) afi: Afi,
@@ -2428,12 +2450,33 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
+    fn prepared_attr_cache_test_route() -> Route {
+        Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        }
+    }
+
     #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "one cache-key matrix keeps scalar equivalence and every memo dimension together"
     )]
-    fn batched_exact_probe_matches_scalar_and_memoizes_only_complete_attr_keys() {
+    fn same_snapshot_batch_memoizes_only_complete_attr_keys() {
         let config = config_with_auth_secret("not-retained");
         let profile = SessionExportProfile::initial(&config, None, false);
         let shared_attributes = Arc::new(vec![
@@ -2550,6 +2593,34 @@ mod tests {
                 "specific next-hop address is part of the cache key"
             );
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "cache snapshot mismatch")]
+    fn prepared_attr_cache_rejects_a_different_snapshot_owner() {
+        let config = config_with_auth_secret("not-retained");
+        let profile = SessionExportProfile::initial(&config, None, false);
+        let route = prepared_attr_cache_test_route();
+        let mut cache = PreparedAttrCache::default();
+        profile.prepared_unicast_attributes_cached(&mut cache, &route, profile.local_ipv4(), None);
+        let mut other = profile.clone();
+        other.owner_id = profile.owner_id + 1;
+        other.prepared_unicast_attributes_cached(&mut cache, &route, other.local_ipv4(), None);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "cache snapshot mismatch")]
+    fn prepared_attr_cache_rejects_a_different_snapshot_generation() {
+        let config = config_with_auth_secret("not-retained");
+        let profile = SessionExportProfile::initial(&config, None, false);
+        let route = prepared_attr_cache_test_route();
+        let mut cache = PreparedAttrCache::default();
+        profile.prepared_unicast_attributes_cached(&mut cache, &route, profile.local_ipv4(), None);
+        let mut other = profile.clone();
+        other.generation = profile.generation + 1;
+        other.prepared_unicast_attributes_cached(&mut cache, &route, other.local_ipv4(), None);
     }
 
     fn encoded(message: UpdateMessage) -> Vec<u8> {
