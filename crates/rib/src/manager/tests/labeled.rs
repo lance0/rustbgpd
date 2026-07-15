@@ -3,9 +3,19 @@ use super::*;
 fn with_labeled_no_advertise(
     mut route: crate::route::LabeledRibRoute,
 ) -> crate::route::LabeledRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-    ]));
+    let attributes = Arc::make_mut(&mut route.attributes);
+    if let Some(PathAttribute::Communities(communities)) = attributes
+        .iter_mut()
+        .find(|attribute| matches!(attribute, PathAttribute::Communities(_)))
+    {
+        if !communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE) {
+            communities.push(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+        }
+    } else {
+        attributes.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ]));
+    }
     route
 }
 
