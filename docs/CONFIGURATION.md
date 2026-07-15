@@ -168,13 +168,19 @@ ownership receipt, and Unix socket are all single-writer state.
 
 This option does **not** make startup restore routes: no cached route is loaded,
 selected, installed, or advertised. A successful checkpoint only causes the GR
-restart marker to carry the matching generation. On Linux this is normally
-marker v3, whose complete boot/time-namespace identity and `CLOCK_BOOTTIME`
-deadline protect the shutdown-to-startup interval from wall-clock steps. If
-that clock domain cannot be sampled or represented, generation-bound marker v2
-retains the bounded wall-clock behavior. Checkpoint failure similarly selects
-a generationless v3 or wall-only v1 marker. The current boot path still
-rebuilds all routing state from peers.
+restart marker to carry the matching generation. Marker v3 protection requires
+Linux 5.6+ with `CONFIG_TIME_NS`, a readable valid
+`/proc/sys/kernel/random/boot_id`, inspectable `/proc/self/ns/time`
+device/inode, readable valid `/proc/self/timens_offsets`, and a sampleable and
+representable `CLOCK_BOOTTIME` deadline. When the complete live domain matches
+exactly at startup, that deadline is insulated from discontinuous
+`CLOCK_REALTIME` steps between shutdown and startup. Otherwise startup uses the
+marker's generation-bound wall deadline, capped by the current configured
+restart maximum; a forward wall-clock step can shorten or expire that fallback.
+If publication cannot form a complete v3 marker, it emits generation-bound v2.
+Checkpoint failure similarly selects a generationless v3 when available or
+wall-only v1 marker. The current boot path still rebuilds all routing state from
+peers.
 
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
