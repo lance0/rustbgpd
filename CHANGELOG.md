@@ -71,6 +71,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
+  reloadstall harness extensions). The reload-stall harness gains an
+  optional `reload_cmd` trailing argument (reloads run `sh -c <cmd>`, e.g.
+  `docker exec <c> birdc configure`, instead of SIGHUP), a `daemon_pid 0`
+  convention that defers RSS sampling to an outer sampler, and a
+  `--flapstorm K` mode that closes K stub sessions simultaneously and
+  measures every survivor's withdrawal- and re-announce-completion
+  percentiles over three rounds. New scenario generators emit
+  addressing-compatible route-server configs for BIRD 3.3.1
+  (`gen-bird-scenario.py`: `rs client` transparency, `threads` knob,
+  static + `gateway recursive` next-hop glue, included filter-file
+  generations reloaded via `birdc configure`) and OpenBGPD 9.1
+  (`gen-obgpd-scenario.py`: `transparent-as yes`, `fib-update no`,
+  `nexthop qualify via default`, included rule-file generations reloaded
+  via `bgpctl reload`). `run-matrix.sh` sequences the per-daemon cells —
+  load-gated start, per-cell process-tree RSS CSV (`rss-sampler.sh`),
+  artifact collection, resumable per-cell status, 100 GiB RSS cell abort,
+  cool-down between cells. The existing 9/10-argument SIGHUP invocation is
+  unchanged.
+
 - **Labeled-unicast export explain.** `rbgp rib advertised <peer> --prefix
   <cidr> --explain --labeled` (gRPC `ExplainAdvertisedRoute` with
   `labeled = true`) dry-runs the live labeled-unicast (SAFI 4, RFC 8277)
