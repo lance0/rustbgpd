@@ -53,11 +53,13 @@ use crate::proto;
 /// their already-assigned process-local `event_id` inside the event
 /// itself. No proto message, payload bytes, or envelope strings cross
 /// this channel.
-// The EVPN variant is several hundred bytes larger than the route
-// variant. Boxing it would shrink the channel slot but put a heap
-// allocation back on the RIB actor's publish path — the exact cost
-// this offload removes — so the enum stays by-value.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the EVPN variant is several hundred bytes larger than the route \
+              variant, but boxing it would put a heap allocation back on the \
+              RIB actor's publish path — the exact cost this offload removes — \
+              so the enum stays by-value"
+)]
 enum RibEventSnapshot {
     Route {
         event: RouteEvent,
