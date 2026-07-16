@@ -278,6 +278,18 @@ impl fmt::Debug for BearerAuthSecret {
     }
 }
 
+impl Drop for BearerAuthSecret {
+    fn drop(&mut self) {
+        // The shared header can only be scrubbed through the last live Arc;
+        // earlier clone drops are no-ops, so retired credential generations
+        // are zeroized when their final holder (e.g. a pinned RPC snapshot)
+        // goes away, not at rotation time.
+        if let Some(header) = Arc::get_mut(&mut self.expected_header) {
+            zeroize::Zeroize::zeroize(header);
+        }
+    }
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
     let mut diff = a.len() ^ b.len();

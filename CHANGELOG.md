@@ -221,6 +221,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   live policy-filtered observability (route events, transition-based) as an
   export-policy deny; previously only export explain covered it.
 
+- **Parse diagnostics no longer echo credential-bearing config lines.** When a
+  TOML error's snippet line — or the line immediately before it, for
+  unterminated-quote spans — mentions `md5_password` or TCP-AO key material,
+  the rendered diagnostic replaces the source line with a redaction placeholder
+  and collapses the caret run (whose width would reveal the secret's length),
+  while keeping the file/line/column pointer. This covers the SIGHUP reload
+  log, daemon stderr, and the `DiffRuntimeConfig`/`PlanConfigTransaction` gRPC
+  statuses in one place. The runtime snapshot token also drops its
+  config-rendering byte-length component (the rendering includes plaintext
+  secrets); tokens stay process-local equality tokens under the same keyed
+  digest. `Neighbor`, `PeerGroupConfig`, and `RuntimeConfigSnapshotReply` gain
+  manual `Debug` impls that redact `md5_password` and the runtime TOML, and
+  management-plane credential reads (bearer token, TLS private key) plus
+  retired `BearerAuthSecret` generations are zeroized on drop.
+
 - **Shutdown GR marker publication and warm-bundle maintenance can no longer
   wedge or wedge-loop.** GR restart marker publication, its generationless
   fallback, and marker removal at coordinated shutdown now run on a detached

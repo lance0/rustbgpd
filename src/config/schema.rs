@@ -670,7 +670,7 @@ fn default_grpc_uds_mode() -> u32 {
     0o600
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Neighbor {
     /// Peer IP address (IPv4 or IPv6).
@@ -805,6 +805,54 @@ pub struct Neighbor {
     pub export_policy_chain: Vec<String>,
 }
 
+// Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`; the
+// `tcp_ao` field redacts through `TcpAoConfig`'s own Debug).
+impl fmt::Debug for Neighbor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Neighbor")
+            .field("address", &self.address)
+            .field("interface", &self.interface)
+            .field("remote_asn", &self.remote_asn)
+            .field("description", &self.description)
+            .field("peer_group", &self.peer_group)
+            .field("hold_time", &self.hold_time)
+            .field("send_hold_time", &self.send_hold_time)
+            .field("max_prefixes", &self.max_prefixes)
+            .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
+            .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "md5_password",
+                &self.md5_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tcp_ao", &self.tcp_ao)
+            .field("bfd", &self.bfd)
+            .field("ttl_security", &self.ttl_security)
+            .field("families", &self.families)
+            .field("graceful_restart", &self.graceful_restart)
+            .field("gr_restart_time", &self.gr_restart_time)
+            .field("gr_stale_routes_time", &self.gr_stale_routes_time)
+            .field("llgr_stale_time", &self.llgr_stale_time)
+            .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)
+            .field("route_reflector_client", &self.route_reflector_client)
+            .field("orr_vantage", &self.orr_vantage)
+            .field("route_server_client", &self.route_server_client)
+            .field("per_client_best", &self.per_client_best)
+            .field("interpret_rfc1997", &self.interpret_rfc1997)
+            .field("role", &self.role)
+            .field("strict_role", &self.strict_role)
+            .field("prefix_orf_receive", &self.prefix_orf_receive)
+            .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
+            .field("remove_private_as", &self.remove_private_as)
+            .field("add_path", &self.add_path)
+            .field("log_level", &self.log_level)
+            .field("import_policy", &self.import_policy)
+            .field("export_policy", &self.export_policy)
+            .field("import_policy_chain", &self.import_policy_chain)
+            .field("export_policy_chain", &self.export_policy_chain)
+            .finish()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TcpAoConfig {
@@ -925,7 +973,7 @@ impl Serialize for TcpAoKeyringConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PeerGroupConfig {
     /// Hold time inherited by neighbors in this group. See the
@@ -1012,6 +1060,47 @@ pub struct PeerGroupConfig {
     /// Named policy chain for export (mutually exclusive with `export_policy`).
     #[serde(default)]
     pub export_policy_chain: Vec<String>,
+}
+
+// Manual Debug: never render `md5_password` (mirrors `TcpAoConfig`).
+impl fmt::Debug for PeerGroupConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerGroupConfig")
+            .field("hold_time", &self.hold_time)
+            .field("send_hold_time", &self.send_hold_time)
+            .field("max_prefixes", &self.max_prefixes)
+            .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
+            .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "md5_password",
+                &self.md5_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("ttl_security", &self.ttl_security)
+            .field("bfd", &self.bfd)
+            .field("families", &self.families)
+            .field("graceful_restart", &self.graceful_restart)
+            .field("gr_restart_time", &self.gr_restart_time)
+            .field("gr_stale_routes_time", &self.gr_stale_routes_time)
+            .field("llgr_stale_time", &self.llgr_stale_time)
+            .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)
+            .field("route_reflector_client", &self.route_reflector_client)
+            .field("orr_vantage", &self.orr_vantage)
+            .field("route_server_client", &self.route_server_client)
+            .field("per_client_best", &self.per_client_best)
+            .field("interpret_rfc1997", &self.interpret_rfc1997)
+            .field("role", &self.role)
+            .field("strict_role", &self.strict_role)
+            .field("prefix_orf_receive", &self.prefix_orf_receive)
+            .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
+            .field("remove_private_as", &self.remove_private_as)
+            .field("add_path", &self.add_path)
+            .field("log_level", &self.log_level)
+            .field("import_policy", &self.import_policy)
+            .field("export_policy", &self.export_policy)
+            .field("import_policy_chain", &self.import_policy_chain)
+            .field("export_policy_chain", &self.export_policy_chain)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
