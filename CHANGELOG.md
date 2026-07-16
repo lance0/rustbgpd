@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Independent per-family maximum-prefix limits.** New `max_prefixes_ipv4`
+  and `max_prefixes_ipv6` neighbor / peer-group knobs bound unique
+  IPv4-unicast and IPv6-unicast prefixes independently of the aggregate
+  `max_prefixes` backstop (both enforced when both set; ADR-0108). A
+  per-family violation tears down with Cease/1 carrying the RFC 4486
+  AFI/SAFI/upper-bound data, and hot-applying a per-family limit below the
+  family's current count enforces immediately.
+
 - **Marker-backed planned-restart selection deferral.** After a valid restart
   marker is consumed, rustbgpd freezes the eligible GR restarting-speaker
   roster per family and withholds selection and outbound propagation until

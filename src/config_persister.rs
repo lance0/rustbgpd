@@ -164,6 +164,8 @@ log_format = "json"
             hold_time: None,
             send_hold_time: None,
             max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             md5_password: None,
             tcp_ao: None,
             bfd: None,

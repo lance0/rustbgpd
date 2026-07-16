@@ -647,6 +647,8 @@ impl PeerSession {
             }
             PeerCommand::UpdateRuntimeConfig {
                 max_prefixes,
+                max_prefixes_ipv4,
+                max_prefixes_ipv6,
                 gr_stale_routes_time,
                 local_ipv6_nexthop,
                 remove_private_as,
@@ -664,12 +666,21 @@ impl PeerSession {
                 // routes are re-probed and advertised AS_PATHs re-encoded
                 // under the new values.
                 self.config.max_prefixes = max_prefixes;
+                self.config.max_prefixes_ipv4 = max_prefixes_ipv4;
+                self.config.max_prefixes_ipv6 = max_prefixes_ipv6;
                 self.config.gr_stale_routes_time = gr_stale_routes_time;
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;
                 self.config.remove_private_as = remove_private_as;
                 self.publish_export_profile();
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
                 let _ = reply.send(Ok(()));
+                // ADR-0108: a per-family limit lowered below the family's
+                // current unique-prefix count enforces immediately, not on
+                // the next UPDATE — a quiet peer must not keep a table that
+                // the operator just bounded below it. The aggregate keeps
+                // its historical next-UPDATE semantics (excluded here via
+                // `include_aggregate = false`).
+                self.enforce_max_prefix_limits(false).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::ApplyTcpAoAddOnly { desired, reply } => {

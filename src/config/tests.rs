@@ -1764,6 +1764,59 @@ max_prefixes = 1000
 }
 
 #[test]
+fn per_family_max_prefixes_inherit_from_group_and_override_per_neighbor() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+max_prefixes_ipv4 = 100
+max_prefixes_ipv6 = 50
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+max_prefixes_ipv4 = 10
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.max_prefixes_ipv4,
+        Some(10),
+        "neighbor-level value overrides the group"
+    );
+    assert_eq!(
+        peers[0].0.max_prefixes_ipv6,
+        Some(50),
+        "unset neighbor value inherits from the group"
+    );
+    assert_eq!(peers[0].0.max_prefixes, None, "aggregate stays independent");
+}
+
+#[test]
+fn per_family_max_prefix_edit_is_hot_applicable() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut hot = old.clone();
+    hot.max_prefixes_ipv4 = Some(10);
+    hot.max_prefixes_ipv6 = Some(20);
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+    let changes = super::describe_neighbor_changes(&old, &hot);
+    assert_eq!(changes.len(), 2);
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
+    );
+}
+
+#[test]
 fn neighbor_md5_and_ttl_security() {
     let toml_str = r#"
 [global]
@@ -4781,6 +4834,8 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -5467,6 +5522,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             hold_time: Some(60),
             send_hold_time: None,
             max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             md5_password: None,
             ttl_security: None,
             bfd: None,
@@ -5502,6 +5559,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         bfd: None,
         tcp_ao: Some(
@@ -5547,6 +5606,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -5601,6 +5662,8 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         bfd: None,
         tcp_ao: Some(

@@ -1706,6 +1706,24 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_ipv4": {
+          "description": "Maximum unique IPv4-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6": {
+          "description": "Maximum unique IPv6-unicast prefixes accepted from this peer\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes` (ADR-0108). Unset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "md5_password": {
           "description": "TCP MD5 signature password (RFC 2385).",
           "type": [
@@ -2006,6 +2024,24 @@
         },
         "max_prefixes": {
           "description": "Prefix limit inherited by neighbors in this group. See the\nneighbor-level `max_prefixes`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv4": {
+          "description": "IPv4-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv4`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_ipv6": {
+          "description": "IPv6-unicast prefix limit inherited by neighbors in this group.\nSee the neighbor-level `max_prefixes_ipv6`.",
           "type": [
             "integer",
             "null"

@@ -83,6 +83,8 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         peer_scope_id: None,
         connect_timeout: Duration::from_secs(5),
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         ttl_security: false,

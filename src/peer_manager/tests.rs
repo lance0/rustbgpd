@@ -44,6 +44,8 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         ttl_security: false,
@@ -1803,6 +1805,8 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         hold_time: None,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -4606,6 +4610,8 @@ fn build_transport_config_reflects_every_transport_field() {
         hold_time: Some(240),
         send_hold_time: Some(600),
         max_prefixes: Some(1000),
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
         md5_password: Some("hunter2".into()),
         tcp_ao: Some(
             rustbgpd_transport::TcpAoConfig {
@@ -4654,6 +4660,8 @@ fn build_transport_config_reflects_every_transport_field() {
         hold_time,
         send_hold_time,
         max_prefixes,
+        max_prefixes_ipv4,
+        max_prefixes_ipv6,
         md5_password,
         tcp_ao,
         ttl_security,
@@ -4689,6 +4697,8 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.peer.remote_asn, *remote_asn, "remote_asn");
     assert_eq!(t.peer_group, *peer_group, "peer_group");
     assert_eq!(t.peer.hold_time, hold_time.unwrap(), "hold_time");
+    assert_eq!(t.max_prefixes_ipv4, *max_prefixes_ipv4, "max_prefixes_ipv4");
+    assert_eq!(t.max_prefixes_ipv6, *max_prefixes_ipv6, "max_prefixes_ipv6");
     assert_eq!(
         t.peer.send_hold_time,
         send_hold_time.unwrap(),

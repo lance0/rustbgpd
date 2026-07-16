@@ -694,6 +694,14 @@ pub struct Neighbor {
     /// Maximum prefixes accepted from this peer before the session is
     /// torn down. Unset = unlimited.
     pub max_prefixes: Option<u32>,
+    /// Maximum unique IPv4-unicast prefixes accepted from this peer
+    /// before the session is torn down with Cease/1. Enforced
+    /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+    pub max_prefixes_ipv4: Option<u32>,
+    /// Maximum unique IPv6-unicast prefixes accepted from this peer
+    /// before the session is torn down with Cease/1. Enforced
+    /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
+    pub max_prefixes_ipv6: Option<u32>,
     /// TCP MD5 signature password (RFC 2385).
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
@@ -923,6 +931,12 @@ pub struct PeerGroupConfig {
     /// Prefix limit inherited by neighbors in this group. See the
     /// neighbor-level `max_prefixes`.
     pub max_prefixes: Option<u32>,
+    /// IPv4-unicast prefix limit inherited by neighbors in this group.
+    /// See the neighbor-level `max_prefixes_ipv4`.
+    pub max_prefixes_ipv4: Option<u32>,
+    /// IPv6-unicast prefix limit inherited by neighbors in this group.
+    /// See the neighbor-level `max_prefixes_ipv6`.
+    pub max_prefixes_ipv6: Option<u32>,
     /// TCP MD5 signature password (RFC 2385) inherited by neighbors in
     /// this group.
     pub md5_password: Option<String>,

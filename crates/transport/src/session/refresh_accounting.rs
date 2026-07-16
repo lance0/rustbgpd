@@ -211,7 +211,7 @@ impl PeerSession {
         match stale {
             RefreshStaleIdentities::UnicastPlain(keys) => {
                 for prefix in keys {
-                    self.known_plain_prefixes.remove(&prefix);
+                    self.forget_known_plain(prefix);
                 }
             }
             RefreshStaleIdentities::UnicastAddPath(keys) => {

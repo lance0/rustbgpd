@@ -313,6 +313,12 @@ pub struct TransportConfig {
     pub connect_timeout: Duration,
     /// Maximum number of prefixes accepted from this peer before Cease/1.
     pub max_prefixes: Option<u32>,
+    /// Maximum unique IPv4-unicast prefixes accepted before Cease/1.
+    /// Enforced independently of `max_prefixes` (ADR-0108).
+    pub max_prefixes_ipv4: Option<u32>,
+    /// Maximum unique IPv6-unicast prefixes accepted before Cease/1.
+    /// Enforced independently of `max_prefixes` (ADR-0108).
+    pub max_prefixes_ipv6: Option<u32>,
     /// Optional peer-group name used for policy matching and operator visibility.
     pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
@@ -384,6 +390,8 @@ impl TransportConfig {
             peer_scope_id: None,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             peer_group: None,
             md5_password: None,
             tcp_ao: None,
