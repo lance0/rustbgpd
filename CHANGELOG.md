@@ -236,6 +236,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `TransportAuthSecret` equality is now constant-time. The derived
+  `PartialEq` compared secret bytes with an early-out; the manual
+  implementation compares in time dependent only on the longer input's
+  length and does not short-circuit on a length mismatch. Current callers
+  only diff config against config, so this hardens a footgun rather than
+  fixing an exploitable path.
+
+- `CredentialStore::reload` now serializes its sequence increment and
+  generation publish behind a reload lock, so concurrent reloads can no
+  longer mint duplicate generation sequences or publish out of order.
+  Today's only caller (SIGHUP) already serialized reloads; the store no
+  longer relies on that.
+
+- The gNMI `subscribe_on_change_streams_session_transitions` test no
+  longer flakes on a 2-second delivery timeout: the event-history test
+  fixture commits with `SYNCHRONOUS=NORMAL` instead of `FULL` (the
+  subscription tests exercise plumbing, not outbox durability, and the
+  per-commit fsyncs were the latency source), and the bounded wait is now
+  a hang guard rather than a latency assertion.
+
 - **Closed outbound channels no longer re-mark peers dirty for resync, so
   shutdown quiesces instead of livelocking.** The outbound send path treated
   a closed per-peer channel (session gone) the same as a full one (peer

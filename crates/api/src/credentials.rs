@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
@@ -81,6 +81,10 @@ impl CredentialGeneration {
 pub struct CredentialStore {
     sources: Arc<[CredentialSource]>,
     active: Arc<ArcSwap<CredentialGeneration>>,
+    /// Serializes [`Self::reload`]'s read-increment-publish so
+    /// concurrent reloads can never mint duplicate sequences or
+    /// publish out of order. Readers stay lock-free via `active`.
+    reload_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for CredentialStore {
@@ -112,6 +116,7 @@ impl CredentialStore {
         Ok(Self {
             sources,
             active: Arc::new(ArcSwap::from(generation)),
+            reload_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -122,10 +127,18 @@ impl CredentialStore {
 
     /// Stage all configured files, then atomically publish one generation.
     ///
+    /// Reloads are serialized: concurrent callers each publish a distinct,
+    /// strictly increasing sequence (the SIGHUP path happens to serialize
+    /// reloads already, but the store does not rely on that).
+    ///
     /// # Errors
     /// Returns a redacted error when any listener fails staging. The active
     /// generation is left unchanged.
     pub fn reload(&self) -> Result<u64, String> {
+        let _guard = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sequence = self.load().sequence.saturating_add(1);
         let candidate = Arc::new(stage_generation(&self.sources, sequence)?);
         self.active.store(candidate);
@@ -483,6 +496,43 @@ mod tests {
         barrier.wait();
         store.reload().unwrap();
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_reloads_publish_unique_increasing_sequences() {
+        const THREADS: usize = 8;
+        const RELOADS: usize = 25;
+        let token = token_file("tok");
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    (0..RELOADS)
+                        .map(|_| store.reload().unwrap())
+                        .collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+        let mut sequences: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        sequences.sort_unstable();
+        // Serialized reloads mint every sequence exactly once: the initial
+        // generation is 1, so the published set is exactly 2..=total+1.
+        let total = u64::try_from(THREADS * RELOADS).unwrap();
+        let expected: Vec<u64> = (2..=total + 1).collect();
+        assert_eq!(sequences, expected);
+        assert_eq!(store.load().sequence(), total + 1);
     }
 
     #[tokio::test]

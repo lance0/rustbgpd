@@ -13,8 +13,31 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 /// The wrapper deliberately exposes only borrowed plaintext access. Its inner
 /// wrapper allocation is zeroized when that runtime copy is dropped; schema,
 /// parser, API, and kernel copies have separate lifetimes.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct TransportAuthSecret(Zeroizing<String>);
+
+/// Constant-time equality. Comparison cost depends only on the longer
+/// input's length — no early return on the first mismatching byte and no
+/// length-based short-circuit — so config-diff paths can't be turned into
+/// a byte-by-byte timing oracle if one side is ever attacker-influenced.
+impl PartialEq for TransportAuthSecret {
+    fn eq(&self, other: &Self) -> bool {
+        constant_time_eq(self.0.as_bytes(), other.0.as_bytes())
+    }
+}
+
+impl Eq for TransportAuthSecret {}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let max_len = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for idx in 0..max_len {
+        let lhs = a.get(idx).copied().unwrap_or(0);
+        let rhs = b.get(idx).copied().unwrap_or(0);
+        diff |= usize::from(lhs ^ rhs);
+    }
+    diff == 0
+}
 
 impl From<String> for TransportAuthSecret {
     fn from(secret: String) -> Self {
@@ -437,6 +460,17 @@ mod tests {
         secret.zeroize();
         assert!(secret.as_ref().is_empty());
         assert_eq!(retained_clone.as_ref(), "transport-secret-sentinel");
+    }
+
+    #[test]
+    fn transport_auth_secret_eq_matches_value_semantics() {
+        let a = TransportAuthSecret::from("secret");
+        assert_eq!(a, TransportAuthSecret::from("secret"));
+        assert_ne!(a, TransportAuthSecret::from("secreT"));
+        // Length differences (prefix and empty) must also compare unequal.
+        assert_ne!(a, TransportAuthSecret::from("secret-longer"));
+        assert_ne!(a, TransportAuthSecret::from(""));
+        assert_eq!(TransportAuthSecret::from(""), TransportAuthSecret::from(""));
     }
 
     #[test]
