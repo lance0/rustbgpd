@@ -8,13 +8,27 @@
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 //!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-//!       [changed_peers]
+//!       [changed_peers] [reload_cmd] [--flapstorm K]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
 //! generated [[neighbors]] blocks) and connect to 127.0.0.1:<port>.
 //! The last CHURNERS stubs each flap a dedicated 16-prefix block every
 //! CHURN_MS milliseconds throughout. On ROUTE_REFRESH a stub re-sends
 //! its base slice (plus its churn block if currently announced).
+//!
+//! IXP-matrix extensions (LAN-334) — the 9/10-positional-arg SIGHUP
+//! invocation above is a frozen contract and behaves identically:
+//! - `reload_cmd` (11th positional): each reload runs `sh -c <reload_cmd>`
+//!   (e.g. `docker exec <c> birdc configure`) instead of SIGHUP-ing
+//!   <daemon_pid>; a nonzero exit fails the run like a failed SIGHUP.
+//! - `daemon_pid` 0: skip in-harness RSS sampling (an outer sampler owns
+//!   it; RSS columns report 0). Requires `reload_cmd` or `--flapstorm`.
+//! - `--flapstorm K` (anywhere in argv): alternative mode replacing the
+//!   reload loop. After convergence + the control window, close the first
+//!   K stub sockets simultaneously, timestamp every survivor's receipt of
+//!   all K slices' withdrawals, reconnect the K after 10 s, re-announce
+//!   their slices, and timestamp survivors' re-announce completion.
+//!   3 rounds, per-round percentiles + `flapstorm_csv` lines.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -46,6 +60,14 @@ const HOLD_TIME: u16 = 180;
 const COMMUNITY_GEN_A: u32 = (65_500 << 16) | 1_000;
 const COMMUNITY_GEN_B: u32 = (65_500 << 16) | 2_000;
 const COMMUNITY_STABLE: u32 = (65_500 << 16) | 9_000;
+const STALL_WINDOW: Duration = Duration::from_secs(120);
+const FLAP_ROUNDS: u32 = 3;
+const FLAP_RECONNECT_SECS: u64 = 10;
+
+/// What the shared per-observer bitmap is armed to track (flapstorm mode).
+const FLAP_OFF: u32 = 0;
+const FLAP_TRACK_WITHDRAWS: u32 = 1;
+const FLAP_TRACK_ANNOUNCES: u32 = 2;
 
 /// One received-UPDATE observation.
 #[derive(Clone, Copy)]
@@ -72,6 +94,19 @@ struct Obs {
     generation: Mutex<GenerationProgress>,
     /// One outstanding ROUTE-REFRESH reply at a time (see the reader).
     refresh_pending: AtomicBool,
+    /// Flapstorm arming: FLAP_OFF, or feed withdrawn/announced base
+    /// prefixes into `generation` (which the reload path leaves idle in
+    /// flapstorm mode — `expected_community` stays 0).
+    flap_mode: AtomicU32,
+}
+
+/// A live stub session: its outbound channel plus the reader/writer task
+/// handles, so flapstorm can hard-close the socket by aborting both tasks
+/// (dropping both split halves closes the fd).
+struct Stub {
+    tx: mpsc::Sender<Message>,
+    reader: tokio::task::JoinHandle<()>,
+    writer: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -272,7 +307,7 @@ fn own_slice(ctx: &Ctx, i: u32) -> Vec<Ipv4Prefix> {
     (lo..lo + ctx.per_peer).map(base_prefix).collect()
 }
 
-async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, String> {
+async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
     let local = stub_addr(i);
     let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
     sock.bind(SocketAddr::new(local.into(), 0))
@@ -352,7 +387,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
 
     // Writer task: outbound messages + periodic keepalive.
     let writer_ctx = Arc::clone(&ctx);
-    tokio::spawn(async move {
+    let writer_handle = tokio::spawn(async move {
         let mut ka_tick = tokio::time::interval(Duration::from_secs(u64::from(HOLD_TIME) / 3));
         ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ka_tick.tick().await;
@@ -378,7 +413,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
     // ROUTE_REFRESH by re-sending the base slice.
     let tx_for_reader = tx.clone();
     let rctx = Arc::clone(&ctx);
-    tokio::spawn(async move {
+    let reader_handle = tokio::spawn(async move {
         let mut frame = BytesMut::with_capacity(1 << 16);
         let mut tmp = vec![0u8; 1 << 16];
         loop {
@@ -485,6 +520,24 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 }
                             }
                         }
+                        // Flapstorm arming: feed the tracked direction into the
+                        // same per-observer bitmap the reload path uses. Runs
+                        // for withdraw-only UPDATEs too (the reload-generation
+                        // block above is announce-gated).
+                        let flap_mode = ob.flap_mode.load(Ordering::Acquire);
+                        if flap_mode != FLAP_OFF {
+                            let tracked = if flap_mode == FLAP_TRACK_WITHDRAWS {
+                                &parsed.withdrawn
+                            } else {
+                                &parsed.announced
+                            };
+                            let mut generation = ob.generation.lock().unwrap();
+                            for e in tracked {
+                                if let Some(index) = base_prefix_index(e.prefix, total_prefixes) {
+                                    generation.observe(index, t_us);
+                                }
+                            }
+                        }
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
                         ob.events.lock().unwrap().push(Event {
@@ -525,7 +578,11 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
         }
     });
 
-    Ok(tx)
+    Ok(Stub {
+        tx,
+        reader: reader_handle,
+        writer: writer_handle,
+    })
 }
 
 /// Percentile over a sorted slice.
@@ -585,6 +642,10 @@ fn stable_marker_peers_since(ctx: &Ctx, changed_peers: u32, since_us: u64) -> us
 }
 
 fn rss_mib(pid: i32) -> u64 {
+    if pid <= 0 {
+        // daemon_pid 0: an outer sampler owns RSS; report 0 everywhere.
+        return 0;
+    }
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
@@ -623,14 +684,191 @@ fn stats_line(label: &str, mut vals: Vec<f64>) -> Stats {
     stats
 }
 
+/// Progress watchdog for one flapstorm phase: every survivor (observers
+/// `first..n_peers`) must complete its armed bitmap; fail loudly when no
+/// survivor makes unique-prefix progress for STALL_WINDOW (same discipline
+/// as the reload loop — no absolute deadline).
+async fn wait_flap_completion(ctx: &Ctx, first: usize, round: u32, phase: &str) {
+    let mut last_unique = 0u64;
+    let mut last_progress = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if (first..ctx.obs.len()).all(|i| completion_us(ctx, i).is_some()) {
+            return;
+        }
+        let sum: u64 = (first..ctx.obs.len())
+            .map(|i| ctx.obs[i].generation.lock().unwrap().unique)
+            .sum();
+        if sum > last_unique {
+            last_unique = sum;
+            last_progress = Instant::now();
+        } else if last_progress.elapsed() > STALL_WINDOW {
+            let done = (first..ctx.obs.len())
+                .filter(|&i| completion_us(ctx, i).is_some())
+                .count();
+            eprintln!(
+                "flap {round} {phase} STALLED: no progress for {}s; \
+                 survivors complete {done}/{}",
+                STALL_WINDOW.as_secs(),
+                ctx.obs.len() - first
+            );
+            for i in (first..ctx.obs.len())
+                .filter(|&i| completion_us(ctx, i).is_none())
+                .take(10)
+            {
+                let g = ctx.obs[i].generation.lock().unwrap();
+                eprintln!(
+                    "flap {round} {phase} observer {i} incomplete: unique={}/{}",
+                    g.unique, g.target
+                );
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Arm every survivor's shared bitmap to track `mode` over the flapped
+/// window (base indices `[0, flap_prefixes)`; everything else excluded).
+fn arm_survivors(ctx: &Ctx, k: u32, flap_prefixes: u32, total: u32, mode: u32) {
+    for observer in ctx.obs.iter().skip(k as usize) {
+        observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+        observer.generation.lock().unwrap().reset(
+            total,
+            u64::from(flap_prefixes),
+            flap_prefixes,
+            total - flap_prefixes,
+        );
+        observer.flap_mode.store(mode, Ordering::Release);
+    }
+}
+
+/// `--flapstorm K` mode: the alternative to the reload loop (see the crate
+/// doc). The flapped cohort is the first K stubs — never the churners,
+/// which are the last CHURNERS.
+async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
+    let n_peers = ctx.n_peers;
+    let total = n_peers * ctx.per_peer;
+    let flap_prefixes = k * ctx.per_peer;
+    let survivors = k as usize..n_peers as usize;
+    println!(
+        "flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,\
+         withdraw_p50_s,withdraw_p95_s,withdraw_max_s,\
+         reannounce_p50_s,reannounce_p95_s,reannounce_max_s,\
+         rss_mib,sessions_up,parse_errors"
+    );
+    for round in 1..=FLAP_ROUNDS {
+        // Arm before closing so no withdrawal is missed.
+        arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
+        println!("flap {round} close wall_us={}", wall_us());
+        let t_close = now_us(ctx);
+        // Simultaneous close: abort both split-half tasks per flapped stub.
+        for stub in stubs.iter().take(k as usize) {
+            stub.reader.abort();
+            stub.writer.abort();
+        }
+        for observer in ctx.obs.iter().take(k as usize) {
+            observer.established.store(false, Ordering::Relaxed);
+        }
+        wait_flap_completion(ctx, k as usize, round, "withdraw").await;
+        let withdraw_s: Vec<f64> = survivors
+            .clone()
+            .filter_map(|i| completion_us(ctx, i))
+            .map(|tc| tc.saturating_sub(t_close) as f64 / 1e6)
+            .collect();
+        let withdraw = stats_line(&format!("flap {round} withdraw_s"), withdraw_s);
+
+        // Hold the sessions down until FLAP_RECONNECT_SECS past the close.
+        let since_close_ms = now_us(ctx).saturating_sub(t_close) / 1000;
+        let hold_ms = (FLAP_RECONNECT_SECS * 1000).saturating_sub(since_close_ms);
+        tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+
+        // Re-arm before any flapped session returns, so no announce is missed.
+        arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_ANNOUNCES);
+        for i in 0..k {
+            match establish_stub(Arc::clone(ctx), i).await {
+                Ok(stub) => stubs[i as usize] = stub,
+                Err(e) => {
+                    eprintln!("flap {round} reconnect stub {i} failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        let t_reann = now_us(ctx);
+        println!("flap {round} reannounce wall_us={}", wall_us());
+        for i in 0..k {
+            let slice = own_slice(ctx, i);
+            for m in announce_msgs(i, &slice) {
+                if stubs[i as usize].tx.send(m).await.is_err() {
+                    eprintln!("flap {round} re-announce send failed for stub {i}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        wait_flap_completion(ctx, k as usize, round, "reannounce").await;
+        let reann_s: Vec<f64> = survivors
+            .clone()
+            .filter_map(|i| completion_us(ctx, i))
+            .map(|tc| tc.saturating_sub(t_reann) as f64 / 1e6)
+            .collect();
+        let reannounce = stats_line(&format!("flap {round} reannounce_s"), reann_s);
+        for observer in ctx.obs.iter().skip(k as usize) {
+            observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+        }
+        let rss = rss_mib(pid);
+        let up = ctx
+            .obs
+            .iter()
+            .filter(|o| o.established.load(Ordering::Relaxed))
+            .count();
+        let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+        println!("flap {round} sessions_up {up}/{n_peers} rss_mib={rss}");
+        if up != n_peers as usize || parse_errors != 0 {
+            eprintln!(
+                "FAIL: flap {round} integrity check failed: \
+                 sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "flapstorm_csv,{round},{n_peers},{k},{total},{flap_prefixes},\
+             {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{rss},{up},{parse_errors}",
+            withdraw.p50,
+            withdraw.p95,
+            withdraw.max,
+            reannounce.p50,
+            reannounce.p95,
+            reannounce.max,
+        );
+        // Quiesce between rounds.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let mut a: Vec<String> = std::env::args().collect();
+    // --flapstorm K may appear anywhere; strip it before positional parsing.
+    let mut flapstorm: Option<u32> = None;
+    if let Some(pos) = a.iter().position(|s| s == "--flapstorm") {
+        flapstorm = Some(
+            a.get(pos + 1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("--flapstorm requires a stub count K");
+                    std::process::exit(2);
+                }),
+        );
+        a.drain(pos..=pos + 1);
+    }
     if a.len() < 10 {
         eprintln!(
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-             [changed_peers]"
+             [changed_peers] [reload_cmd] [--flapstorm K]\n\
+             reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
+             daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
+             requires reload_cmd or --flapstorm\n\
+             --flapstorm K: flap the first K stubs for {FLAP_ROUNDS} rounds instead of reloading"
         );
         std::process::exit(2);
     }
@@ -644,11 +882,23 @@ fn main() {
     let reloads: u32 = a[8].parse().unwrap();
     let control_secs: u64 = a[9].parse().unwrap();
     let changed_peers: u32 = a.get(10).map_or(n_peers, |value| value.parse().unwrap());
+    let reload_cmd: Option<String> = a.get(11).cloned();
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
         "changed_peers must be in 1..={n_peers}"
     );
+    assert!(
+        pid != 0 || reload_cmd.is_some() || flapstorm.is_some(),
+        "daemon_pid 0 (outer RSS sampler) requires reload_cmd or --flapstorm"
+    );
+    if let Some(k) = flapstorm {
+        assert!(
+            (1..=n_peers - CHURNERS).contains(&k),
+            "--flapstorm K must be in 1..={} (the last {CHURNERS} stubs are churners)",
+            n_peers - CHURNERS
+        );
+    }
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
 
@@ -673,6 +923,7 @@ fn main() {
                     expected_community: AtomicU32::new(0),
                     generation: Mutex::new(GenerationProgress::default()),
                     refresh_pending: AtomicBool::new(false),
+                    flap_mode: AtomicU32::new(FLAP_OFF),
                 })
                 .collect(),
             parse_errors: AtomicU64::new(0),
@@ -684,7 +935,7 @@ fn main() {
         );
 
         // --- Establish all sessions (waves of 64). ---
-        let mut txs: Vec<mpsc::Sender<Message>> = Vec::with_capacity(n_peers as usize);
+        let mut stubs: Vec<Stub> = Vec::with_capacity(n_peers as usize);
         for wave in (0..n_peers).collect::<Vec<_>>().chunks(64) {
             let mut handles = Vec::new();
             for &i in wave {
@@ -693,7 +944,7 @@ fn main() {
             }
             for (i, h) in handles {
                 match h.await.unwrap() {
-                    Ok(tx) => txs.push(tx),
+                    Ok(stub) => stubs.push(stub),
                     Err(e) => {
                         eprintln!("stub {i} failed: {e}");
                         std::process::exit(1);
@@ -704,7 +955,7 @@ fn main() {
         }
         println!(
             "established {} at {:.1}s",
-            txs.len(),
+            stubs.len(),
             ctx.t0.elapsed().as_secs_f64()
         );
 
@@ -712,7 +963,7 @@ fn main() {
         for i in 0..n_peers {
             let slice = own_slice(&ctx, i);
             for m in announce_msgs(i, &slice) {
-                txs[i as usize].send(m).await.unwrap();
+                stubs[i as usize].tx.send(m).await.unwrap();
             }
         }
         // Converged: every observer holds the table minus its own slice.
@@ -720,7 +971,6 @@ fn main() {
         // abort with expected-vs-observed counts instead of parking forever
         // (the pre-LAN-449 failure mode: a wrong predicate here is silent).
         let expected = u64::from(total - per_peer);
-        const STALL_WINDOW: Duration = Duration::from_secs(120);
         let mut last_sum = 0u64;
         let mut last_progress = Instant::now();
         loop {
@@ -764,7 +1014,7 @@ fn main() {
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
         for c in 0..CHURNERS {
             let i = n_peers - CHURNERS + c;
-            let tx = txs[i as usize].clone();
+            let tx = stubs[i as usize].tx.clone();
             let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
             tokio::spawn(async move {
                 // Stagger churners across the interval.
@@ -799,6 +1049,21 @@ fn main() {
             .collect();
         stats_line("control_maxgap_ms", gaps);
         println!("control_rss_mib {}", rss_mib(pid));
+
+        // --- Flapstorm mode: an alternative to the reload loop. ---
+        if let Some(k) = flapstorm {
+            run_flapstorm(&ctx, &mut stubs, k, pid).await;
+            println!("done rss_mib={}", rss_mib(pid));
+            let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+            if parse_errors > 0 {
+                eprintln!(
+                    "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
+                );
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+
         println!(
             "reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,\
              completion_p50_s,completion_p95_s,completion_max_s,\
@@ -838,14 +1103,29 @@ fn main() {
             }
             let t_hup = now_us(&ctx);
             let expected_stable = usize::try_from(n_peers - changed_peers).unwrap();
-            println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
-            let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
-            if kill_rc != 0 {
-                eprintln!(
-                    "reload {r} failed to deliver SIGHUP: {}",
-                    std::io::Error::last_os_error()
-                );
-                std::process::exit(1);
+            if let Some(cmd) = &reload_cmd {
+                // Matrix cells (BIRD/OpenBGPD) reload via a command, e.g.
+                // `docker exec <c> birdc configure`; nonzero exit = reload
+                // failure, same handling as a failed SIGHUP.
+                println!("reload {r} reload_cmd wall_us={} policy={next}", wall_us());
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .status();
+                if !matches!(&status, Ok(s) if s.success()) {
+                    eprintln!("reload {r} reload_cmd failed: {status:?}");
+                    std::process::exit(1);
+                }
+            } else {
+                println!("reload {r} SIGHUP wall_us={} policy={next}", wall_us());
+                let kill_rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+                if kill_rc != 0 {
+                    eprintln!(
+                        "reload {r} failed to deliver SIGHUP: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    std::process::exit(1);
+                }
             }
             // Completion is intentionally scoped to observers whose effective
             // export chain changed. Stable proof starts only after every
@@ -1102,6 +1382,24 @@ mod tests {
         progress.observe(3, 40);
         assert_eq!(progress.unique, 3);
         assert_eq!(progress.completed_at_us, Some(40));
+    }
+
+    #[test]
+    fn flap_window_tracks_only_flapped_slices() {
+        // 4 peers x 2 prefixes each, K=2 flapped: window = indices [0, 4),
+        // exclusion covers [4, 8) — the arm_survivors reset shape.
+        let mut progress = GenerationProgress::default();
+        progress.reset(8, 4, 4, 4);
+
+        progress.observe(4, 10); // survivor's own slice: excluded
+        progress.observe(7, 20); // another survivor slice: excluded
+        assert_eq!(progress.unique, 0, "non-flapped indices must not count");
+
+        for idx in 0..4u64 {
+            progress.observe(usize::try_from(idx).unwrap(), 30 + idx);
+        }
+        assert_eq!(progress.unique, 4);
+        assert_eq!(progress.completed_at_us, Some(33));
     }
 
     #[test]

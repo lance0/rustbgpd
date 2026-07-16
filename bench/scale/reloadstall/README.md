@@ -63,7 +63,7 @@ exits 2):
 ```text
 reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
     <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-    [changed_peers]
+    [changed_peers] [reload_cmd] [--flapstorm K]
 ```
 
 - `n_peers` — stub sessions to establish (`total_prefixes` must divide evenly).
@@ -78,6 +78,26 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   chain changes. Completion waits only for these observers; all-observer gap and
   session checks still include every peer. Omit it for the historical all-peer
   import+export scenario.
+- `reload_cmd` — optional (IXP matrix, LAN-334): each reload runs
+  `sh -c <reload_cmd>` (e.g. `docker exec <c> birdc configure`) instead of
+  SIGHUP-ing `daemon_pid`; a nonzero exit fails the run like a failed SIGHUP.
+  The policy-file copy still happens first, so for BIRD/OpenBGPD the "policy"
+  files are the generation include/rule files.
+- `--flapstorm K` — optional flag (anywhere in argv): alternative mode
+  replacing the reload loop. After convergence + the control window, the first
+  `K` stubs (never the churners) are closed simultaneously; every survivor
+  timestamps receipt of all `K` slices' withdrawals, the `K` reconnect after
+  10 s and re-announce, and survivors timestamp re-announce completion.
+  3 rounds, per-round percentiles plus `flapstorm_csv` records.
+
+`daemon_pid` may be `0` when an outer sampler owns RSS measurement (RSS
+columns report 0); that requires `reload_cmd` or `--flapstorm`. The
+9/10-positional-arg SIGHUP invocation above is a frozen contract and behaves
+exactly as before.
+
+Cross-daemon cells (BIRD 3.3.1 / OpenBGPD 9.1) generate their route-server
+configs with `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same
+addressing contract) and are sequenced by `bench/scale/matrix/run-matrix.sh`.
 
 Generate matching daemon configuration and policy generations with:
 
