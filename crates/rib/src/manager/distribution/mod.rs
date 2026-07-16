@@ -1615,7 +1615,7 @@ impl RibManager {
                         );
                     }
                     flushed += batch;
-                    if prepared.is_empty() || poll_start.elapsed() >= self.commit_flush_budget {
+                    if prepared.is_empty() || poll_start.elapsed() >= self.flush_poll_budget {
                         break;
                     }
                 }

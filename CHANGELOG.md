@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Dirty-peer resync ticks now drain the backlog under the same 25 ms
+  wall-clock poll budget as policy-transition commit flushes, instead of a
+  fixed 8 peers per 10 ms re-arm, and select peers round-robin so a peer
+  whose sends keep failing cannot monopolize successive ticks while
+  drainable peers starve. Recovery throughput under outbound backpressure
+  no longer scales inversely with fleet size; each peer is attempted at
+  most once per tick, and failed peers keep waiting for the ordinary retry
+  interval.
+
 - Shared policy-transition commit polls now flush validated members under a
   25 ms wall-clock budget instead of parking after a fixed 8 members. The
   readiness lane keeps its mid-flush seam (bounded at the budget, well under
