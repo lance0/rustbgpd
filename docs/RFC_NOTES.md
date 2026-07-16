@@ -32,13 +32,21 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ---
 
-## RFC 1997 — NO_ADVERTISE export restriction
+## RFC 1997 — well-known community export coverage
 
 - IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS SAFI 71/72
   routes carrying `NO_ADVERTISE` are ineligible before export policy, and the
   post-policy route is checked again before Adj-RIB-Out commit. A permit policy
   cannot remove the community to bypass the restriction; a policy that adds it
   suppresses the modified route.
+- `NO_ADVERTISE` is currently the only RFC 1997 well-known community with
+  built-in egress enforcement. `NO_EXPORT` (0xFFFFFF01) and
+  `NO_EXPORT_SUBCONFED` (0xFFFFFF03) are matchable and settable in policy but
+  are not enforced at egress: routes carrying either community are accepted
+  and re-advertised to eBGP peers. Note that the RFC 9494 §4.6 intra-AS form
+  attaches `NO_EXPORT` (with `LOCAL_PREF` 0) to LLGR-stale routes advertised
+  to iBGP peers and relies on the receiving speaker to honor it — a downstream
+  rustbgpd does not yet provide that containment itself.
 - The same predicate covers single-best plus Add-Path for unicast, VPN, and
   labeled routes; grouped/private and RFC 7947 per-client-best shapes apply to
   unicast, grouped/private applies to VPN, and RFC 9107 ORR applies to unicast
@@ -47,9 +55,22 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   cleared.
 - Add-Path and per-client-best remove scoped candidates before ranking, so
   surviving siblings compact normally. They also skip policy-modified
-  candidates whose result carries `NO_ADVERTISE`. ORR first selects its
-  per-vantage best and suppresses that winner without falling back to a
-  different route, whether the community arrived on the source or from policy.
+  candidates whose result carries `NO_ADVERTISE`. ORR single-best first
+  selects its per-vantage best and suppresses that winner without falling back
+  to a different route, whether the community arrived on the source or from
+  policy. Ranked ORR is the asymmetric case: an Add-Path peer bound to a
+  vantage ranks with the ORR comparator over candidates already filtered for
+  `NO_ADVERTISE`, so the runner-up fills the vacated rank — the no-fallback
+  shape applies only to ORR single-best.
+- For RTC (SAFI 132), `NO_ADVERTISE` suppression has a wider blast radius than
+  for other families. An RT-membership NLRI suppressed by community policy is
+  withdrawn like any other route, and a receiver that filters VPN
+  advertisements by RT-Constrain membership then prunes every VPN route
+  carrying that Route Target; rustbgpd's own RFC 4684 outbound gate reacts the
+  same way toward a peer whose membership no longer covers an RT. The
+  mechanics are correct and fail-closed — the amplification is inherent to
+  SAFI 132, where one NLRI stands for the whole class of VPN routes carrying
+  that RT.
 - `NO_ADVERTISE` enforcement for EVPN and FlowSpec remains deferred.
 
 ---
@@ -669,6 +690,9 @@ Capability code 76 implements the tuple format from the expired
 `draft-abraitis-idr-addpath-paths-limit-04`. Each AFI/SAFI receiver preference
 is applied only to the matching negotiated Add-Path send direction. This is an
 experimental interoperability feature, not an adopted IETF standard.
+Enforcement is send-side only: rustbgpd caps what it sends at the peer's
+advertised limit but does not police received paths against its own
+advertised limit — the draft places that obligation on the sender.
 Neighbor output orders rows by numeric AFI/SAFI and carries an optional
 normalized limit whose presence distinguishes active unlimited from inactive,
 while retaining the legacy raw unlimited sentinel for rolling compatibility.

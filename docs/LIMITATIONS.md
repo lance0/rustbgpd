@@ -23,7 +23,12 @@ surfaces; it does not promote the rest of the project out of alpha.
   rustbgpd does not synthesize local BGP-LS objects. ORR computes only the
   RFC 9552 default topology: non-default MT-ID and malformed topology inputs
   are excluded fail-closed, while Flex-Algorithm data is ignored and no
-  selectable non-default/Flex SPF is implemented.
+  selectable non-default/Flex SPF is implemented. The BGP-LS trust boundary
+  is per-scope, not per-peer: ORR unions BGP-LS Adj-RIB-In across all peers
+  into one default topology, so any negotiated BGP-LS speaker can inject
+  well-formed default-topology nodes or links that shift another ORR client's
+  best-path selection. This is inherent to the RFC 9107 union model — the
+  MT/Flex isolation above scopes topology inputs, not speakers.
 - Confederations are not implemented.
 - Transparent route-server export preserves the accepted route's next hop but
   does not yet verify that the advertising client owns the wire next hop. See
