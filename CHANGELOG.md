@@ -159,6 +159,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/readyz` now treats the 200 ms core-readiness deadline as a hard bound
+  on the HTTP response.** A runtime stall (such as the post-commit outbound
+  flush) could hold the probe past the deadline and then complete it, and the
+  queued actor reply was polled before the expired probe timer — so the probe
+  answered a late 200 that silently violated the readiness contract. The
+  `/readyz` handler now wraps the probe in the deadline and rejects a late
+  success, answering `503 not ready: readiness probe deadline exceeded`
+  instead. The fast-503 daemon-gate path is unchanged. (LAN-448)
+
 - **Shutdown GR marker publication and warm-bundle maintenance can no longer
   wedge or wedge-loop.** GR restart marker publication, its generationless
   fallback, and marker removal at coordinated shutdown now run on a detached

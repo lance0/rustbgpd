@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prometheus::{Encoder, TextEncoder};
-use rustbgpd_api::health_probe::CoreReadinessProbe;
+use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -115,13 +115,31 @@ async fn handle_connection(
             }
         },
         "/livez" => text_response("200 OK", "ok\n"),
-        "/readyz" => match readiness_probe.check().await {
-            Ok(()) => text_response("200 OK", "ready\n"),
-            Err(error) => {
-                warn!(%error, "readiness probe failed");
-                text_response("503 Service Unavailable", &format!("not ready: {error}\n"))
+        "/readyz" => {
+            // Hard bound on the response, not just the probe's internal
+            // waits: a runtime stall can hold the probe past the deadline
+            // and then complete it — on unpark the queued reply is polled
+            // before the expired timer, so without the elapsed guard a
+            // late success would be certified as a (contract-violating)
+            // late 200.
+            let started = std::time::Instant::now();
+            match tokio::time::timeout(CORE_READINESS_DEADLINE, readiness_probe.check()).await {
+                Ok(Ok(())) if started.elapsed() <= CORE_READINESS_DEADLINE => {
+                    text_response("200 OK", "ready\n")
+                }
+                Ok(Err(error)) => {
+                    warn!(%error, "readiness probe failed");
+                    text_response("503 Service Unavailable", &format!("not ready: {error}\n"))
+                }
+                Ok(Ok(())) | Err(_) => {
+                    warn!("readiness probe deadline exceeded");
+                    text_response(
+                        "503 Service Unavailable",
+                        "not ready: readiness probe deadline exceeded\n",
+                    )
+                }
             }
-        },
+        }
         _ => text_response("404 Not Found", "Not Found\n"),
     };
 
@@ -281,6 +299,105 @@ mod tests {
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.ends_with("not ready: RIB manager probe timed out (200ms deadline)\n"));
+    }
+
+    #[tokio::test]
+    async fn get_readyz_returns_503_within_deadline_when_rib_reply_stalls() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
+
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(Vec::new());
+            }
+        });
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let _ = reply.send(0);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let response = request(addr, "/readyz").await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a stalled RIB actor must not delay the /readyz response past the deadline"
+        );
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+    }
+
+    #[tokio::test]
+    async fn get_readyz_rejects_late_success_when_runtime_stall_outlives_deadline() {
+        // R1 from docs/perf/actor-ceiling-1m-2026-07.md: a wedged runtime
+        // holds the probe past the deadline, and on unpark the queued
+        // actor reply is polled before the expired probe timer, so the
+        // probe completes successfully. Without the response-side elapsed
+        // guard this is certified as a late 200.
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (wedge_tx, mut wedge_rx) = mpsc::channel::<Duration>(1);
+        let (engaged_tx, engaged_rx) = tokio::sync::oneshot::channel();
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+
+        // The server runs on its own single-threaded runtime so the test
+        // can wedge exactly the worker that owns the probe timers.
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let metrics = BgpMetrics::new();
+                let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                addr_tx.send(listener.local_addr().unwrap()).unwrap();
+                tokio::spawn(async move {
+                    if let Some(stall) = wedge_rx.recv().await {
+                        let _ = engaged_tx.send(());
+                        // No await between the signal and the sleep, so the
+                        // worker is wedged before the reply can be polled.
+                        std::thread::sleep(stall);
+                    }
+                });
+                let (stream, _) = listener.accept().await.unwrap();
+                let _ = handle_connection(stream, &metrics, &probe).await;
+            });
+        });
+
+        let addr = addr_rx.await.unwrap();
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        // Answer the peer half, then hold the RIB reply until the wedge is
+        // in place so it is already queued when the runtime unparks well
+        // past the deadline.
+        if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+            let _ = reply.send(Vec::new());
+        }
+        let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await else {
+            panic!("expected QueryLocRibCount");
+        };
+        wedge_tx.send(Duration::from_millis(600)).await.unwrap();
+        engaged_rx.await.unwrap();
+        let _ = reply.send(0);
+
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+        .await
+        .expect("response within 5s");
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "late probe success must not be certified as ready: {response}"
+        );
+        assert!(response.ends_with("not ready: readiness probe deadline exceeded\n"));
     }
 
     #[tokio::test]
