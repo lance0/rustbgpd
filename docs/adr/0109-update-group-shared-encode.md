@@ -106,10 +106,18 @@ encoder prepares, groups, and encodes the inventory in bounded route slices
 publishing each slice's chunks as they are produced and sending its own
 filtered copy along the way; consumers prove wire-equivalence once, then
 send chunk *i* as soon as it exists. A member's longest wire silence now
-tracks per-slice encode latency instead of the full-table encode. Sources
-spanning a slice boundary cost one extra UPDATE each; slices keep the
-announce/next-hop-override index alignment, and the prepared-attribute cache
-persists across slices.
+tracks per-slice encode latency instead of the full-table encode.
+
+The encoder walks the inventory through an index sorted by source peer.
+The inventory arrives in table order with sources interleaved per prefix,
+and per-slice grouping in that order fragments every source across every
+slice — measured at 300 clients × 171,600 routes as tens of thousands of
+tiny UPDATEs per member and writer-channel saturation teardown. Source
+order keeps per-source chunks dense (a source spanning a slice boundary
+costs one extra UPDATE) and is safe to reorder because the inventory
+carries one route per prefix and announcements of distinct prefixes are
+order-independent. Slices keep the announce/next-hop-override index
+alignment, and the prepared-attribute cache persists across slices.
 
 The terminal marker is `Complete` or `Failed`. Any encoder anomaly — the
 same enumerated cases as before, at any slice — terminates the stream as
