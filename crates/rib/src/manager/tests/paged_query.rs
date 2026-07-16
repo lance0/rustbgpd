@@ -160,6 +160,7 @@ fn peer_up_direct(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -214,6 +215,7 @@ async fn seeded_manager() -> (
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

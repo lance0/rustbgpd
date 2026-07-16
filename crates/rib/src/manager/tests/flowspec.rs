@@ -27,6 +27,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -86,6 +87,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -141,6 +143,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -210,6 +213,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -357,6 +361,7 @@ async fn destinationless_v4_v6_rules_coexist_and_withdraw_independently() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -440,6 +445,7 @@ async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -508,6 +514,7 @@ async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

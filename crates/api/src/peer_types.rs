@@ -1594,6 +1594,9 @@ pub struct PeerManagerNeighborConfig {
     /// for route-server clients without Add-Path). Requires
     /// `route_server_client`.
     pub per_client_best: bool,
+    /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement
+    /// (resolved; config default `!route_server_client`).
+    pub interpret_rfc1997: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Enable Add-Path receive capability.

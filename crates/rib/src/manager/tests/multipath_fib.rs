@@ -85,6 +85,7 @@ async fn multipath_send_advertises_multiple_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -163,6 +164,7 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -340,6 +342,7 @@ async fn multipath_send_respects_send_max() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -423,6 +426,7 @@ async fn multipath_send_split_horizon() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -471,6 +475,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -607,6 +612,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -657,6 +663,7 @@ async fn multipath_peer_down_cleans_up_state() {
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -708,6 +715,7 @@ async fn multipath_peer_down_cleans_up_state() {
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -749,6 +757,7 @@ async fn multipath_send_incremental_route_addition() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -876,6 +885,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     let (multi_tx, mut multi_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: multi_target,
         peer_asn: 65000,
@@ -898,6 +908,7 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     let (single_tx, mut single_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: single_target,
         peer_asn: 65000,
@@ -992,6 +1003,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1082,6 +1094,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1181,6 +1194,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1284,6 +1298,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1396,6 +1411,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1485,6 +1501,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

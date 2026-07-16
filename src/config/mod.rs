@@ -1230,6 +1230,13 @@ impl Config {
             .per_client_best
             .or_else(|| group.and_then(|g| g.per_client_best))
             .unwrap_or(false);
+        // RFC 1997 egress enforcement defaults to on, except for
+        // route-server clients (transparent pass-through unless the
+        // operator opts in explicitly).
+        transport.interpret_rfc1997 = neighbor
+            .interpret_rfc1997
+            .or_else(|| group.and_then(|g| g.interpret_rfc1997))
+            .unwrap_or(!transport.route_server_client);
         transport.route_reflector_client = neighbor
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))
@@ -1304,6 +1311,7 @@ impl Config {
             orr_vantage: None,
             route_server_client: None,
             per_client_best: None,
+            interpret_rfc1997: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
@@ -2074,7 +2082,11 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::SessionReset,
             "session reset: TCP re-establish",
         ),
-        "route_reflector_client" | "orr_vantage" | "route_server_client" | "per_client_best" => (
+        "route_reflector_client"
+        | "orr_vantage"
+        | "route_server_client"
+        | "per_client_best"
+        | "interpret_rfc1997" => (
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
         ),
@@ -2213,6 +2225,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(per_client_best);
+    cmp_field!(interpret_rfc1997);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
@@ -2331,6 +2344,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.orr_vantage == new.orr_vantage
         && old.route_server_client == new.route_server_client
         && old.per_client_best == new.per_client_best
+        && old.interpret_rfc1997 == new.interpret_rfc1997
         && old.role == new.role
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
@@ -3008,6 +3022,14 @@ impl Config {
                     .per_client_best
                     .or_else(|| group.and_then(|g| g.per_client_best))
                     .unwrap_or(false),
+            );
+            // After route_server_client above so the derived default
+            // reads the resolved value.
+            neighbor.interpret_rfc1997 = Some(
+                neighbor
+                    .interpret_rfc1997
+                    .or_else(|| group.and_then(|g| g.interpret_rfc1997))
+                    .unwrap_or_else(|| neighbor.route_server_client != Some(true)),
             );
             neighbor.strict_role = Some(
                 neighbor
@@ -5365,6 +5387,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(per_client_best);
+    cmp_field!(interpret_rfc1997);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);

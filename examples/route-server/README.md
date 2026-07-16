@@ -46,6 +46,16 @@ its generic deny, and test both the exception and an unauthorized control.
   peers are excluded from update-group sharing (visible as the
   `per_client_best` reason in `rbgp neighbor show`).
 
+## RFC 1997 `NO_EXPORT` and route-server transparency
+
+Both members inherit the transparent default for well-known communities:
+`route_server_client = true` derives `interpret_rfc1997 = false`, so routes
+carrying `NO_EXPORT`/`NO_EXPORT_SUBCONFED` pass through the server unchanged
+and each member enforces them at its own edge — the arouteserver / IXP
+Manager convention. Set `interpret_rfc1997 = true` on a member (or the
+peer-group) to have the server itself suppress tagged routes toward that
+member; plain (non-RS) eBGP neighbors get that enforcement by default.
+
 ## Try it
 
 ```bash

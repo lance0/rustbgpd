@@ -13,6 +13,7 @@ async fn gr_marks_stale_and_demotes_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -390,6 +391,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -505,6 +507,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -820,6 +823,10 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario walks promotion, retention, and EoR sweep end to end"
+)]
 async fn llgr_eor_clears_llgr_stale() {
     tokio::time::pause();
 
@@ -880,6 +887,7 @@ async fn llgr_eor_clears_llgr_stale() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -1080,6 +1088,7 @@ fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65001,
@@ -1409,6 +1418,7 @@ async fn channel_peer_up(
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,

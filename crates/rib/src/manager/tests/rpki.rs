@@ -485,6 +485,7 @@ async fn rpki_cache_update_no_change_no_redistribution() {
 
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,

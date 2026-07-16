@@ -9,7 +9,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP egress
+  by default.** Routes received with either community are suppressed at
+  export staging toward eBGP peers across unicast (incl. RFC 8950 next-hop
+  forms), VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS — the same family set
+  as the existing `NO_ADVERTISE` enforcement. The check is source-route-only:
+  export policy that adds `NO_EXPORT` still delivers the route (the
+  route-server action idiom, also used by the RFC 9494 §4.6 LLGR form), and
+  policy that removes it cannot bypass the suppression. iBGP targets (incl.
+  RR reflection/ORR) are never suppressed. A received route carrying
+  `NO_EXPORT` is now suppressed toward eBGP peers even where RFC 9494 LLGR
+  eligibility previously passed it — RFC 1997 outranks LLGR eligibility.
+  Route-server clients are unchanged (transparent by default, see below).
+  The export-explain ladder gains a stable `no_export` gate rung beside
+  `no_advertise`.
+
 ### Added
+
+- **`interpret_rfc1997` per-neighbor / per-peer-group knob.** Controls the
+  RFC 1997 `NO_EXPORT` egress enforcement above. Default is derived:
+  `true` unless `route_server_client = true` (route servers stay
+  transparent and let members enforce the community). Explicit values on
+  the neighbor or peer-group override the derived default; peers whose
+  effective value differs never share an update group.
 
 - **Independent per-family maximum-prefix limits.** New `max_prefixes_ipv4`
   and `max_prefixes_ipv6` neighbor / peer-group knobs bound unique

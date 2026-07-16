@@ -756,6 +756,12 @@ pub struct Neighbor {
     /// Families where the session negotiates Add-Path send use Add-Path
     /// instead — the negotiated capability outranks this fallback.
     pub per_client_best: Option<bool>,
+    /// Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes
+    /// received with either community are not advertised to this neighbor
+    /// when it is eBGP. Default: `true` unless `route_server_client` is
+    /// set (route servers pass communities through transparently and let
+    /// clients enforce them). Set explicitly to override either default.
+    pub interpret_rfc1997: Option<bool>,
     /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
     pub role: Option<BgpRoleConfig>,
     /// Require the peer to advertise a compatible BGP Role capability.
@@ -972,6 +978,9 @@ pub struct PeerGroupConfig {
     /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
     /// this group. See the neighbor-level `per_client_best`.
     pub per_client_best: Option<bool>,
+    /// RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in
+    /// this group. See the neighbor-level `interpret_rfc1997`.
+    pub interpret_rfc1997: Option<bool>,
     /// Local BGP Role (RFC 9234) inherited by neighbors in this group.
     pub role: Option<BgpRoleConfig>,
     /// Require a compatible BGP Role capability from peers in this group.

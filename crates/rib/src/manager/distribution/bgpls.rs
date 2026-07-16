@@ -13,6 +13,7 @@ impl RibManager {
     /// match communities, large communities, `AS_PATH`, peer, and route type, but
     /// BGP-LS-specific predicates are intentionally deferred.
     #[expect(
+        clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "BGP-LS staging mirrors EVPN distribution context for RR/export parity"
@@ -26,6 +27,7 @@ impl RibManager {
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -58,6 +60,20 @@ impl RibManager {
             // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
             // Policy cannot remove it to make the source route exportable.
             if super::no_advertise_export_suppressed(best.communities()) {
+                if rib_out.get_bgpls(key).is_some() {
+                    bgpls_withdraw.push(key.clone());
+                }
+                continue;
+            }
+
+            // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED source-route
+            // suppression toward an eBGP target in honor mode (see
+            // `no_export_export_suppressed`; pre-policy only).
+            if super::no_export_export_suppressed(
+                best.communities(),
+                target_is_ebgp,
+                interpret_rfc1997,
+            ) {
                 if rib_out.get_bgpls(key).is_some() {
                     bgpls_withdraw.push(key.clone());
                 }
@@ -243,6 +259,7 @@ impl RibManager {
             }
 
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -270,6 +287,7 @@ impl RibManager {
                 target_peer_asn,
                 target_peer_group,
                 target_is_ebgp,
+                interpret_rfc1997,
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),

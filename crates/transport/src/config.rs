@@ -353,6 +353,12 @@ pub struct TransportConfig {
     /// for clients without Add-Path). Requires `route_server_client`;
     /// families with negotiated Add-Path send ignore it.
     pub per_client_best: bool,
+    /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement:
+    /// when `true` and this peer is eBGP, the RIB suppresses source
+    /// routes carrying either community at export staging. Resolved in
+    /// config with default `!route_server_client` (plain eBGP/iBGP
+    /// peers honor RFC 1997; route-server clients are transparent).
+    pub interpret_rfc1997: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
@@ -404,6 +410,7 @@ impl TransportConfig {
             orr_vantage: None,
             route_server_client: false,
             per_client_best: false,
+            interpret_rfc1997: true,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
             explain_enabled: true,

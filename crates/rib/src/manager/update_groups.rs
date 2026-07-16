@@ -69,6 +69,11 @@ pub(super) struct GroupKey {
     target_is_rr_client: bool,
     /// RFC 9234 local role (the OTC egress gate is role-dependent).
     target_local_role: Option<u8>,
+    /// RFC 1997 `NO_EXPORT` egress enforcement (`interpret_rfc1997`).
+    /// The gate outcome is target-dependent like the LLGR §4.4 gate: an
+    /// honor-mode eBGP peer and a transparent route-server client must
+    /// never share a staged winner for a `NO_EXPORT`-tagged route.
+    interpret_rfc1997: bool,
     /// Sendable IPv4-unicast (v1 keys the unicast subset exactly).
     sendable_ipv4_unicast: bool,
     /// Sendable IPv6-unicast.
@@ -656,6 +661,9 @@ pub(in crate::manager) struct GroupRibOut {
     // change moves peers to a different group, so these never mutate).
     pub(in crate::manager) export_chain: Option<PolicyChain>,
     pub(in crate::manager) is_ebgp: bool,
+    /// RFC 1997 `NO_EXPORT` egress enforcement — group-uniform (in the
+    /// [`GroupKey`]).
+    pub(in crate::manager) interpret_rfc1997: bool,
     pub(in crate::manager) is_rr_client: bool,
     pub(in crate::manager) local_role: Option<BgpRole>,
     pub(in crate::manager) sendable: Vec<(Afi, Safi)>,
@@ -668,9 +676,14 @@ pub(in crate::manager) struct GroupRibOut {
 const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 
 impl GroupRibOut {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one constructor snapshots every group-uniform staging input"
+    )]
     fn new(
         export_chain: Option<PolicyChain>,
         is_ebgp: bool,
+        interpret_rfc1997: bool,
         is_rr_client: bool,
         local_role: Option<BgpRole>,
         sendable: Vec<(Afi, Safi)>,
@@ -693,6 +706,7 @@ impl GroupRibOut {
             vpn_member_counts: FxHashMap::default(),
             export_chain,
             is_ebgp,
+            interpret_rfc1997,
             is_rr_client,
             local_role,
             sendable,
@@ -1275,6 +1289,7 @@ impl RibManager {
                     prefix,
                     &mut target,
                     group.is_ebgp,
+                    group.interpret_rfc1997,
                     group.is_rr_client,
                     self.cluster_id,
                     Some(&group.sendable),
@@ -1416,6 +1431,7 @@ impl RibManager {
                     &key_set,
                     &mut target,
                     group.is_ebgp,
+                    group.interpret_rfc1997,
                     group.is_rr_client,
                     self.cluster_id,
                     Some(&group.sendable),
@@ -2258,6 +2274,7 @@ impl RibManager {
                 // feeding the installed chain's ADR-0096 hit counters.
                 self.export_policy_for(peer).map(PolicyChain::share),
                 self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
+                self.peer_interpret_rfc1997.contains(&peer),
                 self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
                 self.peer_local_roles.get(&peer).copied().flatten(),
                 self.peer_sendable_families
@@ -2405,6 +2422,7 @@ impl RibManager {
             target_is_ebgp: fingerprint.target_is_ebgp,
             target_is_rr_client: fingerprint.target_is_rr_client,
             target_local_role: fingerprint.target_local_role,
+            interpret_rfc1997: fingerprint.interpret_rfc1997,
             sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
             sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
             sendable_vpnv4: fingerprint.sendable_vpnv4,
@@ -2455,6 +2473,7 @@ impl RibManager {
         let group = GroupRibOut::new(
             export_policy.map(PolicyChain::share),
             self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
+            self.peer_interpret_rfc1997.contains(&peer),
             self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
             self.peer_local_roles.get(&peer).copied().flatten(),
             self.peer_sendable_families
@@ -2566,6 +2585,7 @@ impl RibManager {
                 .copied()
                 .flatten()
                 .map(BgpRole::to_u8),
+            interpret_rfc1997: self.peer_interpret_rfc1997.contains(&peer),
             sendable_families,
             llgr_families,
             // Paths-Limit needs no v2 key dimension today: every Add-Path-send
@@ -2866,6 +2886,7 @@ mod tests {
     fn empty_group() -> GroupRibOut {
         GroupRibOut::new(
             None,
+            false,
             false,
             true,
             None,
@@ -3270,6 +3291,7 @@ mod tests {
         let mut group = GroupRibOut::new(
             None,
             false,
+            false,
             true,
             None,
             vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
@@ -3311,6 +3333,7 @@ mod tests {
         // Φ is applied per member at emit, not by a staging gate.
         let rtc_group = GroupRibOut::new(
             None,
+            false,
             false,
             true,
             None,
@@ -3450,6 +3473,7 @@ mod tests {
         let phi1 = membership(&[rt(1)]);
         let mut group = GroupRibOut::new(
             None,
+            false,
             false,
             true,
             None,

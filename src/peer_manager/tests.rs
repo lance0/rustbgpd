@@ -60,6 +60,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         orr_vantage: None,
         route_server_client: false,
         per_client_best: false,
+        interpret_rfc1997: true,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         add_path_receive: false,
         add_path_send: false,
@@ -179,6 +180,7 @@ log_format = "json"
                         target_is_ebgp: false,
                         target_is_rr_client: true,
                         target_local_role: None,
+                        interpret_rfc1997: true,
                         sendable_families: vec![(1, 1)],
                         llgr_families: vec![],
                         add_path_send: false,
@@ -192,6 +194,7 @@ log_format = "json"
                             target_is_ebgp: false,
                             target_is_rr_client: true,
                             target_local_role: None,
+                            interpret_rfc1997: true,
                             sendable_ipv4_unicast: true,
                             sendable_ipv6_unicast: false,
                             sendable_vpnv4: false,
@@ -1821,6 +1824,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -4636,6 +4640,7 @@ fn build_transport_config_reflects_every_transport_field() {
         orr_vantage: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
         route_server_client: true,
         per_client_best: true,
+        interpret_rfc1997: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::All,
         add_path_receive: true,
         add_path_send: true,
@@ -4676,6 +4681,7 @@ fn build_transport_config_reflects_every_transport_field() {
         orr_vantage,
         route_server_client,
         per_client_best,
+        interpret_rfc1997,
         remove_private_as,
         add_path_receive,
         add_path_send,
@@ -4746,6 +4752,10 @@ fn build_transport_config_reflects_every_transport_field() {
     // The #702 field: this is the exact assertion the class of tests exists
     // to make impossible to lose again.
     assert_eq!(t.per_client_best, *per_client_best, "per_client_best");
+    // Same class of pin for the RFC 1997 egress knob: the fixture value
+    // (false) differs from the TransportConfig::new default (true), so a
+    // dropped assignment fails here rather than shipping silently.
+    assert_eq!(t.interpret_rfc1997, *interpret_rfc1997, "interpret_rfc1997");
     assert_eq!(t.remove_private_as, *remove_private_as, "remove_private_as");
     assert_eq!(
         t.peer.add_path_receive, *add_path_receive,
@@ -9298,6 +9308,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                                     route_reflector_client: false,
                                     orr_vantage: None,
                                     per_client_best: false,
+                                    interpret_rfc1997: true,
                                     add_path_send_families: Vec::new(),
                                     add_path_send_max: 0,
                                     negotiated_orf_recv: Vec::new(),

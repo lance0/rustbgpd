@@ -198,6 +198,9 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         orr_vantage: definition.orr_vantage,
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
+        // Not exposed on the peer-group gRPC definition: absent means the
+        // config-derived default (!route_server_client) applies at resolve.
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -447,6 +450,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     orr_vantage: cfg.orr_vantage,
                     route_server_client: Some(cfg.route_server_client),
                     per_client_best: Some(cfg.per_client_best),
+                    interpret_rfc1997: None,
                     role: cfg.local_role.map(wire_role_to_config),
                     strict_role: Some(cfg.strict_role),
                     prefix_orf_receive: Some(cfg.prefix_orf_receive),
@@ -886,6 +890,7 @@ remote_asn = 65002
                     orr_vantage: None,
                     route_server_client: false,
                     per_client_best: false,
+                    interpret_rfc1997: true,
                     remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
                     add_path_receive: false,
                     add_path_send: false,

@@ -20,6 +20,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -46,6 +47,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -140,6 +142,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -163,6 +166,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
     let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: other,
         peer_asn: 65000,
@@ -251,6 +255,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -274,6 +279,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -921,6 +927,7 @@ async fn inject_evpn_reflects_to_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -1034,6 +1041,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: early,
         peer_asn: 65000,
@@ -1079,6 +1087,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: late,
         peer_asn: 65000,
@@ -1254,6 +1263,7 @@ async fn evpn_export_policy_applies_modifications() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1276,6 +1286,7 @@ async fn evpn_export_policy_applies_modifications() {
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,

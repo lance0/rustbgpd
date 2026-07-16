@@ -49,6 +49,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let (feed_tx, _feed_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 1,
         peer: feed_peer,
         peer_asn: 65000,
@@ -857,6 +858,7 @@ async fn orr_client_initial_dump_gets_vantage_best() {
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,
@@ -1027,6 +1029,7 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,
@@ -1233,6 +1236,7 @@ async fn split_horizon_and_rr_suppression_apply_before_orr_ranking() {
     let (out_tx_d, mut out_d) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: peer_d,
         peer_asn: 65000,
@@ -1315,6 +1319,7 @@ async fn orr_with_addpath_send_ranks_by_vantage_cost() {
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,
@@ -1391,6 +1396,7 @@ async fn vpn_orr_peer_up(
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -1497,6 +1503,7 @@ async fn vpn_orr_addpath_ranking_uses_vantage_costs() {
     let (out_tx, mut out_a) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: client_a,
         peer_asn: 65000,
@@ -1748,6 +1755,7 @@ async fn vpn_orr_rtc_filter_applies_to_vantage_winner() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1877,6 +1885,7 @@ async fn vpn_orr_initial_dump_gets_vantage_best() {
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: client_b,
         peer_asn: 65000,

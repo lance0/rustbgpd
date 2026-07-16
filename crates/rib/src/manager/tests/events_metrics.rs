@@ -1069,6 +1069,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1169,6 +1170,7 @@ async fn query_advertised_count() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

@@ -77,6 +77,7 @@ impl RibManager {
     /// a vantage is resolved — and staged with outbound path IDs `1..=N`.
     /// Otherwise the single best is staged with `path_id = 0`.
     #[expect(
+        clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
@@ -89,6 +90,7 @@ impl RibManager {
         keys: &HashSet<VpnRouteKey>,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -229,6 +231,16 @@ impl RibManager {
                     }
 
                     if super::no_advertise_export_suppressed(candidate.communities()) {
+                        continue;
+                    }
+                    // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED source-route
+                    // suppression toward an eBGP target in honor mode (see
+                    // `no_export_export_suppressed`; pre-policy only).
+                    if super::no_export_export_suppressed(
+                        candidate.communities(),
+                        target_is_ebgp,
+                        interpret_rfc1997,
+                    ) {
                         continue;
                     }
 
@@ -531,6 +543,27 @@ impl RibManager {
                     crate::update::ExportGateVerdict::Stop,
                     || {
                         "source route carries NO_ADVERTISE; RFC 1997 forbids advertising it"
+                            .to_string()
+                    },
+                );
+                withdraw_existing(vpn_withdraw, existing_path_ids);
+                continue;
+            }
+            // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED — same pre-policy
+            // source-route placement; no post-policy twin (policy-added
+            // NO_EXPORT is delivered). See `no_export_export_suppressed`.
+            if super::no_export_export_suppressed(
+                best.communities(),
+                target_is_ebgp,
+                interpret_rfc1997,
+            ) {
+                target.gate(
+                    "no_export",
+                    "no_export_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "source route carries NO_EXPORT (or NO_EXPORT_SUBCONFED); RFC 1997 \
+                         forbids advertising it to an eBGP peer"
                             .to_string()
                     },
                 );
@@ -929,6 +962,7 @@ impl RibManager {
             }
 
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -974,6 +1008,7 @@ impl RibManager {
                 staged_keys,
                 &mut target,
                 target_is_ebgp,
+                interpret_rfc1997,
                 target_is_rr_client,
                 self.cluster_id,
                 sendable.as_ref(),

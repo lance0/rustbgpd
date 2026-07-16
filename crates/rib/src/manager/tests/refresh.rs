@@ -23,6 +23,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -731,6 +732,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -853,6 +855,7 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -1011,6 +1014,7 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,

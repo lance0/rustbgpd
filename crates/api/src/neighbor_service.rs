@@ -777,6 +777,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             orr_vantage: None,
             route_server_client: config.route_server_client,
             per_client_best: config.per_client_best,
+            // Not exposed on the runtime neighbor-add gRPC surface
+            // (ADR-0039 precedent): dynamic peers take the config-derived
+            // default. Configure exceptions via the static TOML
+            // `interpret_rfc1997` knob.
+            interpret_rfc1997: !config.route_server_client,
             remove_private_as,
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
@@ -1333,6 +1338,7 @@ mod tests {
             orr_vantage: None,
             route_server_client: false,
             per_client_best: false,
+            interpret_rfc1997: true,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,
             add_path_send: false,

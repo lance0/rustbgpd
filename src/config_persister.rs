@@ -180,6 +180,7 @@ log_format = "json"
             orr_vantage: None,
             route_server_client: Some(false),
             per_client_best: Some(false),
+            interpret_rfc1997: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
