@@ -1384,10 +1384,15 @@ impl RibManager {
 
     fn advance_route_pages_for_update(&mut self, update: &RibUpdate) {
         match update {
+            // `ReplacePeerExportPolicies` stages a multi-iteration clean
+            // transition whose `Finalize` flips group memberships and export
+            // overlays; general queries stay fenced out until it is terminal,
+            // so advancing here at acceptance covers the whole transaction.
             RibUpdate::PeerAddPathLimits { .. }
             | RibUpdate::PeerOrfUpdate { .. }
             | RibUpdate::SetPeerPolicyContext { .. }
             | RibUpdate::ReplacePeerExportPolicy { .. }
+            | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::RefreshPeerOutbound { .. }
             | RibUpdate::RouteRefreshRequest { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }

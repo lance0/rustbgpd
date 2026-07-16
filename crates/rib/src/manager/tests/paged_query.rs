@@ -1279,3 +1279,27 @@ fn every_direct_timer_mutation_seam_advances_route_page_versions() {
     manager.release_selection_families(&[family], "test timer expiry");
     assert_ne!(versions(&manager), before, "selection-release seam");
 }
+
+/// A shared clean export-policy transition commits its group-membership and
+/// export-overlay flips in `Finalize`, which does not always reach the
+/// distribution-pass fence (no dirty or forced peers). General queries stay
+/// queued while the transition owns the actor, so fencing at command
+/// acceptance covers the whole transaction, including the fallback handoff.
+#[test]
+fn accepting_a_shared_policy_transition_invalidates_advertised_continuations() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let before = manager.route_page_advertised_version;
+    let (reply, _response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            export_policy: None,
+        }],
+        reply,
+    });
+    assert_ne!(
+        manager.route_page_advertised_version, before,
+        "cohort export-policy replacement must fence advertised continuations at acceptance"
+    );
+}
