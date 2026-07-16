@@ -43,6 +43,23 @@ non-self base prefixes carrying the new policy-generation community —
 which is what makes this run acceptance evidence where the July
 over-count was not.
 
+## Status at later heads
+
+These numbers are pinned to `61efe075` and do not hold at later
+commits. A 2026-07-16 rerun of the identical campaign at `02f1f2a7`
+was rejected: observer stall p50 rose to ~1.03 s (above the gate) with
+a flat per-observer distribution consistent with the paced
+commit/resync sweep introduced by the cooperative policy-transition
+flush, and per-observer completion rose from ~155 s to ~273 s p50
+(LAN-458); post-campaign TERM shutdown also wedged in a dirty-resync
+loop against closed peer channels until SIGKILL (LAN-459). The rerun's
+readiness plane was strictly better than this receipt's (health
+queries bounded at ~225 ms worst by the response-deadline fix, vs
+232 ms here, and degraded only inside re-advertisement windows). This
+receipt remains valid for its commit; a replacement receipt lands only
+after LAN-458/LAN-459 close and a rerun passes acceptance (tracked in
+LAN-350).
+
 ## Why this supersedes the earlier run
 
 An earlier July run at this shape reported effectively the same figures
