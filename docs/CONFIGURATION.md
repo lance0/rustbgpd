@@ -161,6 +161,12 @@ orphan cleanup, and a corrupt, unsafe, oversized, or changed manifest deletes
 nothing. One undeletable stale entry is reported but does not suppress later
 entries in deterministic filename order.
 
+Turning `warm_cache_checkpoint_on_shutdown` back off does not remove the last
+committed bundle: nothing scavenges `<runtime_state_dir>/warm-bundle-v1` once
+the option is disabled. The bundle contains routing table contents (see the
+shutdown warm-checkpoint confidentiality note in SECURITY.md), so delete that
+directory manually if the cached routing data must not persist.
+
 Every concurrently running rustbgpd daemon must use a distinct
 `runtime_state_dir`. Sharing one runtime-state directory between live daemon
 processes is unsupported because the restart marker, warm checkpoint, FIB

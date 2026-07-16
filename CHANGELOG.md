@@ -159,6 +159,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Shutdown GR marker publication and warm-bundle maintenance can no longer
+  wedge or wedge-loop.** GR restart marker publication, its generationless
+  fallback, and marker removal at coordinated shutdown now run on a detached
+  writer thread under a 5-second terminal deadline, so a hung filesystem
+  cannot stall daemon exit. Warm-bundle entry verification treats an entry
+  grown by a same-UID writer mid-read as a typed mismatch instead of
+  panicking in the shutdown thread. A cleanup pass over a bundle directory
+  holding more than 65,536 candidates now removes the first cap-worth in
+  deterministic name order before reporting the over-cap error, so the
+  directory shrinks on every pass instead of failing unchanged forever.
+
 - **The route-server starter now applies documented dual-stack ingress
   hygiene.** Its policy rejects both default routes and a dated 2025-10-09
   snapshot of active IANA special-purpose rows marked non-globally reachable,
