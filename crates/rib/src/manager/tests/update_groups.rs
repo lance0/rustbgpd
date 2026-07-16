@@ -1308,8 +1308,10 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         BTreeMap::from([
             (
                 "bounded".to_owned(),
-                u64::try_from(actor_polls - 3).unwrap()
+                u64::try_from(actor_polls - 4).unwrap()
             ),
+            // MEMBER_COUNT members fit one COMMIT_MEMBERS_PER_POLL batch.
+            ("commit".to_owned(), 1),
             ("finalize".to_owned(), 1),
             ("prefix_snapshot".to_owned(), 2),
         ])
@@ -3373,4 +3375,478 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// Direct-drive fixture for mid-flush observation: `member_count` grouped
+/// RR-client members installed on one shared export policy, `route_count`
+/// Loc-RIB routes distributed and drained, no actor task. Tests step the
+/// parked transition through the same seam the run loop polls.
+fn direct_clean_transition_manager(
+    member_count: usize,
+    route_count: usize,
+    readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
+) -> (
+    RibManager,
+    Vec<IpAddr>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    if let Some(readiness_rx) = readiness_rx {
+        manager = manager.with_readiness_queries(readiness_rx);
+    }
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_2101);
+    let mut peers = Vec::new();
+    let mut receivers = Vec::new();
+    for index in 0..member_count {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 42, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 42,
+                max_len: 65_535,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        });
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: Some(old_policy.clone()),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        let eor = outbound_rx.try_recv().unwrap();
+        assert_eq!(eor.end_of_rib, ipv4_sendable());
+        receivers.push(outbound_rx);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 42);
+    let announced = (0..route_count)
+        .map(|index| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, u8::try_from(index).unwrap(), 0), 24),
+                source,
+            )
+        })
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    (manager, peers, receivers)
+}
+
+/// One run-loop poll of the parked transition, returning the recorded poll
+/// kind and outcome exactly as the actor seam observes them.
+fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static str) {
+    use crate::manager::distribution::CleanPolicyTransitionAdvance;
+    let pending = manager
+        .pending_clean_policy_transition
+        .take()
+        .expect("a parked transition to poll");
+    let kind = pending.poll_kind().as_str();
+    match manager.advance_clean_policy_transition(pending) {
+        CleanPolicyTransitionAdvance::Continue(next) => {
+            manager.pending_clean_policy_transition = Some(next);
+            (kind, "continue")
+        }
+        CleanPolicyTransitionAdvance::Committed(_) => (kind, "committed"),
+        CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+            failed
+                .discard_uncommitted_transition(manager)
+                .expect("fallback cleanup succeeds");
+            (kind, "fallback")
+        }
+    }
+}
+
+fn start_clean_transition(
+    manager: &mut RibManager,
+    peers: &[IpAddr],
+    next_policy: &PolicyChain,
+) -> oneshot::Receiver<Result<crate::update::ExportPolicyCohortOutcome, String>> {
+    let (reply, response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    });
+    assert!(manager.pending_clean_policy_transition.is_some());
+    response
+}
+
+/// LAN-447: the dedicated readiness lane must be answerable BETWEEN commit
+/// batches. With a monolithic finalize poll (no Validate/CommitMembers
+/// split) no mid-flush seam exists and this test fails: the first
+/// commit-kind poll would terminate the transition.
+#[tokio::test]
+async fn readiness_answered_between_commit_flush_batches() {
+    const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
+    const ROUTE_COUNT: usize = 2;
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, Some(readiness_rx));
+    let next_policy = community_chain(0xFDE8_2102);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    // Drive the poll seam until the FIRST commit poll completes.
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(outcome, "continue", "{kind} poll must park mid-transition");
+        if kind == "commit" {
+            break;
+        }
+    }
+    let pending = manager
+        .pending_clean_policy_transition
+        .as_ref()
+        .expect("transition still owned mid-flush");
+    let cursor = pending.commit_cursor().expect("commit phase parked");
+    assert_eq!(cursor, super::super::COMMIT_MEMBERS_PER_POLL);
+    assert!(cursor < MEMBER_COUNT);
+    let elapsed = pending.elapsed();
+
+    // The readiness lane is serviced at exactly this seam.
+    let (reply, mut probe) = oneshot::channel();
+    readiness_tx
+        .try_send(crate::update::RibReadinessQuery::LocRibCount { reply })
+        .unwrap();
+    manager.drain_readiness_queries(Some(elapsed));
+    assert_eq!(
+        probe
+            .try_recv()
+            .expect("readiness answered mid-flush")
+            .expect("healthy verdict while the flush is parked"),
+        ROUTE_COUNT
+    );
+    assert!(manager.pending_clean_policy_transition.is_some());
+
+    // The flush then completes without fallback.
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(kind, "commit");
+        if outcome == "committed" {
+            break;
+        }
+        assert_eq!(outcome, "continue");
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+}
+
+/// The commit phase drains members in bounded batches: ceil(M/8)-1 Continue
+/// polls, each flushing at most `COMMIT_MEMBERS_PER_POLL` members.
+#[tokio::test]
+async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
+    const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
+    const ROUTE_COUNT: usize = 2;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    let next_policy = community_chain(0xFDE8_2103);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    let mut batch_sizes = Vec::new();
+    let mut commit_continues = 0_usize;
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_ne!(outcome, "fallback");
+        if kind == "commit" {
+            // Each member receives exactly one shared flush envelope, so the
+            // per-poll count of newly delivered envelopes IS the batch size.
+            let delivered = receivers
+                .iter_mut()
+                .filter_map(|receiver| receiver.try_recv().ok())
+                .count();
+            batch_sizes.push(delivered);
+            if outcome == "committed" {
+                break;
+            }
+            commit_continues += 1;
+        } else {
+            assert_eq!(outcome, "continue");
+        }
+    }
+    assert_eq!(batch_sizes, vec![8, 8, 8, 2]);
+    assert_eq!(
+        commit_continues,
+        MEMBER_COUNT.div_ceil(super::super::COMMIT_MEMBERS_PER_POLL) - 1
+    );
+    let destination = manager.grouped_member_of(peers[0]).expect("grouped");
+    for &peer in &peers {
+        assert_eq!(manager.grouped_member_of(peer), Some(destination));
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+}
+
+/// Once the first batch has emitted, a member's dropped transport receiver
+/// must not fall the transition back: the dead peer's envelope is silently
+/// dropped, every other member commits, and the cohort ends Committed.
+#[tokio::test]
+async fn commit_flush_never_falls_back_after_first_emission() {
+    const MEMBER_COUNT: usize = 10;
+    const ROUTE_COUNT: usize = 2;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    let next_policy = community_chain(0xFDE8_2104);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    // First commit batch flushes members 0..8 (replacement order).
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(outcome, "continue");
+        if kind == "commit" {
+            break;
+        }
+    }
+    for receiver in &mut receivers[..8] {
+        assert!(
+            receiver.try_recv().is_ok(),
+            "first batch flushed members 0..8"
+        );
+    }
+    // Drop a NOT-yet-committed member's transport receiver mid-flush.
+    drop(receivers.remove(9));
+
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(kind, "commit");
+        match outcome {
+            "committed" => break,
+            "continue" => {}
+            other => panic!("post-emission poll must never {other}"),
+        }
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    // The surviving ninth member got its envelope; the dead member's
+    // membership still committed with the cohort.
+    assert!(receivers[8].try_recv().is_ok());
+    let destination = manager.grouped_member_of(peers[0]).expect("grouped");
+    assert_eq!(manager.grouped_member_of(peers[9]), Some(destination));
+}
+
+/// Fence integrity across the batched flush: a primary route update and a
+/// second cohort enqueued behind an owned transition are processed only
+/// after its terminal commit, in order — every member observes
+/// flush-then-mutation-then-second-flush.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fence regression preserves full cohort setup plus the three-message queue-order proof"
+)]
+async fn fence_holds_queued_work_until_commit_flush_terminal() {
+    const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
+    const ROUTE_COUNT: usize = 2;
+    let (tx, rx) = mpsc::channel(256);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_2105);
+    let mid_policy = community_chain(0xFDE8_2106);
+    let final_policy = community_chain(0xFDE8_2107);
+    let mut peers = Vec::new();
+    let mut receivers = Vec::new();
+    for index in 0..MEMBER_COUNT {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 43, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 43,
+                    max_len: 65_535,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 43);
+    let announced = (0..ROUTE_COUNT)
+        .map(|index| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, u8::try_from(index).unwrap(), 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+    }
+
+    // Enqueue the cohort, then a primary update, then a second cohort —
+    // all queued behind the owned transition.
+    let (reply_mid, response_mid) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(mid_policy.clone()),
+            })
+            .collect(),
+        reply: reply_mid,
+    })
+    .await
+    .unwrap();
+    let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(later_prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let (reply_final, response_final) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(final_policy.clone()),
+            })
+            .collect(),
+        reply: reply_final,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response_mid.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    assert_eq!(
+        response_final.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed),
+        "the second cohort must queue behind the fence, not race the flush"
+    );
+    for receiver in &mut receivers {
+        let flush = receiver.recv().await.unwrap();
+        assert_eq!(
+            flush.announce.len(),
+            ROUTE_COUNT,
+            "cohort flush precedes the queued primary update"
+        );
+        let primary = receiver.recv().await.unwrap();
+        assert_eq!(primary.announce.len(), 1);
+        assert_eq!(primary.announce[0].prefix, Prefix::V4(later_prefix));
+        let second_flush = receiver.recv().await.unwrap();
+        assert_eq!(
+            second_flush.announce.len(),
+            ROUTE_COUNT + 1,
+            "second cohort flushes the post-mutation table"
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-447 companion bound: one resync-timer tick hands at most
+/// `RESYNC_PEERS_PER_TICK` dirty peers to the O(table) resync pass; the
+/// withheld remainder survives untouched for the next tick.
+#[tokio::test]
+async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
+    const PEER_COUNT: usize = 12;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+    }
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT);
+
+    // First tick: exactly the bounded slice resyncs (each successful dirty
+    // resync of a grouped member replays the group table as one envelope);
+    // the withheld backlog is reported and survives untouched.
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(backlog, "a withheld remainder must be reported as backlog");
+    assert_eq!(
+        manager.dirty_peers.len(),
+        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
+    );
+    let first_tick_envelopes = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(first_tick_envelopes, super::super::RESYNC_PEERS_PER_TICK);
+
+    // Second tick drains the remainder without over-reporting backlog.
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(!backlog, "no withheld peers remain");
+    assert!(manager.dirty_peers.is_empty());
+    let second_tick_envelopes = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(
+        second_tick_envelopes,
+        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
+    );
 }

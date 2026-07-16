@@ -76,9 +76,9 @@ first optimized emission. PeerManager then performs ordinary authoritative
 RIB replacements for the entire selected policy cohort, one peer at a time,
 without hot-applying the session chain a second time.
 
-### 3. The five RIB phases
+### 3. The six RIB phases
 
-The actor-owned transition has exactly five phases:
+The actor-owned transition has exactly six phases:
 
 1. **Classify** examines at most eight members per poll, rejects duplicates or
    non-clean members, and proves that the complete cohort has one update-group
@@ -94,29 +94,39 @@ The actor-owned transition has exactly five phases:
    new wire profile, reuses a successful profile's largest encoded length when
    compatible, and reserves each member's outbound writer permit. It emits
    nothing.
-5. **Finalize** revalidates every session, sender, encoder owner/generation,
-   clean-state predicate, group pair, and reserved permit. In one synchronous
-   actor poll it changes memberships, replays counters, and sends the shared
-   `Arc` payload through the reserved permits. It then runs the global
-   `distribute_changes(empty, empty)` retry opportunity before replying, so
-   unrelated dirty or forced peers can drain promptly rather than waiting for
-   the retry timer.
+5. **Validate** revalidates every session, sender, encoder owner/generation,
+   clean-state predicate, group pair, and reserved permit in one actor poll.
+   It is the last phase that can fall back; it emits nothing.
+6. **CommitMembers** changes memberships, replays counters, and sends the
+   shared `Arc` payload through each member's reserved permit in bounded
+   batches of at most eight members per poll, draining committed members so
+   parked state shrinks monotonically. Once the first batch has emitted,
+   later polls only continue or terminate committed — per-batch revalidation
+   is deliberately absent because the actor fence admits only the read-only
+   readiness lane between batches, and a receiver dropped mid-flush is
+   benign (permits are pre-reserved, sending on a closed channel is a no-op,
+   and the queued `PeerDown` cleans up after the fence lifts). The terminal
+   batch then runs the global `distribute_changes(empty, empty)` retry
+   opportunity before replying, so unrelated dirty or forced peers can drain
+   promptly rather than waiting for the retry timer.
 
-No phase before `Finalize` changes committed membership, policy, counters, or
-wire state. On fallback, reserved permits are released and a destination
-created by this transition is removed only if it is still unowned. Failure to
-prove safe cleanup is an error rather than a per-peer handoff.
+No phase before `CommitMembers` changes committed membership, policy,
+counters, or wire state. On fallback, reserved permits are released and a
+destination created by this transition is removed only if it is still
+unowned. Failure to prove safe cleanup is an error rather than a per-peer
+handoff.
 
 The 1,024-route budget does not bound the two snapshot polls. The initial
 Loc-RIB prefix snapshot is O(Loc-RIB entries) in one actor poll; the later
 destination-key snapshot is O(destination entries) in one actor poll. They
 provide stable identity vectors for the chunked bodies, at the cost of two
 full-table allocations and two scheduler-visible, data-dependent polls.
-`Finalize` has an O(cohort members) commit body, but its global retry tail also
-enumerates outbound peers and can perform full Loc-RIB/Adj-RIB-Out work for
-unrelated dirty or forced peers. Its work shape can therefore reach
-O(outbound peers + table entries times dirty/forced peers) in one poll. These
-are explicit bounds of the current model, not claims of constant-time actor
+`CommitMembers` bounds the commit/flush body to eight members per poll, but
+the terminal batch's global retry tail still enumerates outbound peers and
+can perform full Loc-RIB/Adj-RIB-Out work for unrelated dirty or forced
+peers. The terminal poll's work shape can therefore reach
+O(outbound peers + table entries times dirty/forced peers). These are
+explicit bounds of the current model, not claims of constant-time actor
 latency.
 
 ### 4. Cross-partition apply and rollback order
@@ -164,10 +174,11 @@ running.
 
 Production exposes transition-in-progress and last-total-duration gauges,
 emits one slow warning after five seconds, and records every real actor poll in
-`bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}`. The three
+`bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}`. The four
 bounded label values separate chunked work (`bounded`), the two complete table
-snapshots (`prefix_snapshot`), and finalization including the atomic commit and
-global dirty/forced retry tail (`finalize`) so an operator can distinguish a
+snapshots (`prefix_snapshot`), the pre-commit validation poll (`finalize`),
+and the bounded member commit/flush batches (`commit`, whose terminal batch
+includes the global dirty/forced retry tail) so an operator can distinguish a
 long transaction from one long single-threaded poll.
 
 Readiness remains successful during legitimate bounded progress, but the
@@ -230,11 +241,11 @@ wall-clock guarantee. See the
   dominant shape without forcing content-stable or otherwise ineligible peers
   through the RIB batch. Multiple simultaneous policy cohorts would multiply
   state and rollback edges without current demand evidence.
-- **Actor fence, single RIB owner, and five phases:** keep. Together they buy
+- **Actor fence, single RIB owner, and six phases:** keep. Together they buy
   an auditable, observationally atomic RIB commit while bounded bodies provide
   scheduler opportunities. The cost is queued normal work; the two snapshot
-  polls, final member loop, and final global retry are not bounded by the route
-  chunk size.
+  polls and the terminal global retry are not bounded by the route chunk
+  size, though the member commit/flush loop now is (eight members per poll).
 - **Immutable inventory and wire-cohort probe sharing:** keep. They change
   staging and exact probing from routes-times-peers toward
   routes-times-compatible-profiles while retaining per-session generation and
@@ -248,8 +259,9 @@ wall-clock guarantee. See the
 - **Final global retry opportunity:** keep until production poll data says
   otherwise. It promptly drains unrelated dirty/forced residue before the
   successful transaction reply, matching the authoritative replacement seam.
-  Its cost is an unchunked global retry opportunity inside `Finalize`;
-  use the production poll histogram before optimizing or relocating it.
+  Its cost is an unchunked global retry opportunity inside the terminal
+  `CommitMembers` batch; use the production poll histogram before optimizing
+  or relocating it.
 - **Read-only readiness isolation:** keep. It avoids false depools during
   normal transactions, then fails closed at 30 seconds so a true soft wedge is
   automatically depooled. Its cost is a second narrow channel and one
@@ -296,8 +308,10 @@ semantics for both newly created and already-maintained destinations.
   readiness lanes remain responsive at actor seams, but an owned transition
   reports stalled from 30 seconds until terminal commit or cleaned-up fallback.
 - The current implementation deliberately retains two O(table) snapshot polls,
-  one data-dependent finalization poll with a global dirty/force retry tail, a
-  single-cohort partition, and a sequential authoritative remainder.
+  a terminal commit batch whose global dirty/force retry tail is data-
+  dependent, a single-cohort partition, and a sequential authoritative
+  remainder. The member commit/flush loop itself is bounded to eight members
+  per poll (LAN-447).
 - The measured completion win is retained together with its measured delivery-
   gap regression. Neither the ADR nor the microbenchmark receipts turn that
   regression into a success claim.

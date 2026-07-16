@@ -54,6 +54,7 @@ struct PolicyTransitionStats {
     max_actor_slice: std::time::Duration,
     max_prefix_snapshot_poll: std::time::Duration,
     max_finalize_poll: std::time::Duration,
+    max_commit_poll: std::time::Duration,
     #[cfg(feature = "bench-internals")]
     authoritative_peer_applies: usize,
     #[cfg(feature = "bench-internals")]
@@ -664,6 +665,20 @@ pub(in crate::manager) fn policy_transition_slice_end(
 }
 /// Maximum members classified by one strict shared-policy actor poll.
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
+/// Maximum validated members committed and flushed by one strict
+/// shared-policy actor poll (matches `QUERY_BUDGET_PER_CHUNK` so readiness
+/// keeps its per-seam service ratio through the commit flush).
+pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
+/// Maximum dirty peers resynced by one resync-timer tick. Each dirty peer
+/// costs O(table) enumeration and staging, so an unbounded tick stalls the
+/// actor for the whole backlog; the same peers-keyed bound as the commit
+/// flush keeps the actor responsive while a withheld remainder re-arms the
+/// timer at [`DIRTY_RESYNC_BACKLOG_INTERVAL`].
+const RESYNC_PEERS_PER_TICK: usize = 8;
+/// Re-arm interval while a withheld dirty-resync backlog remains. Short by
+/// design: the backlog is work the actor already owes, so the next slice
+/// should run as soon as queued updates and queries have had a turn.
+const DIRTY_RESYNC_BACKLOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 
@@ -1276,6 +1291,35 @@ impl RibManager {
         }
     }
 
+    /// One bounded resync-timer tick: hand at most [`RESYNC_PEERS_PER_TICK`]
+    /// dirty peers to `distribute_changes`, withholding the remainder so the
+    /// actor yields between slices. Returns whether a withheld backlog
+    /// remains (distinct from peers that stayed dirty because their send
+    /// failed — those wait for the ordinary retry interval).
+    ///
+    /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
+    /// state and the dirty flag are committed/cleared only after a
+    /// successful send, and withheld peers are not touched at all.
+    fn resync_dirty_peers_bounded(&mut self) -> bool {
+        let withheld: Vec<IpAddr> = if self.dirty_peers.len() > RESYNC_PEERS_PER_TICK {
+            let selected: HashSet<IpAddr> = self
+                .dirty_peers
+                .iter()
+                .copied()
+                .take(RESYNC_PEERS_PER_TICK)
+                .collect();
+            let withheld = self.dirty_peers.difference(&selected).copied().collect();
+            self.dirty_peers = selected;
+            withheld
+        } else {
+            Vec::new()
+        };
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let backlog = !withheld.is_empty();
+        self.dirty_peers.extend(withheld);
+        backlog
+    }
+
     async fn receive_readiness_query(
         readiness_rx: &mut Option<mpsc::Receiver<RibReadinessQuery>>,
     ) -> Option<RibReadinessQuery> {
@@ -1311,6 +1355,10 @@ impl RibManager {
                 distribution::CleanPolicyTransitionPollKind::Finalize => {
                     self.policy_transition_stats.max_finalize_poll =
                         self.policy_transition_stats.max_finalize_poll.max(elapsed);
+                }
+                distribution::CleanPolicyTransitionPollKind::Commit => {
+                    self.policy_transition_stats.max_commit_poll =
+                        self.policy_transition_stats.max_commit_poll.max(elapsed);
                 }
                 distribution::CleanPolicyTransitionPollKind::Bounded => {}
             }
@@ -4348,15 +4396,20 @@ impl RibManager {
                     count = self.dirty_peers.len(),
                     "resync timer fired for dirty peers"
                 );
-                self.distribute_changes(&HashSet::new(), &HashSet::new());
+                let backlog = self.resync_dirty_peers_bounded();
                 if self.dirty_peers.is_empty() {
                     self.metrics.record_rib_dirty_resync("cleared");
                     resync_armed = false;
                 } else {
                     self.metrics.record_rib_dirty_resync("still_dirty");
+                    let interval = if backlog {
+                        DIRTY_RESYNC_BACKLOG_INTERVAL
+                    } else {
+                        DIRTY_RESYNC_INTERVAL
+                    };
                     resync_sleep
                         .as_mut()
-                        .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                        .reset(tokio::time::Instant::now() + interval);
                 }
                 continue;
             }
@@ -4432,7 +4485,7 @@ impl RibManager {
                             count = self.dirty_peers.len(),
                             "resync timer fired for dirty peers"
                         );
-                        self.distribute_changes(&HashSet::new(), &HashSet::new());
+                        let backlog = self.resync_dirty_peers_bounded();
 
                         // Reset for next tick if still dirty, otherwise disarm.
                         if self.dirty_peers.is_empty() {
@@ -4440,8 +4493,13 @@ impl RibManager {
                             resync_armed = false;
                         } else {
                             self.metrics.record_rib_dirty_resync("still_dirty");
+                            let interval = if backlog {
+                                DIRTY_RESYNC_BACKLOG_INTERVAL
+                            } else {
+                                DIRTY_RESYNC_INTERVAL
+                            };
                             resync_sleep.as_mut().reset(
-                                tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL,
+                                tokio::time::Instant::now() + interval,
                             );
                         }
                     }
