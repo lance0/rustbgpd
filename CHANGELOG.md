@@ -206,6 +206,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Closed outbound channels no longer re-mark peers dirty for resync, so
+  shutdown quiesces instead of livelocking.** The outbound send path treated
+  a closed per-peer channel (session gone) the same as a full one (peer
+  slow): both re-marked the peer dirty, and the bounded dirty-resync tick
+  retried the dead channel forever — at scale each tick's export pass
+  outlasted the 10 ms backlog re-arm, so the RIB actor never returned to its
+  event loop to observe shutdown, spinning at full CPU after SIGTERM until
+  killed externally. `mark_outbound_dirty` — the single dirty-insertion
+  seam — now drops a peer's dirty state when its channel is closed or
+  deregistered, and the resync tick prunes closed-channel peers before
+  selecting its slice, so a dead backlog quiesces in one tick and the timer
+  disarms. Full session teardown remains with the `PeerDown` path. (LAN-459)
+
 - **`/readyz` now treats the 200 ms core-readiness deadline as a hard bound
   on the HTTP response.** A runtime stall (such as the post-commit outbound
   flush) could hold the probe past the deadline and then complete it, and the

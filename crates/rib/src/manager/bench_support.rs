@@ -169,6 +169,7 @@ impl RibManager {
                 is_rr_client,
                 None,       // no ORR vantage
                 false,      // no per-client best (RS mode)
+                true,       // interpret RFC 1997 (production default)
                 Vec::new(), // no Add-Path send
                 0,
                 Vec::new(), // no negotiated receive-side ORF

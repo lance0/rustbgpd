@@ -35,7 +35,7 @@ use std::net::IpAddr;
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation};
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use rustc_hash::FxHashMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
@@ -1134,11 +1134,43 @@ impl RibManager {
         }
     }
 
+    /// Whether `peer`'s outbound channel can never accept another update:
+    /// the peer is deregistered, or its session receiver has been dropped
+    /// (the session is gone). A full-but-open channel is NOT gone — it
+    /// drains and the ordinary dirty resync retries it.
+    pub(in crate::manager) fn outbound_channel_gone(&self, peer: IpAddr) -> bool {
+        self.outbound_peers
+            .get(&peer)
+            .is_none_or(tokio::sync::mpsc::Sender::is_closed)
+    }
+
+    /// Drop a peer's dirty-resync state because its outbound channel is
+    /// gone: the resync timer must not re-arm against a channel that can
+    /// never accept — a backlog of dead sessions (e.g. after shutdown tore
+    /// the TCP sessions down) would otherwise livelock the actor loop and
+    /// block process exit. Session teardown proper stays with the
+    /// `PeerDown` path; this only stops the retry.
+    pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: IpAddr) {
+        self.dirty_peers.remove(&peer);
+        if let Some(gid) = self.grouped_member_of(peer)
+            && let Some(group) = self.group_ribs.get_mut(&gid)
+        {
+            group.dirty_members.remove(&peer);
+        }
+    }
+
     /// Mark a peer's outbound channel dirty for the resync timer, and —
     /// for a grouped member — flag it in its group so tombstone
     /// maintenance starts. Every `dirty_peers` insertion site routes
-    /// through here.
+    /// through here — including the send-failure retry path, so this is
+    /// where a closed channel (peer gone) is distinguished from a full
+    /// one (peer slow): only the latter may re-arm the resync timer.
     pub(in crate::manager) fn mark_outbound_dirty(&mut self, peer: IpAddr) {
+        if self.outbound_channel_gone(peer) {
+            debug!(%peer, "outbound channel closed — dropping dirty state instead of re-marking");
+            self.drop_gone_dirty_peer(peer);
+            return;
+        }
         self.dirty_peers.insert(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)

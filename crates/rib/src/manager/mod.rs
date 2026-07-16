@@ -1487,6 +1487,21 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a
     /// successful send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // Peers whose outbound channel is gone can never resync: drop them
+        // before selecting the slice, so a backlog of dead sessions (e.g.
+        // after shutdown tore the TCP sessions down) quiesces in one cheap
+        // tick — instead of burning an O(table) export pass per dead peer
+        // and re-arming forever, starving the shutdown observation.
+        let gone: Vec<IpAddr> = self
+            .dirty_peers
+            .iter()
+            .copied()
+            .filter(|&peer| self.outbound_channel_gone(peer))
+            .collect();
+        for peer in gone {
+            debug!(%peer, "dropping dirty peer whose outbound channel closed");
+            self.drop_gone_dirty_peer(peer);
+        }
         let withheld: Vec<IpAddr> = if self.dirty_peers.len() > RESYNC_PEERS_PER_TICK {
             let selected: HashSet<IpAddr> = self
                 .dirty_peers
