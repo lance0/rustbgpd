@@ -471,6 +471,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing-emitted contract, and 30-second stalled verdict are unchanged. The
   poll histogram gains a `commit` poll kind for re-measurement. (LAN-447)
 
+- **Dirty-peer resync is bounded per timer tick.** A resync-timer tick used
+  to hand every dirty peer to one synchronous `distribute_changes` pass at
+  O(table) each; it now processes at most eight dirty peers per tick and
+  re-arms the timer at a short 10 ms interval while a withheld backlog
+  remains. Partial passes are safe because per-peer resync is idempotent:
+  Adj-RIB-Out state and the dirty flag are committed only after a successful
+  send, and withheld peers are untouched. (LAN-447)
+
 - **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
   exhaustive public `Capability` enum gains the experimental
   `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived

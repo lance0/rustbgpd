@@ -3807,3 +3807,46 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// LAN-447 companion bound: one resync-timer tick hands at most
+/// `RESYNC_PEERS_PER_TICK` dirty peers to the O(table) resync pass; the
+/// withheld remainder survives untouched for the next tick.
+#[tokio::test]
+async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
+    const PEER_COUNT: usize = 12;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+    }
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT);
+
+    // First tick: exactly the bounded slice resyncs (each successful dirty
+    // resync of a grouped member replays the group table as one envelope);
+    // the withheld backlog is reported and survives untouched.
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(backlog, "a withheld remainder must be reported as backlog");
+    assert_eq!(
+        manager.dirty_peers.len(),
+        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
+    );
+    let first_tick_envelopes = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(first_tick_envelopes, super::super::RESYNC_PEERS_PER_TICK);
+
+    // Second tick drains the remainder without over-reporting backlog.
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(!backlog, "no withheld peers remain");
+    assert!(manager.dirty_peers.is_empty());
+    let second_tick_envelopes = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(
+        second_tick_envelopes,
+        PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
+    );
+}
