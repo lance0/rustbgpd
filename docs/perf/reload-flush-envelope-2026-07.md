@@ -113,3 +113,29 @@ reloadstall <clients> <total_prefixes> 1790 <pid> \
 # fast 200, then per reload: cp gen-{b,a}.rpol over member.rpol; kill -HUP <pid>;
 # sample http://127.0.0.1:9179/readyz latency across the flush.
 ```
+
+## Post-fix re-measurement — cooperative flush (#935)
+
+**Commit measured:** `2ccd98bd` (main; #935 merged — policy-transition commit
+flushes ≤8 members per actor poll, dirty resync bounded per tick). Same box,
+same harness, same readiness-gated method as above.
+
+| shape | pre-fix `/readyz` stall (r1 / r2) | post-fix (r1 / r2) |
+|---|---|---|
+| 300 clients, 300k, 300 changed | 610 / 457 ms (one 503) | **238 / 174 ms** |
+| 500 clients, 1 M, 300 changed | 1.6–2.4 s (503, depooled every reload) | **378 / 357 ms** |
+
+The new `poll_kind="commit"` histogram attributes the residual precisely: at
+1 M, all 38 commit polls per reload landed ≤ 200 ms (37 of 38 ≤ 1 ms; one in
+the 100–200 ms bucket) — **the actor-side flush no longer exceeds the
+readiness deadline at any measured shape.** The remaining ~360 ms `/readyz`
+peak at 1 M is therefore not the actor: it is the transport-side wake storm
+(300 session tasks each synchronously encoding a 998k-route envelope in one
+poll, starving the runtime workers the probe shares) — the "Layer B"
+follow-up pre-scoped in the fix design. Transition wall time grew 2.6 s →
+~5.0 s at 1 M, the expected cost of interleaving readiness service with the
+flush.
+
+Honesty notes: two reloads per shape, same variance caveats as above;
+the 238 ms first reload at the 300-client shape (vs 174 ms on reload 2)
+repeats the first-reload allocation effect seen pre-fix.
