@@ -421,14 +421,20 @@ impl PeerManager {
         selected
     }
 
+    /// Local (no session round-trip) cohort eligibility: the peer exists, its
+    /// export chain moves, and no prior retry intent is pending. The import
+    /// chain is allowed to move too (LAN-462): cohort setup hot-applies that
+    /// delta per member and defers its Route Refresh past the batched RIB
+    /// commit, so an import+export reload no longer disqualifies the fleet.
+    /// The returned pair stays export-only because only the export move keys
+    /// cohort identity — the RIB batch touches nothing else.
     fn local_export_only_policy_pair<'a>(
         &'a self,
         target: &'a ResolvedPeerPolicy,
     ) -> Option<(&'a Option<PolicyChain>, &'a Option<PolicyChain>)> {
         let peer_key = PeerKey::new(target.address, target.interface.clone());
         let managed = self.peers.get(&peer_key)?;
-        (managed.import_policy == target.import_policy
-            && managed.export_policy != target.export_policy
+        (managed.export_policy != target.export_policy
             && !managed.pending_refresh
             && !managed.pending_export_apply)
             .then_some((&managed.export_policy, &target.export_policy))
@@ -500,9 +506,14 @@ impl PeerManager {
     }
 
     /// Fast path for the dominant reload shape: two or more Established peers
-    /// keep identical import policy and move only their export chain. Session
-    /// hot-apply still precedes the RIB commit, but one batched RIB command lets
-    /// equivalent clean update-group members share transition work.
+    /// share one export-chain move. Session hot-apply still precedes the RIB
+    /// commit, but one batched RIB command lets equivalent clean update-group
+    /// members share transition work. A member's import chain may move too
+    /// (LAN-462): the changed chain is hot-applied during setup through the
+    /// same session command the authoritative per-peer path uses, and its
+    /// Route Refresh is deferred until after the batched RIB commit, so an
+    /// import+export reload no longer collapses the whole fleet onto the
+    /// per-peer authoritative transaction.
     ///
     /// Returning `None` means the whole target set is ineligible and the
     /// caller must use the existing per-peer transaction unchanged. Returning
@@ -521,6 +532,7 @@ impl PeerManager {
             return None;
         }
         let mut peer_keys = Vec::with_capacity(targets.len());
+        let mut import_deltas = Vec::with_capacity(targets.len());
         let mut seen = BTreeSet::new();
         for target in targets {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
@@ -528,18 +540,20 @@ impl PeerManager {
                 return None;
             }
             let managed = self.peers.get(&peer_key)?;
-            if managed.import_policy != target.import_policy
-                || managed.export_policy == target.export_policy
+            if managed.export_policy == target.export_policy
                 || managed.pending_refresh
                 || managed.pending_export_apply
             {
                 return None;
             }
+            import_deltas.push(managed.import_policy != target.import_policy);
             peer_keys.push(peer_key);
         }
 
         let mut captured = Vec::with_capacity(targets.len());
-        for (target, peer_key) in targets.iter().zip(&peer_keys) {
+        for ((target, peer_key), &import_changed) in
+            targets.iter().zip(&peer_keys).zip(&import_deltas)
+        {
             let prior = {
                 let managed = self
                     .peers
@@ -557,6 +571,60 @@ impl PeerManager {
                     forward_completed: false,
                 }
             };
+            // LAN-462: hot-apply a changed import chain through the same
+            // session command the authoritative per-peer path uses
+            // (`update_import_policy`), but do NOT fire `soft_reset_in` here —
+            // the Route Refresh is deferred until after the cohort RIB commit
+            // (see the deferred-refresh phase below for the correctness
+            // argument).
+            if import_changed {
+                let import_commands = self
+                    .peers
+                    .get(peer_key)
+                    .expect("cohort peer existed before import hot-apply")
+                    .handle
+                    .commands_sender();
+                let import_result = self
+                    .await_with_readiness(
+                        rustbgpd_transport::PeerHandle::update_import_policy_with(
+                            import_commands,
+                            target.import_policy.clone(),
+                            PEER_POLICY_UPDATE_TIMEOUT,
+                        ),
+                    )
+                    .await;
+                if let Err(error) = import_result {
+                    // Mirror the authoritative forward-import bail: bookkeeping
+                    // retains the prior chain so the next call still sees the
+                    // delta and retries, and `pending_refresh` carries the
+                    // unfired refresh intent across the ambiguous session state
+                    // (the command may have installed the new chain before its
+                    // reply was lost). The export command was never sent for
+                    // this member, so only already-captured peers need
+                    // restoring.
+                    if let Some(managed) = self.peers.get_mut(peer_key) {
+                        managed.pending_refresh = true;
+                    }
+                    let prior_restore = self
+                        .restore_resolved_policies(captured, rollback_rib_budget)
+                        .await;
+                    return Some(Err(match prior_restore {
+                        Ok(()) => format!(
+                            "failed to apply resolved policy to {}: import: {error}; already-applied peers restored",
+                            target.address
+                        ),
+                        Err(restore_error) => format!(
+                            "failed to apply resolved policy to {}: import: {error}; restoring already-applied peers also failed: {restore_error}",
+                            target.address
+                        ),
+                    }));
+                }
+                self.peers
+                    .get_mut(peer_key)
+                    .expect("cohort peer existed after import hot-apply")
+                    .import_policy
+                    .clone_from(&target.import_policy);
+            }
             let commands = self
                 .peers
                 .get(peer_key)
@@ -593,16 +661,60 @@ impl PeerManager {
                     .map_err(|restore_error| {
                         format!("{} session restore failed: {restore_error}", target.address)
                     });
+                // LAN-462: the failing member's import chain was already
+                // acknowledged (and bookkeeping advanced) during setup, so
+                // reassert its prior import chain too, unwinding in reverse
+                // of the import-then-export forward order.
+                let failing_import_restore = if import_changed {
+                    let import_restore_commands = self
+                        .peers
+                        .get(peer_key)
+                        .expect("cohort peer existed while restoring acked import hot-apply")
+                        .handle
+                        .commands_sender();
+                    match self
+                        .await_with_readiness(
+                            rustbgpd_transport::PeerHandle::update_import_policy_with(
+                                import_restore_commands,
+                                prior.policy.import_policy.clone(),
+                                PEER_POLICY_UPDATE_TIMEOUT,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            self.peers
+                                .get_mut(peer_key)
+                                .expect("cohort peer existed after import restore")
+                                .import_policy
+                                .clone_from(&prior.policy.import_policy);
+                            Ok(())
+                        }
+                        Err(restore_error) => {
+                            // Cross-side carry (the authoritative bail
+                            // discipline): the session may hold either chain,
+                            // bookkeeping stays on the new one so a retry sees
+                            // the delta, and `pending_refresh` keeps the
+                            // unfired refresh intent armed.
+                            if let Some(managed) = self.peers.get_mut(peer_key) {
+                                managed.pending_refresh = true;
+                            }
+                            Err(format!(
+                                "{} import restore failed: {restore_error}",
+                                target.address
+                            ))
+                        }
+                    }
+                } else {
+                    Ok(())
+                };
                 let prior_restore = self
                     .restore_resolved_policies(captured, rollback_rib_budget)
                     .await;
-                let restore_error = match (failing_restore, prior_restore) {
-                    (Ok(()), Ok(())) => None,
-                    (Err(error), Ok(())) | (Ok(()), Err(error)) => Some(error),
-                    (Err(failing_error), Err(prior_error)) => {
-                        Some(format!("{failing_error}; {prior_error}"))
-                    }
-                };
+                let restore_error = [failing_restore, failing_import_restore, prior_restore]
+                    .into_iter()
+                    .filter_map(Result::err)
+                    .reduce(|folded, error| format!("{folded}; {error}"));
                 return Some(Err(match restore_error {
                     None => format!(
                         "failed to apply resolved policy to {}: export: {error}; already-applied peers restored",
@@ -664,8 +776,72 @@ impl PeerManager {
             }));
         }
 
-        for captured in &mut captured {
-            captured.forward_completed = true;
+        // LAN-462: fire the deferred Route Refresh for members whose import
+        // chain moved, now that the cohort RIB commit (or its authoritative
+        // handoff) succeeded. Correctness: the window where the session runs
+        // the new import chain while Adj-RIB-In still holds routes accepted
+        // under the old one already exists today in the authoritative
+        // per-peer path, between the import hot-apply and the peer's refresh
+        // answer; deferring the refresh past the commit only lengthens that
+        // window by seconds and converges identically once the peer
+        // re-sends. The re-ingest is output-neutral whenever the import
+        // change does not alter stored routes (LocRib suppresses
+        // interned-attr-equal replacements). Members whose import chain was
+        // unchanged get no refresh at all, exactly as today.
+        for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
+            if !import_deltas[index] {
+                captured[index].forward_completed = true;
+                continue;
+            }
+            let commands = self
+                .peers
+                .get(peer_key)
+                .expect("cohort peer existed before deferred refresh")
+                .handle
+                .commands_sender();
+            let established = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await
+                .is_some_and(|state| state.fsm_state == SessionState::Established);
+            self.drain_readiness_queries().await;
+            if established {
+                if let Err(error) = self.soft_reset_in(peer_key.clone(), Vec::new()).await {
+                    // Mirror the authoritative path's fatal refresh handling:
+                    // arm `pending_refresh` for the retry pipeline, then
+                    // unwind the snapshot. `forward_completed` stays false for
+                    // this member and the ones after it — their Adj-RIB-In
+                    // never moved, so the restore correctly picks the
+                    // no-refresh-back rollback branch for them.
+                    if let Some(managed) = self.peers.get_mut(peer_key) {
+                        managed.pending_refresh = true;
+                    }
+                    let rollback = self
+                        .restore_resolved_policies(captured, rollback_rib_budget)
+                        .await;
+                    return Some(Err(match rollback {
+                        Ok(()) => format!(
+                            "failed to apply resolved policy to {}: route refresh: {error}; already-applied peers restored",
+                            target.address
+                        ),
+                        Err(restore_error) => format!(
+                            "failed to apply resolved policy to {}: route refresh: {error}; restoring already-applied peers also failed: {restore_error}",
+                            target.address
+                        ),
+                    }));
+                }
+            } else {
+                // Idle/Connect (nothing in Adj-RIB-In yet) or an ambiguous
+                // state query: arm `pending_refresh` so a later call fires the
+                // refresh once the session is reachable — the same handling
+                // the authoritative path applies to a non-Established peer.
+                if let Some(managed) = self.peers.get_mut(peer_key) {
+                    managed.pending_refresh = true;
+                }
+            }
+            captured[index].forward_completed = true;
         }
         Some(Ok(captured))
     }

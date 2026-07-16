@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Reloads that change import and export policy together now take the
+  batched export cohort instead of the per-peer authoritative path.** The
+  cohort's eligibility check no longer requires an unchanged import chain:
+  a member's changed import chain is hot-applied to its session during
+  cohort setup, and the corresponding inbound Route Refresh is deferred
+  until the batched RIB commit acknowledges (firing once per member;
+  members whose import chain did not change still get no refresh). On
+  cohort failure the rollback restores both chains and re-arms the
+  existing per-peer retry intent. Previously any import-chain content
+  change disqualified every peer, so a routine import+export reload on a
+  large fleet serialized N full-table export restages and Route Refreshes
+  behind one another instead of sharing one batched transition.
+
 - **Grouped policy-reload re-advertisement now encodes each update-group's
   wire UPDATE stream once instead of once per member** (ADR-0109). The
   clean export-policy transition hands every member envelope one
