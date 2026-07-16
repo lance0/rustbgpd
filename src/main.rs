@@ -104,6 +104,11 @@ const WARM_BUNDLE_DIRECTORY: &str = "warm-bundle-v1";
 const MAX_GR_RESTART_MARKER_BYTES: u64 = 4096;
 const MAX_CHECKPOINT_GENERATION_BYTES: usize = 128;
 const WARM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(30);
+/// Terminal bound for shutdown GR restart marker publication and removal.
+/// The marker is tiny next to the 30-second warm-checkpoint budget, but its
+/// open/write/sync/rename sequence hits the same filesystem: a hung mount
+/// must not stall daemon exit.
+const GR_MARKER_IO_DEADLINE: Duration = Duration::from_secs(5);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WARM_CHECKPOINT_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -679,6 +684,33 @@ where
                 }
             }
         }
+    }
+}
+
+/// Run one small GR restart marker operation on a dedicated OS thread,
+/// bounded by `deadline`. Returns `None` when the deadline fires or the
+/// thread cannot start. Like the warm-checkpoint writer, this avoids Tokio's
+/// blocking pool: a timed-out `spawn_blocking` task cannot be cancelled and
+/// the runtime waits for it during shutdown, defeating the bound. A late
+/// worker is left detached and its result discarded.
+async fn bounded_gr_marker_io<T, F>(deadline: Duration, operation: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (reply, receiver) = oneshot::channel();
+    if std::thread::Builder::new()
+        .name("gr-marker-io".to_string())
+        .spawn(move || {
+            let _ = reply.send(operation());
+        })
+        .is_err()
+    {
+        return None;
+    }
+    match tokio::time::timeout(deadline, receiver).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
@@ -4518,10 +4550,11 @@ async fn run<T>(
 
     if let Some(restart_time_secs) = restart_time_secs {
         let restart_duration = Duration::from_secs(restart_time_secs);
-        let publication = publish_gr_restart_marker_with_fallback(
-            checkpoint_generation.as_deref(),
-            |generation| {
-                gr_restart_marker_store.as_ref().map_or_else(
+        let store = gr_restart_marker_store.clone();
+        let generation = checkpoint_generation.clone();
+        let publication = bounded_gr_marker_io(GR_MARKER_IO_DEADLINE, move || {
+            publish_gr_restart_marker_with_fallback(generation.as_deref(), |generation| {
+                store.as_ref().map_or_else(
                     || {
                         Err(std::io::Error::other(
                             "pinned runtime-state marker storage is unavailable",
@@ -4530,65 +4563,84 @@ async fn run<T>(
                     },
                     |store| store.write_selected(restart_duration, generation),
                 )
-            },
-        );
-        if let Some(error) = publication.initial_error.as_ref() {
-            warn!(
-                marker = %gr_restart_marker_path.display(),
-                marker_visible = error.visible_outcome.is_some(),
-                %error,
-                "initial GR restart marker publication did not reach directory-synced durability"
-            );
-        }
-        if let Some(error) = publication.fallback_error.as_ref() {
-            warn!(
-                marker = %gr_restart_marker_path.display(),
-                marker_visible = error.visible_outcome.is_some(),
-                %error,
-                "generationless GR restart marker fallback did not reach directory-synced durability"
-            );
-        }
-        if let Some(visible) = publication.visible {
-            let outcome = visible.outcome;
-            if visible.durability == GrRestartMarkerDurability::VisibleDirectorySyncUncertain {
+            })
+        })
+        .await;
+        if let Some(publication) = publication {
+            if let Some(error) = publication.initial_error.as_ref() {
                 warn!(
                     marker = %gr_restart_marker_path.display(),
-                    marker_version = outcome.version,
+                    marker_visible = error.visible_outcome.is_some(),
+                    %error,
+                    "initial GR restart marker publication did not reach directory-synced durability"
+                );
+            }
+            if let Some(error) = publication.fallback_error.as_ref() {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    marker_visible = error.visible_outcome.is_some(),
+                    %error,
+                    "generationless GR restart marker fallback did not reach directory-synced durability"
+                );
+            }
+            if let Some(visible) = publication.visible {
+                let outcome = visible.outcome;
+                if visible.durability == GrRestartMarkerDurability::VisibleDirectorySyncUncertain {
+                    warn!(
+                        marker = %gr_restart_marker_path.display(),
+                        marker_version = outcome.version,
+                        checkpoint_generation = outcome.checkpoint_generation.as_deref().unwrap_or("none"),
+                        publication_durability = visible.durability.as_str(),
+                        "GR restart marker is visible but parent-directory durability is unconfirmed"
+                    );
+                }
+                if let Some(reason) = outcome.degraded_reason.as_deref() {
+                    warn!(
+                        marker = %gr_restart_marker_path.display(),
+                        marker_version = outcome.version,
+                        %reason,
+                        "published GR restart marker with wall-clock fallback because boottime protection was unavailable"
+                    );
+                }
+                info!(
+                    marker = %gr_restart_marker_path.display(),
+                    restart_time_secs,
                     checkpoint_generation = outcome.checkpoint_generation.as_deref().unwrap_or("none"),
+                    marker_version = outcome.version,
                     publication_durability = visible.durability.as_str(),
-                    "GR restart marker is visible but parent-directory durability is unconfirmed"
+                    "finished GR restart marker publication for coordinated shutdown"
                 );
-            }
-            if let Some(reason) = outcome.degraded_reason.as_deref() {
+            } else {
                 warn!(
                     marker = %gr_restart_marker_path.display(),
-                    marker_version = outcome.version,
-                    %reason,
-                    "published GR restart marker with wall-clock fallback because boottime protection was unavailable"
+                    "neither publication attempt made a new GR restart marker visible — restarting-speaker mode is not guaranteed on the next start"
                 );
             }
-            info!(
-                marker = %gr_restart_marker_path.display(),
-                restart_time_secs,
-                checkpoint_generation = outcome.checkpoint_generation.as_deref().unwrap_or("none"),
-                marker_version = outcome.version,
-                publication_durability = visible.durability.as_str(),
-                "finished GR restart marker publication for coordinated shutdown"
-            );
         } else {
             warn!(
                 marker = %gr_restart_marker_path.display(),
-                "neither publication attempt made a new GR restart marker visible — restarting-speaker mode is not guaranteed on the next start"
+                deadline_secs = GR_MARKER_IO_DEADLINE.as_secs(),
+                "GR restart marker publication exceeded its terminal deadline; continuing shutdown — restarting-speaker mode is not guaranteed on the next start"
             );
         }
-    } else if let Some(store) = gr_restart_marker_store.as_ref()
-        && let Err(e) = store.remove()
-    {
-        warn!(
-            marker = %gr_restart_marker_path.display(),
-            error = %e,
-            "failed to clear GR restart marker"
-        );
+    } else if let Some(store) = gr_restart_marker_store.clone() {
+        match bounded_gr_marker_io(GR_MARKER_IO_DEADLINE, move || store.remove()).await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    error = %e,
+                    "failed to clear GR restart marker"
+                );
+            }
+            None => {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    deadline_secs = GR_MARKER_IO_DEADLINE.as_secs(),
+                    "clearing the GR restart marker exceeded its terminal deadline; continuing shutdown"
+                );
+            }
+        }
     }
     // ADR-0080: fence in-flight EVPN runtime applies out of the teardown.
     // Applies run on detached tasks (a dropped or aborted caller cannot
@@ -5884,6 +5936,24 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         let marker = store.read().unwrap().unwrap();
         assert_eq!(marker.checkpoint_generation, None);
         store.remove().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_marker_io_returns_completed_results() {
+        let result = bounded_gr_marker_io(GR_MARKER_IO_DEADLINE, || 7_u32).await;
+        assert_eq!(result, Some(7));
+    }
+
+    #[tokio::test]
+    async fn bounded_marker_io_detaches_a_stalled_operation() {
+        // The stall far exceeds any plausible scheduler delay of the timeout,
+        // and the detached thread dies with the test process.
+        let result = bounded_gr_marker_io(Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_mins(1));
+            7_u32
+        })
+        .await;
+        assert_eq!(result, None);
     }
 
     #[tokio::test]

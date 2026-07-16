@@ -19,13 +19,13 @@
 //! recognizable crash-leaked temporary files. Cleanup failure is logged but
 //! never invalidates or rolls back the newly committed generation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -362,8 +362,10 @@ impl WarmBundleDirectory {
     ///
     /// Returns an error without deleting anything when the manifest is
     /// corrupt, unsafe, oversized, or changes before deletion, or when the
-    /// directory scan or candidate bound fails. A durability-sync error can be
-    /// reported after canonical stale entries were already removed.
+    /// directory scan fails. When the directory holds more candidates than
+    /// the bounded inventory, the pass removes the first cap-worth in name
+    /// order and still reports the over-cap error. A durability-sync error
+    /// can be reported after canonical stale entries were already removed.
     pub fn scavenge_owned_entries(&self) -> Result<WarmBundleCleanupReport, WarmBundleError> {
         scavenge_owned_entries_inner(self, FaultPoint::None)
     }
@@ -418,10 +420,12 @@ pub enum WarmBundleError {
         /// Later rollback or cleanup error.
         recovery: Box<WarmBundleError>,
     },
-    /// A cleanup pass exceeded its bounded candidate inventory.
+    /// A cleanup pass exceeded its bounded candidate inventory. The pass
+    /// still processed the first `cap` candidates in name order, so the
+    /// directory shrinks across passes.
     #[error("warm bundle cleanup found more than {cap} canonical candidates")]
     CleanupCandidateLimitExceeded {
-        /// Maximum candidate count accepted before any deletion.
+        /// Maximum candidate count processed by one cleanup pass.
         cap: usize,
     },
     /// Directory/file ownership or permissions were unsafe.
@@ -793,7 +797,7 @@ fn cleanup_owned_candidates(
             current_snapshot, ..
         } => Some(current_snapshot.as_bytes()),
     };
-    let candidates = collect_cleanup_candidates(directory, current_snapshot, budget)?;
+    let (candidates, over_cap) = collect_cleanup_candidates(directory, current_snapshot, budget)?;
 
     if !candidates.is_empty() {
         #[cfg(test)]
@@ -877,6 +881,13 @@ fn cleanup_owned_candidates(
     if let Some(error) = pending_error {
         return Err(error);
     }
+    if over_cap {
+        // Surfaced only after this pass removed its bounded inventory, so
+        // the condition stays visible while every pass makes progress.
+        return Err(WarmBundleError::CleanupCandidateLimitExceeded {
+            cap: MAX_CLEANUP_CANDIDATES,
+        });
+    }
     Ok(WarmBundleCleanupReport {
         removed,
         failed,
@@ -901,7 +912,7 @@ fn collect_cleanup_candidates(
     directory: &WarmBundleDirectory,
     current_snapshot: Option<&[u8]>,
     budget: Option<&WarmSnapshotBudget>,
-) -> Result<Vec<OsString>, WarmBundleError> {
+) -> Result<(Vec<OsString>, bool), WarmBundleError> {
     let cloned = directory
         .file
         .try_clone()
@@ -909,7 +920,8 @@ fn collect_cleanup_candidates(
     let owned: OwnedFd = cloned.into();
     let mut entries =
         Dir::from_fd(owned).map_err(|source| nix_io(&directory.display_path, source))?;
-    let mut candidates = Vec::<OsString>::new();
+    let mut candidates = BinaryHeap::<OsString>::new();
+    let mut over_cap = false;
     for entry in entries.iter() {
         if let Some(budget) = budget {
             budget.check()?;
@@ -922,11 +934,6 @@ fn collect_cleanup_candidates(
         {
             continue;
         }
-        if candidates.len() == MAX_CLEANUP_CANDIDATES {
-            return Err(WarmBundleError::CleanupCandidateLimitExceeded {
-                cap: MAX_CLEANUP_CANDIDATES,
-            });
-        }
         candidates
             .try_reserve(1)
             .map_err(|_| WarmBundleError::AllocationFailed {
@@ -934,9 +941,15 @@ fn collect_cleanup_candidates(
                 requested: u64::try_from(candidates.len().saturating_add(1)).unwrap_or(u64::MAX),
             })?;
         candidates.push(OsString::from_vec(bytes.to_vec()));
+        if candidates.len() > MAX_CLEANUP_CANDIDATES {
+            // Keep only the first cap-worth of names: this pass still makes
+            // deletion progress, so an over-cap directory shrinks across
+            // passes instead of failing every future cleanup unchanged.
+            candidates.pop();
+            over_cap = true;
+        }
     }
-    candidates.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    Ok(candidates)
+    Ok((candidates.into_sorted_vec(), over_cap))
 }
 
 fn verify_cleanup_manifest_guard(
@@ -2012,7 +2025,7 @@ fn verify_existing_entry(
         let read = file
             .read(&mut chunk)
             .map_err(|source| io_error(&display, source))?;
-        if read == 0 || chunk[..read] != expected[offset..offset + read] {
+        if read == 0 || !chunk_matches_expected(expected, offset, &chunk[..read]) {
             return Err(io_error(
                 &display,
                 io::Error::new(
@@ -2024,6 +2037,18 @@ fn verify_existing_entry(
         offset += read;
     }
     Ok(())
+}
+
+/// Compare one streamed chunk against the expected bytes at `offset`.
+///
+/// A chunk that runs past the end of `expected` is a mismatch, not a bounds
+/// violation: a same-UID writer grew the entry after its length was checked,
+/// so the entry no longer matches the expected content by definition.
+fn chunk_matches_expected(expected: &[u8], offset: usize, chunk: &[u8]) -> bool {
+    offset
+        .checked_add(chunk.len())
+        .and_then(|end| expected.get(offset..end))
+        == Some(chunk)
 }
 
 fn rollback_atomic_destination(
@@ -3116,6 +3141,51 @@ mod tests {
         symlink(&target, temp.path().join(WARM_BUNDLE_MANIFEST_FILE)).unwrap();
         assert!(dir.scavenge_owned_entries().is_err());
         assert!(temp.path().join(&stale).is_file());
+    }
+
+    #[test]
+    fn over_cap_scavenge_shrinks_the_directory_across_passes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let extra = 3;
+        for index in 0..MAX_CLEANUP_CANDIDATES + extra {
+            fs::write(temp.path().join(format!("snapshot-{index:064x}.mrt")), b"").unwrap();
+        }
+
+        let error = dir.scavenge_owned_entries().unwrap_err();
+        assert!(matches!(
+            error,
+            WarmBundleError::CleanupCandidateLimitExceeded {
+                cap: MAX_CLEANUP_CANDIDATES,
+            }
+        ));
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), extra);
+        for index in MAX_CLEANUP_CANDIDATES..MAX_CLEANUP_CANDIDATES + extra {
+            // The first cap-worth in name order was removed; only the
+            // largest names survive to the next pass.
+            assert!(
+                temp.path()
+                    .join(format!("snapshot-{index:064x}.mrt"))
+                    .is_file()
+            );
+        }
+
+        let report = dir.scavenge_owned_entries().unwrap();
+        assert_eq!(report.removed(), extra as u64);
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn chunk_compare_treats_a_grown_entry_as_a_mismatch() {
+        // A same-UID writer can grow an entry between the length check and a
+        // later read; an oversized chunk must compare as a mismatch instead
+        // of indexing past the expected bytes.
+        assert!(chunk_matches_expected(b"abcd", 0, b"abcd"));
+        assert!(chunk_matches_expected(b"abcd", 2, b"cd"));
+        assert!(!chunk_matches_expected(b"abcd", 2, b"cx"));
+        assert!(!chunk_matches_expected(b"abcd", 2, b"cde"));
+        assert!(!chunk_matches_expected(b"abcd", 4, b"e"));
+        assert!(!chunk_matches_expected(b"abcd", usize::MAX, b"e"));
     }
 
     #[test]
