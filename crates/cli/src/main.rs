@@ -1045,6 +1045,10 @@ enum RibAction {
         /// including the RFC 4684 RT-Constrain membership gate
         #[arg(long, requires = "explain")]
         rd: Option<String>,
+        /// Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder
+        /// for the prefix instead of the plain unicast ladder
+        #[arg(long, requires = "explain", conflicts_with = "rd")]
+        labeled: bool,
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
@@ -2200,6 +2204,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     family: fam,
                     explain: explain_advertised,
                     rd,
+                    labeled,
                 }) => {
                     if explain {
                         return Err(CliError::Argument(
@@ -2232,6 +2237,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             &address,
                             prefix,
                             rd.as_deref(),
+                            labeled,
                             json,
                         )
                         .await

@@ -904,15 +904,21 @@ impl RibManager {
                 }
             }
             if !labeled_keys.is_empty() {
+                let mut target = super::distribution::ExportTarget::Peer {
+                    peer,
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    metrics: &metrics,
+                    policy_stats: &mut *policy_stats,
+                    peer_label: &target_peer_label,
+                };
                 Self::stage_labeled_routes(
                     loc_rib,
                     &self.ribs,
                     &refresh_view,
                     &self.peer_is_rr_client,
                     &labeled_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
+                    &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
                     target_is_rr_client,
@@ -924,9 +930,6 @@ impl RibManager {
                     self.peer_add_path_send_limits.get(&peer),
                     &peer_add_path_send_families,
                     export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
                     &mut labeled_announce,
                     &mut labeled_withdraw,
                     false, // route refresh re-emits via empty refresh_view

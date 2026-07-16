@@ -1683,6 +1683,7 @@ pub async fn explain_advertised(
     address: &str,
     prefix: &str,
     rd: Option<&str>,
+    labeled: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -1694,6 +1695,7 @@ pub async fn explain_advertised(
             prefix: addr,
             prefix_length: len,
             rd: rd.unwrap_or_default().to_string(),
+            labeled,
         })
         .await?
         .into_inner();
@@ -1863,9 +1865,16 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        explain_advertised(connection, "192.0.2.1", "203.0.113.0/24", None, false)
-            .await
-            .unwrap();
+        explain_advertised(
+            connection,
+            "192.0.2.1",
+            "203.0.113.0/24",
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
 
         let req = server
             .state
@@ -1890,6 +1899,7 @@ mod tests {
             "192.0.2.1",
             "10.0.7.0/24",
             Some("65000:1"),
+            false,
             false,
         )
         .await

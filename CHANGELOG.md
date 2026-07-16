@@ -58,6 +58,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Labeled-unicast export explain.** `rbgp rib advertised <peer> --prefix
+  <cidr> --explain --labeled` (gRPC `ExplainAdvertisedRoute` with
+  `labeled = true`) dry-runs the live labeled-unicast (SAFI 4, RFC 8277)
+  staging body with an explain-only target and reports the full export
+  gate ladder — family, best-route selection, RFC 9494 LLGR restriction,
+  split horizon, RFC 4456 reflection, RFC 1997 NO_ADVERTISE/NO_EXPORT,
+  export policy, and the advertised-state diff — matching the unicast and
+  VPN explains. Labeled export suppressions previously produced no reason
+  line.
+
 - **`interpret_rfc1997` per-neighbor / per-peer-group knob.** Controls the
   RFC 1997 `NO_EXPORT` egress enforcement above. Default is derived:
   `true` unless `route_server_client = true` (route servers stay
@@ -255,6 +265,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subscription tests exercise plumbing, not outbox durability, and the
   per-commit fsyncs were the latency source), and the bounded wait is now
   a hang guard rather than a latency assertion.
+
+- **Single-best exports suppressed by policy-added NO_ADVERTISE now record
+  a policy-filtered entry.** When an export policy permitted a route but
+  added NO_ADVERTISE, the single-best and ORR single-best unicast staging
+  tails withheld the route without the policy-filtered entry the multipath
+  body records — the route disappeared from the peer with no
+  filtered-routes view entry or `policy_filtered` route event. Both tails
+  now record the suppression exactly like the policy-deny arm.
 
 - **Closed outbound channels no longer re-mark peers dirty for resync, so
   shutdown quiesces instead of livelocking.** The outbound send path treated

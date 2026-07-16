@@ -2006,8 +2006,9 @@ impl RibManager {
                 peer,
                 prefix,
                 rd,
+                labeled,
                 reply,
-            } => self.handle_explain_advertised_route(peer, prefix, rd, reply),
+            } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }
@@ -2889,15 +2890,17 @@ impl RibManager {
         peer: IpAddr,
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        labeled: bool,
         reply: tokio::sync::oneshot::Sender<Option<ExplainAdvertisedRoute>>,
     ) {
         if !self.peer_sendable_families.contains_key(&peer) {
             let _ = reply.send(None);
             return;
         }
-        let explanation = match rd {
-            Some(rd) => self.explain_vpn_export(peer, prefix, rd),
-            None => self.explain_unicast_export(peer, prefix),
+        let explanation = match (rd, labeled) {
+            (Some(rd), _) => self.explain_vpn_export(peer, prefix, rd),
+            (None, true) => self.explain_labeled_export(peer, prefix),
+            (None, false) => self.explain_unicast_export(peer, prefix),
         };
         if reply.send(Some(explanation)).is_err() {
             warn!("query caller dropped before receiving response");
@@ -3244,6 +3247,99 @@ impl RibManager {
             peer,
             &ExactExportKey::Vpn(crate::route::VpnRibRouteKey {
                 nlri_key: key,
+                path_id: explanation.path_id,
+            }),
+            explanation,
+        )
+    }
+
+    /// Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for
+    /// `(prefix, peer)` by dry-running the live labeled staging body
+    /// (`stage_labeled_routes`) over the singleton identity with an
+    /// explain-only target — RR suppression, the LLGR restriction,
+    /// RFC 1997 community suppression, export policy, and the
+    /// advertised-state diff all come from the same code live
+    /// reflection runs. Labeled-unicast has no update-group staging,
+    /// so the explain always diffs the peer's private Adj-RIB-Out.
+    fn explain_labeled_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
+        let family = match prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::LabeledUnicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::LabeledUnicast),
+        };
+        if self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&family))
+        {
+            return Self::orf_gated_explain(peer, prefix, None);
+        }
+
+        let sendable = self.peer_sendable_families.get(&peer);
+        let llgr = self.peer_advertised_llgr_families.get(&peer);
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+        let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+        let peer_asn = self.peer_asn.get(&peer).copied();
+        let peer_group = self.peer_group.get(&peer).map(String::as_str);
+        let orr_ctx = self
+            .peer_orr_vantage
+            .get(&peer)
+            .and_then(|vantage| self.orr.spf.get(vantage))
+            .map(|spf| (&self.orr.topology, spf));
+        let add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+        let add_path_send_families = self
+            .peer_add_path_send_families
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+
+        let empty_rib_out;
+        let rib_out = if let Some(out) = self.adj_ribs_out.get(&peer) {
+            out
+        } else {
+            empty_rib_out = AdjRibOut::new(peer);
+            &empty_rib_out
+        };
+
+        let mut trace = distribution::ExportGateTrace::default();
+        let mut target = distribution::ExportTarget::Explain {
+            peer,
+            peer_asn,
+            peer_group,
+            local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+            trace: &mut trace,
+        };
+        let mut keys = HashSet::new();
+        keys.insert(prefix);
+        let mut labeled_announce = Vec::new();
+        let mut labeled_withdraw = Vec::new();
+        Self::stage_labeled_routes(
+            &self.loc_rib,
+            &self.ribs,
+            rib_out,
+            &self.peer_is_rr_client,
+            &keys,
+            &mut target,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            self.cluster_id,
+            sendable,
+            llgr,
+            orr_ctx,
+            add_path_send_max,
+            self.peer_add_path_send_limits.get(&peer),
+            &add_path_send_families,
+            self.export_policy_for(peer),
+            &mut labeled_announce,
+            &mut labeled_withdraw,
+            false,
+        );
+        let explanation = trace.into_explain(peer, prefix, None, None);
+        self.apply_exact_export_overlay_to_explain(
+            peer,
+            &ExactExportKey::Labeled(crate::route::LabeledRibRouteKey {
+                prefix,
                 path_id: explanation.path_id,
             }),
             explanation,
