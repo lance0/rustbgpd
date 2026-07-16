@@ -2984,11 +2984,14 @@ async fn run<T>(
     if let Some(tx) = bmp_loc_rib_tx {
         rib_manager = rib_manager.with_bmp_tx(tx);
     }
-    if let Some(handle) = event_history_handle.clone() {
-        rib_manager = rib_manager.with_event_sink(
-            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle, metrics.clone()),
-        );
-    }
+    let rib_event_stage = if let Some(handle) = event_history_handle.clone() {
+        let (sink, stage) =
+            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle, metrics.clone());
+        rib_manager = rib_manager.with_event_sink(sink);
+        Some(stage)
+    } else {
+        None
+    };
     tokio::spawn(rib_manager.run());
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
@@ -4805,13 +4808,18 @@ async fn run<T>(
     let _ = grpc_shutdown_tx.send(());
 
     // 5. Shut down the durable event outbox (ADR-0072) after the
-    // producers and gRPC have drained. EHM owns its own bounded
-    // 5-second hard timeout on the storage thread; we don't await
-    // unconditionally because a wedged SQLite must not stall the
-    // daemon exit. Holding EHM alive across the producer + gRPC
-    // drain means any final SubscribeFromEvent observers see their
-    // last committed events and any in-flight `try_send` reaches
-    // disk before shutdown.
+    // producers and gRPC have drained. The RIB-event conversion stage
+    // drains its snapshot queue into EHM first, so route/EVPN events
+    // accepted before shutdown still reach EHM's drain-then-commit
+    // shutdown. EHM owns its own bounded 5-second hard timeout on the
+    // storage thread; we don't await unconditionally because a wedged
+    // SQLite must not stall the daemon exit. Holding EHM alive across
+    // the producer + gRPC drain means any final SubscribeFromEvent
+    // observers see their last committed events and any in-flight
+    // `try_send` reaches disk before shutdown.
+    if let Some(stage) = rib_event_stage {
+        stage.shutdown().await;
+    }
     if let Some(manager) = event_history_manager {
         info!("flushing event history outbox");
         manager.shutdown().await;

@@ -2,15 +2,17 @@
 //!
 //! The `event_history_manager_self_time` group times only the synchronous
 //! `RibManager::publish_*` phase. It compares the default no-op sink with the
-//! real EHM sink. All no-op cases finish before EHM is started, and each EHM
-//! sample starts only after the preceding sample reaches EHM's committed
-//! high-water mark. Commit fences and health checks run in Criterion setup and
-//! are therefore outside the timed region.
+//! real EHM sink (event clone + producer timestamp + bounded snapshot
+//! enqueue; conversion and encoding run off-actor). All no-op cases finish
+//! before EHM is started, and each EHM sample starts only after the preceding
+//! sample reaches EHM's committed high-water mark. Commit fences and health
+//! checks run in Criterion setup and are therefore outside the timed region.
 //!
 //! The `event_history_sqlite_end_to_end` group starts at the same manager publish
 //! helper and ends when every event is observed on EHM's post-commit broadcast.
-//! It therefore includes conversion, prost encoding, the bounded queue, SQLite
-//! commit, cursor allocation, and committed-event delivery.
+//! It therefore includes the snapshot queue, off-actor conversion, prost
+//! encoding, the bounded EHM queue, SQLite commit, cursor allocation, and
+//! committed-event delivery.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -101,6 +103,7 @@ struct EhmHarness {
     runtime: Runtime,
     manager: Option<RibManager>,
     history: Option<EventHistoryManager>,
+    stage: Option<rustbgpd_api::event_history_sinks::RibEventConversionStage>,
     handle: EventHistoryHandle,
     sender: EventHistorySender,
     metrics: BgpMetrics,
@@ -138,14 +141,19 @@ impl EhmHarness {
         let handle = history.handle();
         let sender = handle.sender();
         let committed_rx = subscribe_to_commits.then(|| handle.subscribe_live());
-        let sink =
-            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle.clone(), metrics.clone());
+        let (sink, stage) = {
+            // `make_rib_event_sink` spawns the off-actor conversion
+            // stage; enter the runtime so the spawn has a reactor.
+            let _guard = runtime.enter();
+            rustbgpd_api::event_history_sinks::make_rib_event_sink(handle.clone(), metrics.clone())
+        };
         let manager = manager_with_metrics(metrics.clone()).with_event_sink(sink);
 
         Self {
             runtime,
             manager: Some(manager),
             history: Some(history),
+            stage: Some(stage),
             handle,
             sender,
             metrics,
@@ -168,6 +176,8 @@ impl EhmHarness {
             "EHM committed high-water mark changed before shutdown"
         );
         drop(self.manager.take());
+        let stage = self.stage.take().expect("conversion stage present");
+        self.runtime.block_on(stage.shutdown());
         let history = self.history.take().expect("EHM manager present");
         self.runtime.block_on(history.shutdown());
         self.assert_healthy();
