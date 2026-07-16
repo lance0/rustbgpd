@@ -254,6 +254,9 @@ struct SharedGroup {
 
 /// Prepare, group, and encode one slice of the shared inventory exactly
 /// like the per-session path, with the source peer added to the group key.
+/// `indices` selects the slice's routes (and their parallel next-hop
+/// overrides) out of the full inventory; the encoder passes source-sorted
+/// index windows so each slice's groups stay per-source-dense.
 /// `None` = the stream is unshareable (the per-session fallback owns the
 /// diagnostics and teardown semantics for the failing case).
 #[expect(
@@ -265,12 +268,14 @@ pub(super) fn encode_shared_unicast_slice(
     cache: &mut PreparedAttrCache,
     announce: &[Route],
     next_hop_override: &[Option<rustbgpd_policy::NextHopAction>],
+    indices: &[usize],
 ) -> Option<Vec<SharedUnicastChunk>> {
     let max_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN);
     let local_ipv4 = export.local_ipv4();
     let mut index: HashMap<SharedGroupKey, usize> = HashMap::default();
     let mut groups: Vec<SharedGroup> = Vec::new();
-    for (i, route) in announce.iter().enumerate() {
+    for &i in indices {
+        let route = &announce[i];
         if export.otc_blocks_unicast_egress(route) {
             // RIB staging removes OTC-blocked routes before this seam; if
             // one slips through, the per-session path owns the per-member
@@ -465,6 +470,16 @@ impl PeerSession {
             return false;
         }
         let mut cache = PreparedAttrCache::default();
+        // Iterate the inventory in source-peer order rather than table
+        // order. The inventory interleaves sources per prefix, so grouping
+        // per slice in table order fragments every source across every
+        // slice — measured at reload-stall shape as tens of thousands of
+        // tiny UPDATEs per member and writer-channel saturation teardown.
+        // Sorting an index keeps announce/next-hop-override alignment and
+        // is safe to reorder: the inventory carries one route per prefix,
+        // and announcements of distinct prefixes are order-independent.
+        let mut order: Vec<usize> = (0..update.announce.len()).collect();
+        order.sort_unstable_by_key(|&i| update.announce[i].peer);
         // Keep publishing for the group even after this session's own writer
         // saturates: the group's stream must not depend on one member's
         // channel health. The saturation/teardown policy for this session
@@ -472,13 +487,14 @@ impl PeerSession {
         let mut own_send_healthy = true;
         let mut sent: u64 = 0;
         let mut idx = 0;
-        while idx < update.announce.len() {
-            let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(update.announce.len());
+        while idx < order.len() {
+            let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
             let Some(chunks) = encode_shared_unicast_slice(
                 export,
                 &mut cache,
-                &update.announce[idx..end],
-                update.next_hop_override.get(idx..end).unwrap_or(&[]),
+                &update.announce,
+                &update.next_hop_override,
+                &order[idx..end],
             ) else {
                 return false;
             };

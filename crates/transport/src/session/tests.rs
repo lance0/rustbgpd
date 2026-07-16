@@ -3318,6 +3318,7 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
         &mut cache,
         &announce[..1],
         &[None],
+        &[0],
     )
     .expect("head slice encodes");
     encode.test_publish(head);
@@ -3424,8 +3425,9 @@ async fn shared_group_encode_streams_multiple_slices() {
         Some(super::shared_group::StreamTerminal::Complete)
     );
     assert_eq!(
-        chunk_count, 6,
-        "three per-source chunks per slice, two slices"
+        chunk_count, 4,
+        "source-sorted iteration keeps per-source chunks dense: three whole \
+         sources in slice one, the third source's tail in slice two"
     );
 
     let expected_a: Vec<Prefix> = {
@@ -3437,7 +3439,7 @@ async fn shared_group_encode_streams_multiple_slices() {
         v.sort_unstable();
         v
     };
-    assert_eq!(read_announced_prefixes(&mut wire_a, 4).await, expected_a);
+    assert_eq!(read_announced_prefixes(&mut wire_a, 3).await, expected_a);
 
     let (mut member_b, mut wire_b) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_b, &shared, sources[1], &announce);
@@ -3451,7 +3453,7 @@ async fn shared_group_encode_streams_multiple_slices() {
         v.sort_unstable();
         v
     };
-    assert_eq!(read_announced_prefixes(&mut wire_b, 4).await, expected_b);
+    assert_eq!(read_announced_prefixes(&mut wire_b, 3).await, expected_b);
 }
 #[tokio::test]
 async fn send_route_update_emits_bgpls_reach_and_unreach() {
