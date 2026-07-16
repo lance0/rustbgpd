@@ -51,7 +51,7 @@ const COMMUNITY_STABLE: u32 = (65_500 << 16) | 9_000;
 #[derive(Clone, Copy)]
 struct Event {
     t_us: u64,
-    /// announced NLRI in the base table space (20.0.0.0â€“26.x)
+    /// announced NLRI in the base table space (20.0.0.0 onward, one first-octet per 65536 prefixes)
     base_ann: u32,
     /// everything else delivered in this UPDATE (churn announces + withdraws)
     other: u32,
@@ -164,7 +164,12 @@ fn base_prefix_index(prefix: Ipv4Prefix, total_prefixes: u32) -> Option<usize> {
         return None;
     }
     let [a, b, c, d] = prefix.addr.octets();
-    if d != 0 || !(20..30).contains(&a) {
+    // Lower bound only: the base space starts at 20.0.0.0 and grows one
+    // first-octet per 65536 prefixes; the `index < total_prefixes` gate below
+    // is the real upper bound (churn 172.16+.x maps to index >= 9.9M and is
+    // rejected there). A hardcoded 20..30 octet cap here silently dropped
+    // every prefix past index 655359 and wedged the 1M-route shape (LAN-449).
+    if d != 0 || a < 20 {
         return None;
     }
     let index = (u32::from(a - 20) << 16) | (u32::from(b) << 8) | u32::from(c);
@@ -435,11 +440,14 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
                                 continue;
                             }
                         };
+                        let total_prefixes = rctx.n_peers * rctx.per_peer;
                         let mut base = 0u32;
                         let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
                         for e in &parsed.announced {
-                            let first = e.prefix.addr.octets()[0];
-                            if (20..30).contains(&first) {
+                            // Same predicate as generation tracking: a second,
+                            // divergent octet-range check here is what capped
+                            // base_ann_total at 655360 and hung convergence.
+                            if base_prefix_index(e.prefix, total_prefixes).is_some() {
                                 base += 1;
                             } else {
                                 other += 1;
@@ -465,7 +473,6 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<mpsc::Sender<Message>, 
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
                             if base > 0 && expected != 0 && communities.contains(&expected) {
-                                let total_prefixes = rctx.n_peers * rctx.per_peer;
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
                                     for e in &parsed.announced {
@@ -709,17 +716,43 @@ fn main() {
             }
         }
         // Converged: every observer holds the table minus its own slice.
+        // Watchdog: if no observer makes progress for a generous window,
+        // abort with expected-vs-observed counts instead of parking forever
+        // (the pre-LAN-449 failure mode: a wrong predicate here is silent).
         let expected = u64::from(total - per_peer);
+        const STALL_WINDOW: Duration = Duration::from_secs(120);
+        let mut last_sum = 0u64;
+        let mut last_progress = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let min = ctx
+            let counts: Vec<u64> = ctx
                 .obs
                 .iter()
                 .map(|o| o.base_ann_total.load(Ordering::Relaxed))
-                .min()
-                .unwrap();
-            if min >= expected {
+                .collect();
+            if *counts.iter().min().unwrap() >= expected {
                 break;
+            }
+            let sum: u64 = counts.iter().sum();
+            if sum > last_sum {
+                last_sum = sum;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() > STALL_WINDOW {
+                let below: Vec<(usize, u64)> = counts
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &c)| c < expected)
+                    .map(|(i, &c)| (i, c))
+                    .collect();
+                eprintln!(
+                    "FAIL: base-table convergence stalled for {}s: expected >= {expected} \
+                     base prefixes per observer, {} of {n_peers} observers below; \
+                     first stalled (observer, observed): {:?}",
+                    STALL_WINDOW.as_secs(),
+                    below.len(),
+                    &below[..below.len().min(10)]
+                );
+                std::process::exit(1);
             }
         }
         println!(
@@ -817,7 +850,18 @@ fn main() {
             // Completion is intentionally scoped to observers whose effective
             // export chain changed. Stable proof starts only after every
             // changed observer has the new generation, below.
-            let deadline = Instant::now() + Duration::from_secs(900);
+            // Progress watchdog, not an absolute deadline: full-fleet
+            // re-advertisement time scales with peers x prefixes, so any
+            // fixed deadline falsely fails some larger shape while the wire
+            // is still delivering. Fail loudly only when no changed observer
+            // makes generation progress for STALL_WINDOW.
+            let unique_sum = |ctx: &Ctx| -> u64 {
+                (0..changed_peers as usize)
+                    .map(|i| ctx.obs[i].generation.lock().unwrap().unique)
+                    .sum()
+            };
+            let mut last_unique = 0u64;
+            let mut last_progress = Instant::now();
             let mut ticks = 0u32;
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -827,18 +871,37 @@ fn main() {
                     break;
                 }
                 ticks += 1;
-                if ticks.is_multiple_of(20) {
+                if ticks.is_multiple_of(100) {
                     let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
                     eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
-                if Instant::now() > deadline {
-                    println!("reload {r} TIMEOUT waiting for re-advertisement");
+                let sum = unique_sum(&ctx);
+                if sum > last_unique {
+                    last_unique = sum;
+                    last_progress = Instant::now();
+                } else if last_progress.elapsed() > STALL_WINDOW {
+                    println!(
+                        "reload {r} STALLED: no re-advertisement progress for {}s",
+                        STALL_WINDOW.as_secs()
+                    );
                     let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())
                         .count();
                     eprintln!("reload {r} observers_complete {sat}/{changed_peers}");
+                    // Per-observer expected-vs-observed for the first few
+                    // incomplete observers, so a wedge here is diagnosable.
+                    for i in (0..changed_peers as usize)
+                        .filter(|&i| completion_us(&ctx, i).is_none())
+                        .take(10)
+                    {
+                        let g = ctx.obs[i].generation.lock().unwrap();
+                        eprintln!(
+                            "reload {r} observer {i} incomplete: unique={}/{}",
+                            g.unique, g.target
+                        );
+                    }
                     std::process::exit(1);
                 }
             }
@@ -853,15 +916,21 @@ fn main() {
             // an UPDATE queued before or during it.
             let marker_since_us = now_us(&ctx);
             let mut stable_ticks = 0u32;
+            let mut last_stable = 0usize;
+            let mut stable_progress = Instant::now();
             loop {
                 let stable_marker_peers =
                     stable_marker_peers_since(&ctx, changed_peers, marker_since_us);
                 if stable_marker_peers == expected_stable {
                     break;
                 }
-                if Instant::now() > deadline {
+                if stable_marker_peers > last_stable {
+                    last_stable = stable_marker_peers;
+                    stable_progress = Instant::now();
+                } else if stable_progress.elapsed() > STALL_WINDOW {
                     eprintln!(
-                        "reload {r} TIMEOUT waiting for post-completion stable markers: {stable_marker_peers}/{expected_stable}"
+                        "reload {r} STALLED: no post-completion stable-marker progress for {}s: {stable_marker_peers}/{expected_stable}",
+                        STALL_WINDOW.as_secs()
                     );
                     std::process::exit(1);
                 }
@@ -1054,6 +1123,19 @@ mod tests {
         assert_eq!(base_prefix_index(base_prefix(400_400), 400_400), None);
         assert_eq!(
             base_prefix_index(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 24), 400_400),
+            None
+        );
+        // 1M-route shape (LAN-449): indexes past 655359 use first octets >= 30
+        // and must still round-trip; the total gate stays the upper bound.
+        for index in [655_359, 655_360, 999_999] {
+            assert_eq!(
+                base_prefix_index(base_prefix(index), 1_000_000),
+                Some(index as usize)
+            );
+        }
+        assert_eq!(base_prefix_index(base_prefix(1_000_000), 1_000_000), None);
+        assert_eq!(
+            base_prefix_index(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 24), 1_000_000),
             None
         );
     }
