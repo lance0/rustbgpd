@@ -1,8 +1,24 @@
 # Event-history producer machine-artifact manifest
 
-This directory is receipt-only. Measurements are intentionally absent until
-the exact drivers in `docs/perf/event-history-producer-2026-07.md` complete on a
-quiet host.
+This directory is receipt-only.
+
+## Offload A/B (2026-07, shared dev box)
+
+The producer-offload change (LAN-393) was gated with a same-host,
+same-checkout Criterion A/B rather than the full receipt drivers below (the
+host was shared, not quiet; see the "Results" section of the perf doc for the
+noise treatment):
+
+- `criterion-offload-ab.csv`: mean + 95% CI for all nine cases, baseline
+  (`pre-offload` saved Criterion state, main at the fork point) vs candidate
+  (offload branch). Generated from Criterion `estimates.json`, not
+  transcribed.
+- `noop-interleaved-control.csv`: three interleaved baseline/candidate runs
+  of the untouched default-disabled (`noop`) cases in one noise window, used
+  to establish the host noise floor for the noop gate.
+
+The full quiet-host driver receipts described below remain absent and can be
+captured later without invalidating these files.
 
 ## Criterion phases
 

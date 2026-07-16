@@ -497,6 +497,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Durable event-history conversion and encoding moved off the RIB actor.**
+  With `[event_history]` enabled, `RibManager::publish_route_event` /
+  `publish_evpn_route_event` now hand the owned event snapshot (plus the
+  producer-captured `timestamp_ns` and already-assigned `event_id`) to a
+  bounded FIFO channel; proto conversion, prost encoding, and envelope
+  construction run in a dedicated conversion stage in front of the event
+  outbox instead of on the RIB actor. Payload bytes, publish order,
+  EHM-assigned cursor contiguity, producer timestamps, queue-full/closed
+  drop counters, degraded-state semantics, and the legacy ring/broadcast
+  surfaces are unchanged; overload now sheds work before conversion instead
+  of after. The stage drains snapshots accepted before shutdown so they
+  still commit. Manager-side publish cost with durable history enabled
+  drops by roughly an order of magnitude (see
+  `docs/perf/event-history-producer-2026-07.md`). (LAN-393)
+
 - **Grouped export-policy transitions commit in bounded member batches.** The
   transition's former single finalization poll — one synchronous actor poll
   containing the whole per-peer commit/flush loop — is now a `Validate` poll

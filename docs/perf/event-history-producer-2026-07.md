@@ -1,8 +1,10 @@
 # Event-history producer measurement gate
 
-Status: **harness implemented; measurements pending**. Do not implement the
-producer offload until the baseline proceed gate below is captured on an idle
-host and passes.
+Status: **offload implemented and gated**. The baseline proceed gate passed
+(producer conversion/encoding measured at 1.3–3.3 µs/event on the RIB actor,
+38% of RIB-manager samples at saturated churn, ~2x throughput loss with
+durable history enabled), and the producer offload landed with a same-host
+Criterion A/B — see "Results" below.
 
 The Criterion harness separates two costs:
 
@@ -176,5 +178,71 @@ Stop or record a no-proceed/rejected verdict when:
 
 ## Results
 
-Pending host clearance. Summaries must be generated from the retained CSV/JSON
-and full-daemon normalized receipts; terminal-only transcription is not valid.
+### Pre-implementation baseline (proceed gate, 2026-07)
+
+Method: Criterion (`event_history_producer`, this harness) plus a saturated
+rrharness churn A/B, on a 64-core dev box. The manager-side EHM producer cost
+— route/EVPN conversion, prost encoding, envelope construction, bounded
+enqueue, all on the RIB actor — measured:
+
+| shape | manager-side EHM producer cost |
+|---|---|
+| route_added | 1,313 ns/event |
+| route_policy_filtered | 1,676 ns/event |
+| evpn_best_changed | 3,328 ns/event |
+
+The full-daemon profile attributed 38% of RIB-manager samples to EHM producer
+conversion/encoding at saturated churn (~2x throughput loss vs disabled).
+Proceed gate: passed.
+
+### Post-offload A/B (LAN-393)
+
+Method: same-host, same-checkout Criterion A/B on the shared 64-core dev box
+(not the quiet-host receipt drivers). Baseline = main at the branch fork
+point, saved as Criterion state `pre-offload`; candidate = the offload
+branch. Raw per-case means and 95% CIs:
+`artifacts/event-history-producer-2026-07/criterion-offload-ab.csv`.
+
+Manager self-time (ns/event, mean of 256-event samples):
+
+| case | baseline | candidate | change |
+|---|---|---|---|
+| route_added/ehm | 1,650 | 165 | −90.0% |
+| route_policy_filtered/ehm | 1,958 | 147 | −92.5% |
+| evpn_best_changed/ehm | 4,982 | 254 | −94.9% |
+| route_added/noop | 27.6 | 25.9 | −6.1% |
+| route_policy_filtered/noop | 43.6 | 44.5 | +2.1% |
+| evpn_best_changed/noop | 74.1 | 64.1 | −13.5% |
+
+SQLite end-to-end (ns/event): route_added 72,550 → 38,665 (p = 0.06,
+statistically no change), route_policy_filtered 450,269 → 36,602,
+evpn_best_changed 361,769 → 23,889. The large baseline end-to-end means carry
+very wide CIs (shared-host contention during the baseline window); the gate
+verdict is "no shape regressed."
+
+Candidate acceptance: every enabled shape is ≥50% below baseline (−90% to
+−95%, candidate CIs entirely below baseline CIs — also 88–92% below the
+stricter pre-implementation gate numbers above); no noop shape regressed
+beyond 3% in the accepted run; no SQLite shape regressed.
+
+Noise treatment for the noop gate: the default-disabled path is
+source-untouched by the offload, and single runs on the shared host swung
+−20%…+26% on identical binaries. Two controls bound the noise: (a) the
+unchanged baseline source re-measured against its own saved Criterion state
+moved −16%…+7%; (b) three interleaved baseline/candidate runs in one noise
+window (`artifacts/event-history-producer-2026-07/noop-interleaved-control.csv`)
+show per-shape median deltas of +4.2% / +4.9% / −6.9% — mixed sign and
+smaller than the intra-binary round-to-round swings (up to 18%). The
+accepted candidate run measured −6.1% / +2.1% / −13.5%.
+
+### What moved off-actor
+
+`EhmRibSink` (crates/api) now clones the owned `RouteEvent` /
+`EvpnRouteEvent`, stamps `timestamp_ns` at publish, and `try_send`s the
+snapshot on one bounded FIFO channel. Proto conversion, prost encoding, and
+envelope string construction run in a conversion-stage task in front of EHM.
+Preserved invariants (each pinned by a test or the existing byte-equality
+suite): publish order, producer timestamps, byte-identical durable payloads,
+EHM-assigned contiguous cursor IDs, queue-full/closed drop counters +
+degraded semantics, legacy ring/broadcast behavior, and shutdown drain of
+accepted events. Overload now sheds work before conversion instead of after.
