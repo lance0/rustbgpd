@@ -408,6 +408,18 @@ impl RibManager {
     /// `handle_peer_down` does not apply.
     pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
         self.peer_down_teardown(peer);
+        // Deletion also removes the peer from the startup selection-deferral
+        // roster: no future session can satisfy its waiters, and leaving them
+        // in a blocking state would freeze the family until timer expiry even
+        // after every remaining waiter satisfies. Runs after the teardown so
+        // any resulting release recomputes against the cleared Adj-RIB-In.
+        let transitions = self
+            .selection_deferral
+            .as_mut()
+            .map_or_else(Vec::new, |selection| {
+                selection.peer_deleted(peer, &self.metrics)
+            });
+        self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
         self.metrics.reap_peer_series(&peer.to_string());
     }
 
@@ -754,15 +766,30 @@ impl RibManager {
                 }
             }
             ActiveSessionRegistration::CollisionFailback => {
-                let waiting = self.selection_deferral.as_mut().and_then(|selection| {
-                    selection.await_collision_failback_refresh(peer, session_id, &self.metrics)
+                // Same fail-closed contract as the ordinary arm: without the
+                // staged OPEN context the survivor cannot be proven GR- and
+                // enhanced-refresh-capable for any family, so its waiters
+                // stay `AwaitingSession` (timer-bound).
+                let waiting = gr_context.as_ref().and_then(|gr_context| {
+                    let peer_gr_families: HashSet<_> =
+                        gr_context.peer_gr_families.iter().copied().collect();
+                    self.selection_deferral.as_mut().and_then(|selection| {
+                        selection.await_collision_failback_refresh(
+                            peer,
+                            session_id,
+                            gr_context.peer_restart_state,
+                            &peer_gr_families,
+                            gr_context.peer_enhanced_refresh,
+                            &self.metrics,
+                        )
+                    })
                 });
                 if let Some(transitions) = &waiting {
                     info!(
                         %peer,
                         session_id,
                         transition_count = transitions.len(),
-                        "exact collision-failback survivor is awaiting a post-failback enhanced ROUTE-REFRESH completion"
+                        "exact collision-failback survivor classified against the RFC 4724 roster (enhanced-refresh waiters hold convergence until EoRR)"
                     );
                 }
                 waiting.unwrap_or_default()

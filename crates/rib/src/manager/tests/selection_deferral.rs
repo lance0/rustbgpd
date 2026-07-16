@@ -95,6 +95,25 @@ async fn stage_gr_context_with(
         session_id,
         peer_restart_state,
         peer_gr_families,
+        peer_enhanced_refresh: true,
+    })
+    .await
+    .unwrap();
+}
+
+/// Stage a GR-capable OPEN context whose session negotiated only plain
+/// RFC 2918 route refresh (no RFC 7313 enhanced route refresh).
+async fn stage_gr_context_plain_refresh(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    session_id: u64,
+) {
+    tx.send(RibUpdate::SetPeerGracefulRestartContext {
+        peer,
+        session_id,
+        peer_restart_state: false,
+        peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: false,
     })
     .await
     .unwrap();
@@ -350,7 +369,12 @@ async fn restart_state_and_non_gr_sessions_are_excluded_without_waiting_for_eor(
     assert!(!a_released.selection_deferral[0].active);
     assert_eq!(a_released.selection_deferral[0].waiter_state, "excluded");
     assert_eq!(b_released.selection_deferral[0].waiter_state, "excluded");
-    assert_eq!(a_released.selection_deferral[0].release_reason, "all_eor");
+    // Zero End-of-RIB markers were consumed: the recorded reason must not
+    // claim `all_eor`.
+    assert_eq!(
+        a_released.selection_deferral[0].release_reason,
+        "all_excluded"
+    );
     assert_eq!(a_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
     assert_eq!(b_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
 
@@ -411,7 +435,14 @@ fn collision_failback_stages_then_waits_for_refresh_completion() {
     );
     selection.session_down(survivor, 11, &metrics);
     assert_eq!(
-        selection.await_collision_failback_refresh(survivor, 11, &metrics),
+        selection.await_collision_failback_refresh(
+            survivor,
+            11,
+            false,
+            &gr_families,
+            true,
+            &metrics
+        ),
         Some(Vec::new()),
         "the exact re-armed survivor must wait for a post-failback refresh"
     );
@@ -496,7 +527,14 @@ fn multiple_failback_survivors_release_only_after_every_waiter_converges() {
         );
         selection.session_down(peer, session_id, &metrics);
         assert_eq!(
-            selection.await_collision_failback_refresh(peer, session_id, &metrics),
+            selection.await_collision_failback_refresh(
+                peer,
+                session_id,
+                false,
+                &gr_families,
+                true,
+                &metrics
+            ),
             Some(Vec::new())
         );
         let waiting = selection.peer_snapshot(peer).remove(0);
@@ -581,7 +619,7 @@ fn staged_selection_rejects_eor_and_refresh_marker_commits() {
         );
         selection.session_down(source, 11, &metrics);
         selection
-            .await_collision_failback_refresh(source, 11, &metrics)
+            .await_collision_failback_refresh(source, 11, false, &gr_families, true, &metrics)
             .unwrap()
     };
     assert_eq!(
@@ -631,7 +669,7 @@ fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
         );
         selection.session_down(source, 11, &metrics);
         selection
-            .await_collision_failback_refresh(source, 11, &metrics)
+            .await_collision_failback_refresh(source, 11, false, &gr_families, true, &metrics)
             .unwrap()
     };
     manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
@@ -672,7 +710,7 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
         );
         selection.session_down(source, 11, &metrics);
         selection
-            .await_collision_failback_refresh(source, 11, &metrics)
+            .await_collision_failback_refresh(source, 11, false, &gr_families, true, &metrics)
             .unwrap()
     };
     manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
@@ -761,6 +799,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         session_id: 11,
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
     });
     manager.handle_update(peer_up(survivor, 11, survivor_tx));
     let (replacement_tx, _replacement_rx) = mpsc::channel(16);
@@ -769,6 +808,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         session_id: 12,
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
     });
     manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -901,7 +941,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
         );
         selection.session_down(survivor, 11, &metrics);
         selection
-            .await_collision_failback_refresh(survivor, 11, &metrics)
+            .await_collision_failback_refresh(survivor, 11, false, &gr_families, true, &metrics)
             .unwrap()
     };
     manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
@@ -1011,14 +1051,29 @@ fn unstamped_or_ambiguous_collision_failback_stays_timer_bound() {
         RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_selection_deferral(
             config(Duration::from_mins(1), &[unstamped, duplicate, duplicate]),
         );
+    let gr_families = HashSet::from([FAMILY]);
     let selection = manager.selection_deferral.as_mut().unwrap();
 
     assert_eq!(
-        selection.await_collision_failback_refresh(unstamped, 0, &metrics),
+        selection.await_collision_failback_refresh(
+            unstamped,
+            0,
+            false,
+            &gr_families,
+            true,
+            &metrics
+        ),
         None
     );
     assert_eq!(
-        selection.await_collision_failback_refresh(duplicate, 22, &metrics),
+        selection.await_collision_failback_refresh(
+            duplicate,
+            22,
+            false,
+            &gr_families,
+            true,
+            &metrics
+        ),
         None
     );
     for peer in [unstamped, duplicate] {
@@ -1473,6 +1528,7 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             session_id: 11,
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
+            peer_enhanced_refresh: true,
         });
         manager.handle_update(peer_up(survivor, 11, survivor_tx.clone()));
         let (replacement_tx, _replacement_rx) = mpsc::channel(1);
@@ -1481,6 +1537,7 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             session_id: 12,
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
+            peer_enhanced_refresh: true,
         });
         manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -1612,7 +1669,7 @@ fn collision_failback_overflow_receipt(
         .selection_deferral
         .as_mut()
         .unwrap()
-        .await_collision_failback_refresh(source, 8, &metrics)
+        .await_collision_failback_refresh(source, 8, false, &peer_gr_families, true, &metrics)
         .unwrap();
     assert_eq!(
         transitions,
@@ -1869,6 +1926,7 @@ fn peer_teardown_discards_unconsumed_gr_context() {
         session_id: 9,
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
     });
     assert!(manager.pending_peer_gr_context.contains_key(&(a, 9)));
     manager.peer_down_teardown(a);
@@ -1897,6 +1955,7 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
         session_id: 1,
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
     })
     .unwrap();
     tx.try_send(peer_up(source, 1, source_tx)).unwrap();
@@ -2020,4 +2079,181 @@ async fn timer_releases_never_established_waiter_and_records_reason() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn deleted_peer_waiter_releases_family_when_remaining_waiters_satisfy() {
+    let a = peer(1);
+    let b = peer(2);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 254)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(config(Duration::from_mins(1), &[a, b]));
+    let handle = tokio::spawn(manager.run());
+
+    let (a_tx, mut a_rx) = mpsc::channel(16);
+    stage_gr_context(&tx, a, 1).await;
+    tx.send(peer_up(a, 1, a_tx)).await.unwrap();
+    let (b_tx, _b_rx) = mpsc::channel(16);
+    stage_gr_context(&tx, b, 2).await;
+    tx.send(peer_up(b, 2, b_tx)).await.unwrap();
+
+    // Deleting b from configuration removes its waiter outright, but cannot
+    // release the family while a still owes its End-of-RIB.
+    tx.send(RibUpdate::PeerDeleted { peer: b }).await.unwrap();
+    let held = query_state(&tx, a).await;
+    assert!(held.selection_deferral[0].active);
+    assert_eq!(held.selection_deferral[0].waiter_state, "awaiting_eor");
+    assert_eq!(held.selection_deferral[0].blocking_waiters, 1);
+    assert_eq!(
+        query_state(&tx, b).await.selection_deferral[0].waiter_state,
+        "not_in_roster"
+    );
+
+    // The remaining waiter's EoR must release the family without waiting
+    // for the Selection_Deferral_Timer.
+    tx.send(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 1,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let released = query_state(&tx, a).await;
+    assert!(
+        !released.selection_deferral[0].active,
+        "family stayed gated after every remaining waiter satisfied"
+    );
+    assert_eq!(released.selection_deferral[0].release_reason, "all_eor");
+    assert_eq!(a_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn failback_survivor_without_enhanced_refresh_is_not_left_awaiting_refresh() {
+    let survivor = peer(1);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[survivor]));
+    let handle = tokio::spawn(manager.run());
+
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    stage_gr_context_plain_refresh(&tx, survivor, 11).await;
+    tx.send(peer_up(survivor, 11, survivor_tx)).await.unwrap();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(8);
+    stage_gr_context_plain_refresh(&tx, survivor, 12).await;
+    tx.send(peer_up(survivor, 12, replacement_tx))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    })
+    .await
+    .unwrap();
+
+    // A survivor that never negotiated RFC 7313 cannot produce the
+    // post-failback BoRR/EoRR pair: it must be excluded, not parked in an
+    // unfulfillable awaiting_refresh that holds the family all window.
+    let released = query_state(&tx, survivor).await;
+    assert_ne!(
+        released.selection_deferral[0].waiter_state,
+        "awaiting_refresh"
+    );
+    assert_eq!(released.selection_deferral[0].waiter_state, "excluded");
+    assert!(
+        !released.selection_deferral[0].active,
+        "plain-refresh survivor convergence-held the family"
+    );
+    assert_eq!(
+        released.selection_deferral[0].release_reason,
+        "all_excluded"
+    );
+    let mut saw_eor = false;
+    while let Ok(update) = survivor_rx.try_recv() {
+        saw_eor |= update.end_of_rib.contains(&FAMILY);
+    }
+    assert!(
+        saw_eor,
+        "release must deliver the family EoR to the survivor"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[test]
+fn release_sends_single_eor_to_refresh_deferred_peer() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(source, 11, false, &gr_families, &metrics)
+                .is_empty()
+        );
+        selection.session_down(source, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(source, 11, false, &gr_families, true, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up(target, 21, outbound_tx));
+    while outbound_rx.try_recv().is_ok() {}
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        session_id: 21,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert_eq!(
+        manager.selection_deferred_refresh.get(&target),
+        Some(&HashSet::from([FAMILY]))
+    );
+    assert!(outbound_rx.try_recv().is_err());
+
+    let release = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(selection.begin_route_refresh(source, 11, FAMILY).is_none());
+        selection
+            .end_route_refresh(source, 11, FAMILY, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions([release], "test refresh completion");
+
+    let mut eor_updates = 0;
+    let mut saw_refresh_markers = false;
+    while let Ok(update) = outbound_rx.try_recv() {
+        if update.end_of_rib.contains(&FAMILY) {
+            eor_updates += 1;
+        }
+        if !update.refresh_markers.is_empty() {
+            assert!(
+                update.end_of_rib.is_empty(),
+                "deferred refresh response duplicated the convergence EoR"
+            );
+            saw_refresh_markers = true;
+        }
+    }
+    assert_eq!(
+        eor_updates, 1,
+        "release must deliver exactly one genuine EoR to a refresh-deferred peer"
+    );
+    assert!(saw_refresh_markers);
 }

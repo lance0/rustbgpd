@@ -170,6 +170,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deterministic name order before reporting the over-cap error, so the
   directory shrinks on every pass instead of failing unchanged forever.
 
+- **Selection-deferral teardown, failback gating, and release accounting.**
+  Deleting a GR neighbor from configuration mid-deferral now removes its
+  waiters from the frozen roster, so the family releases when the remaining
+  waiters satisfy instead of freezing best-path selection until timer expiry.
+  Collision failback applies the same OPEN gating as ordinary classification:
+  a Restart-State, non-GR, or plain-refresh (no RFC 7313) survivor is excluded
+  instead of being parked in an unfulfillable `awaiting_refresh` that
+  convergence-holds the family for the whole window; the RFC 7313
+  `BoRR`/`EoRR` convergence proof is unchanged where negotiated. A family gate
+  that completes with zero completion markers consumed records the new
+  `all_excluded` release reason instead of claiming `all_eor`; simultaneous
+  identity-and-byte ledger exhaustion records `identities_and_logical_bytes`
+  instead of the identity cap always winning. A plain-refresh peer whose
+  deferred route-refresh response is delivered at release no longer receives a
+  second empty-UPDATE End-of-RIB after the genuine convergence EoR.
+
 - **The route-server starter now applies documented dual-stack ingress
   hygiene.** Its policy rejects both default routes and a dated 2025-10-09
   snapshot of active IANA special-purpose rows marked non-globally reachable,

@@ -45,6 +45,9 @@ impl Default for DeferredSelectionLimits {
 enum DeferredSelectionOverflowReason {
     Identities,
     LogicalBytes,
+    /// Both budgets were exhausted for the rejected identity; neither
+    /// reason alone would be truthful.
+    IdentitiesAndLogicalBytes,
 }
 
 impl DeferredSelectionOverflowReason {
@@ -52,6 +55,7 @@ impl DeferredSelectionOverflowReason {
         match self {
             Self::Identities => "identities",
             Self::LogicalBytes => "logical_bytes",
+            Self::IdentitiesAndLogicalBytes => "identities_and_logical_bytes",
         }
     }
 }
@@ -193,12 +197,11 @@ impl DeferredSelectionKeys {
             let remaining_key_bytes = limits
                 .retained_key_bytes
                 .saturating_sub(*retained_key_bytes);
-            let overflow_reason = if remaining == 0 {
-                Some(DeferredSelectionOverflowReason::Identities)
-            } else if charge > remaining_key_bytes {
-                Some(DeferredSelectionOverflowReason::LogicalBytes)
-            } else {
-                None
+            let overflow_reason = match (remaining == 0, charge > remaining_key_bytes) {
+                (true, true) => Some(DeferredSelectionOverflowReason::IdentitiesAndLogicalBytes),
+                (true, false) => Some(DeferredSelectionOverflowReason::Identities),
+                (false, true) => Some(DeferredSelectionOverflowReason::LogicalBytes),
+                (false, false) => None,
             };
             if let Some(reason) = overflow_reason {
                 if overflowed_families.insert(family) {
@@ -250,6 +253,10 @@ pub(super) enum SelectionDeferralReleaseReason {
     AllEndOfRib,
     CollisionRefreshComplete,
     TimerExpired,
+    /// The gate completed without any waiter delivering a completion signal:
+    /// every roster entry was excluded (or deleted from configuration), so
+    /// zero End-of-RIB or refresh markers were consumed.
+    AllExcluded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +277,7 @@ impl SelectionDeferralReleaseReason {
             Self::AllEndOfRib => "all_eor",
             Self::CollisionRefreshComplete => "collision_refresh",
             Self::TimerExpired => "timer",
+            Self::AllExcluded => "all_excluded",
         }
     }
 }
@@ -421,6 +429,19 @@ impl SelectionDeferral {
     ) -> Option<SelectionDeferralTransition> {
         let gate = self.active.get_mut(&family)?;
         let transition = if Self::complete(gate) {
+            // A gate can complete without any waiter having delivered a
+            // completion signal (every roster entry excluded or deleted).
+            // Recording the event reason there would claim End-of-RIB or
+            // refresh markers that were never received.
+            let release_reason = if gate
+                .waiters
+                .values()
+                .any(|state| matches!(state, WaiterState::Satisfied { .. }))
+            {
+                release_reason
+            } else {
+                SelectionDeferralReleaseReason::AllExcluded
+            };
             SelectionDeferralTransition::Release {
                 family,
                 already_staged: gate.selection_staged,
@@ -541,6 +562,12 @@ impl SelectionDeferral {
     /// completed. Only an unambiguous, stamped survivor whose current roster
     /// state was re-armed by the active session's teardown may take this path.
     ///
+    /// The refresh wait applies the same OPEN gating as `classify_session`:
+    /// a Restart-State or non-GR family is excluded, and a survivor that did
+    /// not negotiate enhanced route refresh (RFC 7313) is excluded too — it
+    /// will never produce the `BoRR`/`EoRR` pair, so `AwaitingRefresh` would
+    /// convergence-hold the family for the entire deferral window.
+    ///
     /// `Some` means at least one active family was classified; the contained
     /// transitions stage any family whose ordinary waiters are already done.
     /// `None` leaves every waiter unchanged.
@@ -548,6 +575,9 @@ impl SelectionDeferral {
         &mut self,
         peer: IpAddr,
         session_id: u64,
+        peer_restart_state: bool,
+        peer_gr_families: &HashSet<(Afi, Safi)>,
+        peer_enhanced_refresh: bool,
         metrics: &BgpMetrics,
     ) -> Option<Vec<SelectionDeferralTransition>> {
         if session_id == 0 {
@@ -576,13 +606,18 @@ impl SelectionDeferral {
             if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingSession) {
                 continue;
             }
-            gate.waiters.insert(
-                peer,
+            let state = if peer_restart_state
+                || !peer_gr_families.contains(&family)
+                || !peer_enhanced_refresh
+            {
+                WaiterState::Excluded { session_id }
+            } else {
                 WaiterState::AwaitingRefresh {
                     session_id,
                     begin_received: false,
-                },
-            );
+                }
+            };
+            gate.waiters.insert(peer, state);
             classified = true;
             metrics.set_selection_deferral_waiters(
                 afi_safi_label(family.0, family.1),
@@ -620,6 +655,47 @@ impl SelectionDeferral {
                 );
             }
         }
+    }
+
+    /// Remove a deleted peer's waiters outright: configuration removed the
+    /// neighbor, so no future session can satisfy or re-arm them. Unlike
+    /// `session_down` (a flap must not shrink the frozen cohort), deletion
+    /// is authoritative — any family whose remaining waiters are already
+    /// done completes here instead of blocking until the timer. An
+    /// ambiguous roster address stays fail-closed: address-only identity
+    /// cannot tell which of the duplicate configured peers was deleted.
+    pub(super) fn peer_deleted(
+        &mut self,
+        peer: IpAddr,
+        metrics: &BgpMetrics,
+    ) -> Vec<SelectionDeferralTransition> {
+        if self.ambiguous_peers.contains(&peer) {
+            tracing::warn!(
+                %peer,
+                "deleted peer address is ambiguous in the selection-deferral roster; keeping its waiters blocked until the timer"
+            );
+            return Vec::new();
+        }
+        let families: Vec<_> = self.active.keys().copied().collect();
+        let mut transitions = Vec::new();
+        for family in families {
+            let Some(gate) = self.active.get_mut(&family) else {
+                continue;
+            };
+            if gate.waiters.remove(&peer).is_none() {
+                continue;
+            }
+            metrics.set_selection_deferral_waiters(
+                afi_safi_label(family.0, family.1),
+                gauge_val(Self::blocking_waiters(gate)),
+            );
+            if let Some(transition) =
+                self.evaluate_family(family, SelectionDeferralReleaseReason::AllEndOfRib)
+            {
+                transitions.push(transition);
+            }
+        }
+        transitions
     }
 
     pub(super) fn end_of_rib(
@@ -1159,7 +1235,21 @@ impl RibManager {
                 // convergence EoR before retrying this response.
                 self.pending_refresh.entry(peer).or_default().insert(family);
             } else {
-                self.send_route_refresh_response(peer, family.0, family.1);
+                // The convergence EoR loop above already queued/flushed the
+                // genuine EoR for every sendable peer, so the response must
+                // not carry its own `end_of_rib` entry — a plain-refresh
+                // (RFC 2918) peer would receive a duplicate empty-UPDATE
+                // EoR (RFC 7313 peers get the EoRR demarcation regardless).
+                let convergence_eor_queued = self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|sendable| sendable.contains(&family));
+                self.send_route_refresh_response_inner(
+                    peer,
+                    family.0,
+                    family.1,
+                    convergence_eor_queued,
+                );
             }
         }
     }
@@ -1497,6 +1587,40 @@ mod ledger_tests {
         );
         assert_eq!(overflowed, HashSet::from([unicast, flowspec]));
         assert_eq!(retained_bytes, 2);
+    }
+
+    #[test]
+    fn simultaneous_identity_and_byte_exhaustion_records_the_combined_reason() {
+        let unicast = (Afi::Ipv4, Safi::Unicast);
+        let mut identities = HashSet::new();
+        let mut overflowed = HashSet::new();
+        let mut bytes_by_family = HashMap::new();
+        let mut retained_bytes = 0;
+        let first = ChargedKey { id: 1, bytes: 1 };
+        let second = ChargedKey { id: 2, bytes: 1 };
+        let limits = DeferredSelectionLimits {
+            identities: 1,
+            retained_key_bytes: 1,
+        };
+
+        let newly_overflowed = DeferredSelectionKeys::extend_bounded(
+            &mut identities,
+            &mut overflowed,
+            &mut bytes_by_family,
+            &mut retained_bytes,
+            [(unicast, &first), (unicast, &second)],
+            0,
+            limits,
+        );
+        assert_eq!(identities, HashSet::from([first]));
+        assert_eq!(
+            newly_overflowed,
+            vec![(
+                unicast,
+                DeferredSelectionOverflowReason::IdentitiesAndLogicalBytes
+            )],
+            "with both budgets exhausted, neither single reason is truthful"
+        );
     }
 
     #[test]

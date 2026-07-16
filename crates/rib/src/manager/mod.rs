@@ -522,9 +522,17 @@ pub(super) struct LiveSessionRecord {
 }
 
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror the RibUpdate::SetPeerGracefulRestartContext wire names"
+)]
 struct PeerSelectionDeferralContext {
     peer_restart_state: bool,
     peer_gr_families: Vec<(Afi, Safi)>,
+    /// Peer negotiated enhanced route refresh (RFC 7313). Collision
+    /// failback only arms a `BoRR`/`EoRR` convergence wait when the
+    /// survivor can actually produce the pair.
+    peer_enhanced_refresh: bool,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -1604,12 +1612,14 @@ impl RibManager {
                 session_id,
                 peer_restart_state,
                 peer_gr_families,
+                peer_enhanced_refresh,
             } => {
                 self.pending_peer_gr_context.insert(
                     (peer, session_id),
                     PeerSelectionDeferralContext {
                         peer_restart_state,
                         peer_gr_families,
+                        peer_enhanced_refresh,
                     },
                 );
             }
