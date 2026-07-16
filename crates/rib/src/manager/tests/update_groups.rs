@@ -3857,3 +3857,74 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
         PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
     );
 }
+
+/// LAN-459 regression: a dirty backlog whose outbound channels are all
+/// closed (sessions torn down, e.g. at shutdown) must quiesce in one
+/// tick — the tick drops the dead peers instead of re-marking them, so
+/// the resync timer disarms (`dirty_peers` empty) and the actor can
+/// observe shutdown instead of re-arming forever.
+#[tokio::test]
+async fn dirty_resync_tick_drops_closed_channel_peers_and_quiesces() {
+    const PEER_COUNT: usize = 12;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+    }
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT);
+
+    // Tear down every session: the outbound receivers drop, closing the
+    // channels while the peers are still marked dirty.
+    drop(receivers);
+
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(
+        !backlog,
+        "closed-channel peers must not be withheld as backlog"
+    );
+    assert!(
+        manager.dirty_peers.is_empty(),
+        "one tick must drop every closed-channel dirty peer so the resync timer disarms"
+    );
+    for &peer in &peers {
+        if let Some(gid) = manager.grouped_member_of(peer) {
+            assert!(
+                !manager.group_ribs[&gid].dirty_members.contains(&peer),
+                "group dirty flag must drop with the peer's dirty state"
+            );
+        }
+    }
+}
+
+/// LAN-459 regression: the send-failure retry path routes through
+/// `mark_outbound_dirty`; once a peer's channel is closed, that path
+/// must drop the peer's dirty state instead of re-inserting it — the
+/// livelock was closed channels re-marking themselves dirty on every
+/// resync attempt.
+#[tokio::test]
+async fn mark_outbound_dirty_drops_peer_with_closed_channel() {
+    const PEER_COUNT: usize = 2;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    let (live, dead) = (peers[0], peers[1]);
+
+    // Both channels open: both marks stick.
+    manager.mark_outbound_dirty(live);
+    manager.mark_outbound_dirty(dead);
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT);
+
+    // Close one session, then re-mark it (as the retry path would after a
+    // failed send): the mark must remove the peer, not keep it dirty.
+    drop(receivers.pop().unwrap());
+    manager.mark_outbound_dirty(dead);
+    assert!(
+        !manager.dirty_peers.contains(&dead),
+        "re-marking a closed-channel peer must drop it from the dirty set"
+    );
+    assert!(
+        manager.dirty_peers.contains(&live),
+        "an open-channel dirty peer is untouched"
+    );
+}
