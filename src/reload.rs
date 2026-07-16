@@ -2161,7 +2161,6 @@ fn halt_partial(
 mod tests {
     use std::fmt::Write as _;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::config_persister::ConfigPersister;
@@ -2169,11 +2168,19 @@ mod tests {
     use rustbgpd_telemetry::BgpMetrics;
 
     fn unique_temp_path(name: &str) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        // A timestamp suffix is not unique under parallel test load (two
+        // tests can share a clock tick and then race truncating writes, so
+        // one parses the other's half-written file as empty). tempfile
+        // creates the file with a random name and O_EXCL; keep() hands the
+        // path to the callers, which write and remove it themselves.
+        tempfile::Builder::new()
+            .prefix(&format!("rustbgpd-{name}-"))
+            .suffix(".toml")
+            .tempfile()
             .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
+            .into_temp_path()
+            .keep()
+            .unwrap()
     }
 
     fn dataset_reload_dir(config_toml: &str, dataset: &str) -> tempfile::TempDir {
@@ -4467,8 +4474,8 @@ hold_time = 90
     )]
     #[tokio::test]
     async fn reload_rpol_imported_leaf_edit_syncs_and_untouched_graph_is_a_noop() {
-        let dir = unique_temp_path("reload-rpol-modules");
-        std::fs::create_dir(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
         let leaf_path = dir.join("leaf.rpol");
         std::fs::write(&leaf_path, "prefix-set drop-list { 127.0.0.0/8 le 32 }").unwrap();
         let main_path = dir.join("main.rpol");
@@ -4578,8 +4585,6 @@ hold_time = 90
             tags.is_empty(),
             "untouched module graph is a no-op: {tags:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// LAN-284: a REJECTED rpol sync must not publish the candidate

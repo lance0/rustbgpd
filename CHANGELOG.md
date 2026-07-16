@@ -183,6 +183,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   success, answering `503 not ready: readiness probe deadline exceeded`
   instead. The fast-503 daemon-gate path is unchanged. (LAN-448)
 
+- **Policy-added NO_ADVERTISE on Add-Path candidates now emits a
+  policy-filtered route event.** When export policy adds NO_ADVERTISE to a
+  multipath (Add-Path) candidate, the suppression surfaces through the same
+  live policy-filtered observability (route events, transition-based) as an
+  export-policy deny; previously only export explain covered it.
+
 - **Shutdown GR marker publication and warm-bundle maintenance can no longer
   wedge or wedge-loop.** GR restart marker publication, its generationless
   fallback, and marker removal at coordinated shutdown now run on a detached

@@ -80,9 +80,12 @@ jobs:
           python3 bench/scale/rebaseline/classify_dhat.py \
             --from-derivative "$receipt/2p-100k.dhat-derivative.tsv" \
             --check "$receipt/2p-100k.memory.tsv"
+          # The raw bgperf capture is never committed, so the CSV numerics
+          # cannot be re-derived here (unlike the CPU/DHAT legs above). This
+          # leg validates structure, schema, convergence, bounds, and
+          # canonical form of the sanitized receipt only.
           python3 bench/scale/rebaseline/sanitize_bgperf_csv.py \
-            --from-sanitized "$receipt/2p-100k.csv" \
-            --check "$receipt/2p-100k.csv"
+            --from-sanitized "$receipt/2p-100k.csv" >/dev/null
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail

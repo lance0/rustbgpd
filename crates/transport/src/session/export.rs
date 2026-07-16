@@ -939,9 +939,8 @@ impl SessionExportProfile {
     }
 
     #[allow(
-        dead_code,
         clippy::too_many_lines,
-        reason = "crate-private high-level LAN-361 probe bridge enumerates every supported family"
+        reason = "enumerates every supported export family"
     )]
     pub(crate) fn probe_announcement(
         &self,
