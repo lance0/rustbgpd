@@ -4,7 +4,7 @@ This directory is receipt-only.
 
 ## Offload A/B (2026-07, shared dev box)
 
-The producer-offload change (LAN-393) was gated with a same-host,
+The producer-offload change was gated with a same-host,
 same-checkout Criterion A/B rather than the full receipt drivers below (the
 host was shared, not quiet; see the "Results" section of the perf doc for the
 noise treatment):

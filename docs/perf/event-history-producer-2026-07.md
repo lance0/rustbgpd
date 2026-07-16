@@ -195,7 +195,7 @@ The full-daemon profile attributed 38% of RIB-manager samples to EHM producer
 conversion/encoding at saturated churn (~2x throughput loss vs disabled).
 Proceed gate: passed.
 
-### Post-offload A/B (LAN-393)
+### Post-offload A/B
 
 Method: same-host, same-checkout Criterion A/B on the shared 64-core dev box
 (not the quiet-host receipt drivers). Baseline = main at the branch fork
