@@ -1676,6 +1676,15 @@ impl RibManager {
                         .to_string()
                 },
             );
+            // Policy-added NO_ADVERTISE is a policy suppression: surface it
+            // through the same policy-filtered accounting as the deny arm
+            // above, matching the multipath body.
+            policy_filtered.push(PolicyFilteredRouteKey {
+                target_peer: target.policy_filtered_target(),
+                source_peer: best.peer,
+                prefix: *prefix,
+                path_id: best.path_id,
+            });
             for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
@@ -1965,6 +1974,15 @@ impl RibManager {
         modified.path_id = 0;
 
         if super::no_advertise_export_suppressed(modified.communities()) {
+            // Policy-added NO_ADVERTISE is a policy suppression: record the
+            // policy-filtered entry, matching the multipath and single-best
+            // bodies.
+            policy_filtered.push(PolicyFilteredRouteKey {
+                target_peer,
+                source_peer: best.peer,
+                prefix: *prefix,
+                path_id: best.path_id,
+            });
             for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }

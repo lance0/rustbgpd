@@ -1515,3 +1515,114 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
     drop(tx);
     handle.await.unwrap();
 }
+
+/// A single-best export where the policy *adds* `NO_ADVERTISE` (permit +
+/// `communities_add`) is a policy suppression: it must surface in the
+/// policy-filtered view exactly like the deny arm. The multipath body
+/// already recorded it; the single-best tail silently withheld the route
+/// with no filtered-routes entry.
+#[tokio::test]
+async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let chain = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(prefix)),
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                communities_add: vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE],
+                ..RouteModifications::default()
+            },
+        }],
+        default_action: PolicyAction::Permit,
+    }]));
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: chain,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let history = query_route_event_history(
+        &tx,
+        Some(target),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(prefix)),
+        10,
+    )
+    .await;
+    let policy_filtered = history
+        .iter()
+        .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        policy_filtered.len(),
+        1,
+        "policy-added NO_ADVERTISE must record a policy-filtered entry"
+    );
+    assert_eq!(policy_filtered[0].peer, Some(source));
+    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].reason, "policy_denied");
+
+    // The route itself was withheld — nothing was announced to the peer.
+    assert!(
+        out_rx.try_recv().is_err(),
+        "NO_ADVERTISE-suppressed route must not be announced"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
