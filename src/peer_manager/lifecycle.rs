@@ -399,12 +399,16 @@ impl PeerManager {
     /// socket-scoped fields are copied from `config` into the stored
     /// transport config by the next rebuild path, which resolves from the
     /// config snapshot anyway).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear pass: change detection, policy seam, knob apply, export refresh, bookkeeping"
+    )]
     pub(super) async fn hot_update_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
     ) -> Result<(), PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
-        let (knobs_changed, policies_changed) = {
+        let (knobs_changed, export_knobs_changed, policies_changed) = {
             let managed = self
                 .peers
                 .get(&peer)
@@ -415,11 +419,18 @@ impl PeerManager {
                 )));
             }
             let tc = &managed.transport_config;
+            // The export-affecting subset: `local_ipv6_nexthop` decides the
+            // exact-export preflight's `MissingIpv6NextHop` suppression and
+            // `remove_private_as` changes the wire AS_PATH of routes already
+            // in Adj-RIB-Out, so a change to either must force an outbound
+            // re-probe below.
+            let export_knobs_changed = tc.local_ipv6_nexthop != config.local_ipv6_nexthop
+                || tc.remove_private_as != config.remove_private_as;
             (
                 tc.max_prefixes != config.max_prefixes
                     || tc.gr_stale_routes_time != config.gr_stale_routes_time
-                    || tc.local_ipv6_nexthop != config.local_ipv6_nexthop
-                    || tc.remove_private_as != config.remove_private_as,
+                    || export_knobs_changed,
+                export_knobs_changed,
                 managed.import_policy != config.import_policy
                     || managed.export_policy != config.export_policy,
             )
@@ -440,11 +451,11 @@ impl PeerManager {
             .map_err(PeerLifecycleError::Internal)?;
         }
 
-        let managed = self
-            .peers
-            .get_mut(&peer)
-            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         if knobs_changed {
+            let managed = self
+                .peers
+                .get(&peer)
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
             managed
                 .handle
                 .update_runtime_config_timeout(
@@ -462,8 +473,61 @@ impl PeerManager {
                 })?;
         }
 
+        // Force re-emission after an export-affecting knob swap — the same
+        // reason the gshut toggle and live-policy apply refresh: routes the
+        // exact-export preflight suppressed under the OLD knobs (e.g.
+        // `MissingIpv6NextHop`) are only re-probed, and already-advertised
+        // AS_PATHs only re-encoded, on an outbound event. Without this the
+        // remediation stays off the wire until unrelated churn or a session
+        // bounce. Runs BEFORE the bookkeeping below: a hard refresh failure
+        // returns Err while the stored transport config still holds the old
+        // values, so the next SIGHUP re-detects the diff and retries
+        // (idempotent — the session-side knob re-apply is a no-op).
+        if export_knobs_changed {
+            let addr = peer.address;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.rib_tx
+                .send(RibUpdate::RefreshPeerOutbound {
+                    peer: addr,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|error| {
+                    PeerLifecycleError::Internal(format!(
+                        "failed to send RIB refresh after hot-applying export knobs to {peer}: {error}"
+                    ))
+                })?;
+            match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+                Err(_) => {
+                    return Err(PeerLifecycleError::Internal(format!(
+                        "RIB did not reply to export-knob refresh for {peer} within {:?}",
+                        super::RIB_REPLY_TIMEOUT
+                    )));
+                }
+                Ok(Err(_)) => {
+                    return Err(PeerLifecycleError::Internal(format!(
+                        "RIB dropped reply for export-knob refresh for {peer}"
+                    )));
+                }
+                Ok(Ok(Err(error))) => {
+                    // "not registered for outbound updates" is expected for a
+                    // peer not yet Established — the next PeerUp emits from
+                    // the updated config.
+                    debug!(
+                        %addr, error = %error,
+                        "RIB declined export-knob refresh (peer likely not yet Established)"
+                    );
+                }
+                Ok(Ok(Ok(()))) => {}
+            }
+        }
+
         // Manager-side bookkeeping so `rbgp neighbor list` and any later
         // session rebuild see the new values.
+        let managed = self
+            .peers
+            .get_mut(&peer)
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed.description.clone_from(&config.description);
         managed.max_prefixes = config.max_prefixes;
         managed.transport_config.max_prefixes = config.max_prefixes;

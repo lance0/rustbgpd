@@ -1979,6 +1979,96 @@ async fn hot_update_peer_applies_in_place_without_session_rebuild() {
 }
 
 #[tokio::test]
+async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    // Mirror the gshut-toggle precedent: record every forced outbound
+    // refresh the RIB would receive, then reply so the apply completes.
+    let (seen_tx, mut seen_rx) = mpsc::channel(8);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                seen_tx.send(peer).await.unwrap();
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+
+    // `local_ipv6_nexthop` decides the exact-export preflight's
+    // `MissingIpv6NextHop` suppression: remediating it must re-probe
+    // the peer's suppressed routes without waiting for unrelated churn.
+    let mut updated = make_config(addr, 65002);
+    updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    mgr.hot_update_peer(updated).await.unwrap();
+    assert_eq!(
+        seen_rx
+            .try_recv()
+            .expect("hot-applying local_ipv6_nexthop must force an outbound refresh"),
+        addr
+    );
+
+    // `remove_private_as` changes already-advertised AS_PATHs.
+    let mut updated = make_config(addr, 65002);
+    updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    updated.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+    mgr.hot_update_peer(updated).await.unwrap();
+    assert_eq!(
+        seen_rx
+            .try_recv()
+            .expect("hot-applying remove_private_as must force an outbound refresh"),
+        addr
+    );
+}
+
+#[tokio::test]
+async fn hot_update_peer_skips_outbound_refresh_when_export_knobs_unchanged() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+
+    // Export-inert knob changes and a full no-op must not replay the
+    // peer's outbound table.
+    let mut updated = make_config(addr, 65002);
+    updated.description = "hot-updated".to_string();
+    updated.max_prefixes = Some(500);
+    updated.gr_stale_routes_time = 300;
+    mgr.hot_update_peer(updated.clone()).await.unwrap();
+    mgr.hot_update_peer(updated).await.unwrap();
+
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, RibUpdate::RefreshPeerOutbound { .. }),
+            "an export-inert hot apply must not force an outbound refresh"
+        );
+    }
+}
+
+#[tokio::test]
 async fn hot_update_peer_applies_policy_chains_in_place() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

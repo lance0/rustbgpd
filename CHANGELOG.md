@@ -186,6 +186,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deferred route-refresh response is delivered at release no longer receives a
   second empty-UPDATE End-of-RIB after the genuine convergence EoR.
 
+- **Hot-applied export-affecting knobs now re-probe suppressed routes.** A
+  SIGHUP reload that hot-applies `local_ipv6_nexthop` or `remove_private_as`
+  to a live session issues a forced outbound refresh (like the
+  graceful-shutdown toggle and live policy apply), so routes the exact-export
+  preflight suppressed under the old knobs go back on the wire immediately —
+  and already-advertised AS_PATHs re-encode — instead of waiting for
+  unrelated churn or a session bounce. Export-inert hot applies issue no
+  refresh.
+
+- **Per-family Paths-Limit caps survive a collision failback.** The RIB's
+  live-session record now carries the session's per-family Add-Path
+  Paths-Limit map and restores it when an outbound registration fails over
+  to a surviving session, instead of clamping every family to the scalar
+  send limit.
+
+- **Unicast exact-export encode failures after RIB commit now fail closed.**
+  The IPv6 no-next-hop and Extended-Next-Hop IPv4 preparation arms tear the
+  session down with Cease/Out-of-Resources like the oversize branches,
+  instead of silently dropping the route and leaving Adj-RIB-Out ahead of
+  the wire. Both arms are unreachable while producers run the exact-export
+  preflight; this aligns them with the fail-closed convention.
+
 - **The route-server starter now applies documented dual-stack ingress
   hygiene.** Its policy rejects both default routes and a dated 2025-10-09
   snapshot of active IANA special-purpose rows marked non-globally reachable,
