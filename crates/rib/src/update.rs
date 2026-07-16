@@ -689,8 +689,9 @@ pub enum ExportPolicyCohortOutcome {
 }
 
 /// Once-per-update-group cell through which the first consuming session task
-/// publishes its encoded wire chunks so every other member of the group can
-/// reuse the bytes instead of re-encoding the same shared announce inventory.
+/// (the elected encoder) publishes its progressively encoded wire chunks so
+/// every other member of the group can stream the bytes instead of
+/// re-encoding the same shared announce inventory.
 ///
 /// The payload is transport-owned and deliberately opaque here (the same
 /// trust-boundary pattern as [`ExactExportSnapshot::as_any`]): the RIB only
@@ -698,10 +699,15 @@ pub enum ExportPolicyCohortOutcome {
 /// same cell. Transport downcasts, proves wire-equivalence between its own
 /// export profile and the encoder's, and falls back to its ordinary
 /// per-session encode when the proof fails.
+///
+/// The lock is synchronous on purpose: initialization only *constructs* the
+/// (empty) progressive stream state, so encoder election commits with no
+/// await point between winning the election and starting to encode — a
+/// cancelled task can never leave an initialized cell with no live encoder.
 #[derive(Default)]
 pub struct SharedGroupEncode {
-    /// First-consumer-initializes cell; losers await instead of re-encoding.
-    pub cell: tokio::sync::OnceCell<Arc<dyn Any + Send + Sync>>,
+    /// First-consumer-initializes cell; losers stream instead of re-encoding.
+    pub cell: std::sync::OnceLock<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Routes to be sent outbound to a peer.

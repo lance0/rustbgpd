@@ -37,6 +37,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single entry — falls back to the unchanged per-session encode. At
   route-server scale this removes the N× duplicate encode that delayed
   every observer's first post-reload UPDATE by the full-table encode time.
+  Publication is progressive (ADR-0109 amendment): the encoder publishes
+  each slice's chunks as they are produced and members send them as they
+  arrive, so an observer's longest wire silence tracks per-slice encode
+  latency (single-digit milliseconds) instead of the single-threaded
+  full-table encode; a stream that fails mid-way terminates explicitly
+  (drop-guarded against encoder unwind) and members fall back to the local
+  encode, whose byte-identical re-announcements are idempotent.
 
 - Dirty-peer resync ticks now drain the backlog under the same 25 ms
   wall-clock poll budget as policy-transition commit flushes, instead of a
