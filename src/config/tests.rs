@@ -10640,6 +10640,41 @@ fn runtime_snapshot_token_changes_when_only_a_secret_rotates() {
 }
 
 #[test]
+fn runtime_snapshot_token_does_not_encode_config_length() {
+    // The normalized rendering includes plaintext secrets, so its byte
+    // length must not appear in the token: configs whose secrets differ
+    // only in length yield same-shape, digest-only tokens.
+    let mut short = parse(valid_toml()).unwrap();
+    short.neighbors[0].md5_password = Some("s".to_string());
+    let mut long = short.clone();
+    long.neighbors[0].md5_password = Some("s".repeat(64));
+
+    let key = RuntimeSnapshotKey::random();
+    let token_short = key.token(&short).unwrap();
+    let token_long = key.token(&long).unwrap();
+    assert_eq!(token_short.len(), "kv1:".len() + 16, "{token_short}");
+    assert_eq!(token_short.len(), token_long.len());
+    assert_ne!(token_short, token_long);
+}
+
+#[test]
+fn neighbor_and_peer_group_debug_redact_md5_password() {
+    let mut config = parse(valid_toml()).unwrap();
+    config.neighbors[0].md5_password = Some("hunter2-secret".to_string());
+    let rendered = format!("{:?}", config.neighbors[0]);
+    assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+
+    let group = PeerGroupConfig {
+        md5_password: Some("hunter2-secret".to_string()),
+        ..PeerGroupConfig::default()
+    };
+    let rendered = format!("{group:?}");
+    assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[test]
 fn runtime_snapshot_token_differs_across_keys() {
     // The token is keyed: a caller who does not hold the per-process key cannot
     // reproduce the digest for a known config. That is what closes the

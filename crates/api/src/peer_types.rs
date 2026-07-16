@@ -542,7 +542,7 @@ pub struct ResolvedPeerPolicy {
 /// Reply payload of [`PeerManagerCommand::RuntimeConfigSnapshot`]: the
 /// normalized runtime TOML plus the live compiled `.rpol` registry
 /// (which the TOML deliberately excludes — see the command docs).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeConfigSnapshotReply {
     /// Normalized TOML for the current runtime snapshot.
     pub toml: String,
@@ -550,6 +550,18 @@ pub struct RuntimeConfigSnapshotReply {
     pub rpol_files: Vec<String>,
     /// Live compiled `.rpol` policy registry.
     pub rpol: rustbgpd_policy::rpol::RpolPolicySet,
+}
+
+// Manual Debug: the runtime TOML carries live secret material
+// (`md5_password`, `tcp_ao` keys) and must never be rendered.
+impl std::fmt::Debug for RuntimeConfigSnapshotReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConfigSnapshotReply")
+            .field("toml", &"<redacted>")
+            .field("rpol_files", &self.rpol_files)
+            .field("rpol", &self.rpol)
+            .finish()
+    }
 }
 
 /// Current static-session negotiation identity captured for one coordinated
@@ -1961,4 +1973,20 @@ pub struct PolicyDatasetStatusRow {
     pub status: rustbgpd_policy::datasets::DatasetStatus,
     /// Bound snapshot file path (`[policy.datasets.<name>].path`).
     pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_config_snapshot_reply_debug_redacts_toml() {
+        let reply = super::RuntimeConfigSnapshotReply {
+            toml: "md5_password = \"hunter2-secret\"".to_string(),
+            rpol_files: vec!["/etc/rustbgpd/policy.rpol".to_string()],
+            rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+        };
+        let rendered = format!("{reply:?}");
+        assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("policy.rpol"), "{rendered}");
+    }
 }

@@ -9,6 +9,7 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
+use zeroize::Zeroizing;
 
 use crate::authz_runtime::BearerAuthSecret;
 
@@ -152,13 +153,15 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
         .token_file
         .as_ref()
         .map(|path| {
-            let token = fs::read_to_string(path).map_err(|e| {
+            // Zeroizing scrubs this transient read when it drops; the
+            // retained copy inside `BearerAuthSecret` scrubs on its own drop.
+            let raw = Zeroizing::new(fs::read_to_string(path).map_err(|e| {
                 format!(
                     "listener {index}: failed to read token file {}: {e}",
                     path.display()
                 )
-            })?;
-            let token = token.trim_end();
+            })?);
+            let token = raw.trim_end();
             if token.is_empty() {
                 return Err(format!(
                     "listener {index}: token file {} is empty",
@@ -176,13 +179,15 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
     Ok(ListenerCredentials { bearer, tls })
 }
 
-fn read_file(index: usize, label: &str, path: &Path) -> Result<Vec<u8>, String> {
-    let bytes = fs::read(path).map_err(|e| {
+/// Read a credential file into a buffer that is scrubbed on drop (the TLS
+/// private key in particular must not linger in freed heap after parsing).
+fn read_file(index: usize, label: &str, path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+    let bytes = Zeroizing::new(fs::read(path).map_err(|e| {
         format!(
             "listener {index}: failed to read {label} file {}: {e}",
             path.display()
         )
-    })?;
+    })?);
     if bytes.is_empty() {
         return Err(format!(
             "listener {index}: {label} file {} is empty",

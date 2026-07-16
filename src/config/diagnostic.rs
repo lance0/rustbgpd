@@ -114,6 +114,20 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
     }
 }
 
+/// True when a source line may carry secret material and must not be echoed
+/// in a diagnostic. Keep in sync with the fields `Config::effective_redacted`
+/// masks: `md5_password` and TCP-AO `key` material (which renders either on a
+/// line mentioning `tcp_ao` or as a bare `key = "..."` line inside a
+/// `tcp_ao` table).
+fn line_mentions_secret(line: &str) -> bool {
+    line.contains("md5_password")
+        || line.contains("tcp_ao")
+        || line
+            .trim_start()
+            .strip_prefix("key")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
 /// Render a source snippet with an underlined span, rustc-style.
 fn render_snippet(
     source: &str,
@@ -139,17 +153,41 @@ fn render_snippet(
     let line_num_width = line_num.to_string().len();
     let pad = " ".repeat(line_num_width);
 
+    // A parse error's span can land on the line after the secret it belongs
+    // to (an unterminated quote on `md5_password = "...` reports at the next
+    // line), so check the immediately preceding line too and redact
+    // conservatively.
+    let prev_text = if line_start == 0 {
+        ""
+    } else {
+        let prev_end = line_start - 1;
+        let prev_start = source[..prev_end].rfind('\n').map_or(0, |i| i + 1);
+        &source[prev_start..prev_end]
+    };
+    let redact = line_mentions_secret(line_text) || line_mentions_secret(prev_text);
+
     let mut out = String::new();
     let _ = writeln!(out, "error: {heading}");
     let _ = writeln!(out, "{pad} --> {path}:{line_num}:{col}");
     let _ = writeln!(out, "{pad} |");
-    let _ = writeln!(out, "{line_num} | {line_text}");
-    let _ = write!(
-        out,
-        "{pad} | {}{} {label}",
-        " ".repeat(col - 1),
-        "^".repeat(underline_len),
-    );
+    if redact {
+        // Never echo the source line; a caret run sized to the span would
+        // reveal the secret's length, so collapse the underline too. The
+        // line:column in the arrow line keeps the error actionable.
+        let _ = writeln!(
+            out,
+            "{line_num} | <line contains sensitive material, redacted>"
+        );
+        let _ = write!(out, "{pad} | ^ {label}");
+    } else {
+        let _ = writeln!(out, "{line_num} | {line_text}");
+        let _ = write!(
+            out,
+            "{pad} | {}{} {label}",
+            " ".repeat(col - 1),
+            "^".repeat(underline_len),
+        );
+    }
     out
 }
 
@@ -380,6 +418,62 @@ log_format = \"text\"
         assert!(output.contains("--> test.toml:3:"), "got: {output}");
         assert!(output.contains("hold_time = 2"), "got: {output}");
         assert!(output.contains("^ must be >= 3"), "got: {output}");
+    }
+
+    #[test]
+    fn parse_error_snippet_redacts_md5_password_line() {
+        // Unterminated quote: the secret sits on the reported line or the
+        // line before it; neither may be echoed.
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+md5_password = \"hunter2-secret
+hold_time = 90
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(!rendered.contains("hunter2-secret"), "got: {rendered}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
+        assert!(
+            rendered.contains("config.toml:8:") || rendered.contains("config.toml:9:"),
+            "got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn parse_error_snippet_redacts_tcp_ao_key_line() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+
+[neighbors.tcp_ao]
+key = \"s3cr3t-ao-key
+send_id = 1
+recv_id = 2
+algorithm = \"hmac(sha256)\"
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(!rendered.contains("s3cr3t-ao-key"), "got: {rendered}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
+        assert!(
+            rendered.contains("config.toml:10:") || rendered.contains("config.toml:11:"),
+            "got: {rendered}"
+        );
     }
 
     #[test]

@@ -2908,14 +2908,16 @@ impl RuntimeSnapshotKey {
         hasher.write_usize(context.len());
         hasher.write(context);
         let digest = hasher.finish();
+        // The token deliberately carries no length of the normalized
+        // rendering: that length varies with secret bytes (md5_password,
+        // tcp_ao keys), so encoding it would leak secret length to any
+        // token holder. Tokens are only equality-compared against tokens
+        // minted by this same in-process key, so the keyed digest alone is
+        // the change detector.
         if context.is_empty() {
-            Ok(format!("kv1:{digest:016x}:{}", normalized.len()))
+            Ok(format!("kv1:{digest:016x}"))
         } else {
-            Ok(format!(
-                "kv2:{digest:016x}:{}:{}",
-                normalized.len(),
-                context.len()
-            ))
+            Ok(format!("kv2:{digest:016x}:{}", context.len()))
         }
     }
 }

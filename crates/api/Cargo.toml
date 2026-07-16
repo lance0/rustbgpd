@@ -43,6 +43,7 @@ bytes.workspace = true
 x509-parser.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+zeroize.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
