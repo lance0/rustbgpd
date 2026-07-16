@@ -190,19 +190,23 @@ route-paging tranche:
 
 | Variant | Commit | Behavior |
 |---|---|---|
-| Baseline | `aacb3a89527759b610bead421c80612f04d04826` | Current main through #872; unfiltered pages still rescan their complete scope |
-| Ordered continuation | `c9922e4b8b8cb5cda975be2363c17907978fc68c` | Final RIB ordered indices plus mutation-fenced continuation at every ingest, lifecycle, distribution, refresh, and selection-release seam |
+| Baseline | `63159c20617ac6ebdecb3c3dd76eef5b01d452dd` | Current main at the tranche's rebase point; unfiltered pages still rescan their complete scope |
+| Ordered continuation | `fbb3789881eb1549354ebb5ecf6869b3ed49573d` | RIB ordered indices plus mutation-fenced continuation at every ingest, lifecycle, distribution, refresh, and selection-release seam |
 
-The performance pin intentionally ends at the exact final RIB production
-checkpoint. Subsequent benchmark, API, protobuf, and documentation commits do
-not alter any measured RIB production source; the normalized production-diff
-hash below enforces that boundary.
+The performance pin intentionally ends at the RIB production checkpoint above.
+Subsequent benchmark, API, protobuf, and documentation commits do not alter any
+measured RIB production source, with one deliberate exception: a later fence
+commit adds the shared export-policy cohort command to the continuation
+invalidation allowlist in the central manager. That arm sits on a control-plane
+command path no benchmark scenario dispatches, so the measured envelope is
+unchanged; the normalized production-diff hash below enforces the checkpoint
+boundary itself.
 
 The normalized production diff across all twelve changed RIB sources —
 Adj-RIB-In, Adj-RIB-Out, Loc-RIB, prefix map, `lib.rs`, `update.rs`, the central
 manager, update groups, distribution, GR/LLGR, route refresh, and selection
 deferral — is pinned to
-`83f64788b48f1347e3fc722f504903da78f2f5ffb58ac8260f58d46b0b01f6f9`.
+`fb439f795d2b6869d1a34f3f1d7c30d70736d0a9b6104ab24f524d97df815432`.
 Both refs' sources are retained under their exact repository-relative paths in
 the nested receipt manifest, so the two manager `mod.rs` files cannot collide.
 
@@ -223,8 +227,8 @@ receipt unless every read, write, and memory gate passes.
 
 ```bash
 bench/compare-route-paging.sh \
-  --base aacb3a89527759b610bead421c80612f04d04826 \
-  --head c9922e4b8b8cb5cda975be2363c17907978fc68c \
+  --base 63159c20617ac6ebdecb3c3dd76eef5b01d452dd \
+  --head fbb3789881eb1549354ebb5ecf6869b3ed49573d \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
   --repetitions 4 \

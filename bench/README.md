@@ -67,8 +67,8 @@ Use the paired driver for retained comparisons:
 
 ```bash
 bench/compare-route-paging.sh \
-  --base aacb3a89527759b610bead421c80612f04d04826 \
-  --head c9922e4b8b8cb5cda975be2363c17907978fc68c \
+  --base 63159c20617ac6ebdecb3c3dd76eef5b01d452dd \
+  --head fbb3789881eb1549354ebb5ecf6869b3ed49573d \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
   --repetitions 4 \

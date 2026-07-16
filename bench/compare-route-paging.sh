@@ -54,9 +54,9 @@ changes are intentionally never measured.
 EOF
 }
 
-readonly expected_base_commit=aacb3a89527759b610bead421c80612f04d04826
-readonly expected_head_commit=c9922e4b8b8cb5cda975be2363c17907978fc68c
-readonly expected_production_diff_sha256=83f64788b48f1347e3fc722f504903da78f2f5ffb58ac8260f58d46b0b01f6f9
+readonly expected_base_commit=63159c20617ac6ebdecb3c3dd76eef5b01d452dd
+readonly expected_head_commit=fbb3789881eb1549354ebb5ecf6869b3ed49573d
+readonly expected_production_diff_sha256=fb439f795d2b6869d1a34f3f1d7c30d70736d0a9b6104ab24f524d97df815432
 readonly -a production_sources=(
   crates/rib/src/adj_rib_in.rs
   crates/rib/src/adj_rib_out.rs
