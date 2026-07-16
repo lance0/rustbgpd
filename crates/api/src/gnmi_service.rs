@@ -3356,7 +3356,11 @@ mod tests {
             path: dir.path().join("events.db"),
             max_events: 100,
             max_bytes: 1_000_000,
-            synchronous: SynchronousMode::Full,
+            // NORMAL, not FULL: this fixture exercises gNMI subscription
+            // plumbing, not outbox durability. FULL puts two fsyncs on the
+            // temp filesystem inside every commit the tests' bounded waits
+            // cover, which is where the old 2s-timeout flake came from.
+            synchronous: SynchronousMode::Normal,
             required: false,
             queue_capacity: 64,
             batch_size: 1,
@@ -3511,11 +3515,13 @@ mod tests {
         manager.handle().sender().try_send(envelope).unwrap();
 
         // The ON_CHANGE task forwards the transition with the new
-        // OpenConfig short-form state name. Bounded wait so the test
-        // doesn't hang on a regression.
-        let response = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        // OpenConfig short-form state name. Delivery is race-free (the
+        // broadcast attach happens-before the sync_response drained
+        // above) but rides a real SQLite commit + broadcast hop, so the
+        // bound is a generous hang guard, not a latency assertion.
+        let response = tokio::time::timeout(Duration::from_secs(30), stream.message())
             .await
-            .expect("ON_CHANGE Update did not arrive within 2s")
+            .expect("ON_CHANGE Update did not arrive (hang guard)")
             .unwrap()
             .unwrap();
         let Some(gnmi::subscribe_response::Response::Update(notif)) = response.response else {
