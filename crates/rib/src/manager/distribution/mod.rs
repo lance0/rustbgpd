@@ -1580,26 +1580,44 @@ impl RibManager {
                 // batches, so no mutation can invalidate the prepared state.
                 // Never fall back from here — an envelope may already be on
                 // a member's wire (see the phase-level invariant comment).
-                let batch = super::COMMIT_MEMBERS_PER_POLL.min(prepared.len());
-                for member in prepared.drain(..batch) {
-                    self.commit_clean_policy_transition_member(member.peer, source, destination);
-                    self.clear_policy_filtered_routes_for_peer(member.peer);
-                    self.apply_clean_policy_transition_counters(member.peer, &inventory);
-                    if let Some(permit) = member.permit {
-                        permit.send(OutboundRouteUpdate {
-                            exact_export_snapshot: member.snapshot,
-                            announce_source_exclusion: Some(member.peer),
-                            announce: Arc::clone(&inventory.announce),
-                            next_hop_override: Arc::clone(&inventory.next_hop_override),
-                            ..OutboundRouteUpdate::default()
-                        });
+                // Flush stride-sized batches until the poll's wall-clock
+                // budget elapses. A member commit is ~0.1 ms but ~10 ms of
+                // interleaved actor work separates polls, so parking on a
+                // fixed member count makes emission start scale with fleet
+                // size; the budget bounds the readiness-seam latency
+                // instead.
+                let poll_start = std::time::Instant::now();
+                let mut flushed = 0_usize;
+                loop {
+                    let batch = super::COMMIT_MEMBERS_PER_POLL.min(prepared.len());
+                    for member in prepared.drain(..batch) {
+                        self.commit_clean_policy_transition_member(
+                            member.peer,
+                            source,
+                            destination,
+                        );
+                        self.clear_policy_filtered_routes_for_peer(member.peer);
+                        self.apply_clean_policy_transition_counters(member.peer, &inventory);
+                        if let Some(permit) = member.permit {
+                            permit.send(OutboundRouteUpdate {
+                                exact_export_snapshot: member.snapshot,
+                                announce_source_exclusion: Some(member.peer),
+                                announce: Arc::clone(&inventory.announce),
+                                next_hop_override: Arc::clone(&inventory.next_hop_override),
+                                ..OutboundRouteUpdate::default()
+                            });
+                        }
+                        let advertised = self.grouped_advertised_count(member.peer).unwrap_or(0);
+                        self.metrics.set_adj_rib_out_prefixes(
+                            &member.peer.to_string(),
+                            "all",
+                            gauge_val(advertised),
+                        );
                     }
-                    let advertised = self.grouped_advertised_count(member.peer).unwrap_or(0);
-                    self.metrics.set_adj_rib_out_prefixes(
-                        &member.peer.to_string(),
-                        "all",
-                        gauge_val(advertised),
-                    );
+                    flushed += batch;
+                    if prepared.is_empty() || poll_start.elapsed() >= self.commit_flush_budget {
+                        break;
+                    }
                 }
                 if !prepared.is_empty() {
                     pending.phase = Some(CleanPolicyTransitionPhase::CommitMembers {
@@ -1608,7 +1626,7 @@ impl RibManager {
                         inventory,
                         prepared,
                         full_probe_count,
-                        cursor: cursor + batch,
+                        cursor: cursor + flushed,
                     });
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
