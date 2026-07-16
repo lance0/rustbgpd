@@ -1193,7 +1193,11 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(128);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    // This test proves the multi-poll seam exists in the LIVE actor (poll
+    // accounting, readiness interleaving), so pin the flush budget to zero:
+    // one test-sized stride per poll, exactly as before the budget loops.
+    manager.flush_poll_budget = std::time::Duration::ZERO;
     let handle = tokio::spawn(manager.run());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
@@ -3637,6 +3641,50 @@ async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
     for &peer in &peers {
         assert_eq!(manager.grouped_member_of(peer), Some(destination));
     }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+}
+
+/// With wall-clock budget in hand, the probe-and-prepare phase strides the
+/// whole cohort in a handful of polls instead of one route-slice per poll —
+/// the fenced pre-commit window must not scale with table x member count
+/// when the actor has time available.
+#[tokio::test]
+async fn probe_phase_uses_full_poll_budget_before_parking() {
+    const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
+    const ROUTE_COUNT: usize = 2;
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    // The helper zeroes the budget for deterministic per-stride tests;
+    // restore a generous one so pre-commit phases stride to completion.
+    manager.flush_poll_budget = std::time::Duration::from_mins(1);
+    let next_policy = community_chain(0xFDE8_2106);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    let mut pre_commit_polls = 0_usize;
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_ne!(outcome, "fallback");
+        if kind == "commit" {
+            if outcome == "committed" {
+                break;
+            }
+        } else {
+            pre_commit_polls += 1;
+            assert_eq!(outcome, "continue");
+        }
+    }
+    // Under a zero budget this shape needs one poll per member probe
+    // route-slice (the test slice is a single route) plus classification
+    // polls — dozens. A budgeted poll strides through; allow a small
+    // constant for the distinct phases (classify, probe, validate,
+    // snapshot seams).
+    assert!(
+        pre_commit_polls <= 8,
+        "budgeted pre-commit phases must not scale with members x routes: {pre_commit_polls} polls"
+    );
     assert_eq!(
         response.try_recv().unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)

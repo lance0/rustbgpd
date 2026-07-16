@@ -1200,26 +1200,37 @@ impl RibManager {
                 if pending.replacements.len() < 2 {
                     return CleanPolicyTransitionAdvance::Fallback(pending);
                 }
-                let end = (cursor + super::POLICY_TRANSITION_MEMBER_SLICE)
-                    .min(pending.replacements.len());
-                for replacement in &pending.replacements[cursor..end] {
-                    if !seen.insert(replacement.peer)
-                        || !self.clean_policy_transition_peer_ready(replacement.peer)
+                // Budgeted stride loop (see the probe phase below): fixed
+                // 8-member classification polls cost ~88 fenced polls at 700
+                // members; stride until the poll budget elapses instead.
+                let poll_start = std::time::Instant::now();
+                loop {
+                    let end = (cursor + super::POLICY_TRANSITION_MEMBER_SLICE)
+                        .min(pending.replacements.len());
+                    for replacement in &pending.replacements[cursor..end] {
+                        if !seen.insert(replacement.peer)
+                            || !self.clean_policy_transition_peer_ready(replacement.peer)
+                        {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        }
+                        let Some(pair) = self.clean_policy_transition_destination(
+                            replacement.peer,
+                            replacement.export_policy.as_ref(),
+                        ) else {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        };
+                        if transition.is_some_and(|expected| expected != pair) {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        }
+                        transition = Some(pair);
+                    }
+                    cursor = end;
+                    if cursor == pending.replacements.len()
+                        || poll_start.elapsed() >= self.flush_poll_budget
                     {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                        break;
                     }
-                    let Some(pair) = self.clean_policy_transition_destination(
-                        replacement.peer,
-                        replacement.export_policy.as_ref(),
-                    ) else {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
-                    };
-                    if transition.is_some_and(|expected| expected != pair) {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
-                    }
-                    transition = Some(pair);
                 }
-                cursor = end;
                 if cursor < pending.replacements.len() {
                     pending.phase = Some(CleanPolicyTransitionPhase::Classify {
                         cursor,
@@ -1278,18 +1289,26 @@ impl RibManager {
                 }
 
                 let snapshot = prefixes.as_ref().expect("initialized above");
-                let end = super::policy_transition_slice_end(
-                    cursor,
-                    snapshot.len(),
-                    super::POLICY_TRANSITION_ROUTE_SLICE,
-                );
-                if cursor < end {
-                    self.stage_policy_transition_group_chunk(
-                        destination,
-                        &snapshot[cursor..end],
-                        &mut memo,
+                // Budgeted stride loop (see the probe phase): stage
+                // route-slices until the poll budget elapses.
+                let poll_start = std::time::Instant::now();
+                loop {
+                    let end = super::policy_transition_slice_end(
+                        cursor,
+                        snapshot.len(),
+                        super::POLICY_TRANSITION_ROUTE_SLICE,
                     );
-                    cursor = end;
+                    if cursor < end {
+                        self.stage_policy_transition_group_chunk(
+                            destination,
+                            &snapshot[cursor..end],
+                            &mut memo,
+                        );
+                        cursor = end;
+                    }
+                    if cursor == snapshot.len() || poll_start.elapsed() >= self.flush_poll_budget {
+                        break;
+                    }
                 }
                 if cursor < snapshot.len() {
                     pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
@@ -1335,23 +1354,31 @@ impl RibManager {
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
                 let snapshot = keys.as_ref().expect("initialized above");
-                let end = super::policy_transition_slice_end(
-                    cursor,
-                    snapshot.len(),
-                    super::POLICY_TRANSITION_ROUTE_SLICE,
-                );
-                if self
-                    .extend_clean_policy_transition_inventory(
-                        source,
-                        destination,
-                        &snapshot[cursor..end],
-                        &mut inventory,
-                    )
-                    .is_none()
-                {
-                    return CleanPolicyTransitionAdvance::Fallback(pending);
+                // Budgeted stride loop (see the probe phase): extend the
+                // inventory by route-slices until the poll budget elapses.
+                let poll_start = std::time::Instant::now();
+                loop {
+                    let end = super::policy_transition_slice_end(
+                        cursor,
+                        snapshot.len(),
+                        super::POLICY_TRANSITION_ROUTE_SLICE,
+                    );
+                    if self
+                        .extend_clean_policy_transition_inventory(
+                            source,
+                            destination,
+                            &snapshot[cursor..end],
+                            &mut inventory,
+                        )
+                        .is_none()
+                    {
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    }
+                    cursor = end;
+                    if cursor == snapshot.len() || poll_start.elapsed() >= self.flush_poll_budget {
+                        break;
+                    }
                 }
-                cursor = end;
                 if cursor < snapshot.len() {
                     pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                         source,
@@ -1384,123 +1411,141 @@ impl RibManager {
                 mut active_probe,
                 mut full_probe_count,
             } => {
-                if let Some(mut probe) = active_probe.take() {
-                    let end = super::policy_transition_slice_end(
-                        probe.cursor,
-                        inventory.announce.len(),
-                        super::POLICY_TRANSITION_ROUTE_SLICE,
-                    );
-                    let candidates = inventory.announce[probe.cursor..end]
-                        .iter()
-                        .zip(inventory.next_hop_override[probe.cursor..end].iter())
-                        .map(|(route, next_hop_override)| {
-                            crate::update::ExactExportCandidate::Unicast {
-                                route,
-                                next_hop_override: next_hop_override.as_ref(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let (results, cardinality_correct) = probe_exact_export_announcements(
-                        probe.peer,
-                        probe.snapshot.as_ref(),
-                        &candidates,
-                    );
-                    if !cardinality_correct || results.iter().any(Result::is_err) {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
-                    }
-                    full_probe_count = full_probe_count.saturating_add(results.len());
-                    probe.encoded_lengths.extend(
-                        results
-                            .into_iter()
-                            .filter_map(|result| result.ok().map(|accepted| accepted.encoded_len)),
-                    );
-                    probe.cursor = end;
-                    if probe.cursor < inventory.announce.len() {
-                        active_probe = Some(probe);
-                    } else {
-                        probe_cache.store(
-                            destination,
-                            Arc::clone(&inventory.announce),
-                            Arc::clone(&inventory.next_hop_override),
-                            Arc::clone(&probe.snapshot),
-                            probe.encoded_lengths,
+                // Budgeted stride loop, matching the commit flush and dirty
+                // resync: one stride is a POLICY_TRANSITION_ROUTE_SLICE probe
+                // slice or one member classification; keep striding until the
+                // poll budget elapses. The transition fence admits only the
+                // read-only readiness lane between polls, so a multi-stride
+                // poll observes the same frozen state as single-stride polls —
+                // fewer, fatter polls shrink the fenced window that stalls
+                // interleaved churn (400k routes = 391 single-slice probe
+                // polls, a measured ~1.1 s of wall at 700 members).
+                let poll_start = std::time::Instant::now();
+                loop {
+                    if let Some(mut probe) = active_probe.take() {
+                        let end = super::policy_transition_slice_end(
+                            probe.cursor,
+                            inventory.announce.len(),
+                            super::POLICY_TRANSITION_ROUTE_SLICE,
                         );
-                        prepared.push(PreparedCleanPolicyTransitionPeer {
-                            peer: probe.peer,
-                            session_id: probe.session_id,
-                            export_policy: probe.export_policy,
-                            snapshot: Some(probe.snapshot),
-                            sender: probe.sender,
-                            permit: probe.permit,
-                        });
-                        cursor += 1;
-                    }
-                } else if cursor < pending.replacements.len() {
-                    let replacement = &pending.replacements[cursor];
-                    let peer = replacement.peer;
-                    let Some(session_id) = self.outbound_session_ids.get(&peer).copied() else {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
-                    };
-                    let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
-                        return CleanPolicyTransitionAdvance::Fallback(pending);
-                    };
-                    let permit = if inventory.announce.is_empty() {
-                        None
-                    } else {
-                        let Ok(permit) = sender.clone().try_reserve_owned() else {
-                            return CleanPolicyTransitionAdvance::Fallback(pending);
-                        };
-                        Some(permit)
-                    };
-                    let export_policy = replacement.export_policy.clone();
-                    if inventory.announce.is_empty() {
-                        prepared.push(PreparedCleanPolicyTransitionPeer {
-                            peer,
-                            session_id,
-                            export_policy,
-                            snapshot: None,
-                            sender,
-                            permit,
-                        });
-                        cursor += 1;
-                    } else {
-                        let Some(encoder) = self.peer_export_encoders.get(&peer) else {
-                            return CleanPolicyTransitionAdvance::Fallback(pending);
-                        };
-                        let snapshot = encoder.snapshot();
-                        if snapshot.owner_id() != encoder.owner_id() {
+                        let candidates = inventory.announce[probe.cursor..end]
+                            .iter()
+                            .zip(inventory.next_hop_override[probe.cursor..end].iter())
+                            .map(|(route, next_hop_override)| {
+                                crate::update::ExactExportCandidate::Unicast {
+                                    route,
+                                    next_hop_override: next_hop_override.as_ref(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let (results, cardinality_correct) = probe_exact_export_announcements(
+                            probe.peer,
+                            probe.snapshot.as_ref(),
+                            &candidates,
+                        );
+                        if !cardinality_correct || results.iter().any(Result::is_err) {
                             return CleanPolicyTransitionAdvance::Fallback(pending);
                         }
-                        if let Some(maximum) = probe_cache.reuse_grouped_exact_export_maximum(
-                            destination,
-                            &inventory.announce,
-                            &inventory.next_hop_override,
-                            snapshot.as_ref(),
-                        ) {
-                            if maximum.is_err() {
+                        full_probe_count = full_probe_count.saturating_add(results.len());
+                        probe.encoded_lengths.extend(
+                            results.into_iter().filter_map(|result| {
+                                result.ok().map(|accepted| accepted.encoded_len)
+                            }),
+                        );
+                        probe.cursor = end;
+                        if probe.cursor < inventory.announce.len() {
+                            active_probe = Some(probe);
+                        } else {
+                            probe_cache.store(
+                                destination,
+                                Arc::clone(&inventory.announce),
+                                Arc::clone(&inventory.next_hop_override),
+                                Arc::clone(&probe.snapshot),
+                                probe.encoded_lengths,
+                            );
+                            prepared.push(PreparedCleanPolicyTransitionPeer {
+                                peer: probe.peer,
+                                session_id: probe.session_id,
+                                export_policy: probe.export_policy,
+                                snapshot: Some(probe.snapshot),
+                                sender: probe.sender,
+                                permit: probe.permit,
+                            });
+                            cursor += 1;
+                        }
+                    } else if cursor < pending.replacements.len() {
+                        let replacement = &pending.replacements[cursor];
+                        let peer = replacement.peer;
+                        let Some(session_id) = self.outbound_session_ids.get(&peer).copied() else {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        };
+                        let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
+                            return CleanPolicyTransitionAdvance::Fallback(pending);
+                        };
+                        let permit = if inventory.announce.is_empty() {
+                            None
+                        } else {
+                            let Ok(permit) = sender.clone().try_reserve_owned() else {
                                 return CleanPolicyTransitionAdvance::Fallback(pending);
-                            }
+                            };
+                            Some(permit)
+                        };
+                        let export_policy = replacement.export_policy.clone();
+                        if inventory.announce.is_empty() {
                             prepared.push(PreparedCleanPolicyTransitionPeer {
                                 peer,
                                 session_id,
                                 export_policy,
-                                snapshot: Some(snapshot),
+                                snapshot: None,
                                 sender,
                                 permit,
                             });
                             cursor += 1;
                         } else {
-                            active_probe = Some(CleanPolicyTransitionProbe {
-                                peer,
-                                session_id,
-                                export_policy,
-                                snapshot,
-                                sender,
-                                permit,
-                                cursor: 0,
-                                encoded_lengths: Vec::with_capacity(inventory.announce.len()),
-                            });
+                            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                                return CleanPolicyTransitionAdvance::Fallback(pending);
+                            };
+                            let snapshot = encoder.snapshot();
+                            if snapshot.owner_id() != encoder.owner_id() {
+                                return CleanPolicyTransitionAdvance::Fallback(pending);
+                            }
+                            if let Some(maximum) = probe_cache.reuse_grouped_exact_export_maximum(
+                                destination,
+                                &inventory.announce,
+                                &inventory.next_hop_override,
+                                snapshot.as_ref(),
+                            ) {
+                                if maximum.is_err() {
+                                    return CleanPolicyTransitionAdvance::Fallback(pending);
+                                }
+                                prepared.push(PreparedCleanPolicyTransitionPeer {
+                                    peer,
+                                    session_id,
+                                    export_policy,
+                                    snapshot: Some(snapshot),
+                                    sender,
+                                    permit,
+                                });
+                                cursor += 1;
+                            } else {
+                                active_probe = Some(CleanPolicyTransitionProbe {
+                                    peer,
+                                    session_id,
+                                    export_policy,
+                                    snapshot,
+                                    sender,
+                                    permit,
+                                    cursor: 0,
+                                    encoded_lengths: Vec::with_capacity(inventory.announce.len()),
+                                });
+                            }
                         }
+                    }
+                    if cursor == pending.replacements.len() && active_probe.is_none() {
+                        break;
+                    }
+                    if poll_start.elapsed() >= self.flush_poll_budget {
+                        break;
                     }
                 }
 

@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Every pre-commit phase of a shared policy transition (member
+  classification, destination staging, inventory build, and the
+  exact-export probe) now strides under the same 25 ms wall-clock poll
+  budget as the commit flush, instead of parking after one fixed-size
+  slice per actor poll. The fenced window that excludes interleaved
+  churn during a transition no longer scales with members x table size
+  (400k routes cost ~391 single-slice probe polls — a measured ~1.1 s
+  observer gap at 700 members).
+
 - **Reloads that change import and export policy together now take the
   batched export cohort instead of the per-peer authoritative path.** The
   cohort's eligibility check no longer requires an unchanged import chain:
