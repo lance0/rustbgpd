@@ -3163,13 +3163,16 @@ async fn shared_group_encode_first_member_encodes_and_second_reuses() {
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.handle_outbound_route_update(update).await;
     let published = shared.cell.get().expect("first member publishes the cell");
-    let super::shared_group::SharedUnicastEncode::Ready { chunks, .. } = published
-        .downcast_ref::<super::shared_group::SharedUnicastEncode>()
+    let (chunk_count, terminal) = published
+        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
         .expect("cell payload is the transport shared-encode type")
-    else {
-        panic!("uniform-profile inventory must be shareable");
-    };
-    assert_eq!(chunks.len(), 3, "one chunk per source at this size");
+        .test_snapshot();
+    assert_eq!(
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete),
+        "uniform-profile inventory must complete"
+    );
+    assert_eq!(chunk_count, 3, "one chunk per source at this size");
     assert_eq!(
         read_announced_prefixes(&mut wire_a, 2).await,
         {
@@ -3258,14 +3261,16 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.handle_outbound_route_update(update).await;
     let published = shared.cell.get().expect("cell published");
-    let super::shared_group::SharedUnicastEncode::Ready { chunks, .. } = published
-        .downcast_ref::<super::shared_group::SharedUnicastEncode>()
+    let (chunk_count, terminal) = published
+        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
         .unwrap()
-    else {
-        panic!("inventory must be shareable");
-    };
-    assert!(
-        chunks.iter().any(|chunk| chunk.afi == Afi::Ipv6),
+        .test_snapshot();
+    assert_eq!(
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete)
+    );
+    assert_eq!(
+        chunk_count, 2,
         "encoder produced the IPv6 chunk for dual-stack members"
     );
     // Member A negotiated only IPv4-unicast and excluded source A: nothing
@@ -3283,6 +3288,170 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
         vec![Prefix::V4(sentinel_prefix)],
         "no IPv6 UPDATE preceded the sentinel on an IPv4-only session"
     );
+}
+
+/// A stream that terminates `Failed` after a member already sent shared
+/// chunks must fall back to the full local encode: the receiver sees the
+/// head chunk again (byte-identical, idempotent) and every remaining route
+/// exactly once — repetition is possible, skipping is not.
+#[tokio::test]
+async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    let source_a = Ipv4Addr::new(10, 33, 0, 1);
+    let source_b = Ipv4Addr::new(10, 33, 0, 2);
+    let source_x = Ipv4Addr::new(10, 33, 0, 9);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let announce = vec![
+        make_sourced_route(source_a, prefix_a, 64_601),
+        make_sourced_route(source_b, prefix_b, 64_602),
+    ];
+
+    let (mut member, mut wire) = shared_group_member(65001).await;
+    let profile = (*member.publish_export_profile()).clone();
+    let encode = ProgressiveUnicastEncode::test_new(profile.clone());
+    // Simulate an encoder that published the first source's chunk and then
+    // hit an anomaly.
+    let mut cache = super::export::PreparedAttrCache::default();
+    let head = super::shared_group::encode_shared_unicast_slice(
+        &profile,
+        &mut cache,
+        &announce[..1],
+        &[None],
+    )
+    .expect("head slice encodes");
+    encode.test_publish(head);
+    encode.test_finish(StreamTerminal::Failed);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    assert!(
+        shared
+            .cell
+            .set(Arc::new(encode) as Arc<dyn std::any::Any + Send + Sync>)
+            .is_ok(),
+        "fresh cell"
+    );
+
+    // Exclusion targets an uninvolved source, so this member wants both
+    // routes.
+    let update = shared_group_envelope(&member, &shared, source_x, &announce);
+    member.handle_outbound_route_update(update).await;
+
+    // Wire: the shared head chunk (prefix A), then the full local fallback
+    // stream (prefix A and prefix B in distinct-attr UPDATEs).
+    assert_eq!(
+        read_announced_prefixes(&mut wire, 3).await,
+        {
+            let mut expected = vec![
+                Prefix::V4(prefix_a),
+                Prefix::V4(prefix_a),
+                Prefix::V4(prefix_b),
+            ];
+            expected.sort_unstable();
+            expected
+        },
+        "head chunk repeats (idempotent), nothing is skipped"
+    );
+}
+
+/// The encoder unwinding without a terminal must leave `Failed`, never a
+/// stream consumers could wait on forever.
+#[tokio::test]
+async fn shared_group_encoder_guard_publishes_failed_on_unwind() {
+    use super::shared_group::{EncoderGuard, ProgressiveUnicastEncode, StreamTerminal};
+    let (member, _wire) = shared_group_member(65001).await;
+    let encode = ProgressiveUnicastEncode::test_new((*member.publish_export_profile()).clone());
+    drop(EncoderGuard(&encode));
+    assert_eq!(encode.test_snapshot(), (0, Some(StreamTerminal::Failed)));
+}
+
+/// An inventory larger than one encoder slice is published progressively
+/// across slices and streams completely to a consumer, with split horizon
+/// still composed from whole per-source chunks.
+#[tokio::test]
+async fn shared_group_encode_streams_multiple_slices() {
+    let sources = [
+        Ipv4Addr::new(10, 34, 0, 1),
+        Ipv4Addr::new(10, 34, 0, 2),
+        Ipv4Addr::new(10, 34, 0, 3),
+    ];
+    // One attribute Arc per source so same-source routes group into shared
+    // chunks (mirroring interned route-server tables).
+    let attrs: Vec<Arc<Vec<PathAttribute>>> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, source)| {
+            Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![
+                        64_601 + u32::try_from(i).unwrap(),
+                    ])],
+                }),
+                PathAttribute::NextHop(*source),
+            ])
+        })
+        .collect();
+    let total = 2_100_usize; // > one 2048-route slice
+    let announce: Vec<Route> = (0..total)
+        .map(|i| {
+            let source = sources[i % 3];
+            Route {
+                prefix: Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x0A40_0000_u32 + u32::try_from(i).unwrap() * 256),
+                    24,
+                )),
+                peer: IpAddr::V4(source),
+                next_hop: IpAddr::V4(source),
+                attributes: Arc::clone(&attrs[i % 3]),
+                ..make_route(100)
+            }
+        })
+        .collect();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_a, &shared, sources[0], &announce);
+    member_a.handle_outbound_route_update(update).await;
+    let (chunk_count, terminal) = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .unwrap()
+        .test_snapshot();
+    assert_eq!(
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete)
+    );
+    assert_eq!(
+        chunk_count, 6,
+        "three per-source chunks per slice, two slices"
+    );
+
+    let expected_a: Vec<Prefix> = {
+        let mut v: Vec<Prefix> = announce
+            .iter()
+            .filter(|route| route.peer != IpAddr::V4(sources[0]))
+            .map(|route| route.prefix)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(read_announced_prefixes(&mut wire_a, 4).await, expected_a);
+
+    let (mut member_b, mut wire_b) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_b, &shared, sources[1], &announce);
+    member_b.handle_outbound_route_update(update).await;
+    let expected_b: Vec<Prefix> = {
+        let mut v: Vec<Prefix> = announce
+            .iter()
+            .filter(|route| route.peer != IpAddr::V4(sources[1]))
+            .map(|route| route.prefix)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(read_announced_prefixes(&mut wire_b, 4).await, expected_b);
 }
 #[tokio::test]
 async fn send_route_update_emits_bgpls_reach_and_unreach() {

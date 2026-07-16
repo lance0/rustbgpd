@@ -87,3 +87,37 @@ the mirror byte-exact).
 - The shared bytes hold one encoded copy of the table for the life of the
   fanout envelopes — bounded by the same inventory the envelopes already
   share.
+
+## Amendment: progressive chunk publication
+
+The original design published the whole encoded payload through one
+`OnceCell`, so every consumer awaited the encoder's full-table encode before
+sending anything: the single-threaded encode became the per-observer wire-gap
+floor (measured 1.2–1.5 s at 700 clients × 400,400 routes, above the 1 s
+receipt gate, even though completion and first-UPDATE latency were healthy).
+
+Publication is now progressive. The cell became a synchronous `OnceLock`
+whose initializer only *constructs* an empty stream state (encoder profile,
+a mutex-guarded chunk vector with a terminal marker, and a `Notify`), so
+encoder election commits with no await point between winning and encoding —
+an initialized cell always has a live encoder or its guard's terminal. The
+encoder prepares, groups, and encodes the inventory in bounded route slices
+(2048 routes; single-digit-millisecond encode at reload-stall shapes),
+publishing each slice's chunks as they are produced and sending its own
+filtered copy along the way; consumers prove wire-equivalence once, then
+send chunk *i* as soon as it exists. A member's longest wire silence now
+tracks per-slice encode latency instead of the full-table encode. Sources
+spanning a slice boundary cost one extra UPDATE each; slices keep the
+announce/next-hop-override index alignment, and the prepared-attribute cache
+persists across slices.
+
+The terminal marker is `Complete` or `Failed`. Any encoder anomaly — the
+same enumerated cases as before, at any slice — terminates the stream as
+`Failed`, published by a drop guard even if the encoder unwinds, and every
+member falls back to the ordinary per-session encode. Mid-stream fallback is
+safe by construction: everything a member already sent is byte-identical to
+what its local re-encode produces (exactly what the wire-equivalence proof
+establishes for an announce-only envelope), so the receiver sees idempotent
+re-announcements and no route can be skipped. An encoder whose own writer
+saturates keeps publishing for the group; its own teardown policy has
+already run inside the failed enqueue.

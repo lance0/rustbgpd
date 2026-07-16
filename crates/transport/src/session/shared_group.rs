@@ -1,4 +1,5 @@
-//! Encode-once fanout for update-group shared envelopes (LAN-455/LAN-458).
+//! Encode-once fanout for update-group shared envelopes (LAN-455/LAN-458),
+//! with progressive chunk publication (ADR-0109, amended).
 //!
 //! A clean grouped export-policy transition releases the *same* announce
 //! inventory (`Arc`-shared) to every member of an update-group, differing
@@ -7,17 +8,27 @@
 //! encodes that fair-shared the cores and delayed everyone's first wire
 //! UPDATE by the total encode time divided by the core count.
 //!
-//! Here the first member to consume its envelope encodes the inventory once
-//! into per-`(source peer, family)` wire chunks at the standard 4096-byte
-//! ceiling and publishes them through the envelope's
-//! [`SharedGroupEncode`] cell; every other member awaits the cell, proves
-//! byte-equivalence with [`SessionExportProfile::has_same_wire_encoding`],
-//! and enqueues the shared bytes — skipping the chunks of its own source
-//! (split horizon) and of families it did not negotiate. Any anomaly
-//! (profile mismatch, preparation failure, OTC filter hit, single-entry
-//! oversize, scoped-link-local IPv4 drop) makes the payload unshareable and
-//! each member falls back to the ordinary per-session encode, which owns
-//! the established diagnostics and teardown semantics for every such case.
+//! The first member to consume its envelope is elected encoder through the
+//! envelope's [`SharedGroupEncode`] cell (a synchronous `OnceLock`, so the
+//! election commits with no await point that could strand an initialized
+//! cell without a live encoder). The encoder prepares, groups, and encodes
+//! the inventory in bounded route slices, publishing each slice's chunks as
+//! they are produced; every other member proves byte-equivalence with
+//! [`SessionExportProfile::has_same_wire_encoding`] and then *streams* the
+//! chunks — sending chunk `i` as soon as it exists instead of awaiting the
+//! whole payload — skipping the chunks of its own source (split horizon)
+//! and of families it did not negotiate. This makes a member's longest wire
+//! silence track per-slice encode latency instead of the full-table encode.
+//!
+//! Failure semantics: any anomaly (preparation failure, OTC filter hit,
+//! single-entry oversize, scoped-link-local IPv4 drop) terminates the
+//! stream as `Failed` — published by a drop guard even if the encoder
+//! unwinds — and every member falls back to the ordinary per-session
+//! encode, which owns the established diagnostics and teardown semantics
+//! for each case. Mid-stream fallback is safe by construction: the chunks a
+//! member already sent are byte-identical to what its local encode re-sends
+//! (that is exactly what the wire-equivalence proof establishes), so the
+//! receiver sees idempotent re-announcements and no route can be skipped.
 //!
 //! Chunks never mix source peers even when global attribute interning gives
 //! two sources pointer-identical attribute sets: keeping the source in the
@@ -36,27 +47,124 @@ use bytes::Bytes;
 use rustbgpd_rib::SharedGroupEncode;
 use rustc_hash::FxHashMap as HashMap;
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Routes per encoder slice: each slice is prepared, grouped, encoded, and
+/// published as one unit, so consumers' streaming granularity (and the gap
+/// floor between their UPDATEs) tracks one slice's encode latency — single-
+/// digit milliseconds at reload-stall route shapes — instead of the full
+/// table. Sources spanning a slice boundary cost one extra UPDATE each.
+const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 
 /// One pre-encoded wire UPDATE carrying routes from exactly one source peer
 /// and one unicast family.
+#[derive(Clone)]
 pub(super) struct SharedUnicastChunk {
     pub(super) source: IpAddr,
     pub(super) afi: Afi,
     pub(super) bytes: Bytes,
 }
 
-/// Cell payload published by the first member to consume its envelope.
-pub(super) enum SharedUnicastEncode {
-    /// Chunks valid for every member whose export profile proves
-    /// [`SessionExportProfile::has_same_wire_encoding`] with `profile`.
-    Ready {
-        profile: SessionExportProfile,
-        chunks: Vec<SharedUnicastChunk>,
-    },
-    /// The encoding member hit an anomaly; every member (encoder included)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum StreamTerminal {
+    /// Every chunk of the inventory has been published.
+    Complete,
+    /// The stream is truncated (encoder anomaly or unwind); every member
     /// falls back to its ordinary per-session encode.
-    Unshareable,
+    Failed,
+}
+
+#[derive(Default)]
+struct ProgressiveStateInner {
+    chunks: Vec<SharedUnicastChunk>,
+    terminal: Option<StreamTerminal>,
+}
+
+/// Cell payload created by the elected encoder *before* it encodes anything.
+pub(super) struct ProgressiveUnicastEncode {
+    /// The encoder's profile; consumers reuse chunks only after proving
+    /// [`SessionExportProfile::has_same_wire_encoding`] against it.
+    profile: SessionExportProfile,
+    state: Mutex<ProgressiveStateInner>,
+    progress: tokio::sync::Notify,
+}
+
+impl ProgressiveUnicastEncode {
+    fn new(profile: SessionExportProfile) -> Self {
+        Self {
+            profile,
+            state: Mutex::new(ProgressiveStateInner::default()),
+            progress: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn publish(&self, chunks: Vec<SharedUnicastChunk>) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.chunks.extend(chunks);
+        }
+        self.progress.notify_waiters();
+    }
+
+    /// First terminal wins; the encoder's explicit `Complete` makes the
+    /// drop guard's `Failed` a no-op on the success path.
+    fn finish(&self, terminal: StreamTerminal) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.terminal.is_none() {
+                state.terminal = Some(terminal);
+            }
+        }
+        self.progress.notify_waiters();
+    }
+
+    /// Chunks published since `from`, plus the terminal state. Bytes are
+    /// refcounted, so the clone-out is cheap.
+    fn snapshot_from(&self, from: usize) -> (Vec<SharedUnicastChunk>, Option<StreamTerminal>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.chunks.get(from..).unwrap_or(&[]).to_vec(),
+            state.terminal,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_new(profile: SessionExportProfile) -> Self {
+        Self::new(profile)
+    }
+    #[cfg(test)]
+    pub(super) fn test_publish(&self, chunks: Vec<SharedUnicastChunk>) {
+        self.publish(chunks);
+    }
+    #[cfg(test)]
+    pub(super) fn test_finish(&self, terminal: StreamTerminal) {
+        self.finish(terminal);
+    }
+    #[cfg(test)]
+    pub(super) fn test_snapshot(&self) -> (usize, Option<StreamTerminal>) {
+        let (chunks, terminal) = self.snapshot_from(0);
+        (chunks.len(), terminal)
+    }
+}
+
+/// Publishes `Failed` if the encoder unwinds (panic or early return) before
+/// its explicit `finish(Complete)`, so consumers can never wait forever on a
+/// stream with no live encoder.
+pub(super) struct EncoderGuard<'cell>(pub(super) &'cell ProgressiveUnicastEncode);
+
+impl Drop for EncoderGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish(StreamTerminal::Failed);
+    }
 }
 
 /// Whether an envelope is shaped like a clean group-transition fanout:
@@ -144,26 +252,22 @@ struct SharedGroup {
     body: SharedGroupBody,
 }
 
-/// Encode the shared inventory once: prepare and group announcements
-/// exactly like the per-session path, with the source peer added to the
-/// group key, then chunk each group to the standard message ceiling.
+/// Prepare, group, and encode one slice of the shared inventory exactly
+/// like the per-session path, with the source peer added to the group key.
+/// `None` = the stream is unshareable (the per-session fallback owns the
+/// diagnostics and teardown semantics for the failing case).
 #[expect(
     clippy::too_many_lines,
     reason = "mirrors the per-session grouping branches in one auditable pass"
 )]
-pub(super) fn build_shared_unicast_encode(
+pub(super) fn encode_shared_unicast_slice(
     export: &SessionExportProfile,
+    cache: &mut PreparedAttrCache,
     announce: &[Route],
     next_hop_override: &[Option<rustbgpd_policy::NextHopAction>],
-) -> SharedUnicastEncode {
-    // Scoped link-local peers silently drop IPv4 with a per-member warning;
-    // keep that behavior on the per-session path.
-    if export.is_scoped_link_local_peer() {
-        return SharedUnicastEncode::Unshareable;
-    }
+) -> Option<Vec<SharedUnicastChunk>> {
     let max_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN);
     let local_ipv4 = export.local_ipv4();
-    let mut cache = PreparedAttrCache::default();
     let mut index: HashMap<SharedGroupKey, usize> = HashMap::default();
     let mut groups: Vec<SharedGroup> = Vec::new();
     for (i, route) in announce.iter().enumerate() {
@@ -171,11 +275,11 @@ pub(super) fn build_shared_unicast_encode(
             // RIB staging removes OTC-blocked routes before this seam; if
             // one slips through, the per-session path owns the per-member
             // diagnostics.
-            return SharedUnicastEncode::Unshareable;
+            return None;
         }
         let nh_override = next_hop_override.get(i).and_then(Option::as_ref);
         let attrs = export
-            .prepared_unicast_attributes_cached(&mut cache, route, local_ipv4, nh_override)
+            .prepared_unicast_attributes_cached(cache, route, local_ipv4, nh_override)
             .clone();
         // `finish_unicast_candidate` picks IPv4-body vs MP_REACH from the
         // profile's Extended Next Hop state itself, so this match covers
@@ -219,7 +323,7 @@ pub(super) fn build_shared_unicast_encode(
             // The exact-export preflight probed every route on this same
             // snapshot before commit; a failure here is the anomaly the
             // per-session path turns into a teardown.
-            Err(_) => return SharedUnicastEncode::Unshareable,
+            Err(_) => return None,
         };
         if let Some(&at) = index.get(&key) {
             match (&mut groups[at].body, body_seed) {
@@ -240,7 +344,7 @@ pub(super) fn build_shared_unicast_encode(
                 // A key collision across body kinds cannot happen (MP keys
                 // always carry a next hop, body keys never do), but sharing
                 // must stay provable rather than clever.
-                _ => return SharedUnicastEncode::Unshareable,
+                _ => return None,
             }
         } else {
             index.insert(key, groups.len());
@@ -281,19 +385,13 @@ pub(super) fn build_shared_unicast_encode(
                 }),
             ),
         };
-        let Some(encoded) = encoded else {
-            return SharedUnicastEncode::Unshareable;
-        };
-        chunks.extend(encoded.into_iter().map(|bytes| SharedUnicastChunk {
+        chunks.extend(encoded?.into_iter().map(|bytes| SharedUnicastChunk {
             source: group.source,
             afi,
             bytes,
         }));
     }
-    SharedUnicastEncode::Ready {
-        profile: export.clone(),
-        chunks,
-    }
+    Some(chunks)
 }
 
 impl PeerSession {
@@ -313,7 +411,9 @@ impl PeerSession {
     /// shared bytes (including an enqueue failure, whose saturation/teardown
     /// policy already ran — re-encoding locally would duplicate the stream).
     /// `false` = fall back to the ordinary path, which re-runs the snapshot
-    /// trust checks and owns their teardown.
+    /// trust checks and owns their teardown. Mid-stream `false` (truncated
+    /// stream) is safe: everything sent so far is byte-identical to what the
+    /// local re-encode sends, so the fallback can only repeat, never skip.
     async fn try_send_shared_group(
         &mut self,
         shared: &SharedGroupEncode,
@@ -330,54 +430,147 @@ impl PeerSession {
         {
             return false;
         }
-        let encoded = shared
-            .cell
-            .get_or_init(|| {
-                let value: Arc<dyn Any + Send + Sync> = Arc::new(build_shared_unicast_encode(
-                    export,
-                    &update.announce,
-                    &update.next_hop_override,
-                ));
-                std::future::ready(value)
-            })
-            .await;
-        let Some(encode) = encoded.downcast_ref::<SharedUnicastEncode>() else {
+        // Encoder election: constructing the (empty) stream state is the
+        // only work inside the lock, and there is no await between winning
+        // and encoding, so an initialized cell always has a live encoder
+        // (or its drop guard's terminal).
+        let mut elected_encoder = false;
+        let cell = shared.cell.get_or_init(|| {
+            elected_encoder = true;
+            Arc::new(ProgressiveUnicastEncode::new(export.clone())) as Arc<dyn Any + Send + Sync>
+        });
+        let Some(encode) = cell.downcast_ref::<ProgressiveUnicastEncode>() else {
             return false;
         };
-        let SharedUnicastEncode::Ready { profile, chunks } = encode else {
-            return false;
-        };
-        if !export.has_same_wire_encoding(profile) {
+        if elected_encoder {
+            self.encode_and_send_shared_group(encode, update, export)
+        } else {
+            self.stream_shared_group(encode, update, export).await
+        }
+    }
+
+    /// Encoder role: encode the inventory slice by slice, publishing each
+    /// slice's chunks for the group and sending its own filtered copy along
+    /// the way. Scoped-link-local peers and any slice failure terminate the
+    /// stream as `Failed` (via the guard) and fall back locally.
+    fn encode_and_send_shared_group(
+        &mut self,
+        encode: &ProgressiveUnicastEncode,
+        update: &OutboundRouteUpdate,
+        export: &SessionExportProfile,
+    ) -> bool {
+        let guard = EncoderGuard(encode);
+        if export.is_scoped_link_local_peer() {
+            // The per-session path owns the per-member IPv4-drop warning.
             return false;
         }
+        let mut cache = PreparedAttrCache::default();
+        // Keep publishing for the group even after this session's own writer
+        // saturates: the group's stream must not depend on one member's
+        // channel health. The saturation/teardown policy for this session
+        // already ran inside the failed enqueue.
+        let mut own_send_healthy = true;
         let mut sent: u64 = 0;
-        for chunk in chunks {
-            if update.announce_source_exclusion == Some(chunk.source) {
-                continue;
+        let mut idx = 0;
+        while idx < update.announce.len() {
+            let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(update.announce.len());
+            let Some(chunks) = encode_shared_unicast_slice(
+                export,
+                &mut cache,
+                &update.announce[idx..end],
+                update.next_hop_override.get(idx..end).unwrap_or(&[]),
+            ) else {
+                return false;
+            };
+            let mine: Vec<SharedUnicastChunk> = chunks
+                .iter()
+                .filter(|chunk| self.wants_shared_chunk(update, chunk))
+                .cloned()
+                .collect();
+            encode.publish(chunks);
+            if own_send_healthy {
+                for chunk in mine {
+                    if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
+                        own_send_healthy = false;
+                        break;
+                    }
+                    self.updates_sent += 1;
+                    self.metrics.record_message_sent(&self.peer_label, "update");
+                    sent += 1;
+                }
             }
-            if !self
-                .negotiated_families
-                .contains(&(chunk.afi, Safi::Unicast))
-            {
-                continue;
-            }
-            if self
-                .enqueue_bulk_encoded(chunk.bytes.clone(), true)
-                .is_err()
-            {
-                // Saturation teardown / writer-closed policy already ran
-                // inside; abort the batch like the ordinary chunked senders.
-                return true;
-            }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
-            sent += 1;
+            idx = end;
         }
+        encode.finish(StreamTerminal::Complete);
+        drop(guard);
         debug!(
             peer = %self.peer_label,
             updates = sent,
-            "sent update-group announcements from shared encode"
+            "encoded and sent update-group announcements as shared encode"
         );
         true
+    }
+
+    /// Consumer role: prove byte-equivalence once, then send each chunk as
+    /// it is published instead of awaiting the whole payload.
+    async fn stream_shared_group(
+        &mut self,
+        encode: &ProgressiveUnicastEncode,
+        update: &OutboundRouteUpdate,
+        export: &SessionExportProfile,
+    ) -> bool {
+        if !export.has_same_wire_encoding(&encode.profile) {
+            return false;
+        }
+        let mut next = 0;
+        let mut sent: u64 = 0;
+        loop {
+            // Register for wakeups BEFORE snapshotting, so a publish that
+            // lands between the snapshot and the await still wakes us.
+            let notified = encode.progress.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let (new_chunks, terminal) = encode.snapshot_from(next);
+            next += new_chunks.len();
+            for chunk in new_chunks {
+                if !self.wants_shared_chunk(update, &chunk) {
+                    continue;
+                }
+                if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
+                    // Saturation teardown / writer-closed policy already ran
+                    // inside; abort like the ordinary chunked senders.
+                    return true;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
+                sent += 1;
+            }
+            match terminal {
+                Some(StreamTerminal::Complete) => {
+                    debug!(
+                        peer = %self.peer_label,
+                        updates = sent,
+                        "sent update-group announcements from shared encode"
+                    );
+                    return true;
+                }
+                Some(StreamTerminal::Failed) => {
+                    // Truncated stream: fall back to the full local encode.
+                    // Chunks already sent are byte-identical to the local
+                    // path's output, so the receiver sees idempotent
+                    // re-announcements; nothing can be skipped.
+                    return false;
+                }
+                None => notified.await,
+            }
+        }
+    }
+
+    /// Split horizon (own-source exclusion) plus negotiated-family filter.
+    fn wants_shared_chunk(&self, update: &OutboundRouteUpdate, chunk: &SharedUnicastChunk) -> bool {
+        update.announce_source_exclusion != Some(chunk.source)
+            && self
+                .negotiated_families
+                .contains(&(chunk.afi, Safi::Unicast))
     }
 }
