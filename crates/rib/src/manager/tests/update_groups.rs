@@ -705,9 +705,13 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     let mut folded = Vec::new();
+    let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
         assert!(update.withdraw.is_empty());
+        if let Some(cell) = &update.shared_group_encode {
+            shared_cells.push(Arc::clone(cell));
+        }
         let mut routes = update
             .announce
             .iter()
@@ -722,6 +726,19 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
             .collect::<Vec<_>>();
         routes.sort_unstable();
         folded.push(routes);
+    }
+    // A grouped commit hands every member the SAME encode-once cell so the
+    // transport fanout encodes the shared inventory exactly once; the
+    // ungrouped per-peer path must never carry one.
+    if force_ungrouped {
+        assert!(shared_cells.is_empty());
+    } else {
+        assert_eq!(shared_cells.len(), receivers.len());
+        assert!(
+            shared_cells
+                .iter()
+                .all(|cell| Arc::ptr_eq(cell, &shared_cells[0]))
+        );
     }
     let (stats_reply, stats_response) = oneshot::channel();
     tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })

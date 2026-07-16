@@ -6,6 +6,7 @@ pub(crate) mod inbound;
 mod io;
 mod outbound;
 mod refresh_accounting;
+mod shared_group;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
@@ -1530,7 +1531,7 @@ impl PeerSession {
                 // Outbound route updates from RIB manager
                 Some(update) = outbound_rx.recv(),
                     if self.fsm.state() == SessionState::Established => {
-                    self.send_route_update(update);
+                    self.handle_outbound_route_update(update).await;
                 }
             }
         }

@@ -992,6 +992,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     }
 }
 /// Expect the next BMP event to be a rib-out `RouteMonitoring` and
@@ -3035,6 +3036,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -3076,6 +3078,212 @@ async fn shared_transition_payload_excludes_only_the_target_source() {
     assert_eq!(parsed.announced.len(), 1);
     assert_eq!(parsed.announced[0].prefix, other_prefix);
 }
+
+/// Build a route-server-style route owned by `source` with a per-source
+/// `AS_PATH` so shared-encode grouping cannot merge sources through
+/// interned attribute pointers.
+fn make_sourced_route(source: Ipv4Addr, prefix: Ipv4Prefix, asn: u32) -> Route {
+    Route {
+        prefix: Prefix::V4(prefix),
+        peer: IpAddr::V4(source),
+        next_hop: IpAddr::V4(source),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![asn])],
+            }),
+            PathAttribute::NextHop(source),
+        ]),
+        ..make_route(100)
+    }
+}
+
+/// One update-group member session wired to a live loopback stream.
+async fn shared_group_member(local_asn: u32) -> (PeerSession, TcpStream) {
+    let (mut session, _rib_rx) = make_test_session_with_rib(local_asn, 65002);
+    let (client, server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    session.config.route_server_client = true;
+    (session, server)
+}
+
+fn shared_group_envelope(
+    session: &PeerSession,
+    shared: &Arc<rustbgpd_rib::SharedGroupEncode>,
+    excluded_source: Ipv4Addr,
+    announce: &[Route],
+) -> OutboundRouteUpdate {
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.announce_source_exclusion = Some(IpAddr::V4(excluded_source));
+    update.announce = announce.to_vec().into();
+    update.next_hop_override = vec![None; announce.len()].into();
+    update.shared_group_encode = Some(Arc::clone(shared));
+    update
+}
+
+async fn read_announced_prefixes(stream: &mut TcpStream, expected_updates: usize) -> Vec<Prefix> {
+    let mut prefixes = Vec::new();
+    for _ in 0..expected_updates {
+        let Message::Update(message) = read_single_bgp_message(stream).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        prefixes.extend(parsed.announced.iter().map(|nlri| Prefix::V4(nlri.prefix)));
+    }
+    prefixes.sort_unstable();
+    prefixes
+}
+
+/// The first member of a grouped fanout encodes the shared inventory once;
+/// the second reuses the published bytes. Each member's stream is the
+/// inventory minus its own source's chunks (split horizon composes from
+/// whole per-source chunks).
+#[tokio::test]
+async fn shared_group_encode_first_member_encodes_and_second_reuses() {
+    let source_a = Ipv4Addr::new(10, 30, 0, 1);
+    let source_b = Ipv4Addr::new(10, 30, 0, 2);
+    let source_c = Ipv4Addr::new(10, 30, 0, 3);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let prefix_c = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let announce = vec![
+        make_sourced_route(source_a, prefix_a, 64_601),
+        make_sourced_route(source_b, prefix_b, 64_602),
+        make_sourced_route(source_c, prefix_c, 64_603),
+    ];
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
+    member_a.handle_outbound_route_update(update).await;
+    let published = shared.cell.get().expect("first member publishes the cell");
+    let super::shared_group::SharedUnicastEncode::Ready { chunks, .. } = published
+        .downcast_ref::<super::shared_group::SharedUnicastEncode>()
+        .expect("cell payload is the transport shared-encode type")
+    else {
+        panic!("uniform-profile inventory must be shareable");
+    };
+    assert_eq!(chunks.len(), 3, "one chunk per source at this size");
+    assert_eq!(
+        read_announced_prefixes(&mut wire_a, 2).await,
+        {
+            let mut expected = vec![Prefix::V4(prefix_b), Prefix::V4(prefix_c)];
+            expected.sort_unstable();
+            expected
+        },
+        "member A receives the table minus its own source"
+    );
+
+    let (mut member_b, mut wire_b) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
+    member_b.handle_outbound_route_update(update).await;
+    assert!(
+        Arc::ptr_eq(shared.cell.get().unwrap(), published),
+        "second member reuses the published encode"
+    );
+    assert_eq!(
+        read_announced_prefixes(&mut wire_b, 2).await,
+        {
+            let mut expected = vec![Prefix::V4(prefix_a), Prefix::V4(prefix_c)];
+            expected.sort_unstable();
+            expected
+        },
+        "member B receives the table minus its own source"
+    );
+}
+
+/// A member whose export profile is not provably wire-identical to the
+/// encoder's must fall back to its ordinary per-session encode and still
+/// deliver a correct stream.
+#[tokio::test]
+async fn shared_group_encode_profile_mismatch_falls_back_to_local_encode() {
+    let source_a = Ipv4Addr::new(10, 31, 0, 1);
+    let source_b = Ipv4Addr::new(10, 31, 0, 2);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let announce = vec![
+        make_sourced_route(source_a, prefix_a, 64_601),
+        make_sourced_route(source_b, prefix_b, 64_602),
+    ];
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
+    member_a.handle_outbound_route_update(update).await;
+    assert!(shared.cell.get().is_some());
+    assert_eq!(
+        read_announced_prefixes(&mut wire_a, 1).await,
+        vec![Prefix::V4(prefix_b)]
+    );
+
+    // Different local ASN = different wire bytes (AS_PATH prepend) — the
+    // equality proof must reject the published encode.
+    let (mut member_b, mut wire_b) = shared_group_member(64_999).await;
+    let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
+    member_b.handle_outbound_route_update(update).await;
+    assert_eq!(
+        read_announced_prefixes(&mut wire_b, 1).await,
+        vec![Prefix::V4(prefix_a)],
+        "fallback member still delivers its correct per-session stream"
+    );
+}
+
+/// Shared chunks carry their family; a member that did not negotiate a
+/// family skips those chunks even though the encoder produced them.
+#[tokio::test]
+async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
+    let source_a = Ipv4Addr::new(10, 32, 0, 1);
+    let source_b = Ipv4Addr::new(10, 32, 0, 2);
+    let prefix_v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6_route = Route {
+        prefix: Prefix::V6(Ipv6Prefix::new(
+            "2001:db8:2::".parse::<Ipv6Addr>().unwrap(),
+            48,
+        )),
+        next_hop: IpAddr::V6("2001:db8::b".parse::<Ipv6Addr>().unwrap()),
+        ..make_sourced_route(source_b, prefix_v4, 64_602)
+    };
+    let announce = vec![make_sourced_route(source_a, prefix_v4, 64_601), v6_route];
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    // Encoder negotiated IPv4 only, and its own source is excluded — its
+    // wire stream must skip the IPv6 chunk it still encoded for the group.
+    let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
+    member_a.handle_outbound_route_update(update).await;
+    let published = shared.cell.get().expect("cell published");
+    let super::shared_group::SharedUnicastEncode::Ready { chunks, .. } = published
+        .downcast_ref::<super::shared_group::SharedUnicastEncode>()
+        .unwrap()
+    else {
+        panic!("inventory must be shareable");
+    };
+    assert!(
+        chunks.iter().any(|chunk| chunk.afi == Afi::Ipv6),
+        "encoder produced the IPv6 chunk for dual-stack members"
+    );
+    // Member A negotiated only IPv4-unicast and excluded source A: nothing
+    // but the IPv6 chunk remains, and that chunk is skipped — so the next
+    // message on the wire would block forever. Prove the skip by sending a
+    // sentinel envelope through the ordinary path and reading it back.
+    let mut sentinel = empty_outbound_update();
+    sentinel.exact_export_snapshot = Some(member_a.publish_export_profile());
+    let sentinel_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 128), 25);
+    sentinel.announce = vec![make_sourced_route(source_b, sentinel_prefix, 64_602)].into();
+    sentinel.next_hop_override = vec![None].into();
+    member_a.handle_outbound_route_update(sentinel).await;
+    assert_eq!(
+        read_announced_prefixes(&mut wire_a, 1).await,
+        vec![Prefix::V4(sentinel_prefix)],
+        "no IPv6 UPDATE preceded the sentinel on an IPv4-only session"
+    );
+}
 #[tokio::test]
 async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -3111,6 +3319,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_REACH UPDATE");
@@ -3150,6 +3359,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected BGP-LS MP_UNREACH UPDATE");
@@ -3208,6 +3418,7 @@ async fn oversized_bgpls_output_tears_down_session() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     assert!(
         session.read_half.is_none(),
@@ -3324,6 +3535,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected labeled MP_REACH UPDATE");
@@ -3373,6 +3585,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         labeled_withdraw: vec![key],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected labeled MP_UNREACH UPDATE");
@@ -3462,6 +3675,7 @@ async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected labeled MP_REACH UPDATE");
@@ -3551,6 +3765,7 @@ async fn send_route_update_reflects_vpnv6_link_local_next_hop() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected VPN MP_REACH UPDATE");
@@ -3618,6 +3833,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected labeled Add-Path MP_REACH UPDATE");
@@ -3642,26 +3858,8 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
     );
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
-        announce_source_exclusion: None,
-        otc_blocked: vec![],
-        announce: vec![].into(),
-        withdraw: vec![],
-        end_of_rib: vec![],
-        refresh_markers: vec![],
-        next_hop_override: vec![].into(),
-        flowspec_announce: vec![],
-        flowspec_withdraw: vec![],
-        evpn_announce: vec![],
-        evpn_withdraw: vec![],
-        bgpls_announce: vec![],
-        bgpls_withdraw: vec![],
-        vpn_announce: vec![],
-        labeled_announce: vec![],
-        rtc_announce: vec![],
-        vpn_withdraw: vec![],
         labeled_withdraw: vec![key],
-        rtc_withdraw: vec![],
-        request_refresh_all_negotiated: false,
+        ..empty_outbound_update()
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected labeled Add-Path MP_UNREACH UPDATE");
@@ -4073,6 +4271,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected VPN MP_REACH UPDATE");
@@ -4122,6 +4321,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected VPN MP_UNREACH UPDATE");
@@ -4171,26 +4371,8 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
-        announce_source_exclusion: None,
-        otc_blocked: vec![],
-        announce: vec![].into(),
-        withdraw: vec![],
-        end_of_rib: vec![],
-        refresh_markers: vec![],
-        next_hop_override: vec![].into(),
-        flowspec_announce: vec![],
-        flowspec_withdraw: vec![],
-        evpn_announce: vec![],
-        evpn_withdraw: vec![],
-        bgpls_announce: vec![],
-        bgpls_withdraw: vec![],
         vpn_announce: vec![route.clone()],
-        labeled_announce: vec![],
-        rtc_announce: vec![],
-        vpn_withdraw: vec![],
-        labeled_withdraw: vec![],
-        rtc_withdraw: vec![],
-        request_refresh_all_negotiated: false,
+        ..empty_outbound_update()
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected VPN Add-Path MP_REACH UPDATE");
@@ -4235,6 +4417,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected VPN Add-Path MP_UNREACH UPDATE");
@@ -5058,6 +5241,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         rtc_announce: vec![route.clone(), local_default],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     // Distinct next-hops (stored vs session-local) split into two UPDATEs.
     let mut seen_nlris = Vec::new();
@@ -5118,6 +5302,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         rtc_announce: vec![],
         rtc_withdraw: vec![key],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected RTC MP_UNREACH UPDATE");
@@ -5209,6 +5394,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: true,
+        shared_group_encode: None,
     });
     let mut refreshed = Vec::new();
     for _ in 0..2 {
@@ -5337,6 +5523,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: true,
+        shared_group_encode: None,
     });
     // The first wire message must be the EoR UPDATE — no ROUTE-REFRESH
     // was emitted ahead of it.
@@ -5409,6 +5596,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(first) = read_single_bgp_message(&mut server).await else {
         panic!("expected first UPDATE");
@@ -6489,6 +6677,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -8028,6 +8217,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8080,6 +8270,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8138,6 +8329,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8196,6 +8388,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8249,6 +8442,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let mut header = [0_u8; 19];
@@ -8316,6 +8510,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8372,6 +8567,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -8430,6 +8626,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
         labeled_withdraw: vec![],
         rtc_withdraw: vec![],
         request_refresh_all_negotiated: false,
+        shared_group_encode: None,
     };
     session.send_route_update(update);
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
