@@ -3400,7 +3400,7 @@ fn direct_clean_transition_manager(
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Zero flush budget parks the commit poll after every stride, making the
     // per-poll batch boundaries deterministic for the seam assertions below.
-    manager.commit_flush_budget = std::time::Duration::ZERO;
+    manager.flush_poll_budget = std::time::Duration::ZERO;
     if let Some(readiness_rx) = readiness_rx {
         manager = manager.with_readiness_queries(readiness_rx);
     }
@@ -3637,7 +3637,7 @@ async fn commit_flush_uses_full_poll_budget_before_parking() {
         direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
     // The helper zeroes the budget for deterministic seam tests; restore a
     // generous one so the whole cohort fits a single poll.
-    manager.commit_flush_budget = std::time::Duration::from_mins(1);
+    manager.flush_poll_budget = std::time::Duration::from_mins(1);
     let next_policy = community_chain(0xFDE8_2105);
     let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
 
@@ -3898,6 +3898,75 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     assert_eq!(
         second_tick_envelopes,
         PEER_COUNT - super::super::RESYNC_PEERS_PER_TICK
+    );
+}
+
+/// With wall-clock budget in hand, one resync tick keeps taking strides
+/// instead of parking after a fixed peer count — backlog recovery
+/// throughput must not scale inversely with fleet size when the actor has
+/// time available.
+#[tokio::test]
+async fn dirty_resync_tick_uses_full_poll_budget_before_parking() {
+    const PEER_COUNT: usize = 12;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    // The helper zeroes the budget for deterministic per-stride tests;
+    // restore a generous one so the whole backlog drains in a single tick.
+    manager.flush_poll_budget = std::time::Duration::from_mins(1);
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+    }
+    assert_eq!(manager.dirty_peers.len(), PEER_COUNT);
+
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(!backlog, "budgeted tick drains the whole backlog");
+    assert!(manager.dirty_peers.is_empty());
+    let envelopes = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(envelopes, PEER_COUNT);
+}
+
+/// Failed sends must not spin the budget loop: peers whose channel is full
+/// stay dirty after their attempt, and the tick returns without backlog
+/// (they wait for the ordinary retry interval) instead of re-attempting
+/// them until the budget expires.
+#[tokio::test]
+async fn dirty_resync_tick_attempts_each_peer_at_most_once() {
+    const PEER_COUNT: usize = 12;
+    const ROUTE_COUNT: usize = 1;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(PEER_COUNT, ROUTE_COUNT, None);
+    manager.flush_poll_budget = std::time::Duration::from_mins(1);
+    // Saturate every outbound channel (helper capacity 8) by repeatedly
+    // re-dirtying and resyncing without draining the receivers: each
+    // grouped dirty resync replays the group table as one envelope, so the
+    // channels fill and further sends fail, leaving the peers dirty.
+    for _ in 0..9 {
+        for &peer in &peers {
+            manager.mark_outbound_dirty(peer);
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    for &peer in &peers {
+        manager.mark_outbound_dirty(peer);
+    }
+    let _ = &mut receivers;
+    let started = std::time::Instant::now();
+    let backlog = manager.resync_dirty_peers_bounded();
+    assert!(
+        !backlog,
+        "attempted-but-failed peers are not withheld backlog"
+    );
+    assert!(
+        !manager.dirty_peers.is_empty(),
+        "peers with saturated channels stay dirty for the ordinary retry"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the tick must terminate without spinning the budget loop"
     );
 }
 

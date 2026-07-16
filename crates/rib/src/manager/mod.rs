@@ -16,7 +16,7 @@ mod tests;
 #[cfg(test)]
 use crate::ERR_REFRESH_TIMEOUT;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -242,15 +242,23 @@ pub struct RibManager {
     /// Local cluster ID for route reflection (RFC 4456). `None` = not an RR.
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
-    dirty_peers: HashSet<IpAddr>,
-    /// Wall-clock budget one commit-kind transition poll may spend flushing
-    /// validated members before parking for the readiness seam. Committing a
-    /// member is cheap (~0.1 ms), but ~10 ms of interleaved actor work
-    /// elapses between polls, so a fixed per-poll member count makes
-    /// emission start scale linearly with fleet size (measured ~0.88 s of
-    /// stagger at 700 members). Tests override this to force deterministic
-    /// per-stride parking.
-    commit_flush_budget: std::time::Duration,
+    /// Ordered (`BTreeSet`) so the resync tick can round-robin fairly via
+    /// [`Self::dirty_resync_cursor`] instead of re-drawing an arbitrary
+    /// subset each tick.
+    dirty_peers: BTreeSet<IpAddr>,
+    /// Ring position of the dirty-resync round-robin: the last peer
+    /// attempted. Selection resumes strictly after it (wrapping), so peers
+    /// whose sends keep failing cannot monopolize every tick while
+    /// drainable peers starve.
+    dirty_resync_cursor: Option<IpAddr>,
+    /// Wall-clock budget one actor poll may spend flushing paced work —
+    /// commit-kind transition polls and dirty-resync ticks — before parking
+    /// for the readiness seam. A unit of paced work is cheap-to-moderate,
+    /// but ~10 ms of interleaved actor work elapses between polls, so a
+    /// fixed per-poll item count makes throughput scale inversely with
+    /// fleet size (measured ~0.88 s of emission stagger at 700 members).
+    /// Tests override this to force deterministic per-stride parking.
+    flush_poll_budget: std::time::Duration,
     /// Peers whose next `distribute_changes` pass must bypass the
     /// `AdjRibOut`-already-matches suppression for currently-
     /// advertised routes. Used by `RibUpdate::RefreshPeerOutbound`
@@ -769,16 +777,17 @@ pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
 /// keeps flushing strides until [`COMMIT_FLUSH_POLL_BUDGET`] elapses, then
 /// parks so the readiness lane gets its seam.
 pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
-/// Wall-clock budget for one commit-kind poll's member flush. Bounds the
-/// readiness-seam latency during a shared policy transition (well under the
-/// 200 ms readiness deadline) while decoupling emission start from fleet
-/// size — a fixed 8-member poll at ~10 ms of interleaved actor work per
+/// Wall-clock budget for one paced actor poll — a commit-kind member flush
+/// or a dirty-resync tick. Bounds the readiness-seam latency (well under
+/// the 200 ms readiness deadline) while decoupling paced throughput from
+/// fleet size — a fixed 8-item poll at ~10 ms of interleaved actor work per
 /// poll seam cost ~0.88 s of staggered emission at 700 members.
-const COMMIT_FLUSH_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
-/// Maximum dirty peers resynced by one resync-timer tick. Each dirty peer
-/// costs O(table) enumeration and staging, so an unbounded tick stalls the
-/// actor for the whole backlog; the same peers-keyed bound as the commit
-/// flush keeps the actor responsive while a withheld remainder re-arms the
+const FLUSH_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
+/// Stride of dirty peers handed to one `distribute_changes` pass between
+/// wall-clock checks inside a resync-timer tick. Each dirty peer costs
+/// O(table) enumeration and staging, so an unbounded pass stalls the actor
+/// for the whole backlog; the tick keeps taking strides until
+/// [`FLUSH_POLL_BUDGET`] elapses, then a withheld remainder re-arms the
 /// timer at [`DIRTY_RESYNC_BACKLOG_INTERVAL`].
 const RESYNC_PEERS_PER_TICK: usize = 8;
 /// Re-arm interval while a withheld dirty-resync backlog remains. Short by
@@ -1106,7 +1115,7 @@ impl RibManager {
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
-            commit_flush_budget: COMMIT_FLUSH_POLL_BUDGET,
+            flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             pending_peer_export_context: HashMap::new(),
@@ -1125,7 +1134,8 @@ impl RibManager {
             peer_orr_vantage: HashMap::new(),
             orr: crate::orr::OrrState::default(),
             cluster_id,
-            dirty_peers: HashSet::new(),
+            dirty_peers: BTreeSet::new(),
+            dirty_resync_cursor: None,
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
@@ -1493,11 +1503,16 @@ impl RibManager {
         }
     }
 
-    /// One bounded resync-timer tick: hand at most [`RESYNC_PEERS_PER_TICK`]
-    /// dirty peers to `distribute_changes`, withholding the remainder so the
-    /// actor yields between slices. Returns whether a withheld backlog
-    /// remains (distinct from peers that stayed dirty because their send
-    /// failed — those wait for the ordinary retry interval).
+    /// One bounded resync-timer tick: hand [`RESYNC_PEERS_PER_TICK`]-sized
+    /// slices of dirty peers to `distribute_changes` until the poll's
+    /// wall-clock budget elapses, withholding the remainder so the actor
+    /// yields between polls. Selection round-robins from
+    /// [`Self::dirty_resync_cursor`] and never re-attempts a peer within
+    /// the same tick, so peers whose sends keep failing cannot spin the
+    /// budget loop or monopolize successive ticks. Returns whether a
+    /// withheld (not-yet-attempted) backlog remains — distinct from peers
+    /// that stayed dirty because their send failed; those wait for the
+    /// ordinary retry interval.
     ///
     /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
     /// state and the dirty flag are committed/cleared only after a
@@ -1518,23 +1533,55 @@ impl RibManager {
             debug!(%peer, "dropping dirty peer whose outbound channel closed");
             self.drop_gone_dirty_peer(peer);
         }
-        let withheld: Vec<IpAddr> = if self.dirty_peers.len() > RESYNC_PEERS_PER_TICK {
-            let selected: HashSet<IpAddr> = self
+        let poll_start = std::time::Instant::now();
+        let mut attempted: HashSet<IpAddr> = HashSet::new();
+        loop {
+            // Ring selection: up to RESYNC_PEERS_PER_TICK unattempted peers,
+            // starting strictly after the cursor and wrapping. Ring order is
+            // preserved so the cursor lands on the last peer actually
+            // attempted, not the numerically largest.
+            let ring: Vec<IpAddr> = {
+                let after = self
+                    .dirty_peers
+                    .iter()
+                    .filter(|peer| match self.dirty_resync_cursor {
+                        Some(cursor) => **peer > cursor,
+                        None => true,
+                    });
+                let wrapped = self.dirty_peers.iter().filter(|peer| {
+                    self.dirty_resync_cursor
+                        .is_some_and(|cursor| **peer <= cursor)
+                });
+                after
+                    .chain(wrapped)
+                    .filter(|peer| !attempted.contains(*peer))
+                    .take(RESYNC_PEERS_PER_TICK)
+                    .copied()
+                    .collect()
+            };
+            let Some(&last) = ring.last() else {
+                // Nothing unattempted remains: any peers still dirty failed
+                // their send this tick and wait for the ordinary retry.
+                return false;
+            };
+            self.dirty_resync_cursor = Some(last);
+            attempted.extend(ring.iter().copied());
+            let selected: BTreeSet<IpAddr> = ring.into_iter().collect();
+            let withheld: Vec<IpAddr> = self.dirty_peers.difference(&selected).copied().collect();
+            self.dirty_peers = selected;
+            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.dirty_peers.extend(withheld);
+            let unattempted_remain = self
                 .dirty_peers
                 .iter()
-                .copied()
-                .take(RESYNC_PEERS_PER_TICK)
-                .collect();
-            let withheld = self.dirty_peers.difference(&selected).copied().collect();
-            self.dirty_peers = selected;
-            withheld
-        } else {
-            Vec::new()
-        };
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
-        let backlog = !withheld.is_empty();
-        self.dirty_peers.extend(withheld);
-        backlog
+                .any(|peer| !attempted.contains(peer));
+            if !unattempted_remain {
+                return false;
+            }
+            if poll_start.elapsed() >= self.flush_poll_budget {
+                return true;
+            }
+        }
     }
 
     async fn receive_readiness_query(
