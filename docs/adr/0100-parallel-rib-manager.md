@@ -6,6 +6,14 @@
 **Repo:** rustbgpd, main ≥ `21a5ffaa`. Design only; nothing implemented.
 **Inputs:** `docs/perf/scale-receipt-2026-07.md` (measured), scratchpad `cpu-flamegraph-2026-07-03.md` (measured), ADR-0098/0099 (invariants), code read at HEAD.
 
+**Update (2026-07):** the gating question was answered at 1M-route /
+500-peer scale by [the actor-ceiling receipt](../perf/actor-ceiling-1m-2026-07.md):
+the worst policy-transition actor poll was 0.1–0.2 s, under the 200 ms
+readiness deadline. The depool observed in that run was the un-chunked
+post-commit flush, fixed by cooperative commit batching (#935), not a
+sharding candidate. This ADR is not rejected — the trigger stays open for
+evidence beyond that scale.
+
 ## 0. The measured starting point (facts, not estimates)
 
 - 1000 RR clients × 100k routes cold convergence: **1.80 s staged / 1.82 s wire** (`docs/perf/scale-receipt-2026-07.md`, commit `b26ff11c`). Wire trails staged by ≤ 25 ms at every point → **the single-threaded manager task is the wall-clock gate**; the 1000 session tasks (prepare+encode 42%, writer 37% of RR CPU) already parallelize across cores and keep pace.
