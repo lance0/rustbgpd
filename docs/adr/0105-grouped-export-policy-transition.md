@@ -56,7 +56,10 @@ Everything not selected remains the authoritative remainder; the algorithm
 does not recursively find a second cohort. The local repeated-pair preflight is
 O(targets squared) in the worst case; after it finds a possible pair, the
 Established-state selection pass is linear in targets and issues at most one
-session query per locally eligible candidate.
+session query per locally eligible candidate. Those queries run sequentially
+and each is bounded by the 100 ms peer-query timeout, so a fleet of wedged
+sessions costs up to one timeout per candidate while the PeerManager actor
+services only its readiness lane.
 
 The policy cohort is not a wire-equivalence cohort. RibManager independently
 revalidates update-group source and destination, clean state, live session and
@@ -68,8 +71,11 @@ most eight wire cohorts per update group. A profile beyond that bound takes
 the ordinary exact-probe path rather than growing retained state.
 
 The fast RIB path accepts only clean, grouped-to-grouped, plain single-best
-unicast members moving across one source/destination group pair. Dirty or
-forced members, Add-Path, per-client-best, ORF, RTC, VPN or other private
+unicast members moving across one source/destination group pair. Clean
+requires zero policy-filtered routes in both the source and destination
+groups, so the fast path covers only permit-set-preserving (attribute-only)
+policy changes; a policy that filters even one route always falls back. Dirty
+or forced members, Add-Path, per-client-best, ORF, RTC, VPN or other private
 family state, selection gates, stale generations, closed or saturated writer
 channels, and exact-export rejection cause a fail-closed handoff before the
 first optimized emission. PeerManager then performs ordinary authoritative

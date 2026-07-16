@@ -283,7 +283,13 @@ request is not propagated to other peers. RFC 1997 egress enforcement happens
 before export policy, so `set_community_remove = ["NO_ADVERTISE"]` cannot make
 the scoped route exportable. The post-policy result is checked as well, so a
 policy that adds `NO_ADVERTISE` suppresses the modified route instead of
-advertising it. Earlier operator denies still short-circuit normally.
+advertising it. Earlier operator denies still short-circuit normally. There
+is no per-route escape hatch while the knob is enabled: chain evaluation
+accumulates permit modifications, so an earlier operator permit does not
+bypass the implicit tail rule, and the added `NO_ADVERTISE` cannot be removed
+at export. Deliberately propagating a blackhole request to selected peers
+requires leaving `honor_blackhole` off (its default) and scoping the
+community in operator policy instead.
 
 By default this does **not** install a kernel discard/null route. To turn
 local RTBH enforcement on, set both:
