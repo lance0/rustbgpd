@@ -45,7 +45,7 @@ those.
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
-| Security: TCP MD5, GTSM, static TCP-AO, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop (M43); ADR-0064 authz |
+| Security: TCP MD5, GTSM, TCP-AO keyrings + live successor rotation (selection/deletion restart-required), native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. live rotation (M43); ADR-0064 authz |
 | RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped |
 | ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
@@ -225,9 +225,18 @@ new AFI/SAFI and EVPN dataplane expansion.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while
-  full-fleet delivery gaps regress 2.070x / 2.899x. Chunk member resync next so
-  queries and churn interleave, then gate repeated heterogeneous reloads on
-  completion time, control-query latency, session continuity, and folded
+  full-fleet delivery gaps regress 2.070x / 2.899x. The shared-cohort speedup
+  applies to permit-set-preserving (attribute-only) reloads — a policy that
+  filters even one route takes the authoritative fallback path. Member resync
+  and the post-commit flush are now chunked (#935: commit/flush at most eight
+  members per actor poll, dirty resync at most eight peers per tick); post-fix
+  the reload `/readyz` peak at the 500-client × 1M shape fell from 1.6–2.4 s
+  to ~360 ms
+  ([the reload-flush envelope receipt](docs/perf/reload-flush-envelope-2026-07.md)).
+  Remaining: rerun the corrected uniform-fleet receipt (unblocked by the flush
+  fix and the harness completion-detection fix), bound the transport-side
+  encode wake storm, then gate repeated heterogeneous reloads on completion
+  time, control-query latency, session continuity, and folded
   advertised-state equivalence. The withdrawn historical `< 1 s` claim remains
   superseded by the corrected raw receipt, not revived.
 - **Expose groupability before apply.** Config transaction planning now projects
@@ -252,9 +261,11 @@ new AFI/SAFI and EVPN dataplane expansion.
   shadow or canary run with explained differences, exact sanitized inputs, and
   an operator-readable rollback record.
 - **Tighten lifecycle security without reopening scope.** Preserve the shipped
-  unprivileged base service and opt-in dataplane capability profile; finish
-  typed API-error migration and decide the v1 posture for received eBGP-only
-  attributes. Management-plane bearer and mTLS bytes behind unchanged paths now
+  unprivileged base service and opt-in dataplane capability profile. The typed
+  API-error migration is complete (#898 closed the last API-visible stringly
+  seam), and the v1 posture for received eBGP-only attributes is decided:
+  eBGP-received LOCAL_PREF is ignored on ingress (#836). Management-plane
+  bearer and mTLS bytes behind unchanged paths now
   rotate atomically on SIGHUP; listener, path, auth-mode, principal, role, and
   access changes remain restart-required. Privilege separation remains a
   larger architectural choice, not a release-checkbox claim.
@@ -263,19 +274,20 @@ new AFI/SAFI and EVPN dataplane expansion.
   proposed opt-in strict-peer pilot. Bind its identity to the live session
   generation; same-AS alternate next hops and explicit authorization remain
   later modes behind a generation-consistent fleet inventory.
-- **Quantify the single-owner RIB actor ceiling before committing to sharding.**
-  The exact-export precommit and the grouped policy transition moved more
-  synchronous work onto the single `RibManager` actor — two un-chunked O(table)
-  snapshot polls plus an O(outbound-peers + table × dirty/forced-peers) finalize
-  tail, recorded as explicit bounds in ADR-0105.
-  `bgp_rib_policy_transition_actor_poll_duration_seconds` now instruments it, but
-  no run has exercised it at internet-table scale. Measure the worst-case actor
-  poll under a ~1M-route reload/churn to settle whether a single poll can exceed
-  the readiness deadline and to produce the named-workload number that gates
-  ADR-0100 parallel-RibManager (LAN-433). Sharding stays measurement-gated; the
-  cheaper alternative — chunking the two snapshot polls — is the first candidate
-  if a poll breaches readiness but the end-to-end evidence still does not justify
-  sharding.
+- **Single-owner RIB actor ceiling: measured at 1M; sharding stays unjustified.**
+  The named-workload number that gates ADR-0100 parallel-RibManager exists
+  ([the 1M actor-ceiling receipt](docs/perf/actor-ceiling-1m-2026-07.md),
+  LAN-433): at 500 route-server clients × 1M routes × 300 changed peers, the
+  worst policy-transition actor poll was 0.1–0.2 s — under the 200 ms readiness
+  deadline. The depool observed there was driven by the un-chunked post-commit
+  flush, fixed by cooperative `CommitMembers` batching (#935, at most eight
+  members per poll); post-fix every commit poll stays within the readiness
+  deadline and the reload `/readyz` peak fell from 1.6–2.4 s to ~360 ms at 1M
+  (post-fix section of
+  [the reload-flush envelope receipt](docs/perf/reload-flush-envelope-2026-07.md)).
+  The residual peak is the transport-side encode wake storm, tracked
+  separately. ADR-0100 sharding remains unjustified by this evidence at this
+  scale; the trigger stays open for evidence beyond it.
 - **Prove recently hardened transition paths against independent stacks before
   broadening support claims.** Live TCP-AO rotation (M43) and GR helper /
   graceful shutdown (M11/M35) have real-peer labs, but graceful-restart

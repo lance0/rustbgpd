@@ -14,6 +14,13 @@ Extended Messages support was added in v4.7.0. Verified 2026-07-12. These are
 upstream capability claims, not rustbgpd interoperability receipts; receipts
 are identified explicitly where they exist.
 
+One trajectory caveat: GoBGP merged outbound UPDATE coalescing and
+table-scale improvements in early 2026
+([osrg/gobgp#3332](https://github.com/osrg/gobgp/pull/3332),
+[osrg/gobgp#3333](https://github.com/osrg/gobgp/pull/3333)), so scale and
+performance comparisons against GoBGP should be re-validated against current
+releases rather than carried forward from older measurements.
+
 ## Address Families
 
 | Feature | GoBGP | rustbgpd | Notes |
@@ -49,6 +56,7 @@ are identified explicitly where they exist.
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
 | Prefix ORF (RFC 5291/5292) | No | Receive | GoBGP defines no ORF capability (code 3 absent from `bgp.go`). rustbgpd receive side for Address-Prefix ORF is shipped (route-server export filtering); send-side ORF remains deferred |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
+| Add-Path Paths-Limit (capability 76, expired `draft-abraitis-idr-addpath-paths-limit-04`) | No | Experimental | rustbgpd advertises a per-family receiver preference and honors received code-76 tuples as outbound Add-Path send caps; real-FRR interop receipt (M89); explicitly experimental, outside the v1 contract. GoBGP does not implement it (open feature request osrg/gobgp#2786 since March 2024) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | Yes | Yes | GoBGP upstream support was added in v4.7.0; no rustbgpd/GoBGP interop receipt is claimed here |
