@@ -654,10 +654,15 @@ impl PeerSession {
             } => {
                 // LAN-341 hot-apply: these knobs are read from
                 // `self.config` on every evaluation (see the command's
-                // doc), so swapping them here is the whole apply — no
-                // FSM event, no TCP impact. A lowered `max_prefixes`
-                // trips on the next received UPDATE, matching the
-                // reload matrix's documented semantics.
+                // doc) — no FSM event, no TCP impact. A lowered
+                // `max_prefixes` trips on the next received UPDATE,
+                // matching the reload matrix's documented semantics.
+                // For the export-affecting knobs (`local_ipv6_nexthop`,
+                // `remove_private_as`) the swap alone is NOT the whole
+                // apply: the peer manager follows it with a
+                // `RibUpdate::RefreshPeerOutbound` so preflight-suppressed
+                // routes are re-probed and advertised AS_PATHs re-encoded
+                // under the new values.
                 self.config.max_prefixes = max_prefixes;
                 self.config.gr_stale_routes_time = gr_stale_routes_time;
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;

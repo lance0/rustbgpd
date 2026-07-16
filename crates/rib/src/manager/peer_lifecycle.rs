@@ -600,6 +600,9 @@ impl RibManager {
             per_client_best,
             add_path_send_families,
             add_path_send_max,
+            // Filled in by the `PeerAddPathLimits` handler; the session
+            // emits its per-family Paths-Limit map after this `PeerUp`.
+            add_path_send_limits: std::collections::HashMap::new(),
             negotiated_orf_recv,
             negotiated_llgr_families,
             gr_context,
@@ -656,6 +659,7 @@ impl RibManager {
         let per_client_best = record.per_client_best;
         let add_path_send_families = record.add_path_send_families.clone();
         let add_path_send_max = record.add_path_send_max;
+        let add_path_send_limits = record.add_path_send_limits.clone();
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let negotiated_llgr_families = record.negotiated_llgr_families.clone();
         let gr_context = record.gr_context.clone();
@@ -840,6 +844,16 @@ impl RibManager {
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
+        // Replay the session's per-family Paths-Limit map (collision
+        // failback: the session sent it exactly once, and the stale-session
+        // fence drops any re-send). Absent and empty are equivalent — every
+        // consumer falls back per family to the scalar limit — so an empty
+        // record map (limits never received, or explicitly empty) keeps the
+        // plain-PeerUp behavior of no stored entry.
+        if !add_path_send_limits.is_empty() {
+            self.peer_add_path_send_limits
+                .insert(peer, add_path_send_limits);
+        }
         // Per-registration like the vantage: a replacement session that
         // dropped the knob must not inherit it.
         if per_client_best {

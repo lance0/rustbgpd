@@ -794,6 +794,74 @@ fn paths_limit_ignores_entries_outside_negotiated_send_families() {
     );
 }
 
+#[test]
+fn paths_limit_survives_collision_failback() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.3".parse().unwrap();
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
+    let peer_up = |session_id, outbound_tx| RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        add_path_send_families: dual_stack_sendable(),
+        add_path_send_max: 8,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    };
+
+    // Survivor session comes up and sends its one per-family limit map.
+    let (survivor_tx, _survivor_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up(7, survivor_tx));
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 2),
+            ((Afi::Ipv6, Safi::Unicast), 5),
+        ],
+    });
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 2);
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
+
+    // RFC 4271 §6.8 collision window: the loser's PeerUp replaces the
+    // registration (clearing the stored limits), sends its own map, then
+    // goes down — the registration fails back to the survivor.
+    let (loser_tx, _loser_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up(8, loser_tx));
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 8,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 1),
+            ((Afi::Ipv6, Safi::Unicast), 1),
+        ],
+    });
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 1);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 8,
+    });
+
+    // The failback replay must restore the survivor's per-family caps, not
+    // clamp every family to the scalar minimum.
+    assert_eq!(
+        manager.add_path_send_max_for_prefix(peer, &v4),
+        2,
+        "collision failback lost the survivor's per-family Paths-Limit map"
+    );
+    assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,

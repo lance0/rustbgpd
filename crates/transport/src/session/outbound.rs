@@ -369,28 +369,37 @@ impl PeerSession {
                         nh_override,
                     )
                     .clone();
-                let prepared =
-                    match export.finish_unicast_candidate(route, nh_override, cached_attrs) {
-                        Ok(PreparedUnicastCandidate::Mp {
-                            next_hop,
-                            link_local_next_hop,
-                            attrs,
-                            entry,
-                            ..
-                        }) => (attrs, next_hop, link_local_next_hop, entry),
-                        Ok(PreparedUnicastCandidate::Ipv4Body { .. }) => {
-                            unreachable!("ENHE profile must prepare IPv4 as MP_REACH")
-                        }
-                        Err(error) => {
-                            warn!(
-                                peer = %self.peer_label,
-                                prefix = %route.prefix,
-                                %error,
-                                "cannot prepare IPv4 route with Extended Next Hop"
-                            );
-                            continue;
-                        }
-                    };
+                let prepared = match export.finish_unicast_candidate(
+                    route,
+                    nh_override,
+                    cached_attrs,
+                ) {
+                    Ok(PreparedUnicastCandidate::Mp {
+                        next_hop,
+                        link_local_next_hop,
+                        attrs,
+                        entry,
+                        ..
+                    }) => (attrs, next_hop, link_local_next_hop, entry),
+                    Ok(PreparedUnicastCandidate::Ipv4Body { .. }) => {
+                        unreachable!("ENHE profile must prepare IPv4 as MP_REACH")
+                    }
+                    Err(error) => {
+                        // Unreachable while every producer runs the
+                        // exact-export preflight on this same snapshot;
+                        // if it ever fires, a silent drop would leave
+                        // Adj-RIB-Out ahead of the wire, so fail closed
+                        // like the oversize branches.
+                        warn!(
+                            peer = %self.peer_label,
+                            prefix = %route.prefix,
+                            %error,
+                            "IPv4 Extended Next Hop route failed exact export preparation after RIB commit — sending Cease/Out-of-Resources and tearing down"
+                        );
+                        self.trigger_outbound_out_of_resources_teardown();
+                        return;
+                    }
+                };
                 let (attrs, next_hop, link_local_next_hop, entry) = prepared;
                 let key = AttrGroupKey {
                     attrs_ptr: Arc::as_ptr(&attrs) as usize,
@@ -514,13 +523,18 @@ impl PeerSession {
                         !matches!(&error, ExportProbeError::MissingIpv6NextHop),
                         "RIB sent IPv6 route to eBGP peer with no valid IPv6 next-hop"
                     );
+                    // Unreachable while every producer runs the exact-export
+                    // preflight on this same snapshot; if it ever fires, a
+                    // silent drop would leave Adj-RIB-Out ahead of the wire,
+                    // so fail closed like the oversize branches.
                     warn!(
                         peer = %self.peer_label,
                         prefix = %route.prefix,
                         %error,
-                        "dropping IPv6 route: exact export preparation failed"
+                        "IPv6 route failed exact export preparation after RIB commit — sending Cease/Out-of-Resources and tearing down"
                     );
-                    continue;
+                    self.trigger_outbound_out_of_resources_teardown();
+                    return;
                 }
             };
             let (attrs, nh, link_local_next_hop, nlri_entry) = prepared;
@@ -1136,10 +1150,13 @@ impl PeerSession {
                     // session still Established. Tear the session down instead
                     // (matching the BGP-LS/VPN chunkers): reconnect rebuilds
                     // Adj-RIB-Out from scratch, so the peer is visibly unhealthy
-                    // rather than falsely advertised. A route that is
-                    // intrinsically un-sendable will loop until withdrawn; the
-                    // durable fix is an exportability check before Adj-RIB-Out
-                    // commit.
+                    // rather than falsely advertised. An intrinsically
+                    // un-sendable route no longer flap-loops here: the RIB's
+                    // exact-export preflight probes encodability before the
+                    // Adj-RIB-Out commit and suppresses such routes as
+                    // peer-unexportable (re-probed on outbound refresh), so
+                    // this branch only fires if the wire encoding diverges
+                    // from that probe.
                     warn!(
                         peer = %self.peer_label,
                         size = encoded_len,

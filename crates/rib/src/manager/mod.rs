@@ -515,6 +515,12 @@ pub(super) struct LiveSessionRecord {
     per_client_best: bool,
     add_path_send_families: Vec<(Afi, Safi)>,
     add_path_send_max: u32,
+    /// Per-family Paths-Limit caps (RFC-draft Paths-Limit), filtered to the
+    /// negotiated send families. Empty at `PeerUp`; the session emits its
+    /// `PeerAddPathLimits` exactly once, and the handler mirrors the accepted
+    /// map here so a collision failback replays it instead of clamping every
+    /// family back to the scalar `add_path_send_max`.
+    add_path_send_limits: HashMap<(Afi, Safi), u32>,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
     gr_context: Option<PeerSelectionDeferralContext>,
@@ -1548,6 +1554,15 @@ impl RibManager {
                                 old != new
                             })
                         });
+                    // Mirror the accepted map into the live-session record —
+                    // the single registration truth an outbound failover
+                    // replays from. Without this, a collision failback would
+                    // permanently clamp every family to the scalar limit.
+                    if let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                        sessions.iter_mut().find(|s| s.session_id == session_id)
+                    }) {
+                        record.add_path_send_limits.clone_from(&new_limits);
+                    }
                     self.peer_add_path_send_limits.insert(peer, new_limits);
                     if effective_limit_changed {
                         self.send_initial_table(peer);
