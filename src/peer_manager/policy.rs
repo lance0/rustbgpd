@@ -1272,7 +1272,7 @@ impl PeerManager {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => failures.push(format!("{peer_key} (import): {error}")),
                     Err(_) => failures.push(format!(
-                        "{peer_key} (import): route refresh timed out after                          {PEER_POLICY_UPDATE_TIMEOUT:?}"
+                        "{peer_key} (import): route refresh timed out after {PEER_POLICY_UPDATE_TIMEOUT:?}"
                     )),
                 }
             }

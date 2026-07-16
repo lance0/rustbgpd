@@ -650,7 +650,7 @@ impl BgpMetrics {
         let rib_policy_transition_actor_poll_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_policy_transition_actor_poll_duration_seconds",
-                "Wall-clock duration of each real export-policy transition actor poll, partitioned by bounded work, complete prefix snapshot, or finalization (including commit and retry work).",
+                "Wall-clock duration of each real export-policy transition actor poll, partitioned by bounded work, complete prefix snapshot, pre-commit validation (finalize), or a bounded member commit/flush batch (commit; the terminal batch includes the global retry tail).",
             )
             .buckets(vec![
                 0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0,

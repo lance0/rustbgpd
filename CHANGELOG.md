@@ -459,6 +459,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Grouped export-policy transitions commit in bounded member batches.** The
+  transition's former single finalization poll — one synchronous actor poll
+  containing the whole per-peer commit/flush loop — is now a `Validate` poll
+  (the last that can fall back) followed by `CommitMembers` polls that flush
+  at most eight members each, yielding to the dedicated readiness lane
+  between batches. At internet scale (1M routes / 500 peers / 300 changed)
+  the old loop blocked the actor 1.6–2.4 s and depooled `/readyz`; the stall
+  is peer-fleet-driven and volume-flat, so the bound is keyed on members, not
+  routes. The commit reply position, terminal retry pass, fallback-implies-
+  nothing-emitted contract, and 30-second stalled verdict are unchanged. The
+  poll histogram gains a `commit` poll kind for re-measurement. (LAN-447)
+
 - **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
   exhaustive public `Capability` enum gains the experimental
   `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived

@@ -247,7 +247,8 @@ struct PreparedCleanPolicyTransitionPeer {
 
 /// One actor-owned, pre-emission clean policy transition. The RIB run loop
 /// advances exactly one bounded phase step and yields before polling it again;
-/// ordinary mutation traffic remains queued until `Finalize` completes.
+/// ordinary mutation traffic remains queued until the terminal
+/// `CommitMembers` batch completes.
 pub(super) struct PendingCleanPolicyTransition {
     replacements: Vec<PeerExportPolicyReplacement>,
     reply: Option<
@@ -259,9 +260,9 @@ pub(super) struct PendingCleanPolicyTransition {
     created_destination: Option<usize>,
 }
 
-/// The deliberately narrow five-phase transition contract approved for the
-/// shared grouped-to-grouped path. No phase before `Finalize` emits or changes
-/// committed membership.
+/// The deliberately narrow six-phase transition contract approved for the
+/// shared grouped-to-grouped path. No phase before `CommitMembers` emits or
+/// changes committed membership.
 enum CleanPolicyTransitionPhase {
     Classify {
         cursor: usize,
@@ -292,12 +293,30 @@ enum CleanPolicyTransitionPhase {
         active_probe: Option<CleanPolicyTransitionProbe>,
         full_probe_count: usize,
     },
-    Finalize {
+    Validate {
         source: usize,
         destination: usize,
         inventory: super::update_groups::CleanPolicyTransitionInventory,
         prepared: Vec<PreparedCleanPolicyTransitionPeer>,
         full_probe_count: usize,
+    },
+    /// Commit the validated members in bounded batches of at most
+    /// [`super::COMMIT_MEMBERS_PER_POLL`] per poll, draining `prepared` so
+    /// parked state shrinks monotonically; `cursor` counts committed members.
+    ///
+    /// INVARIANT: `Validate` is the last phase that may return `Fallback`.
+    /// Once the first batch has emitted, later polls only `Continue` or
+    /// terminate `Committed` — per-batch revalidation is deliberately absent.
+    /// A transport receiver dropped mid-flush is benign: permits were
+    /// reserved in `ProbeAndPrepare`, sending on a closed channel is a
+    /// no-op, and the queued `PeerDown` cleans up after the fence lifts.
+    CommitMembers {
+        source: usize,
+        destination: usize,
+        inventory: super::update_groups::CleanPolicyTransitionInventory,
+        prepared: Vec<PreparedCleanPolicyTransitionPeer>,
+        full_probe_count: usize,
+        cursor: usize,
     },
 }
 
@@ -323,6 +342,7 @@ pub(super) enum CleanPolicyTransitionPollKind {
     Bounded,
     PrefixSnapshot,
     Finalize,
+    Commit,
 }
 
 impl CleanPolicyTransitionPollKind {
@@ -331,6 +351,7 @@ impl CleanPolicyTransitionPollKind {
             Self::Bounded => "bounded",
             Self::PrefixSnapshot => "prefix_snapshot",
             Self::Finalize => "finalize",
+            Self::Commit => "commit",
         }
     }
 }
@@ -390,10 +411,23 @@ impl PendingCleanPolicyTransition {
                 CleanPolicyTransitionPhase::StageDestination { prefixes: None, .. }
                 | CleanPolicyTransitionPhase::BuildInventory { keys: None, .. },
             ) => CleanPolicyTransitionPollKind::PrefixSnapshot,
-            Some(CleanPolicyTransitionPhase::Finalize { .. }) => {
+            Some(CleanPolicyTransitionPhase::Validate { .. }) => {
                 CleanPolicyTransitionPollKind::Finalize
             }
+            Some(CleanPolicyTransitionPhase::CommitMembers { .. }) => {
+                CleanPolicyTransitionPollKind::Commit
+            }
             _ => CleanPolicyTransitionPollKind::Bounded,
+        }
+    }
+
+    /// Members committed so far, while the commit phase is parked. Test-only
+    /// observation of mid-flush progress.
+    #[cfg(test)]
+    pub(super) fn commit_cursor(&self) -> Option<usize> {
+        match self.phase.as_ref() {
+            Some(CleanPolicyTransitionPhase::CommitMembers { cursor, .. }) => Some(*cursor),
+            _ => None,
         }
     }
 
@@ -1104,11 +1138,11 @@ impl RibManager {
     }
 
     /// Advance one bounded production step of the actor-owned transition.
-    /// Every return before `Finalize` is pre-emission and leaves committed
-    /// membership and installed policy state untouched.
+    /// Every return before `CommitMembers` is pre-emission and leaves
+    /// committed membership and installed policy state untouched.
     #[expect(
         clippy::too_many_lines,
-        reason = "the five explicit phases stay together so ownership and no-emission transitions remain auditable"
+        reason = "the six explicit phases stay together so ownership and no-emission transitions remain auditable"
     )]
     pub(super) fn advance_clean_policy_transition(
         &mut self,
@@ -1432,7 +1466,7 @@ impl RibManager {
                 }
 
                 if cursor == pending.replacements.len() && active_probe.is_none() {
-                    pending.phase = Some(CleanPolicyTransitionPhase::Finalize {
+                    pending.phase = Some(CleanPolicyTransitionPhase::Validate {
                         source,
                         destination,
                         inventory,
@@ -1453,7 +1487,7 @@ impl RibManager {
                 }
                 CleanPolicyTransitionAdvance::Continue(pending)
             }
-            CleanPolicyTransitionPhase::Finalize {
+            CleanPolicyTransitionPhase::Validate {
                 source,
                 destination,
                 inventory,
@@ -1489,9 +1523,31 @@ impl RibManager {
                 if !all_current {
                     return CleanPolicyTransitionAdvance::Fallback(pending);
                 }
-
-                let materialized_routes = inventory.announce.len();
-                for member in prepared {
+                pending.phase = Some(CleanPolicyTransitionPhase::CommitMembers {
+                    source,
+                    destination,
+                    inventory,
+                    prepared,
+                    full_probe_count,
+                    cursor: 0,
+                });
+                CleanPolicyTransitionAdvance::Continue(pending)
+            }
+            CleanPolicyTransitionPhase::CommitMembers {
+                source,
+                destination,
+                inventory,
+                mut prepared,
+                full_probe_count,
+                cursor,
+            } => {
+                // Validation happened once, in `Validate`; the actor fence
+                // admits only the read-only readiness lane between these
+                // batches, so no mutation can invalidate the prepared state.
+                // Never fall back from here — an envelope may already be on
+                // a member's wire (see the phase-level invariant comment).
+                let batch = super::COMMIT_MEMBERS_PER_POLL.min(prepared.len());
+                for member in prepared.drain(..batch) {
                     self.commit_clean_policy_transition_member(member.peer, source, destination);
                     self.clear_policy_filtered_routes_for_peer(member.peer);
                     self.apply_clean_policy_transition_counters(member.peer, &inventory);
@@ -1511,6 +1567,23 @@ impl RibManager {
                         gauge_val(advertised),
                     );
                 }
+                if !prepared.is_empty() {
+                    pending.phase = Some(CleanPolicyTransitionPhase::CommitMembers {
+                        source,
+                        destination,
+                        inventory,
+                        prepared,
+                        full_probe_count,
+                        cursor: cursor + batch,
+                    });
+                    return CleanPolicyTransitionAdvance::Continue(pending);
+                }
+
+                // Terminal batch: the tail below runs exactly once, and the
+                // `Committed` reply stays after the global retry pass — the
+                // peer manager treats it as flush-complete before launching
+                // remainder per-peer applies and rollback restores.
+                let materialized_routes = inventory.announce.len();
                 self.finish_clean_policy_transition_commit();
                 // Match the authoritative single-peer replacement seam: a
                 // successful policy transaction also owns the global retry

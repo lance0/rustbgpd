@@ -54,6 +54,7 @@ struct PolicyTransitionStats {
     max_actor_slice: std::time::Duration,
     max_prefix_snapshot_poll: std::time::Duration,
     max_finalize_poll: std::time::Duration,
+    max_commit_poll: std::time::Duration,
     #[cfg(feature = "bench-internals")]
     authoritative_peer_applies: usize,
     #[cfg(feature = "bench-internals")]
@@ -664,6 +665,10 @@ pub(in crate::manager) fn policy_transition_slice_end(
 }
 /// Maximum members classified by one strict shared-policy actor poll.
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
+/// Maximum validated members committed and flushed by one strict
+/// shared-policy actor poll (matches `QUERY_BUDGET_PER_CHUNK` so readiness
+/// keeps its per-seam service ratio through the commit flush).
+pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 
@@ -1311,6 +1316,10 @@ impl RibManager {
                 distribution::CleanPolicyTransitionPollKind::Finalize => {
                     self.policy_transition_stats.max_finalize_poll =
                         self.policy_transition_stats.max_finalize_poll.max(elapsed);
+                }
+                distribution::CleanPolicyTransitionPollKind::Commit => {
+                    self.policy_transition_stats.max_commit_poll =
+                        self.policy_transition_stats.max_commit_poll.max(elapsed);
                 }
                 distribution::CleanPolicyTransitionPollKind::Bounded => {}
             }
