@@ -13,10 +13,12 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::best_path_cmp;
+use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
     RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
 };
+use crate::update::{RouteQueryKey, route_query_key};
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
@@ -34,6 +36,10 @@ pub struct LocRib {
     /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
     /// saved at the 2p×100k profile shape.
     routes: HashMap<Prefix, (Route, SystemTime)>,
+    /// Compact ordered prefix index used only by resumable route listings.
+    /// The lookup-hot best-path table stays hash-backed; this second index
+    /// adds ordered continuation without retaining per-walk snapshots.
+    ordered_prefixes: FamilyPrefixMap<()>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
@@ -67,6 +73,7 @@ impl LocRib {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
+            ordered_prefixes: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
@@ -86,38 +93,56 @@ impl LocRib {
     ) -> bool {
         let best = candidates.min_by(|a, b| best_path_cmp(a, b)).cloned();
 
-        match best {
-            Some(new_best) => {
-                // Detect preference-relevant changes AND same-peer payload
-                // churn. `best_path_cmp` compares only the fields that drive
-                // selection and tiebreaks on the peer address, so the same
-                // peer re-advertising the prefix with a new next-hop or
-                // changed attributes (communities, equal-length AS_PATH
-                // content, ...) would compare Equal and the stale payload
-                // would never be redistributed to single-best downstream
-                // peers or FIB install candidates. Mirrors the
-                // `recompute_evpn` payload comparison below.
-                let changed = self.routes.get(&prefix).is_none_or(|(old, _)| {
-                    best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
-                        || old.next_hop != new_best.next_hop
-                        || old.link_local_next_hop != new_best.link_local_next_hop
-                        || old.next_hop_scope != new_best.next_hop_scope
-                        || old.path_id != new_best.path_id
-                        || old.peer_router_id != new_best.peer_router_id
-                        || old.attributes != new_best.attributes
-                });
-                if changed {
-                    self.routes.insert(prefix, (new_best, SystemTime::now()));
+        if let Some(new_best) = best {
+            // Detect preference-relevant changes AND same-peer payload
+            // churn. `best_path_cmp` compares only the fields that drive
+            // selection and tiebreaks on the peer address, so the same
+            // peer re-advertising the prefix with a new next-hop or
+            // changed attributes (communities, equal-length AS_PATH
+            // content, ...) would compare Equal and the stale payload
+            // would never be redistributed to single-best downstream
+            // peers or FIB install candidates. Mirrors the
+            // `recompute_evpn` payload comparison below.
+            let changed = self.routes.get(&prefix).is_none_or(|(old, _)| {
+                best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
+                    || old.next_hop != new_best.next_hop
+                    || old.link_local_next_hop != new_best.link_local_next_hop
+                    || old.next_hop_scope != new_best.next_hop_scope
+                    || old.path_id != new_best.path_id
+                    || old.peer_router_id != new_best.peer_router_id
+                    || old.attributes != new_best.attributes
+            });
+            if changed {
+                let was_absent = !self.routes.contains_key(&prefix);
+                self.routes.insert(prefix, (new_best, SystemTime::now()));
+                if was_absent {
+                    self.ordered_prefixes.entry_or_default(prefix);
                 }
-                changed
             }
-            None => self.routes.remove(&prefix).is_some(),
+            changed
+        } else {
+            let removed = self.routes.remove(&prefix).is_some();
+            if removed {
+                self.ordered_prefixes.remove(&prefix);
+            }
+            removed
         }
     }
 
     /// Iterate over all best routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
         self.routes.values().map(|(route, _)| route)
+    }
+
+    /// Iterate best routes in route-query identity order, excluding rows at
+    /// or before `after`. There is one best per prefix, so the compact prefix
+    /// index supplies the full ordering and the hash map remains authoritative
+    /// for route bodies.
+    pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+        self.ordered_prefixes
+            .iter_from(after.map(|cursor| cursor.0))
+            .filter_map(|(prefix, ())| self.routes.get(&prefix).map(|(route, _)| route))
+            .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
     /// Return the number of best routes.

@@ -67,8 +67,8 @@ Use the paired driver for retained comparisons:
 
 ```bash
 bench/compare-route-paging.sh \
-  --base 50399dac696507a827480be4a9dcfef49e1682b3 \
-  --head d12cbaae37a9779ccc58617189253450b57c8fa4 \
+  --base 63159c20617ac6ebdecb3c3dd76eef5b01d452dd \
+  --head fbb3789881eb1549354ebb5ecf6869b3ed49573d \
   --routes 100000,400000 \
   --page-sizes 100,1000 \
   --repetitions 4 \
@@ -81,17 +81,32 @@ bench-support source byte-for-byte into both. It records and verifies their
 combined SHA-256, runs every traversal in a fresh process, and alternates
 baseline-first/optimized-first order for paired repetitions. The harness
 validates row totals, strict cursor order, page bounds, complete traversal, and
-a deterministic ordered-route-key checksum. The
+a deterministic ordered-route-key checksum. Each fresh process also records
+seed-ingest time, a 1,000-route withdraw/reannounce control, and resident bytes
+after setup. Both write controls drive the production `RoutesReceived`
+dispatcher and bounded chunk drain on each ref before outbound peers are
+registered, so the candidate pays its real index and continuation-invalidation
+cost without transport fanout contaminating the timed value. Zero, malformed,
+non-finite, or internally inconsistent measurements fail closed. The
 grouped fixture is intentionally distinct from the best control: two RR-client
 members share a group while every sixteenth route is sourced by the queried
 member and removed by member-specific split horizon. The driver rejects any
-baseline/optimized row, page-count, or checksum disagreement and any grouped
-fixture that collapses back to the best control. Both refs are required, must
-resolve to the pinned distinct commits, and executable-line plus iterator-body
-guards require the materialized call only at the baseline and the borrowed
-grouped view only at the optimized ref. The normalized production diff must
-match its pinned SHA-256, so extra edits inside an otherwise allowed
-implementation file are rejected. After the shared overlays, all tracked Cargo
+baseline/optimized row, page-count, checksum, or churn-fixture disagreement and
+any grouped fixture that collapses back to the best control. Every requested
+400k grouped shape must deliver at least 10x median complete-traversal speedup;
+other complete traversals may regress at most 3%, and handler-boundary p99 may
+not regress. Paired medians must also stay below the default 10% seed-ingest
+and 10% churn regressions; resident growth must satisfy both the 25% and 128
+MiB ceilings. Retained evidence must include the 400k/page-100 and page-1,000
+target shapes. All limits are explicit driver options and retained in metadata
+plus `gate-summary.csv`. Both refs are
+required, must resolve to the pinned distinct commits, and executable guards
+require ordered page/index definitions only at the optimized ref. The
+normalized production diff across all twelve changed RIB production sources —
+the three RIB tables, prefix map, public update/export surface, central manager,
+update groups, distribution, GR/LLGR, route-refresh, and selection-deferral
+seams — must match its pinned SHA-256, so extra edits inside an otherwise
+allowed implementation file are rejected. After the shared overlays, all tracked Cargo
 manifests and lockfiles, build scripts, Cargo config, and optional Rust
 toolchain selector files must be byte-identical; dirty production files are
 never measured. Retained comparisons also require a clean invoking checkout
@@ -119,12 +134,13 @@ not the host username or absolute home directory.
 
 Each per-process CSV is retained under the comparison artifact's `raw/`
 directory. The exact overlaid harness, bench-support module, comparison driver,
-baseline/optimized production paging sources, and common Cargo/build inputs are
+all twelve baseline/optimized production paging/index/invalidation sources
+under their repository-relative paths, and common Cargo/build inputs are
 retained under `measurement-sources/` with verified manifests, and an
 explicitly selected output directory must be empty.
 On successful validation, a top-level `SHA256SUMS` covers the combined/raw
-CSVs, logs, preflight evidence, metadata, and nested measurement-source
-manifest.
+CSVs, the gate summary, logs, preflight evidence, metadata, and nested
+measurement-source manifest.
 
 `--no-taskset` marks the output `mechanics-only` and is never retained as
 comparison evidence. A dirty checkout is rejected by default; the explicit
@@ -139,7 +155,8 @@ with one `--routes`, `--page-size`, and `--scope` value. Do not retain or publis
 that output as comparison evidence.
 
 Requirements: `bash`, `git`, `cargo`, `python3`, `flock`, and `taskset` from
-util-linux, plus Linux `/proc/loadavg` and per-CPU cpufreq governor reporting.
+util-linux, plus Linux `/proc/loadavg`, `/proc/self/status` `VmRSS`, and per-CPU
+cpufreq governor reporting.
 Use `--no-taskset` only for a quick mechanics check; its output is not
 performance evidence.
 

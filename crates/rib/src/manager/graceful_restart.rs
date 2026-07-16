@@ -377,6 +377,9 @@ impl RibManager {
         reason = "LLGR promotion has unicast + FlowSpec paths"
     )]
     pub(super) fn sweep_gr_stale(&mut self, peer: IpAddr) {
+        // Timer arms call this outside `handle_update`; invalidate Received,
+        // Best, and Advertised continuations before stale promotion/purge.
+        self.advance_all_route_pages();
         let gr_families: Vec<(Afi, Safi)> = self
             .gr_peers
             .remove(&peer)
@@ -711,6 +714,10 @@ impl RibManager {
         reason = "family-scoped sweeps and recomputes across all seven route tables"
     )]
     pub(super) fn sweep_llgr_stale(&mut self, peer: IpAddr, families: &[(Afi, Safi)]) {
+        if !families.is_empty() {
+            // Like GR expiry, LLGR expiry is a direct timer mutation seam.
+            self.advance_all_route_pages();
+        }
         info!(%peer, ?families, "LLGR timer expired — sweeping LLGR-stale routes");
         let peer_label = peer.to_string();
 

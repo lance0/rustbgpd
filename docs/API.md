@@ -982,9 +982,15 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `page_token` is opaque: always pass the `next_page_token` from the previous
-response (empty = listing complete). Pages are keyed, not offset-based, so a
-listing stays consistent while the RIB mutates underneath it. `page_size` is
-capped server-side at 1000 rows per page (0 = default of 100).
+response (empty = listing complete), and only reuse it with the same RPC,
+neighbor, route scope, and semantically equivalent route filters. Changing a
+scope or filter returns gRPC `INVALID_ARGUMENT`; changing only `page_size` is
+safe. Tokens are process-local and mutation-fenced by one conservative
+generation for the Received, Best, or Advertised scope class. Any mutation in
+that class makes the next request fail with gRPC `ABORTED`; a peer-specific
+listing can therefore restart after an unrelated peer in the same class
+changes. The server retains no route snapshot or cursor registry. `page_size`
+is capped server-side at 1000 rows per page (0 = default of 100).
 
 ### Watch route changes (streaming)
 

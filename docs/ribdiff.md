@@ -65,10 +65,12 @@ Live-source limitations (also printed in every report):
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
 - **Unknown attributes**: path attributes outside the typed set are not
   visible over gRPC and are not compared.
-- **Generation**: the route-listing API exposes no RIB generation token.
-  Listing drift during pagination is detected via per-page `total_count`
-  (any movement refuses the comparison); the snapshot header's
-  `generation` is adopted for the live side.
+- **Generation**: the route-listing API exposes no numeric RIB generation.
+  Opaque route-page tokens bind the RPC scope and canonical filters and abort
+  on any mid-walk mutation in the conservative Received/Best/Advertised scope
+  class, including an unrelated peer in that class; the adapter also refuses
+  per-page `total_count` drift. The snapshot header's `generation` is adopted
+  for the live side.
 
 ## Fail-closed behaviors
 

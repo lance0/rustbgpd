@@ -1153,6 +1153,11 @@ impl RibManager {
         families: &[(Afi, Safi)],
         reason: &'static str,
     ) {
+        if !families.is_empty() {
+            // Timer expiry and all-EoR release can recompute Loc-RIB directly
+            // without a new RibUpdate. Fence every view before the release.
+            self.advance_all_route_pages();
+        }
         for &family in families {
             self.complete_selection_family(family, false, reason);
         }

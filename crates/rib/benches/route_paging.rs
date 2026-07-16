@@ -5,9 +5,11 @@
 //! that Criterion's minimum sample count is counterproductive. Each process
 //! runs exactly one complete traversal. Its page samples are summarized as
 //! p50/p99/max synchronous handler-boundary timings in machine-readable CSV;
-//! they include oneshot setup and retrieval but no actor scheduling.
+//! they include oneshot setup and retrieval but no actor scheduling. The same
+//! row records seed ingest, a bounded withdraw/reannounce control, and
+//! post-setup resident bytes so persistent indices carry explicit write-side
+//! and memory gates.
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr};
@@ -137,6 +139,9 @@ fn parse_args() -> Args {
 /// grouped view therefore exercises member-specific split horizon and has a
 /// distinct row count/checksum from the Loc-RIB best control.
 const GROUP_SPLIT_HORIZON_STRIDE: usize = 16;
+/// A bounded remove/re-announce subset exposes write-side ordered-index cost
+/// in every fresh process without materially extending the 64-cell campaign.
+const CHURN_ROUTE_COUNT: usize = 1_000;
 
 #[derive(Debug)]
 struct PermissiveExactExport;
@@ -216,22 +221,67 @@ fn make_routes(count: usize) -> Vec<Route> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SetupMetrics {
+    ingest: Duration,
+    churn_routes: usize,
+    churn: Duration,
+    resident_bytes: u64,
+}
+
+fn resident_bytes() -> io::Result<u64> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let bytes = status
+        .lines()
+        .find_map(|line| {
+            let kib = line.strip_prefix("VmRSS:")?.split_whitespace().next()?;
+            kib.parse::<u64>().ok()?.checked_mul(1_024)
+        })
+        .ok_or_else(|| io::Error::other("/proc/self/status has no valid positive VmRSS"))?;
+    if bytes == 0 {
+        return Err(io::Error::other("/proc/self/status reported zero VmRSS"));
+    }
+    Ok(bytes)
+}
+
 fn seeded_manager(
     count: usize,
-) -> (
+) -> io::Result<(
     RibManager,
     Vec<mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate>>,
-) {
+    SetupMetrics,
+)> {
     let (_update_tx, update_rx) = mpsc::channel(1);
     let (_query_tx, query_rx) = mpsc::channel(1);
     let mut manager = RibManager::new(update_rx, query_rx, None, None, BgpMetrics::new());
+    let routes = make_routes(count);
+    let churn_fixture = routes
+        .iter()
+        .take(CHURN_ROUTE_COUNT.min(routes.len()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ingest_started = Instant::now();
+    manager.bench_seed_loc_rib(routes);
+    let ingest = ingest_started.elapsed();
+    let churn_started = Instant::now();
+    manager.bench_churn_loc_rib(churn_fixture);
+    let churn = churn_started.elapsed();
+    // Register after the timed writes. Initial-table staging builds the same
+    // two-member grouped advertised view while keeping transport fanout out of
+    // the ingest/churn controls. The helper drains the initial updates.
     let receivers =
         manager.bench_register_peers(2, None, true, 4, || Arc::new(PermissiveExactExport));
-    let routes = make_routes(count);
-    let changed: HashSet<_> = routes.iter().map(|route| route.prefix).collect();
-    manager.bench_seed_loc_rib(routes);
-    manager.bench_distribute(&changed);
-    (manager, receivers)
+    let resident_bytes = resident_bytes()?;
+    Ok((
+        manager,
+        receivers,
+        SetupMetrics {
+            ingest,
+            churn_routes: CHURN_ROUTE_COUNT.min(count),
+            churn,
+            resident_bytes,
+        },
+    ))
 }
 
 fn percentile(sorted: &[Duration], numerator: usize, denominator: usize) -> Duration {
@@ -355,11 +405,11 @@ fn main() -> io::Result<()> {
     };
     writeln!(
         output,
-        "variant,commit,harness_sha256,scope,routes,page_size,repetition,pair_order,run_position,pages,rows,ordered_key_checksum,complete_ns,page_p50_ns,page_p99_ns,page_max_ns,rows_per_second"
+        "variant,commit,harness_sha256,scope,routes,page_size,repetition,pair_order,run_position,pages,rows,ordered_key_checksum,complete_ns,page_p50_ns,page_p99_ns,page_max_ns,rows_per_second,ingest_ns,churn_routes,churn_ns,resident_bytes"
     )?;
 
     let expected_rows = args.scope.expected_rows(args.route_count);
-    let (mut manager, _receivers) = seeded_manager(args.route_count);
+    let (mut manager, _receivers, setup) = seeded_manager(args.route_count)?;
     let sample = traverse(
         &mut manager,
         args.scope.query(),
@@ -375,7 +425,7 @@ fn main() -> io::Result<()> {
     let rows_per_second = sample.rows as f64 / sample.elapsed.as_secs_f64();
     writeln!(
         output,
-        "{variant},{commit},{harness_sha256},{},{},{},{},{pair_order},{run_position},{},{},{:016x},{},{},{},{},{rows_per_second:.3}",
+        "{variant},{commit},{harness_sha256},{},{},{},{},{pair_order},{run_position},{},{},{:016x},{},{},{},{},{rows_per_second:.3},{},{},{},{}",
         args.scope.label(),
         args.route_count,
         args.page_size,
@@ -387,6 +437,10 @@ fn main() -> io::Result<()> {
         sample.page_p50.as_nanos(),
         sample.page_p99.as_nanos(),
         sample.page_max.as_nanos(),
+        setup.ingest.as_nanos(),
+        setup.churn_routes,
+        setup.churn.as_nanos(),
+        setup.resident_bytes,
     )?;
     output.flush()?;
     Ok(())

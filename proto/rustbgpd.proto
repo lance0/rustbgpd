@@ -1437,6 +1437,13 @@ message ListRoutesRequest {
   string neighbor_address = 1;
   AddressFamily afi_safi = 2;
   uint32 page_size = 3;
+  // Opaque, process-local continuation returned by next_page_token. The token
+  // is bound to this RPC's exact route scope, canonical filter semantics, and
+  // conservative Received/Best/Advertised scope-class generation. A changed
+  // scope or filter returns INVALID_ARGUMENT; any mutation in the same class
+  // returns ABORTED, including an unrelated peer change. Restart with an empty
+  // token. Never parse or synthesize a token. page_size may change between
+  // pages.
   string page_token = 4;
 
   // Route filters — all are optional; when set, only matching routes are returned.
@@ -1464,6 +1471,8 @@ message ListRoutesRequest {
 
 message ListRoutesResponse {
   repeated Route routes = 1;
+  // Opaque continuation for the next page. Empty means the listing is
+  // complete. Pass it back verbatim with the same RPC, scope, and filters.
   string next_page_token = 2;
   uint64 total_count = 3;
 }

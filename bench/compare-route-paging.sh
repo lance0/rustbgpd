@@ -20,24 +20,57 @@ Usage: bench/compare-route-paging.sh [options]
                       the output is marked mechanics-only
   --preflight-wait-seconds N
                       Maximum idle-preflight polling time per cell (default: 30)
+  --max-ingest-regression-pct PCT
+                      Maximum median seed-ingest regression (default: 10)
+  --max-churn-regression-pct PCT
+                      Maximum median remove/reannounce regression (default: 10)
+  --max-complete-regression-pct PCT
+                      Maximum median complete-traversal regression outside the
+                      400k grouped target shapes (default: 3)
+  --max-page-p99-regression-pct PCT
+                      Maximum median handler-boundary p99 regression (default: 0)
+  --min-grouped-400k-speedup FACTOR
+                      Minimum complete-traversal speedup for every requested
+                      400k grouped-advertised shape (default: 10)
+  --max-resident-growth-pct PCT
+                      Maximum median resident-set growth (default: 25)
+  --max-resident-growth-bytes N
+                      Maximum median resident-set growth in bytes (default: 134217728)
   -h, --help          Show this help
 
 The invoking checkout's route_paging.rs and benchmark-support module are copied
 byte-for-byte into both detached worktrees. The script refuses to run if those
 measurement sources differ. REF values must resolve to the exact reviewed
-baseline/candidate commits. The normalized production patch and all Cargo/build
-inputs must match the pinned hashes; benchmark, test, and documentation overlays
-remain auditable. Retained comparisons require a clean invoking checkout,
+baseline/candidate commits. The normalized production patch, including every
+ordered-index source, and all Cargo/build inputs must match the pinned hashes;
+benchmark, test, and documentation overlays remain auditable. Retained
+comparisons require a clean invoking checkout,
 exclusive host lock, selected-core performance governor, one-minute load below
 2.0, and no competing cargo/rustc/rrharness/route_paging process immediately
-before every cell. Uncommitted production changes are intentionally never
-measured.
+before every cell. Every row must report valid positive traversal, ingest,
+churn, and resident measurements. Paired medians must satisfy the explicit
+read-side speedup/latency, write-side, and memory gates. Uncommitted production
+changes are intentionally never measured.
 EOF
 }
 
-readonly expected_base_commit=50399dac696507a827480be4a9dcfef49e1682b3
-readonly expected_head_commit=d12cbaae37a9779ccc58617189253450b57c8fa4
-readonly expected_production_diff_sha256=558cf2ebc9101ca722b3d733a4dc2f4a91859a08e16ab6c7258844e99930ec87
+readonly expected_base_commit=63159c20617ac6ebdecb3c3dd76eef5b01d452dd
+readonly expected_head_commit=fbb3789881eb1549354ebb5ecf6869b3ed49573d
+readonly expected_production_diff_sha256=fb439f795d2b6869d1a34f3f1d7c30d70736d0a9b6104ab24f524d97df815432
+readonly -a production_sources=(
+  crates/rib/src/adj_rib_in.rs
+  crates/rib/src/adj_rib_out.rs
+  crates/rib/src/lib.rs
+  crates/rib/src/loc_rib.rs
+  crates/rib/src/manager/distribution/mod.rs
+  crates/rib/src/manager/graceful_restart.rs
+  crates/rib/src/manager/mod.rs
+  crates/rib/src/manager/route_refresh.rs
+  crates/rib/src/manager/selection_deferral.rs
+  crates/rib/src/manager/update_groups.rs
+  crates/rib/src/prefix_map.rs
+  crates/rib/src/update.rs
+)
 
 base_ref=
 head_ref=
@@ -49,6 +82,13 @@ output_dir=
 use_taskset=1
 allow_dirty_mechanics=0
 preflight_wait_seconds=30
+max_ingest_regression_pct=10
+max_churn_regression_pct=10
+max_complete_regression_pct=3
+max_page_p99_regression_pct=0
+min_grouped_400k_speedup=10
+max_resident_growth_pct=25
+max_resident_growth_bytes=134217728
 readonly load_one_max=2.0
 readonly required_governor=performance
 
@@ -65,6 +105,34 @@ while (($#)); do
     --allow-dirty-mechanics) allow_dirty_mechanics=1; shift ;;
     --preflight-wait-seconds)
       preflight_wait_seconds=${2:?--preflight-wait-seconds requires a value}
+      shift 2
+      ;;
+    --max-ingest-regression-pct)
+      max_ingest_regression_pct=${2:?--max-ingest-regression-pct requires a value}
+      shift 2
+      ;;
+    --max-churn-regression-pct)
+      max_churn_regression_pct=${2:?--max-churn-regression-pct requires a value}
+      shift 2
+      ;;
+    --max-complete-regression-pct)
+      max_complete_regression_pct=${2:?--max-complete-regression-pct requires a value}
+      shift 2
+      ;;
+    --max-page-p99-regression-pct)
+      max_page_p99_regression_pct=${2:?--max-page-p99-regression-pct requires a value}
+      shift 2
+      ;;
+    --min-grouped-400k-speedup)
+      min_grouped_400k_speedup=${2:?--min-grouped-400k-speedup requires a value}
+      shift 2
+      ;;
+    --max-resident-growth-pct)
+      max_resident_growth_pct=${2:?--max-resident-growth-pct requires a value}
+      shift 2
+      ;;
+    --max-resident-growth-bytes)
+      max_resident_growth_bytes=${2:?--max-resident-growth-bytes requires a value}
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -98,6 +166,24 @@ positive_integer "$repetitions" --repetitions
   exit 2
 }
 positive_integer "$preflight_wait_seconds" --preflight-wait-seconds
+nonnegative_decimal() {
+  [[ $1 =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || {
+    printf '%s must be a non-negative decimal, got %s\n' "$2" "$1" >&2
+    exit 2
+  }
+}
+nonnegative_decimal "$max_ingest_regression_pct" --max-ingest-regression-pct
+nonnegative_decimal "$max_churn_regression_pct" --max-churn-regression-pct
+nonnegative_decimal "$max_complete_regression_pct" --max-complete-regression-pct
+nonnegative_decimal "$max_page_p99_regression_pct" --max-page-p99-regression-pct
+nonnegative_decimal "$min_grouped_400k_speedup" --min-grouped-400k-speedup
+awk -v value="$min_grouped_400k_speedup" 'BEGIN { exit !(value + 0 > 0) }' || {
+  printf '%s must be greater than zero, got %s\n' \
+    --min-grouped-400k-speedup "$min_grouped_400k_speedup" >&2
+  exit 2
+}
+nonnegative_decimal "$max_resident_growth_pct" --max-resident-growth-pct
+positive_integer "$max_resident_growth_bytes" --max-resident-growth-bytes
 if ((allow_dirty_mechanics && use_taskset)); then
   printf '%s requires %s; dirty output cannot be retained as evidence\n' \
     --allow-dirty-mechanics --no-taskset >&2
@@ -111,6 +197,18 @@ IFS=, read -r -a page_sizes <<<"$page_sizes_csv"
 }
 for value in "${routes[@]}"; do positive_integer "$value" --routes; done
 for value in "${page_sizes[@]}"; do positive_integer "$value" --page-sizes; done
+if ((use_taskset)); then
+  [[ ",${routes_csv}," == *,400000,* ]] || {
+    printf 'retained evidence must include the 400000-route target shape\n' >&2
+    exit 2
+  }
+  for target_page_size in 100 1000; do
+    [[ ",${page_sizes_csv}," == *",${target_page_size},"* ]] || {
+      printf 'retained evidence must include page size %s\n' "$target_page_size" >&2
+      exit 2
+    }
+  done
+fi
 
 repo_root=$(git rev-parse --show-toplevel)
 invoking_head=$(git -C "$repo_root" rev-parse --verify HEAD)
@@ -208,10 +306,18 @@ git merge-base --is-ancestor "$base_commit" "$head_commit" || {
 mapfile -t changed_files < <(
   git -C "$repo_root" diff --name-only "$base_commit..$head_commit"
 )
+is_production_source() {
+  local candidate=$1 production_source
+  for production_source in "${production_sources[@]}"; do
+    [[ $candidate == "$production_source" ]] && return 0
+  done
+  return 1
+}
 for changed_file in "${changed_files[@]}"; do
+  if is_production_source "$changed_file"; then
+    continue
+  fi
   case "$changed_file" in
-    crates/rib/src/manager/mod.rs|crates/rib/src/manager/update_groups.rs)
-      ;;
     crates/rib/src/manager/tests/paged_query.rs|\
     crates/rib/src/manager/bench_support.rs|\
     crates/rib/benches/route_paging.rs|\
@@ -229,9 +335,7 @@ production_diff_sha256=$(
   LC_ALL=C git -C "$repo_root" -c diff.algorithm=myers --no-pager diff \
     --no-ext-diff --no-textconv --no-color --abbrev=8 \
     --src-prefix=a/ --dst-prefix=b/ --indent-heuristic \
-    "$base_commit..$head_commit" -- \
-    crates/rib/src/manager/mod.rs \
-    crates/rib/src/manager/update_groups.rs \
+    "$base_commit..$head_commit" -- "${production_sources[@]}" \
     | sha256sum | awk '{print $1}'
 )
 [[ $production_diff_sha256 == "$expected_production_diff_sha256" ]] || {
@@ -239,29 +343,29 @@ production_diff_sha256=$(
     "$expected_production_diff_sha256" "$production_diff_sha256" >&2
   exit 2
 }
-baseline_call='^[[:space:]]*match self\.grouped_advertised_routes\(peer\) \{$'
-optimized_call='^[[:space:]]*match self\.grouped_advertised_routes_iter\(peer\) \{$'
-iterator_definition='^[[:space:]]*pub\(in crate::manager\) fn grouped_advertised_routes_iter\($'
-borrowed_iterator_body='^[[:space:]]*Some\(group\.table\.iter\(\)\.filter\(move \|route\| \{$'
-if ! git -C "$repo_root" grep -Eq "$baseline_call" "$base_commit" -- \
+ordered_page_definition='^[[:space:]]*fn page_ordered_routes'
+ordered_resume_definition='^[[:space:]]*pub fn iter_ordered_from\(&self,'
+prefix_resume_definition='^[[:space:]]*pub\(crate\) fn iter_from\(&self,'
+loc_index_field='^[[:space:]]*ordered_prefixes: FamilyPrefixMap<\(\)>,'
+if git -C "$repo_root" grep -Eq "$ordered_page_definition" "$base_commit" -- \
   crates/rib/src/manager/mod.rs \
-  || git -C "$repo_root" grep -Eq "$optimized_call" "$base_commit" -- \
-    crates/rib/src/manager/mod.rs \
-  || git -C "$repo_root" grep -Eq "$iterator_definition" "$base_commit" -- \
-    crates/rib/src/manager/update_groups.rs; then
-  printf 'baseline does not contain only the materialized paging call: %s\n' \
+  || git -C "$repo_root" grep -Eq "$prefix_resume_definition" "$base_commit" -- \
+    crates/rib/src/prefix_map.rs \
+  || git -C "$repo_root" grep -Eq "$loc_index_field" "$base_commit" -- \
+    crates/rib/src/loc_rib.rs; then
+  printf 'baseline unexpectedly contains the ordered continuation path: %s\n' \
     "$base_commit" >&2
   exit 2
 fi
-if ! git -C "$repo_root" grep -Eq "$optimized_call" "$head_commit" -- \
+if ! git -C "$repo_root" grep -Eq "$ordered_page_definition" "$head_commit" -- \
   crates/rib/src/manager/mod.rs \
-  || git -C "$repo_root" grep -Eq "$baseline_call" "$head_commit" -- \
-    crates/rib/src/manager/mod.rs \
-  || ! git -C "$repo_root" grep -Eq "$iterator_definition" "$head_commit" -- \
-    crates/rib/src/manager/update_groups.rs \
-  || ! git -C "$repo_root" grep -Eq "$borrowed_iterator_body" "$head_commit" -- \
-    crates/rib/src/manager/update_groups.rs; then
-  printf 'optimized commit lacks the executable borrowed-iterator paging path: %s\n' \
+  || ! git -C "$repo_root" grep -Eq "$ordered_resume_definition" "$head_commit" -- \
+    crates/rib/src/adj_rib_in.rs crates/rib/src/adj_rib_out.rs crates/rib/src/loc_rib.rs \
+  || ! git -C "$repo_root" grep -Eq "$prefix_resume_definition" "$head_commit" -- \
+    crates/rib/src/prefix_map.rs \
+  || ! git -C "$repo_root" grep -Eq "$loc_index_field" "$head_commit" -- \
+    crates/rib/src/loc_rib.rs; then
+  printf 'optimized commit lacks the executable ordered continuation path: %s\n' \
     "$head_commit" >&2
   exit 2
 fi
@@ -308,14 +412,14 @@ cmp --silent "$canonical_driver" "$source_dir/compare-route-paging.sh"
 printf '%s' "$invoking_status" >"$source_dir/invoking-status.txt"
 invoking_status_sha256=$(sha256sum "$source_dir/invoking-status.txt" | awk '{print $1}')
 mkdir "$source_dir/baseline-production" "$source_dir/optimized-production"
-for production_source in \
-  crates/rib/src/manager/mod.rs \
-  crates/rib/src/manager/update_groups.rs; do
-  source_name=${production_source##*/}
+for production_source in "${production_sources[@]}"; do
+  mkdir -p \
+    "$source_dir/baseline-production/$(dirname "$production_source")" \
+    "$source_dir/optimized-production/$(dirname "$production_source")"
   git -C "$repo_root" show "$base_commit:$production_source" \
-    >"$source_dir/baseline-production/$source_name"
+    >"$source_dir/baseline-production/$production_source"
   git -C "$repo_root" show "$head_commit:$production_source" \
-    >"$source_dir/optimized-production/$source_name"
+    >"$source_dir/optimized-production/$production_source"
 done
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/rustbgpd-route-paging.XXXXXX")
 base_tree="$scratch/base"
@@ -438,6 +542,7 @@ head_commit=$head_commit
 expected_head_commit=$expected_head_commit
 production_diff_sha256=$production_diff_sha256
 expected_production_diff_sha256=$expected_production_diff_sha256
+production_source_count=${#production_sources[@]}
 harness_sha256=$harness_sha256
 harness_source_sha256=$harness_source_sha256
 bench_support_source_sha256=$bench_support_source_sha256
@@ -448,6 +553,13 @@ compile_input_count=$compile_input_count
 routes=$routes_csv
 page_sizes=$page_sizes_csv
 repetitions=$repetitions
+max_ingest_regression_pct=$max_ingest_regression_pct
+max_churn_regression_pct=$max_churn_regression_pct
+max_complete_regression_pct=$max_complete_regression_pct
+max_page_p99_regression_pct=$max_page_p99_regression_pct
+min_grouped_400k_speedup=$min_grouped_400k_speedup
+max_resident_growth_pct=$max_resident_growth_pct
+max_resident_growth_bytes=$max_resident_growth_bytes
 core=$core
 taskset=$use_taskset
 host_lock_source=$host_lock_source
@@ -464,6 +576,7 @@ build_mode=cargo_bench_no_run_locked_jobs_1_separate_target_dirs
 build_log_baseline=build-logs/baseline.log
 build_log_optimized=build-logs/optimized.log
 cell_preflight_tsv=cell-preflight.tsv
+gate_summary_csv=gate-summary.csv
 uname=$(uname -srvmo)
 rustc=$(rustc --version)
 cargo=$(cargo --version)
@@ -520,7 +633,7 @@ head_benchmark_binary_sha256=$(sha256sum "$head_benchmark_binary" | awk '{print 
 
 results="$output_dir/route-paging.csv"
 printf '%s\n' \
-  'variant,commit,harness_sha256,scope,routes,page_size,repetition,pair_order,run_position,pages,rows,ordered_key_checksum,complete_ns,page_p50_ns,page_p99_ns,page_max_ns,rows_per_second' \
+  'variant,commit,harness_sha256,scope,routes,page_size,repetition,pair_order,run_position,pages,rows,ordered_key_checksum,complete_ns,page_p50_ns,page_p99_ns,page_max_ns,rows_per_second,ingest_ns,churn_routes,churn_ns,resident_bytes' \
   >"$results"
 execution_log="$output_dir/execution.log"
 : >"$execution_log"
@@ -672,25 +785,133 @@ for route_count in "${routes[@]}"; do
   done
 done
 
-python3 - "$results" "$harness_sha256" <<'PY'
+gate_summary="$output_dir/gate-summary.csv"
+python3 - \
+  "$results" \
+  "$harness_sha256" \
+  "$base_commit" \
+  "$head_commit" \
+  "$max_complete_regression_pct" \
+  "$max_page_p99_regression_pct" \
+  "$min_grouped_400k_speedup" \
+  "$max_ingest_regression_pct" \
+  "$max_churn_regression_pct" \
+  "$max_resident_growth_pct" \
+  "$max_resident_growth_bytes" \
+  "$gate_summary" <<'PY'
 import csv
+import math
 import sys
 from collections import defaultdict
+from statistics import median
 
-path, expected_harness = sys.argv[1:]
+(
+    path,
+    expected_harness,
+    expected_base_commit,
+    expected_head_commit,
+    max_complete_pct,
+    max_page_p99_pct,
+    min_grouped_400k_speedup,
+    max_ingest_pct,
+    max_churn_pct,
+    max_resident_pct,
+    max_resident_bytes,
+    gate_summary,
+) = sys.argv[1:]
+max_complete_pct = float(max_complete_pct)
+max_page_p99_pct = float(max_page_p99_pct)
+min_grouped_400k_speedup = float(min_grouped_400k_speedup)
+max_ingest_pct = float(max_ingest_pct)
+max_churn_pct = float(max_churn_pct)
+max_resident_pct = float(max_resident_pct)
+max_resident_bytes = int(max_resident_bytes)
+required_fields = [
+    "variant", "commit", "harness_sha256", "scope", "routes", "page_size",
+    "repetition", "pair_order", "run_position", "pages", "rows",
+    "ordered_key_checksum", "complete_ns", "page_p50_ns", "page_p99_ns",
+    "page_max_ns", "rows_per_second", "ingest_ns", "churn_routes",
+    "churn_ns", "resident_bytes",
+]
 with open(path, newline="", encoding="utf-8") as handle:
-    rows = list(csv.DictReader(handle))
+    reader = csv.DictReader(handle)
+    if reader.fieldnames != required_fields:
+        raise SystemExit(
+            f"result columns differ: expected {required_fields}, got {reader.fieldnames}"
+        )
+    rows = list(reader)
+if not rows:
+    raise SystemExit("route-paging matrix emitted no rows")
 
 pairs = defaultdict(dict)
 fixtures = defaultdict(dict)
+integer_fields = (
+    "routes", "page_size", "repetition", "pages", "rows", "complete_ns",
+    "page_p50_ns", "page_p99_ns", "page_max_ns", "ingest_ns",
+    "churn_routes", "churn_ns", "resident_bytes",
+)
+expected_commits = {
+    "baseline": expected_base_commit,
+    "optimized": expected_head_commit,
+}
 for row in rows:
+    variant = row["variant"]
+    if variant not in expected_commits:
+        raise SystemExit(f"invalid result variant: {variant!r}")
+    if row["commit"] != expected_commits[variant]:
+        raise SystemExit(
+            f"{variant} result commit mismatch: expected {expected_commits[variant]}, "
+            f"got {row['commit']}"
+        )
     if row["harness_sha256"] != expected_harness:
         raise SystemExit("result harness hash differs from the canonical source")
+    if row["scope"] not in {"best", "grouped_advertised"}:
+        raise SystemExit(f"invalid result scope: {row['scope']!r}")
+    for field in integer_fields:
+        raw = row[field]
+        if not raw or not raw.isascii() or not raw.isdigit():
+            raise SystemExit(f"invalid {field} for result row: {raw!r}")
+        value = int(raw)
+        if value <= 0:
+            raise SystemExit(f"{field} must be positive, got {value}")
+        row[field] = value
+    try:
+        rows_per_second = float(row["rows_per_second"])
+    except (TypeError, ValueError) as error:
+        raise SystemExit(
+            f"invalid rows_per_second for result row: {row['rows_per_second']!r}"
+        ) from error
+    if not math.isfinite(rows_per_second) or rows_per_second <= 0:
+        raise SystemExit(
+            f"rows_per_second must be finite and positive, got {row['rows_per_second']!r}"
+        )
+    row["rows_per_second"] = rows_per_second
+    checksum = row["ordered_key_checksum"]
+    if len(checksum) != 16 or any(char not in "0123456789abcdef" for char in checksum):
+        raise SystemExit(f"invalid ordered_key_checksum: {checksum!r}")
+    if not (
+        row["page_p50_ns"] <= row["page_p99_ns"] <= row["page_max_ns"]
+        <= row["complete_ns"]
+    ):
+        raise SystemExit("page timing order must satisfy p50 <= p99 <= max <= complete")
+    page_cap = min(row["page_size"], 1_000)
+    expected_pages = (row["rows"] + page_cap - 1) // page_cap
+    if row["pages"] != expected_pages:
+        raise SystemExit(
+            f"pages must equal ceil(rows/min(page_size,1000)): expected "
+            f"{expected_pages}, got {row['pages']}"
+        )
+    expected_churn_routes = min(row["routes"], 1_000)
+    if row["churn_routes"] != expected_churn_routes:
+        raise SystemExit(
+            f"churn_routes must equal {expected_churn_routes}, got "
+            f"{row['churn_routes']}"
+        )
     key = (row["scope"], row["routes"], row["page_size"], row["repetition"])
-    if row["variant"] in pairs[key]:
+    if variant in pairs[key]:
         raise SystemExit(f"duplicate variant for cell {key}")
-    pairs[key][row["variant"]] = row
-    fixture_key = (row["variant"], row["routes"], row["page_size"], row["repetition"])
+    pairs[key][variant] = row
+    fixture_key = (variant, row["routes"], row["page_size"], row["repetition"])
     fixtures[fixture_key][row["scope"]] = row
 
 for key, variants in pairs.items():
@@ -707,7 +928,7 @@ for key, variants in pairs.items():
     expected = expected_positions.get(baseline["pair_order"])
     if expected is None or (baseline["run_position"], optimized["run_position"]) != expected:
         raise SystemExit(f"invalid counterbalanced positions for {key}")
-    for field in ("pages", "rows", "ordered_key_checksum"):
+    for field in ("pages", "rows", "ordered_key_checksum", "churn_routes"):
         if baseline[field] != optimized[field]:
             raise SystemExit(f"baseline/optimized {field} mismatch for {key}")
 
@@ -716,12 +937,18 @@ for key, scopes in fixtures.items():
         raise SystemExit(f"missing fixture control for {key}")
     best = scopes["best"]
     grouped = scopes["grouped_advertised"]
-    if int(best["rows"]) != int(best["routes"]):
+    if best["rows"] != best["routes"]:
         raise SystemExit(f"best fixture row mismatch for {key}")
-    if int(grouped["rows"]) >= int(best["rows"]):
-        raise SystemExit(f"grouped fixture is not distinct for {key}")
+    expected_grouped_rows = best["routes"] - ((best["routes"] + 15) // 16)
+    if grouped["rows"] != expected_grouped_rows:
+        raise SystemExit(
+            f"grouped fixture row mismatch for {key}: expected "
+            f"{expected_grouped_rows}, got {grouped['rows']}"
+        )
     if grouped["ordered_key_checksum"] == best["ordered_key_checksum"]:
         raise SystemExit(f"grouped fixture checksum is not distinct for {key}")
+    if grouped["churn_routes"] != best["churn_routes"]:
+        raise SystemExit(f"scope churn fixture mismatch for {key}")
 
 orders = defaultdict(set)
 for key, variants in pairs.items():
@@ -731,11 +958,126 @@ for key, seen in orders.items():
     if seen != {"baseline-first", "optimized-first"}:
         raise SystemExit(f"cell did not counterbalance pair order: {key}")
 
-print(f"validated {len(pairs)} paired cells with identical route/page checksums")
+def delta_pct(baseline, optimized):
+    return ((optimized / baseline) - 1.0) * 100.0
+
+gate_rows = []
+gate_failures = []
+shapes = defaultdict(lambda: {"baseline": [], "optimized": []})
+for (scope, routes, page_size, _repetition), variants in pairs.items():
+    shape = (scope, routes, page_size)
+    for variant in ("baseline", "optimized"):
+        shapes[shape][variant].append(variants[variant])
+
+for shape, variants in sorted(shapes.items()):
+    scope, routes, page_size = shape
+    baseline_complete = median(row["complete_ns"] for row in variants["baseline"])
+    optimized_complete = median(row["complete_ns"] for row in variants["optimized"])
+    complete_change = delta_pct(baseline_complete, optimized_complete)
+    complete_speedup = baseline_complete / optimized_complete
+    target_shape = scope == "grouped_advertised" and routes == 400_000
+    complete_verdict = (
+        "pass"
+        if (
+            complete_speedup >= min_grouped_400k_speedup
+            if target_shape
+            else complete_change <= max_complete_pct
+        )
+        else "fail"
+    )
+    gate_rows.append([
+        "complete_ns", scope, routes, page_size, baseline_complete,
+        optimized_complete, complete_change, complete_speedup,
+        min_grouped_400k_speedup if target_shape else "",
+        "" if target_shape else max_complete_pct, "", complete_verdict,
+    ])
+    if complete_verdict == "fail":
+        if target_shape:
+            gate_failures.append(
+                f"complete_ns {shape} speedup {complete_speedup:.3f}x "
+                f"(minimum {min_grouped_400k_speedup:.3f}x)"
+            )
+        else:
+            gate_failures.append(
+                f"complete_ns {shape} regressed {complete_change:.3f}% "
+                f"(limit {max_complete_pct:.3f}%)"
+            )
+
+    baseline_p99 = median(row["page_p99_ns"] for row in variants["baseline"])
+    optimized_p99 = median(row["page_p99_ns"] for row in variants["optimized"])
+    p99_change = delta_pct(baseline_p99, optimized_p99)
+    p99_speedup = baseline_p99 / optimized_p99
+    p99_verdict = "pass" if p99_change <= max_page_p99_pct else "fail"
+    gate_rows.append([
+        "page_p99_ns", scope, routes, page_size, baseline_p99, optimized_p99,
+        p99_change, p99_speedup, "", max_page_p99_pct, "", p99_verdict,
+    ])
+    if p99_verdict == "fail":
+        gate_failures.append(
+            f"page_p99_ns {shape} regressed {p99_change:.3f}% "
+            f"(limit {max_page_p99_pct:.3f}%)"
+        )
+
+    for metric, limit in (
+        ("ingest_ns", max_ingest_pct),
+        ("churn_ns", max_churn_pct),
+    ):
+        baseline_value = median(row[metric] for row in variants["baseline"])
+        optimized_value = median(row[metric] for row in variants["optimized"])
+        change = delta_pct(baseline_value, optimized_value)
+        speedup = baseline_value / optimized_value
+        verdict = "pass" if change <= limit else "fail"
+        gate_rows.append(
+            [metric, scope, routes, page_size, baseline_value, optimized_value,
+             change, speedup, "", limit, "", verdict]
+        )
+        if verdict == "fail":
+            gate_failures.append(
+                f"{metric} {shape} regressed {change:.3f}% (limit {limit:.3f}%)"
+            )
+
+    baseline_rss = median(row["resident_bytes"] for row in variants["baseline"])
+    optimized_rss = median(row["resident_bytes"] for row in variants["optimized"])
+    rss_change_pct = delta_pct(baseline_rss, optimized_rss)
+    rss_change_bytes = optimized_rss - baseline_rss
+    verdict = (
+        "pass"
+        if rss_change_pct <= max_resident_pct and rss_change_bytes <= max_resident_bytes
+        else "fail"
+    )
+    gate_rows.append(
+        ["resident_bytes", scope, routes, page_size, baseline_rss, optimized_rss,
+         rss_change_pct, "", "", max_resident_pct, max_resident_bytes, verdict]
+    )
+    if verdict == "fail":
+        gate_failures.append(
+            f"resident_bytes {shape} grew {rss_change_pct:.3f}% / "
+            f"{rss_change_bytes} bytes (limits {max_resident_pct:.3f}% / "
+            f"{max_resident_bytes} bytes)"
+        )
+
+with open(gate_summary, "w", newline="", encoding="utf-8") as handle:
+    writer = csv.writer(handle)
+    writer.writerow([
+        "metric", "scope", "routes", "page_size", "baseline_median",
+        "optimized_median", "delta_pct", "speedup", "min_speedup",
+        "max_delta_pct", "max_delta_bytes", "verdict",
+    ])
+    writer.writerows(gate_rows)
+
+if gate_failures:
+    raise SystemExit("; ".join(gate_failures))
+
+print(
+    f"validated {len(pairs)} paired cells with identical route/page/churn "
+    f"fixtures and {len(gate_rows)} passing read/write/memory gates"
+)
 PY
 
 {
   printf 'run_utc_finish=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'write_side_memory_gates=passed\n'
+  printf 'read_write_memory_gates=passed\n'
   printf 'matrix_complete=1\n'
 } >>"$output_dir/metadata.txt"
 

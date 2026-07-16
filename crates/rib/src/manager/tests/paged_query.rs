@@ -3,6 +3,7 @@
 //! inside the actor, and a canceled query (dropped reply receiver)
 //! skips the scan entirely.
 
+use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
@@ -15,11 +16,25 @@ async fn query_page(
     after: Option<RouteQueryKey>,
     page_size: usize,
 ) -> RoutePage {
+    query_page_at(tx, scope, filter, after, None, page_size)
+        .await
+        .unwrap()
+}
+
+async fn query_page_at(
+    tx: &mpsc::Sender<RibUpdate>,
+    scope: RouteQueryScope,
+    filter: Option<RouteQueryFilter>,
+    after: Option<RouteQueryKey>,
+    expected_version: Option<RoutePageVersion>,
+    page_size: usize,
+) -> Result<RoutePage, RoutePageError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
         scope,
         filter,
         after,
+        expected_version,
         page_size,
         reply: reply_tx,
     })
@@ -37,16 +52,57 @@ async fn collect_pages(
 ) -> Vec<Route> {
     let mut out: Vec<Route> = Vec::new();
     let mut after = None;
+    let mut expected_version = None;
     loop {
-        let page = query_page(tx, scope, None, after, page_size).await;
+        let page = query_page_at(tx, scope, None, after, expected_version, page_size)
+            .await
+            .unwrap();
         assert!(
             page.routes.len() <= page_size,
             "page exceeded requested size"
         );
         let has_more = page.has_more;
+        expected_version = Some(page.version);
         after = page.routes.last().map(route_query_key);
         out.extend(page.routes);
         if !has_more {
+            return out;
+        }
+    }
+}
+
+async fn collect_pages_matching_prefix(
+    tx: &mpsc::Sender<RibUpdate>,
+    scope: RouteQueryScope,
+    page_size: usize,
+    wanted: Prefix,
+) -> Vec<Route> {
+    let mut out = Vec::new();
+    let mut after = None;
+    let mut expected_version = None;
+    let mut reported_total = None;
+    loop {
+        let page = query_page_at(
+            tx,
+            scope,
+            Some(Box::new(move |route: &Route| route.prefix == wanted)),
+            after,
+            expected_version,
+            page_size,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *reported_total.get_or_insert(page.total),
+            page.total,
+            "unchanged fixture must report one cursor-independent total"
+        );
+        let has_more = page.has_more;
+        expected_version = Some(page.version);
+        after = page.routes.last().map(route_query_key);
+        out.extend(page.routes);
+        if !has_more {
+            assert_eq!(reported_total, Some(u64::try_from(out.len()).unwrap()));
             return out;
         }
     }
@@ -68,8 +124,25 @@ fn direct_page(
     after: Option<RouteQueryKey>,
     page_size: usize,
 ) -> RoutePage {
+    direct_page_at(manager, scope, after, None, page_size).unwrap()
+}
+
+fn direct_page_at(
+    manager: &mut RibManager,
+    scope: RouteQueryScope,
+    after: Option<RouteQueryKey>,
+    expected_version: Option<RoutePageVersion>,
+    page_size: usize,
+) -> Result<RoutePage, RoutePageError> {
     let (reply, mut response) = oneshot::channel();
-    manager.handle_query_routes_page(scope, None, after, page_size, reply);
+    manager.handle_query_routes_page_versioned(
+        scope,
+        None,
+        after,
+        expected_version,
+        page_size,
+        reply,
+    );
     response
         .try_recv()
         .expect("route page handler replies synchronously")
@@ -277,14 +350,16 @@ async fn paged_query_reports_total_and_has_more() {
     )
     .await;
     assert!(!all.has_more);
-    let last = query_page(
+    let last = query_page_at(
         &tx,
         RouteQueryScope::Received { peer: None },
         None,
         all.routes.last().map(route_query_key),
+        Some(all.version),
         100,
     )
-    .await;
+    .await
+    .unwrap();
     assert!(last.routes.is_empty());
     assert!(!last.has_more);
     assert_eq!(last.total, 12, "total stays cursor-independent");
@@ -300,18 +375,22 @@ async fn paged_query_filters_inside_the_actor() {
     // Keep only one prefix; total and pages both reflect the filter.
     let wanted = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24));
     let mut after = None;
+    let mut expected_version = None;
     let mut got = Vec::new();
     loop {
-        let page = query_page(
+        let page = query_page_at(
             &tx,
             RouteQueryScope::Received { peer: None },
             Some(Box::new(move |route: &Route| route.prefix == wanted)),
             after,
+            expected_version,
             2,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(page.total, 3, "one route per peer matches the filter");
         let has_more = page.has_more;
+        expected_version = Some(page.version);
         after = page.routes.last().map(route_query_key);
         got.extend(page.routes);
         if !has_more {
@@ -323,6 +402,322 @@ async fn paged_query_filters_inside_the_actor() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn filtered_page_unions_match_authoritative_snapshots_for_every_scope() {
+    let (tx, target, _out_rx, handle) = seeded_manager().await;
+    let wanted = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24));
+    let one_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let scopes = [
+        RouteQueryScope::Received { peer: None },
+        RouteQueryScope::Received {
+            peer: Some(one_peer),
+        },
+        RouteQueryScope::Best,
+        RouteQueryScope::Advertised { peer: target },
+    ];
+    for page_size in [1, 2, 1_000, usize::MAX] {
+        for scope in scopes {
+            let actual = collect_pages_matching_prefix(&tx, scope, page_size, wanted).await;
+            assert!(actual.iter().all(|route| route.prefix == wanted));
+            assert!(
+                actual
+                    .windows(2)
+                    .all(|rows| { route_query_key(&rows[0]) < route_query_key(&rows[1]) }),
+                "filtered {scope:?} page union must stay strictly ordered"
+            );
+        }
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_scopes_return_a_terminal_zero_total_page() {
+    let (tx, _target, _out_rx, handle) = seeded_manager().await;
+    let missing = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 250));
+
+    for scope in [
+        RouteQueryScope::Received {
+            peer: Some(missing),
+        },
+        RouteQueryScope::Advertised { peer: missing },
+    ] {
+        for page_size in [0, 1, 1_000, usize::MAX] {
+            let page = query_page(&tx, scope, None, None, page_size).await;
+            assert!(page.routes.is_empty(), "empty {scope:?}");
+            assert_eq!(page.total, 0, "empty {scope:?}");
+            assert!(!page.has_more, "empty {scope:?}");
+        }
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[test]
+fn page_core_matches_full_sort_for_adversarial_order_filters_and_cursors() {
+    let peer_a = Ipv4Addr::new(192, 0, 2, 1);
+    let peer_b = Ipv4Addr::new(192, 0, 2, 2);
+    let mut routes = Vec::new();
+    for last in (0..=63u8).rev() {
+        let mut route = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, last), 32),
+            if last % 2 == 0 { peer_a } else { peer_b },
+        );
+        route.path_id = u32::from(last % 3);
+        routes.push(route);
+    }
+
+    let cursor_cases = [
+        None,
+        routes.get(48).map(route_query_key),
+        Some((
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 31), 32)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+            99,
+        )),
+    ];
+    for after in cursor_cases {
+        for page_size in [0, 1, 7, 1_000, usize::MAX] {
+            for filtered in [false, true] {
+                let filter: Option<RouteQueryFilter> = filtered
+                    .then(|| Box::new(|route: &Route| route.path_id != 1) as RouteQueryFilter);
+                let page = page_routes(routes.iter(), filter.as_ref(), after, page_size);
+
+                let mut authoritative: Vec<_> = routes
+                    .iter()
+                    .filter(|route| filter.as_ref().is_none_or(|f| f(route)))
+                    .cloned()
+                    .collect();
+                authoritative.sort_unstable_by_key(route_query_key);
+                let total = authoritative.len();
+                let eligible: Vec<_> = authoritative
+                    .into_iter()
+                    .filter(|route| after.is_none_or(|cursor| route_query_key(route) > cursor))
+                    .collect();
+                let cap = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+                assert_eq!(page.total, u64::try_from(total).unwrap());
+                assert_eq!(
+                    keys(&page.routes),
+                    keys(&eligible[..eligible.len().min(cap)])
+                );
+                assert_eq!(page.has_more, eligible.len() > cap);
+            }
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one differential fixture checks both ordered table implementations across mixed families and Add-Path replacement"
+)]
+fn ordered_table_indices_match_full_sort_across_add_path_and_replacement() {
+    let peer_a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let peer_b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let make = |peer: IpAddr, path_id: u32| {
+        let IpAddr::V4(peer) = peer else {
+            unreachable!()
+        };
+        let mut route = make_route(prefix, peer);
+        route.path_id = path_id;
+        route
+    };
+
+    let inserted = vec![
+        make(peer_b, 9),
+        make(peer_a, 7),
+        make(peer_b, 1),
+        make(peer_a, 3),
+    ];
+
+    let mut inbound = AdjRibIn::new(peer_a);
+    for mut route in inserted.clone() {
+        route.peer = peer_a;
+        inbound.insert(route);
+    }
+    let mut inbound_expected: Vec<_> = inbound.iter().map(route_query_key).collect();
+    inbound_expected.sort_unstable();
+    assert_eq!(
+        inbound
+            .iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        inbound_expected
+    );
+    let inbound_cursor = inbound_expected[1];
+    assert_eq!(
+        inbound
+            .iter_ordered_from(Some(inbound_cursor))
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        inbound_expected[2..]
+    );
+
+    let mut outbound = AdjRibOut::new(peer_a);
+    for route in inserted {
+        outbound.insert(route);
+    }
+    let mut outbound_expected: Vec<_> = outbound.iter().map(route_query_key).collect();
+    outbound_expected.sort_unstable();
+    assert_eq!(
+        outbound
+            .iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        outbound_expected
+    );
+    let replacement = make(peer_a, 9);
+    outbound.insert(replacement);
+    outbound_expected = outbound.iter().map(route_query_key).collect();
+    outbound_expected.sort_unstable();
+    assert_eq!(
+        outbound
+            .iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        outbound_expected,
+        "replacing a path with a different source peer reorders its identity"
+    );
+    assert!(outbound.withdraw(&Prefix::V4(prefix), 3));
+    outbound_expected = outbound.iter().map(route_query_key).collect();
+    outbound_expected.sort_unstable();
+    assert_eq!(
+        outbound
+            .iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        outbound_expected,
+        "withdraw removes the ordered-index row"
+    );
+
+    let mut loc = LocRib::new();
+    let best_a = make(peer_a, 0);
+    assert!(loc.recompute(best_a.prefix, std::iter::once(&best_a)));
+    assert_eq!(
+        loc.iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        vec![route_query_key(&best_a)]
+    );
+    let best_b = make(peer_b, 0);
+    assert!(loc.recompute(best_b.prefix, std::iter::once(&best_b)));
+    assert_eq!(
+        loc.iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        vec![route_query_key(&best_b)],
+        "best replacement updates the route body without duplicating the prefix index"
+    );
+    assert!(loc.recompute(best_b.prefix, std::iter::empty()));
+    assert!(loc.iter_ordered_from(None).next().is_none());
+
+    for step in 0..64u32 {
+        let mut route = make(if step % 2 == 0 { peer_a } else { peer_b }, step % 5);
+        route.prefix = if step % 3 == 0 {
+            Prefix::V6(Ipv6Prefix::new(
+                format!("2001:db8:{:x}::", step % 7).parse().unwrap(),
+                48,
+            ))
+        } else {
+            Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(10, 0, u8::try_from(step % 7).unwrap(), 0),
+                24,
+            ))
+        };
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+        if step % 5 == 4 {
+            assert!(loc.recompute(route.prefix, std::iter::empty()));
+        }
+        let mut authoritative: Vec<_> = loc.iter().map(route_query_key).collect();
+        authoritative.sort_unstable();
+        assert_eq!(
+            loc.iter_ordered_from(None)
+                .map(route_query_key)
+                .collect::<Vec<_>>(),
+            authoritative,
+            "Loc-RIB prefix-index parity after source flip step {step}"
+        );
+    }
+}
+
+#[test]
+fn randomized_mixed_family_add_path_continuations_match_full_key_sort() {
+    let mut outbound = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)));
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for index in 0..512u32 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let mut route = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 32),
+            Ipv4Addr::new(192, 0, 2, 1),
+        );
+        route.prefix = if state & 1 == 0 {
+            let len = u8::try_from(8 + ((state >> 8) % 25)).unwrap();
+            Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::from(u32::try_from((state >> 16) & u64::from(u32::MAX)).unwrap()),
+                len,
+            ))
+        } else {
+            let len = u8::try_from(16 + ((state >> 8) % 113)).unwrap();
+            let high = u128::from(state) << 64;
+            let low = u128::from(index).wrapping_mul(0x0001_0001_0001_0001);
+            Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(high | low), len))
+        };
+        route.peer = if state & 2 == 0 {
+            IpAddr::V4(Ipv4Addr::from(
+                0xc000_0200u32 | u32::try_from((state >> 32) & 0xff).unwrap(),
+            ))
+        } else {
+            IpAddr::V6(Ipv6Addr::from(
+                0x2001_0db8_ffff_0000_0000_0000_0000_0000u128 | u128::from(index % 251),
+            ))
+        };
+        route.path_id = u32::try_from((state >> 40) & 0x0f).unwrap();
+        outbound.insert(route);
+    }
+
+    let mut authoritative: Vec<_> = outbound.iter().map(route_query_key).collect();
+    authoritative.sort_unstable();
+    authoritative.dedup();
+    assert_eq!(
+        outbound
+            .iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        authoritative
+    );
+
+    let absent_cursors = [
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(127, 1, 2, 0), 24)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 250)),
+            77,
+        ),
+        (
+            Prefix::V6(Ipv6Prefix::new("2001:db8:abcd::".parse().unwrap(), 64)),
+            IpAddr::V6("2001:db8::ffff".parse().unwrap()),
+            99,
+        ),
+    ];
+    for cursor in authoritative.iter().copied().chain(absent_cursors) {
+        let expected: Vec<_> = authoritative
+            .iter()
+            .copied()
+            .filter(|key| *key > cursor)
+            .collect();
+        let actual: Vec<_> = outbound
+            .iter_ordered_from(Some(cursor))
+            .map(route_query_key)
+            .collect();
+        assert_eq!(actual, expected, "cursor {cursor:?}");
+    }
 }
 
 #[tokio::test]
@@ -342,6 +737,7 @@ async fn canceled_paged_query_skips_the_scan() {
             true
         })),
         after: None,
+        expected_version: None,
         page_size: 100,
         reply: reply_tx,
     })
@@ -429,16 +825,20 @@ fn grouped_pages_match_snapshot_with_split_horizon_and_exact_rejection() {
     for page_size in [1, 100, 1_000] {
         let mut actual = Vec::new();
         let mut after = None;
+        let mut expected_version = None;
         loop {
-            let page = direct_page(
+            let page = direct_page_at(
                 &mut manager,
                 RouteQueryScope::Advertised { peer: target },
                 after,
+                expected_version,
                 page_size,
-            );
+            )
+            .unwrap();
             assert_eq!(page.total, expected.len() as u64);
             assert!(page.routes.len() <= page_size);
             actual.extend(page.routes.iter().map(route_query_key));
+            expected_version = Some(page.version);
             after = page.routes.last().map(route_query_key);
             if !page.has_more {
                 break;
@@ -449,7 +849,93 @@ fn grouped_pages_match_snapshot_with_split_horizon_and_exact_rejection() {
 }
 
 #[test]
-fn cursor_mutation_contract_is_strictly_after_last_key() {
+fn grouped_high_exclusion_pages_match_snapshot_and_terminal_empty_view() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target_v4 = Ipv4Addr::new(10, 0, 0, 1);
+    let target = IpAddr::V4(target_v4);
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let external_v4 = Ipv4Addr::new(192, 0, 2, 100);
+    let external = IpAddr::V4(external_v4);
+    let _target_rx = peer_up_direct(&mut manager, target);
+    let _sibling_rx = peer_up_direct(&mut manager, sibling);
+
+    // Put 1,024 target-sourced rows ahead of the sole eligible row. The
+    // grouped iterator resumes from its ordered index but must stream past
+    // member-local split-horizon exclusions before yielding the page.
+    let own_base = u32::from(Ipv4Addr::new(10, 64, 0, 0));
+    let own_routes = (0..1_024u32)
+        .map(|offset| {
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::from(own_base + offset), 32),
+                target_v4,
+            )
+        })
+        .collect();
+    receive_direct(&mut manager, target, own_routes, vec![]);
+    let external_route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32),
+        external_v4,
+    );
+    receive_direct(&mut manager, external, vec![external_route.clone()], vec![]);
+
+    let scope = RouteQueryScope::Advertised { peer: target };
+    assert_eq!(
+        keys(&direct_advertised_snapshot(&mut manager, target)),
+        vec![route_query_key(&external_route)]
+    );
+    let page = direct_page(&mut manager, scope, None, 1);
+    assert_eq!(page.total, 1);
+    assert_eq!(keys(&page.routes), vec![route_query_key(&external_route)]);
+    assert!(!page.has_more);
+
+    // Exact-export rejection leaves a terminal zero-row member view even
+    // though the shared group table remains populated by every source row.
+    manager
+        .peer_unexportable
+        .entry(target)
+        .or_default()
+        .insert(ExactExportKey::Unicast(
+            external_route.prefix,
+            external_route.path_id,
+        ));
+    manager.advance_advertised_pages();
+    let page = direct_page(&mut manager, scope, None, 1);
+    assert_eq!(page.total, 0);
+    assert!(page.routes.is_empty());
+    assert!(!page.has_more);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn benchmark_write_controls_drive_production_chunk_invalidation() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let route = make_route(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32), source);
+    let versions = |manager: &RibManager| {
+        (
+            manager.route_page_received_version,
+            manager.route_page_best_version,
+            manager.route_page_advertised_version,
+        )
+    };
+
+    let before_seed = versions(&manager);
+    manager.bench_seed_loc_rib(vec![route.clone()]);
+    assert_ne!(versions(&manager), before_seed);
+    assert_eq!(manager.ribs.values().map(AdjRibIn::len).sum::<usize>(), 1);
+    assert_eq!(manager.loc_rib.len(), 1);
+
+    let before_churn = versions(&manager);
+    manager.bench_churn_loc_rib(vec![route]);
+    assert_ne!(versions(&manager), before_churn);
+    assert_eq!(manager.ribs.values().map(AdjRibIn::len).sum::<usize>(), 1);
+    assert_eq!(manager.loc_rib.len(), 1);
+}
+
+#[test]
+fn mutation_invalidates_cursor_and_restart_reads_current_table() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = Ipv4Addr::new(192, 0, 2, 1);
@@ -478,6 +964,7 @@ fn cursor_mutation_contract_is_strictly_after_last_key() {
             .collect::<Vec<_>>()
     );
     let cursor = first.routes.last().map(route_query_key);
+    let version = Some(first.version);
 
     receive_direct(
         &mut manager,
@@ -486,25 +973,333 @@ fn cursor_mutation_contract_is_strictly_after_last_key() {
         vec![(route(30).prefix, 0)],
     );
 
-    let mut resumed = Vec::new();
-    let mut after = cursor;
+    assert_eq!(
+        direct_page_at(&mut manager, scope, cursor, version, 2).unwrap_err(),
+        RoutePageError::Invalidated,
+        "a changed scope must force an explicit restart"
+    );
+
+    let mut restarted = Vec::new();
+    let mut after = None;
+    let mut expected_version = None;
     loop {
-        let page = direct_page(&mut manager, scope, after, 2);
-        assert_eq!(page.total, 6, "total reflects the current table");
-        resumed.extend(page.routes.iter().map(route_query_key));
+        let page = direct_page_at(&mut manager, scope, after, expected_version, 2).unwrap();
+        assert_eq!(page.total, 6, "restart sees the current table");
+        restarted.extend(page.routes.iter().map(route_query_key));
+        expected_version = Some(page.version);
         after = page.routes.last().map(route_query_key);
         if !page.has_more {
             break;
         }
     }
-    let expected: Vec<_> = [35, 40, 50]
+    let expected: Vec<_> = [10, 15, 20, 35, 40, 50]
         .into_iter()
         .map(route)
         .map(|route| route_query_key(&route))
         .collect();
-    assert_eq!(resumed, expected);
-    assert!(
-        resumed.iter().all(|key| Some(*key) > cursor),
-        "resumed pages never repeat or backfill at/before the cursor"
+    assert_eq!(restarted, expected);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle scenario preserves the cursor while exercising every required generation invalidation seam"
+)]
+fn scope_generations_cover_other_peer_group_overlay_and_peer_recreate() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source_a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let source_b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let _target_rx = peer_up_direct(&mut manager, target);
+    let _sibling_rx = peer_up_direct(&mut manager, sibling);
+    receive_direct(
+        &mut manager,
+        source_a,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24),
+            source_a.to_string().parse().unwrap(),
+        )],
+        vec![],
+    );
+
+    let received_scope = RouteQueryScope::Received { peer: None };
+    let received = direct_page(&mut manager, received_scope, None, 1);
+    let received_cursor = received.routes.last().map(route_query_key);
+    receive_direct(
+        &mut manager,
+        source_b,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24),
+            source_b.to_string().parse().unwrap(),
+        )],
+        vec![],
+    );
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            received_scope,
+            received_cursor,
+            Some(received.version),
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated,
+        "a different peer mutating Received(all) invalidates the walk"
+    );
+
+    let advertised_scope = RouteQueryScope::Advertised { peer: target };
+    let advertised = direct_page(&mut manager, advertised_scope, None, 1);
+    let advertised_cursor = advertised.routes.last().map(route_query_key);
+    receive_direct(
+        &mut manager,
+        source_b,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 3, 0, 0), 24),
+            source_b.to_string().parse().unwrap(),
+        )],
+        vec![],
+    );
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            advertised_scope,
+            advertised_cursor,
+            Some(advertised.version),
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated,
+        "a shared group-table mutation invalidates member continuations"
+    );
+
+    let advertised = direct_page(&mut manager, advertised_scope, None, 1);
+    let advertised_cursor = advertised.routes.last().map(route_query_key);
+    let rejected = manager
+        .grouped_advertised_routes_iter(target)
+        .and_then(|mut routes| routes.next())
+        .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+        .unwrap();
+    manager
+        .peer_unexportable
+        .entry(target)
+        .or_default()
+        .insert(rejected);
+    manager.advance_advertised_pages();
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            advertised_scope,
+            advertised_cursor,
+            Some(advertised.version),
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated,
+        "member-local rejection-overlay mutation invalidates its walk"
+    );
+
+    let advertised = direct_page(&mut manager, advertised_scope, None, 1);
+    let old_version = advertised.version;
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 0,
+    });
+    let after_delete = direct_page(&mut manager, advertised_scope, None, 1);
+    assert_ne!(after_delete.version, old_version);
+    let _replacement_rx = peer_up_direct(&mut manager, target);
+    let after_recreate = direct_page(&mut manager, advertised_scope, None, 1);
+    assert_ne!(after_recreate.version, after_delete.version);
+
+    // PeerUp is usually an outbound-only registration, but a collision-window
+    // replacement clears the predecessor session's Adj-RIB-In and Loc-RIB.
+    // Its conservative classification must therefore fence all three views.
+    receive_direct(
+        &mut manager,
+        target,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(10, 4, 0, 0), 24),
+            target.to_string().parse().unwrap(),
+        )],
+        vec![],
+    );
+    let received_scope = RouteQueryScope::Received { peer: Some(target) };
+    let best_scope = RouteQueryScope::Best;
+    let received = direct_page(&mut manager, received_scope, None, 1);
+    let best = direct_page(&mut manager, best_scope, None, 1);
+    let _collision_replacement_rx = peer_up_direct(&mut manager, target);
+    assert_ne!(
+        direct_page(&mut manager, received_scope, None, 1).version,
+        received.version,
+        "replacement PeerUp invalidates the cleared received view"
+    );
+    assert_ne!(
+        direct_page(&mut manager, best_scope, None, 1).version,
+        best.version,
+        "replacement PeerUp invalidates the recomputed best view"
+    );
+}
+
+#[test]
+fn route_page_generation_rollover_reseeds_then_fails_closed_at_full_exhaustion() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+
+    manager.route_page_received_version = Some(RoutePageVersion {
+        epoch: 7,
+        generation: u64::MAX,
+    });
+    manager.advance_received_pages();
+    assert_eq!(
+        manager.route_page_received_version,
+        Some(RoutePageVersion {
+            epoch: 8,
+            generation: 0,
+        })
+    );
+
+    manager.route_page_received_version = Some(RoutePageVersion {
+        epoch: u64::MAX,
+        generation: u64::MAX,
+    });
+    manager.advance_received_pages();
+    assert_eq!(manager.route_page_received_version, None);
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            RouteQueryScope::Received { peer: None },
+            None,
+            None,
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::GenerationExhausted
+    );
+}
+
+#[test]
+fn timer_driven_gr_sweep_invalidates_received_and_best_continuations() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let IpAddr::V4(peer_v4) = peer else {
+        unreachable!()
+    };
+    receive_direct(
+        &mut manager,
+        peer,
+        [1, 2]
+            .into_iter()
+            .map(|octet| {
+                make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, octet), 32),
+                    peer_v4,
+                )
+            })
+            .collect(),
+        vec![],
+    );
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    manager.outbound_peers.insert(peer, outbound_tx);
+
+    let received_scope = RouteQueryScope::Received { peer: None };
+    let best_scope = RouteQueryScope::Best;
+    let received = direct_page(&mut manager, received_scope, None, 1);
+    let best = direct_page(&mut manager, best_scope, None, 1);
+    assert!(received.has_more && best.has_more);
+
+    // This is the same direct seam invoked by both GR timer arms in `run`;
+    // there is no intervening RibUpdate to advance the versions for us.
+    manager.sweep_gr_stale(peer);
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            received_scope,
+            received.routes.last().map(route_query_key),
+            Some(received.version),
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    assert_eq!(
+        direct_page_at(
+            &mut manager,
+            best_scope,
+            best.routes.last().map(route_query_key),
+            Some(best.version),
+            1,
+        )
+        .unwrap_err(),
+        RoutePageError::Invalidated
+    );
+    assert!(manager.ribs.get(&peer).is_none_or(AdjRibIn::is_empty));
+    assert!(manager.loc_rib.is_empty());
+}
+
+#[test]
+fn every_direct_timer_mutation_seam_advances_route_page_versions() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let versions = |manager: &RibManager| {
+        (
+            manager.route_page_received_version,
+            manager.route_page_best_version,
+            manager.route_page_advertised_version,
+        )
+    };
+
+    let before = versions(&manager);
+    manager.sweep_llgr_stale(peer, &[family]);
+    assert_ne!(versions(&manager), before, "LLGR expiry seam");
+
+    manager
+        .refresh_in_progress
+        .entry(peer)
+        .or_default()
+        .insert(family);
+    let before = versions(&manager);
+    manager.finish_route_refresh(peer, family.0, family.1, true);
+    assert_ne!(versions(&manager), before, "refresh-timeout seam");
+
+    let before = versions(&manager);
+    manager.release_selection_families(&[family], "test timer expiry");
+    assert_ne!(versions(&manager), before, "selection-release seam");
+}
+
+/// A shared clean export-policy transition commits its group-membership and
+/// export-overlay flips in `Finalize`, which does not always reach the
+/// distribution-pass fence (no dirty or forced peers). General queries stay
+/// queued while the transition owns the actor, so fencing at command
+/// acceptance covers the whole transaction, including the fallback handoff.
+#[test]
+fn accepting_a_shared_policy_transition_invalidates_advertised_continuations() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let before = manager.route_page_advertised_version;
+    let (reply, _response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            export_policy: None,
+        }],
+        reply,
+    });
+    assert_ne!(
+        manager.route_page_advertised_version, before,
+        "cohort export-policy replacement must fence advertised continuations at acceptance"
     );
 }

@@ -12,7 +12,7 @@
 //! the default no-op sink with its concrete EHM sink without widening the
 //! normal public API or duplicating manager-side ring/broadcast work.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,12 +22,11 @@ use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 
 use super::RibManager;
-use crate::adj_rib_in::AdjRibIn;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::Route;
 use crate::update::{
-    ExactExportEncoder, OutboundRouteUpdate, PeerExportPolicyReplacement, RoutePage, RouteQueryKey,
-    RouteQueryScope,
+    ExactExportEncoder, OutboundRouteUpdate, PeerExportPolicyReplacement, RibUpdate, RoutePage,
+    RouteQueryKey, RouteQueryScope,
 };
 
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
@@ -183,28 +182,68 @@ impl RibManager {
         receivers
     }
 
-    /// Seed the Loc-RIB by inserting each route under its declared source peer
-    /// and recomputing best paths, so [`RibManager::bench_distribute`] has a
-    /// populated table to fan out. Call AFTER [`RibManager::bench_register_peers`]
-    /// so the initial-table dump sees an empty Loc-RIB (it then emits only the
-    /// drained `EoR` marker, no route announces).
+    /// Drive one production `RoutesReceived` envelope to completion, including
+    /// the manager dispatcher, bounded ingest chunks, recompute, distribution,
+    /// and every mutation-version fence implemented by the selected git ref.
+    fn bench_apply_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<Route>,
+        withdrawn: Vec<(Prefix, u32)>,
+    ) {
+        let session_id = self.outbound_session_ids.get(&peer).copied().unwrap_or(0);
+        self.handle_update(RibUpdate::RoutesReceived {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+        });
+        while self.process_next_route_chunk() {}
+    }
+
+    /// Seed the Loc-RIB through the production actor/event path, grouped into
+    /// one session envelope per source peer. The benchmark calls this before
+    /// outbound peers are registered, so distribution has no transport fanout
+    /// and the timed value isolates ingest, index maintenance, recompute, and
+    /// the selected ref's real continuation-invalidation work.
     pub fn bench_seed_loc_rib(&mut self, routes: Vec<Route>) {
-        let mut affected = HashSet::with_capacity(routes.len());
-        let mut announcers = HashSet::with_capacity(routes.len());
-        for mut route in routes {
-            let source = route.peer;
-            affected.insert(route.prefix);
-            announcers.insert((source, route.prefix));
-            self.attr_intern.intern(&mut route.attributes);
-            self.ribs
-                .entry(source)
-                .or_insert_with(|| AdjRibIn::new(source))
-                .insert(route);
+        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        for route in routes {
+            by_peer.entry(route.peer).or_default().push(route);
         }
-        for (source, prefix) in announcers {
-            self.register_unicast_announcer(source, prefix);
+        for (peer, announced) in by_peer {
+            self.bench_apply_routes_received(peer, announced, Vec::new());
         }
-        self.recompute_best(&affected);
+    }
+
+    /// Withdraw and re-announce an existing unicast subset through production
+    /// `RoutesReceived` envelopes. The final table is identical to the input
+    /// fixture, so traversal remains a checksum oracle while the timed control
+    /// includes each ref's actual chunking and invalidation behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a requested fixture route was not present in its source
+    /// Adj-RIB-In; that would make the churn control incomparable.
+    pub fn bench_churn_loc_rib(&mut self, routes: Vec<Route>) {
+        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        for route in routes {
+            by_peer.entry(route.peer).or_default().push(route);
+        }
+        for (&peer, peer_routes) in &by_peer {
+            let withdrawn = peer_routes
+                .iter()
+                .map(|route| (route.prefix, route.path_id))
+                .collect();
+            self.bench_apply_routes_received(peer, Vec::new(), withdrawn);
+        }
+        for (peer, announced) in by_peer {
+            self.bench_apply_routes_received(peer, announced, Vec::new());
+        }
     }
 
     /// Fan `changed` out to every registered peer — the measured hot path. Both

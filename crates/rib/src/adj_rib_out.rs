@@ -13,6 +13,7 @@ use crate::route::{
     LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
+use crate::update::{RouteQueryKey, route_query_key};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -129,6 +130,28 @@ impl AdjRibOut {
     /// Iterate over all advertised routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
         self.routes.iter()
+    }
+
+    /// Iterate unicast routes in route-query identity order, beginning at
+    /// the cursor prefix and excluding identities at or before `after`.
+    ///
+    /// The existing prefix trie is the persistent ordered index. Sorting a
+    /// cloned per-prefix `SmallVec` is needed here because an Adj-RIB-Out can
+    /// carry Add-Path rows sourced by different peers; identity order is
+    /// `(prefix, source peer, path_id)`, not insertion order.
+    pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+        let routes = &self.routes;
+        self.prefix_path_ids
+            .iter_from(after.map(|cursor| cursor.0))
+            .flat_map(move |(_, ids)| {
+                let mut ordered = ids.clone();
+                ordered
+                    .sort_unstable_by_key(|(_, handle)| routes.get(*handle).map(route_query_key));
+                ordered
+                    .into_iter()
+                    .filter_map(move |(_, handle)| routes.get(handle))
+            })
+            .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
