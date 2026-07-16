@@ -753,7 +753,9 @@ where
     }
 }
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
-/// Production route budget for one strict shared-policy actor poll.
+/// Production stride of probed routes between wall-clock checks inside one
+/// strict shared-policy actor poll; the poll keeps striding until
+/// [`FLUSH_POLL_BUDGET`] elapses.
 pub(in crate::manager) const POLICY_TRANSITION_PRODUCTION_ROUTE_SLICE: usize = 1_024;
 /// Maximum route identities processed by one strict shared-policy actor poll.
 #[cfg(not(test))]
