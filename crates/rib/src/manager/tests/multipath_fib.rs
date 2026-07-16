@@ -284,6 +284,22 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         "ExplainBestPath skips post-policy NO_ADVERTISE before rank assignment"
     );
 
+    // Post-policy NO_ADVERTISE suppression must surface through live
+    // policy-filtered observability, not only export explain.
+    let history = query_route_event_history(&tx, Some(target), Some(Afi::Ipv4), None, 10).await;
+    let policy_filtered = history
+        .iter()
+        .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        policy_filtered.len(),
+        1,
+        "policy-added NO_ADVERTISE emits one policy-filtered event"
+    );
+    assert_eq!(policy_filtered[0].peer, Some(IpAddr::V4(source_b)));
+    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].prefix, Prefix::V4(prefix));
+
     drop(tx);
     handle.await.unwrap();
 }

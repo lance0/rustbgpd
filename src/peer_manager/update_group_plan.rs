@@ -126,7 +126,11 @@ fn transition(current: &PlannedGroupability, candidate: &PlannedGroupability) ->
             },
         ) if ar == br && af == bf => "no_op",
         (Absent, Absent) => "no_op",
-        (Group { .. }, Group { .. }) | (_, Absent) | (Absent, Group { .. }) => "regroup",
+        // Deleting a never-established peer (Indeterminate -> Absent) is not a
+        // regroup; the indeterminate arm below must win for that case.
+        (Group { .. } | Private { .. }, Absent) | (Group { .. } | Absent, Group { .. }) => {
+            "regroup"
+        }
         (Private { .. }, Group { .. }) => "shared_migration",
         (_, Private { .. }) => "private_resync",
         (_, Indeterminate { .. }) | (Indeterminate { .. }, _) => "indeterminate",
@@ -427,6 +431,11 @@ mod tests {
         );
         assert_eq!(
             transition(&PlannedGroupability::Absent, &unknown),
+            "indeterminate"
+        );
+        // Deleting a never-established peer must not count as a regroup.
+        assert_eq!(
+            transition(&unknown, &PlannedGroupability::Absent),
             "indeterminate"
         );
     }

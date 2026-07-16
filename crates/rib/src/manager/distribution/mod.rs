@@ -2075,41 +2075,55 @@ impl RibManager {
                 rtc_announce.retain(|_| rtc_keep.next().unwrap_or(false));
                 debug_assert_eq!(offset + family_lengths[6], keep.len());
 
-                for key in decision.owed_withdrawals {
-                    match key {
-                        ExactExportKey::Unicast(prefix, path_id) => {
-                            if !withdraw.contains(&(prefix, path_id)) {
-                                withdraw.push((prefix, path_id));
+                if !decision.owed_withdrawals.is_empty() {
+                    // owed_withdrawals is already a set, so dedup is only
+                    // against the withdrawals staged above. Mirror the OTC
+                    // block's HashSet so duplicate detection stays
+                    // constant-time for large resync batches.
+                    let withdrawn: HashSet<_> = withdraw.iter().copied().collect();
+                    let flowspec_withdrawn: HashSet<_> =
+                        flowspec_withdraw.iter().cloned().collect();
+                    let evpn_withdrawn: HashSet<_> = evpn_withdraw.iter().copied().collect();
+                    let bgpls_withdrawn: HashSet<_> = bgpls_withdraw.iter().cloned().collect();
+                    let vpn_withdrawn: HashSet<_> = vpn_withdraw.iter().cloned().collect();
+                    let labeled_withdrawn: HashSet<_> = labeled_withdraw.iter().copied().collect();
+                    let rtc_withdrawn: HashSet<_> = rtc_withdraw.iter().cloned().collect();
+                    for key in decision.owed_withdrawals {
+                        match key {
+                            ExactExportKey::Unicast(prefix, path_id) => {
+                                if !withdrawn.contains(&(prefix, path_id)) {
+                                    withdraw.push((prefix, path_id));
+                                }
                             }
-                        }
-                        ExactExportKey::FlowSpec(key) => {
-                            if !flowspec_withdraw.contains(&key) {
-                                flowspec_withdraw.push(key);
+                            ExactExportKey::FlowSpec(key) => {
+                                if !flowspec_withdrawn.contains(&key) {
+                                    flowspec_withdraw.push(key);
+                                }
                             }
-                        }
-                        ExactExportKey::Evpn(key) => {
-                            if !evpn_withdraw.contains(&key) {
-                                evpn_withdraw.push(key);
+                            ExactExportKey::Evpn(key) => {
+                                if !evpn_withdrawn.contains(&key) {
+                                    evpn_withdraw.push(key);
+                                }
                             }
-                        }
-                        ExactExportKey::BgpLs(key) => {
-                            if !bgpls_withdraw.contains(&key) {
-                                bgpls_withdraw.push(key);
+                            ExactExportKey::BgpLs(key) => {
+                                if !bgpls_withdrawn.contains(&key) {
+                                    bgpls_withdraw.push(key);
+                                }
                             }
-                        }
-                        ExactExportKey::Vpn(key) => {
-                            if !vpn_withdraw.contains(&key) {
-                                vpn_withdraw.push(key);
+                            ExactExportKey::Vpn(key) => {
+                                if !vpn_withdrawn.contains(&key) {
+                                    vpn_withdraw.push(key);
+                                }
                             }
-                        }
-                        ExactExportKey::Labeled(key) => {
-                            if !labeled_withdraw.contains(&key) {
-                                labeled_withdraw.push(key);
+                            ExactExportKey::Labeled(key) => {
+                                if !labeled_withdrawn.contains(&key) {
+                                    labeled_withdraw.push(key);
+                                }
                             }
-                        }
-                        ExactExportKey::Rtc(key) => {
-                            if !rtc_withdraw.contains(&key) {
-                                rtc_withdraw.push(key);
+                            ExactExportKey::Rtc(key) => {
+                                if !rtc_withdrawn.contains(&key) {
+                                    rtc_withdraw.push(key);
+                                }
                             }
                         }
                     }

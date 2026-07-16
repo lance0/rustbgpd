@@ -1030,8 +1030,8 @@ def check_contract_producer_tests(contract: dict, label: str) -> None:
         if not test_linkage or test_linkage not in test_region:
             fail(f"{producer_label} test is not linked to its producer")
         golden_linkage = producer.get("golden_linkage")
-        if not golden_linkage or golden_linkage not in strip_rust_comments(source):
-            fail(f"{producer_label} source is not linked to its pinned golden")
+        if not golden_linkage or golden_linkage not in test_region:
+            fail(f"{producer_label} test is not linked to its pinned golden")
 
     if len(linked_goldens) != len(set(linked_goldens)):
         fail(f"{label}.producer_tests link a golden file more than once")

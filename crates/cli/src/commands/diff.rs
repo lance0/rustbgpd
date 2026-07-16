@@ -1955,6 +1955,8 @@ mod tests {
 
         #[tokio::test]
         async fn bird_golden_matches_and_diffs_clean() {
+            // Pins the golden this test exercises (stable-surface inventory).
+            assert_eq!(BIRD.golden, "bird-m83.expected.ndjson");
             check_golden(&BIRD);
             // Wire truth from the lab: BIRD advertised 4 statics with
             // next hop 10.83.1.2 and path [65001]. The BIRD export view
@@ -1984,6 +1986,8 @@ mod tests {
 
         #[tokio::test]
         async fn frr_golden_matches_and_diffs_clean() {
+            // Pins the golden this test exercises (stable-surface inventory).
+            assert_eq!(FRR.golden, "frr-m83.expected.ndjson");
             check_golden(&FRR);
             // Wire truth: FRR advertised 3 networks with the RSOUT
             // route-map applied (MED 55, community 65003:99), path
@@ -2008,6 +2012,8 @@ mod tests {
 
         #[tokio::test]
         async fn gobgp_golden_matches_and_diffs_clean() {
+            // Pins the golden this test exercises (stable-surface inventory).
+            assert_eq!(GOBGP.golden, "gobgp-m83.expected.ndjson");
             check_golden(&GOBGP);
             // GoBGP adj-out is the true post-policy Adj-RIB-Out (own
             // ASN prepended, next hop rewritten): full attribute

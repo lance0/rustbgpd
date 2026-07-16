@@ -172,9 +172,11 @@ Review the committed artifact without the raw capture using:
 
 ```text
 python3 bench/scale/rebaseline/sanitize_bgperf_csv.py \
-  --from-sanitized receipts/2p-100k.csv \
-  --check receipts/2p-100k.csv
+  --from-sanitized receipts/2p-100k.csv >/dev/null
 ```
+
+This validates structure, schema, convergence, bounds, and canonical form
+only; without the raw capture the numeric values themselves are unanchored.
 
 ## Receipt artifact contract
 

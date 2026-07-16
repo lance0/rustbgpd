@@ -2217,6 +2217,11 @@ impl RibManager {
             .values()
             .flat_map(|rib| {
                 rib.iter()
+                    // Invariant: unicast is keyed at path_id 0 here because
+                    // lookups go through ExactExportKey::nlri_identity()
+                    // (crates/rib/src/update.rs), which normalizes the
+                    // unicast Add-Path rank to 0. Changing either side's
+                    // keying requires changing the other.
                     .map(|route| ExactExportKey::Unicast(route.prefix, 0))
                     .chain(
                         rib.iter_flowspec()

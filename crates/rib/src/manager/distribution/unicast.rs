@@ -1271,6 +1271,16 @@ impl RibManager {
             // with the same source attrs and equal modifications.
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
             if super::no_advertise_export_suppressed(modified.communities()) {
+                // Export policy added NO_ADVERTISE: the route is suppressed
+                // by policy, so surface it through the same policy-filtered
+                // accounting as the deny arm above (export explain already
+                // covers this seam; live observability must too).
+                policy_filtered.push(PolicyFilteredRouteKey {
+                    target_peer,
+                    source_peer: candidate.peer,
+                    prefix: *prefix,
+                    path_id: candidate.path_id,
+                });
                 continue;
             }
             modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
