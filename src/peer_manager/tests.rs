@@ -1003,6 +1003,24 @@ fn deny_policy_chain() -> PolicyChain {
     }])
 }
 
+/// A deny chain padded to `depth + 1` copies of the deny policy —
+/// content-distinct per depth. Per-peer distinct export targets keep a
+/// snapshot off the import-tolerant export cohort (LAN-462 relaxed its
+/// import-equality requirement, so a uniform import+export move now
+/// partitions) and on the per-peer authoritative path these regressions pin.
+fn distinct_deny_policy_chain(depth: usize) -> PolicyChain {
+    use rustbgpd_policy::{Policy, PolicyAction};
+
+    PolicyChain::new(
+        (0..=depth)
+            .map(|_| Policy {
+                entries: Vec::new(),
+                default_action: PolicyAction::Deny,
+            })
+            .collect(),
+    )
+}
+
 fn validation_policy_chain(dependency: ImportValidationDependency) -> PolicyChain {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
     use rustbgpd_wire::{AspaValidation, RpkiValidation};
@@ -6549,15 +6567,23 @@ async fn assert_non_established_rollback_rib_outcome(
         reply.send(reply_result).unwrap();
     });
 
+    // Distinct export targets keep this snapshot off the LAN-462
+    // import-tolerant cohort (no repeated export pair) and on the per-peer
+    // authoritative transaction whose rollback this regression pins.
     let result = mgr
         .apply_resolved_policy_snapshot(
             [flapping, failing]
                 .into_iter()
-                .map(|address| ResolvedPeerPolicy {
+                .enumerate()
+                .map(|(index, address)| ResolvedPeerPolicy {
                     address,
                     interface: None,
                     import_policy: Some(next.clone()),
-                    export_policy: Some(next.clone()),
+                    export_policy: Some(if index == 0 {
+                        next.clone()
+                    } else {
+                        distinct_deny_policy_chain(1)
+                    }),
                 })
                 .collect(),
         )
@@ -7483,13 +7509,31 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     let (replaces_a, replaces_b) = (rib_replaces_a.clone(), rib_replaces_b.clone());
     let rib_drainer = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = update {
-                if peer == a {
-                    replaces_a.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    replaces_b.fetch_add(1, Ordering::SeqCst);
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
+                    if peer == a {
+                        replaces_a.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        replaces_b.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let _ = reply.send(Ok(()));
                 }
-                let _ = reply.send(Ok(()));
+                // LAN-462: the initial uniform install rides the batched
+                // import-tolerant cohort — one member replacement per peer.
+                RibUpdate::ReplacePeerExportPolicies {
+                    replacements,
+                    reply,
+                } => {
+                    for replacement in replacements {
+                        if replacement.peer == a {
+                            replaces_a.fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            replaces_b.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                _ => {}
             }
         }
     });
@@ -8492,15 +8536,19 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
         );
     }
     let next = deny_policy_chain();
+    // Distinct export targets keep this snapshot off the LAN-462
+    // import-tolerant cohort (no repeated export pair) and on the per-peer
+    // authoritative transaction whose rollback this regression pins.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
             .copied()
-            .map(|address| ResolvedPeerPolicy {
+            .enumerate()
+            .map(|(index, address)| ResolvedPeerPolicy {
                 address,
                 interface: None,
                 import_policy: Some(next.clone()),
-                export_policy: Some(next.clone()),
+                export_policy: Some(distinct_deny_policy_chain(index)),
             })
             .collect(),
     );
@@ -8584,15 +8632,19 @@ async fn policy_rollback_skips_refresh_when_rib_restore_cannot_register() {
     }
 
     let next = deny_policy_chain();
+    // Distinct export targets keep this snapshot off the LAN-462
+    // import-tolerant cohort (no repeated export pair) and on the per-peer
+    // authoritative transaction whose rollback this regression pins.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
             .copied()
-            .map(|address| ResolvedPeerPolicy {
+            .enumerate()
+            .map(|(index, address)| ResolvedPeerPolicy {
                 address,
                 interface: None,
                 import_policy: Some(next.clone()),
-                export_policy: Some(next.clone()),
+                export_policy: Some(distinct_deny_policy_chain(index)),
             })
             .collect(),
     );
@@ -8771,6 +8823,511 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
     let (batches, singles) = rib_task.await.unwrap();
     assert_eq!(batches, vec![vec![first, second]]);
     assert_eq!(singles, vec![second, first]);
+}
+
+/// Session model for the LAN-462 import-tolerant cohort tests: acks import,
+/// export, refresh, and state queries while counting each, tracks the live
+/// import chain, and optionally fails one export attempt.
+#[derive(Default)]
+struct CohortSessionCounters {
+    import_installs: AtomicUsize,
+    export_installs: AtomicUsize,
+    refreshes: AtomicUsize,
+    live_import: Mutex<Option<rustbgpd_policy::PolicyChain>>,
+}
+
+fn import_tolerant_cohort_test_session(
+    addr: IpAddr,
+    counters: Arc<CohortSessionCounters>,
+    fail_export_on_attempt: Option<usize>,
+) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                    counters.import_installs.fetch_add(1, Ordering::SeqCst);
+                    *counters.live_import.lock().unwrap() = policy;
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let attempt = counters.export_installs.fetch_add(1, Ordering::SeqCst) + 1;
+                    let result = if fail_export_on_attempt == Some(attempt) {
+                        Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                            "injected export-policy apply failure".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    counters.refreshes.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// LAN-462: a reload that moves import AND export chains must still engage the
+/// batched cohort (previously the import delta disqualified every member and
+/// the whole fleet fell onto the per-peer authoritative path), and each
+/// import-moving member's Route Refresh must fire exactly once, only after the
+/// cohort RIB commit acknowledges. Import-unchanged members get no refresh.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression pins partition engagement, deferred-refresh ordering, and the unchanged-member exemption together"
+)]
+async fn import_tolerant_cohort_defers_refresh_past_committed_batch() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 42, 0, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 42, 0, 2));
+    let export_only = IpAddr::V4(Ipv4Addr::new(10, 42, 0, 3));
+    let peers = [first, second, export_only];
+    let counters: Vec<Arc<CohortSessionCounters>> = peers
+        .iter()
+        .map(|_| Arc::new(CohortSessionCounters::default()))
+        .collect();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (peer, counter) in peers.iter().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            *peer,
+            import_tolerant_cohort_test_session(*peer, Arc::clone(counter), None),
+            false,
+        );
+    }
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let targets = vec![
+        ResolvedPeerPolicy {
+            address: first,
+            interface: None,
+            import_policy: Some(changed_import.clone()),
+            export_policy: Some(shared_export.clone()),
+        },
+        ResolvedPeerPolicy {
+            address: second,
+            interface: None,
+            import_policy: Some(changed_import.clone()),
+            export_policy: Some(shared_export.clone()),
+        },
+        ResolvedPeerPolicy {
+            address: export_only,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(shared_export.clone()),
+        },
+    ];
+    let apply = manager.apply_resolved_policy_snapshot(targets);
+    let refresh_watch = counters.clone();
+    let drive_rib = async {
+        let RibUpdate::ReplacePeerExportPolicies {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        assert_eq!(
+            replacements.len(),
+            peers.len(),
+            "the partition must cover the whole fleet despite import deltas"
+        );
+        assert!(
+            refresh_watch
+                .iter()
+                .all(|counter| counter.refreshes.load(Ordering::SeqCst) == 0),
+            "no Route Refresh may fire before the cohort RIB commit acknowledges"
+        );
+        reply
+            .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    let priors = result.expect("import+export cohort snapshot must commit");
+
+    assert_eq!(priors.len(), peers.len());
+    assert!(
+        matches!(rib_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "no per-peer authoritative RIB command may run after the committed batch"
+    );
+    for (peer, counter) in peers.iter().zip(&counters) {
+        let expected_refreshes = usize::from(*peer != export_only);
+        assert_eq!(
+            counter.refreshes.load(Ordering::SeqCst),
+            expected_refreshes,
+            "deferred refresh fires exactly once per import-moving member ({peer})"
+        );
+        assert_eq!(
+            counter.import_installs.load(Ordering::SeqCst),
+            expected_refreshes,
+            "import hot-apply runs only for import-moving members ({peer})"
+        );
+        assert_eq!(counter.export_installs.load(Ordering::SeqCst), 1);
+        let peer_state = manager.peers.get(&key(*peer)).unwrap();
+        assert_eq!(peer_state.export_policy, Some(shared_export.clone()));
+        assert!(!peer_state.pending_refresh);
+        assert!(!peer_state.pending_export_apply);
+    }
+    assert_eq!(
+        manager.peers.get(&key(first)).unwrap().import_policy,
+        Some(changed_import.clone())
+    );
+    assert_eq!(
+        manager.peers.get(&key(second)).unwrap().import_policy,
+        Some(changed_import)
+    );
+    assert_eq!(
+        manager.peers.get(&key(export_only)).unwrap().import_policy,
+        None
+    );
+
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// LAN-462: when the RIB batch hands the cohort back for the per-peer
+/// authoritative RIB seam (`RequiresAuthoritativePerPeerApply`), the deferred
+/// refresh still fires exactly once per member — after the handoff completes —
+/// with no double refresh from the handoff itself.
+#[tokio::test]
+async fn import_tolerant_cohort_handoff_fires_deferred_refresh_once() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 43, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 43, 0, 2)),
+    ];
+    let counters: Vec<Arc<CohortSessionCounters>> = peers
+        .iter()
+        .map(|_| Arc::new(CohortSessionCounters::default()))
+        .collect();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (peer, counter) in peers.iter().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            *peer,
+            import_tolerant_cohort_test_session(*peer, Arc::clone(counter), None),
+            false,
+        );
+    }
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let apply = manager.apply_resolved_policy_snapshot(
+        peers
+            .iter()
+            .map(|&address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: Some(changed_import.clone()),
+                export_policy: Some(shared_export.clone()),
+            })
+            .collect(),
+    );
+    let refresh_watch = counters.clone();
+    let drive_rib = async {
+        let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected cohort RIB command");
+        };
+        reply
+            .send(Ok(
+                rustbgpd_rib::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+            ))
+            .unwrap();
+        for expected_peer in peers {
+            let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected ordinary per-peer RIB command");
+            };
+            assert_eq!(peer, expected_peer);
+            assert!(
+                refresh_watch
+                    .iter()
+                    .all(|counter| counter.refreshes.load(Ordering::SeqCst) == 0),
+                "no Route Refresh may fire before the authoritative handoff completes"
+            );
+            reply.send(Ok(())).unwrap();
+        }
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+    result.expect("handoff cohort snapshot must commit");
+
+    for counter in &counters {
+        assert_eq!(
+            counter.refreshes.load(Ordering::SeqCst),
+            1,
+            "the deferred refresh fires exactly once per member — no handoff double refresh"
+        );
+        assert_eq!(counter.import_installs.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.export_installs.load(Ordering::SeqCst), 1);
+    }
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// LAN-462: a cohort RIB commit failure must restore BOTH chains — the import
+/// delta hot-applied during setup and the export chain — and fire no forward
+/// refresh (only the rollback's post-reassert refresh), leaving no pending
+/// retry intent behind after a clean restore.
+#[tokio::test]
+async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 44, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 44, 0, 2)),
+    ];
+    let counters: Vec<Arc<CohortSessionCounters>> = peers
+        .iter()
+        .map(|_| Arc::new(CohortSessionCounters::default()))
+        .collect();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let rib_task = tokio::spawn(async move {
+        let mut singles = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Err("injected cohort failure".to_string()));
+                }
+                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
+                    singles.push(peer);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+        singles
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (peer, counter) in peers.iter().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            *peer,
+            import_tolerant_cohort_test_session(*peer, Arc::clone(counter), None),
+            false,
+        );
+    }
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .map(|&address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(changed_import.clone()),
+                    export_policy: Some(shared_export.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("failed to update export policy cohort: injected cohort failure")
+                && error.contains("already-applied peers restored")
+        }),
+        "the RIB failure must surface with a successful rollback: {result:?}"
+    );
+
+    for (peer, counter) in peers.iter().zip(&counters) {
+        assert_eq!(
+            counter.import_installs.load(Ordering::SeqCst),
+            2,
+            "the session must observe the forward install and the rollback reassert ({peer})"
+        );
+        assert_eq!(
+            *counter.live_import.lock().unwrap(),
+            None,
+            "the rollback must reassert the prior import chain ({peer})"
+        );
+        assert_eq!(counter.export_installs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            counter.refreshes.load(Ordering::SeqCst),
+            1,
+            "the rollback refresh runs only after the prior chain is reasserted ({peer})"
+        );
+        let peer_state = manager.peers.get(&key(*peer)).unwrap();
+        assert_eq!(peer_state.import_policy, None);
+        assert_eq!(peer_state.export_policy, None);
+        assert!(!peer_state.pending_refresh);
+        assert!(!peer_state.pending_export_apply);
+    }
+
+    for peer in peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    let singles = rib_task.await.unwrap();
+    assert_eq!(
+        singles,
+        vec![peers[1], peers[0]],
+        "rollback RIB restores run newest-first"
+    );
+}
+
+/// LAN-462: an export hot-apply failure on a member whose import delta was
+/// already acknowledged must reassert that member's prior import chain
+/// directly (its bookkeeping had advanced) while the previously captured
+/// members restore through the ordinary rollback — and the failing member
+/// still gets no RIB compensation, matching the export-only discipline.
+#[tokio::test]
+async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 45, 0, 1));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 45, 0, 2));
+    let first_counters = Arc::new(CohortSessionCounters::default());
+    let failing_counters = Arc::new(CohortSessionCounters::default());
+    let rib_single_restores = Arc::new(AtomicUsize::new(0));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let restores = Arc::clone(&rib_single_restores);
+    let _rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    restores.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { .. } => {
+                    panic!("the RIB batch must not run after a session-side cohort failure");
+                }
+                _ => {}
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        first,
+        import_tolerant_cohort_test_session(first, Arc::clone(&first_counters), None),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        failing,
+        import_tolerant_cohort_test_session(failing, Arc::clone(&failing_counters), Some(1)),
+        false,
+    );
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, failing]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(changed_import.clone()),
+                    export_policy: Some(shared_export.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains(&format!(
+                "failed to apply resolved policy to {failing}: export:"
+            )) && error.contains("already-applied peers restored")
+        }),
+        "the export failure must surface with a successful rollback: {result:?}"
+    );
+
+    // The failing member: forward import install + direct prior reassert, no
+    // forward refresh (it was deferred and never fired), no RIB compensation.
+    assert_eq!(failing_counters.import_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *failing_counters.live_import.lock().unwrap(),
+        None,
+        "the failing member's prior import chain must be reasserted"
+    );
+    assert_eq!(failing_counters.export_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(failing_counters.refreshes.load(Ordering::SeqCst), 0);
+    // The captured member restores through the ordinary rollback: reassert,
+    // RIB restore, then the conservative post-reassert refresh.
+    assert_eq!(first_counters.import_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(*first_counters.live_import.lock().unwrap(), None);
+    assert_eq!(first_counters.export_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(first_counters.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rib_single_restores.load(Ordering::SeqCst),
+        1,
+        "no RIB compensation may be planned for the member whose forward apply failed"
+    );
+    for peer in [first, failing] {
+        let peer_state = manager.peers.get(&key(peer)).unwrap();
+        assert_eq!(peer_state.import_policy, None);
+        assert_eq!(peer_state.export_policy, None);
+        assert!(!peer_state.pending_refresh);
+        assert!(!peer_state.pending_export_apply);
+    }
+
+    for peer in [first, failing] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -9251,15 +9808,19 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
     }
 
     let next = deny_policy_chain();
+    // Distinct export targets keep this snapshot off the LAN-462
+    // import-tolerant cohort (no repeated export pair) and on the per-peer
+    // authoritative transaction whose rollback ordering this proof pins.
     let apply = manager.apply_resolved_policy_snapshot(
         peers
             .iter()
             .copied()
-            .map(|address| ResolvedPeerPolicy {
+            .enumerate()
+            .map(|(index, address)| ResolvedPeerPolicy {
                 address,
                 interface: None,
                 import_policy: Some(next.clone()),
-                export_policy: Some(next.clone()),
+                export_policy: Some(distinct_deny_policy_chain(index)),
             })
             .collect(),
     );
