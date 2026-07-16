@@ -811,7 +811,7 @@ owned-state.
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
-| `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor`, `collision_refresh`, or `timer` |
+| `bgp_selection_deferral_releases_total{afi_safi,reason}` | Family gates released after `all_eor`, `collision_refresh`, `all_excluded`, or `timer` |
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
 | `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore use a complete release sweep |
 

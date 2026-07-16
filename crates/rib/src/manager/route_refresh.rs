@@ -584,11 +584,27 @@ impl RibManager {
 
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
+    pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        self.send_route_refresh_response_inner(peer, afi, safi, false);
+    }
+
+    /// `suppress_eor` is set by the selection-deferral release path, which
+    /// has already queued/flushed the genuine convergence `EoR` for this
+    /// peer and family: without it a plain-refresh (RFC 2918) peer would
+    /// receive a second empty-UPDATE `EoR` from this response. An RFC 7313
+    /// peer is unaffected either way — transport substitutes the response's
+    /// own `end_of_rib` entry with the `EoRR` demarcation marker.
     #[expect(
         clippy::too_many_lines,
         reason = "route-refresh replay keeps family staging, ORF gating, and EoR together"
     )]
-    pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn send_route_refresh_response_inner(
+        &mut self,
+        peer: IpAddr,
+        afi: Afi,
+        safi: Safi,
+        suppress_eor: bool,
+    ) {
         let family = (afi, safi);
         if self.selection_convergence_held(family) {
             self.selection_deferred_refresh
@@ -1158,7 +1174,11 @@ impl RibManager {
                 nh_override_flags.into(),
                 announce.into(),
                 withdraw,
-                if deferred_eor { vec![] } else { vec![family] },
+                if deferred_eor || suppress_eor {
+                    vec![]
+                } else {
+                    vec![family]
+                },
                 vec![
                     (afi, safi, RouteRefreshSubtype::BoRR),
                     (afi, safi, RouteRefreshSubtype::EoRR),

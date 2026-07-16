@@ -2813,7 +2813,8 @@ impl BgpMetrics {
             .set(count);
     }
 
-    /// Record release of one family gate (`all_eor` or `timer`).
+    /// Record release of one family gate (`all_eor`, `collision_refresh`,
+    /// `all_excluded`, or `timer`).
     pub fn record_selection_deferral_release(&self, afi_safi: &str, reason: &str) {
         self.selection_deferral_releases
             .with_label_values(&[afi_safi, reason])

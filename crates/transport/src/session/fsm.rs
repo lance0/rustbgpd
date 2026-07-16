@@ -434,6 +434,7 @@ impl PeerSession {
                         .iter()
                         .map(|family| (family.afi, family.safi))
                         .collect();
+                    let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
                     self.negotiated = Some(*neg);
                     self.publish_export_profile();
                     self.established_at = Some(Instant::now());
@@ -482,6 +483,7 @@ impl PeerSession {
                             session_id: self.session_identity.id,
                             peer_restart_state,
                             peer_gr_families,
+                            peer_enhanced_refresh,
                         })
                         .await;
 

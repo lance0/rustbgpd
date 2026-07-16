@@ -302,8 +302,9 @@ does not mean its configured ORR vantage is inactive.
 marker-backed RFC 4724 restart it reports one row per frozen address-family
 gate: whether the gate is active, this peer's waiter state and stamped session,
 the process-wide blocking-waiter count, and remaining time. Released rows are
-retained for the daemon lifetime with reason `all_eor` or `timer`, so an
-operator can distinguish complete convergence from timer-driven release.
+retained for the daemon lifetime with reason `all_eor`, `all_excluded`, or
+`timer`, so an operator can distinguish complete convergence from timer-driven
+release.
 
 `NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Legacy field
 `effective_send_max` retains raw semantics (`UINT32_MAX` unlimited, zero

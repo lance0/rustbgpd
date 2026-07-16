@@ -1101,17 +1101,20 @@ across static peers, the process-start selection deferral.
 During a same-address collision, ordinary replacement still re-arms the
 replacement session as an EoR waiter and stale predecessor EoR is rejected. If
 the replacement then loses and registration fails back to the exact nonzero,
-unambiguous survivor, only that survivor enters `awaiting_refresh`; other
-waiters continue to block. Once ordinary waiters finish, the current Loc-RIB is
-staged immediately, but family EoR and route-refresh responses remain held. A
-post-failback BoRR arms the waiter and only the matching peer EoRR releases it.
-An ordinary EoR, stray EoRR, or local refresh timeout cannot declare
-convergence. Without Enhanced Route Refresh, the original marker-bounded timer
-is the fallback.
+unambiguous survivor, only that survivor enters `awaiting_refresh` — and only
+when its session negotiated Enhanced Route Refresh for a GR family; a
+Restart-State, non-GR, or plain-refresh survivor is excluded instead, because
+it can never produce the BoRR/EoRR proof. Other waiters continue to block.
+Once ordinary waiters finish, the current Loc-RIB is staged immediately, but
+family EoR and route-refresh responses remain held. A post-failback BoRR arms
+the waiter and only the matching peer EoRR releases it. An ordinary EoR, stray
+EoRR, or local refresh timeout cannot declare convergence. The original
+marker-bounded timer remains the overall fallback.
 
 `rbgp neighbor <address>` shows `Selection Deferral` rows while active and
-retains their `all_eor`, `collision_refresh`, or `timer` release reason
-afterward. Metrics are
+retains their `all_eor`, `collision_refresh`, `all_excluded` (the gate
+completed with every waiter excluded or deleted — zero completion markers
+consumed), or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
 `bgp_selection_deferral_releases_total`, and
 `bgp_selection_deferral_timeouts_total`. The process-wide deferred-identity

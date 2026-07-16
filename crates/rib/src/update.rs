@@ -1309,6 +1309,10 @@ pub enum RibUpdate {
         peer_restart_state: bool,
         /// Negotiated families present in the peer's GR capability.
         peer_gr_families: Vec<(Afi, Safi)>,
+        /// Peer negotiated enhanced route refresh (RFC 7313), so a
+        /// collision-failback convergence wait on `BoRR`/`EoRR` is
+        /// fulfillable.
+        peer_enhanced_refresh: bool,
     },
     /// Inject a locally-originated route.
     InjectRoute {
