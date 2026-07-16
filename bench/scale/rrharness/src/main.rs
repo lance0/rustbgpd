@@ -247,6 +247,7 @@ async fn setup(n_clients: u32) -> Harness {
             route_reflector_client: true,
             orr_vantage: None,
             per_client_best: false,
+            interpret_rfc1997: true,
             add_path_send_families: Vec::new(),
             add_path_send_max: 0,
             negotiated_orf_recv: Vec::new(),
