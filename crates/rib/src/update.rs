@@ -688,6 +688,22 @@ pub enum ExportPolicyCohortOutcome {
     RequiresAuthoritativePerPeerApply,
 }
 
+/// Once-per-update-group cell through which the first consuming session task
+/// publishes its encoded wire chunks so every other member of the group can
+/// reuse the bytes instead of re-encoding the same shared announce inventory.
+///
+/// The payload is transport-owned and deliberately opaque here (the same
+/// trust-boundary pattern as [`ExactExportSnapshot::as_any`]): the RIB only
+/// guarantees that every member envelope of one grouped fanout carries the
+/// same cell. Transport downcasts, proves wire-equivalence between its own
+/// export profile and the encoder's, and falls back to its ordinary
+/// per-session encode when the proof fails.
+#[derive(Default)]
+pub struct SharedGroupEncode {
+    /// First-consumer-initializes cell; losers await instead of re-encoding.
+    pub cell: tokio::sync::OnceCell<Arc<dyn Any + Send + Sync>>,
+}
+
 /// Routes to be sent outbound to a peer.
 #[derive(Default)]
 pub struct OutboundRouteUpdate {
@@ -764,6 +780,10 @@ pub struct OutboundRouteUpdate {
     /// skipped with a warning and inbound state recovers only on the
     /// peer's natural re-advertisement.
     pub request_refresh_all_negotiated: bool,
+    /// Encode-once cell shared by every member envelope of one grouped
+    /// fanout (set only by the clean group-transition seam alongside
+    /// `announce_source_exclusion`). `None` = ordinary per-session encode.
+    pub shared_group_encode: Option<Arc<SharedGroupEncode>>,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

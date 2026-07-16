@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Grouped policy-reload re-advertisement now encodes each update-group's
+  wire UPDATE stream once instead of once per member** (ADR-0109). The
+  clean export-policy transition hands every member envelope one
+  encode-once cell; the first consuming session task encodes the shared
+  inventory into per-source-peer, per-family chunks at the standard
+  4096-byte ceiling and every other member reuses the bytes after proving
+  its export profile wire-identical to the encoder's. Split horizon
+  composes from whole chunks (a member sends all chunks except its own
+  source's), members that negotiated fewer families skip those chunks, and
+  any anomaly — profile mismatch, preparation failure, OTC hit, oversize
+  single entry — falls back to the unchanged per-session encode. At
+  route-server scale this removes the N× duplicate encode that delayed
+  every observer's first post-reload UPDATE by the full-table encode time.
+
 - Dirty-peer resync ticks now drain the backlog under the same 25 ms
   wall-clock poll budget as policy-transition commit flushes, instead of a
   fixed 8 peers per 10 ms re-arm, and select peers round-robin so a peer

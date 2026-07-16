@@ -96,7 +96,7 @@ impl SessionExportProfile {
     /// proof by default instead of requiring a parallel allow-list. Remote ASN
     /// identity is deliberately absent because current rules consume only the
     /// stored eBGP/iBGP class; a value-dependent rule must restore it here.
-    fn has_same_wire_encoding(&self, other: &Self) -> bool {
+    pub(super) fn has_same_wire_encoding(&self, other: &Self) -> bool {
         let mut this = self.clone();
         let mut other = other.clone();
         for profile in [&mut this, &mut other] {
@@ -221,6 +221,18 @@ impl SessionExportProfile {
 
     pub(super) fn is_ebgp(&self) -> bool {
         self.is_ebgp
+    }
+
+    /// Profile-level mirror of `PeerSession::otc_egress_blocks_unicast`
+    /// (RFC 9234 egress gate), evaluated from the captured `local_role` so
+    /// the update-group shared encoder applies the identical filter the
+    /// per-session path would.
+    pub(super) fn otc_blocks_unicast_egress(&self, route: &Route) -> bool {
+        has_otc(&route.attributes)
+            && matches!(
+                self.local_role,
+                Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
+            )
     }
 
     pub(super) fn add_path_send(&self, family: (Afi, Safi)) -> bool {

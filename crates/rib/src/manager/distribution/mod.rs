@@ -317,6 +317,11 @@ enum CleanPolicyTransitionPhase {
         prepared: Vec<PreparedCleanPolicyTransitionPeer>,
         full_probe_count: usize,
         cursor: usize,
+        /// One encode-once cell for the whole fanout: every member envelope
+        /// across every batch carries this same cell so the first consuming
+        /// session task encodes the shared inventory and the rest reuse the
+        /// bytes (transport proves wire-equivalence before reusing).
+        shared_encode: Arc<crate::update::SharedGroupEncode>,
     },
 }
 
@@ -1564,6 +1569,7 @@ impl RibManager {
                     prepared,
                     full_probe_count,
                     cursor: 0,
+                    shared_encode: Arc::new(crate::update::SharedGroupEncode::default()),
                 });
                 CleanPolicyTransitionAdvance::Continue(pending)
             }
@@ -1574,6 +1580,7 @@ impl RibManager {
                 mut prepared,
                 full_probe_count,
                 cursor,
+                shared_encode,
             } => {
                 // Validation happened once, in `Validate`; the actor fence
                 // admits only the read-only readiness lane between these
@@ -1604,6 +1611,7 @@ impl RibManager {
                                 announce_source_exclusion: Some(member.peer),
                                 announce: Arc::clone(&inventory.announce),
                                 next_hop_override: Arc::clone(&inventory.next_hop_override),
+                                shared_group_encode: Some(Arc::clone(&shared_encode)),
                                 ..OutboundRouteUpdate::default()
                             });
                         }
@@ -1627,6 +1635,7 @@ impl RibManager {
                         prepared,
                         full_probe_count,
                         cursor: cursor + flushed,
+                        shared_encode,
                     });
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
@@ -2338,6 +2347,7 @@ impl RibManager {
                 rtc_withdraw,
                 otc_blocked,
                 request_refresh_all_negotiated: false,
+                shared_group_encode: None,
             },
         );
         true

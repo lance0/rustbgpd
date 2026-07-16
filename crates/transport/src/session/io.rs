@@ -152,17 +152,35 @@ impl PeerSession {
     pub(super) fn enqueue_bulk(&mut self, msg: &Message) -> Result<(), TransportError> {
         let max_len = self.outbound_max_message_len();
         let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
-        // Clone the sender so the caller's mutable borrow of self is
-        // free for the saturation handler if try_send returns Full.
-        let Some(tx) = self.writer_bulk_tx.clone() else {
+        if self.writer_bulk_tx.is_none() {
             debug!(
                 peer = %self.peer_label,
                 msg_type = %msg.message_type(),
                 "cannot send — not connected (bulk)"
             );
             return Ok(());
+        }
+        self.enqueue_bulk_encoded(Bytes::from(encoded), matches!(msg, Message::Update(_)))
+    }
+
+    /// Enqueue an already-encoded wire message on the writer's **bulk**
+    /// channel. Byte-level seam shared by [`Self::enqueue_bulk`] and the
+    /// update-group shared-encode path, so pre-encoded group chunks keep the
+    /// identical BMP rib-out tap and saturation-teardown semantics.
+    pub(super) fn enqueue_bulk_encoded(
+        &mut self,
+        encoded: Bytes,
+        is_update: bool,
+    ) -> Result<(), TransportError> {
+        // Clone the sender so the caller's mutable borrow of self is
+        // free for the saturation handler if try_send returns Full.
+        let Some(tx) = self.writer_bulk_tx.clone() else {
+            debug!(
+                peer = %self.peer_label,
+                "cannot send — not connected (bulk)"
+            );
+            return Ok(());
         };
-        let encoded = Bytes::from(encoded);
         // RFC 8671 post-policy Adj-RIB-Out tap: every outbound UPDATE
         // (announcements, withdraws, EoR markers — all families) funnels
         // through here as final wire bytes, so the BMP mirror is
@@ -179,9 +197,8 @@ impl PeerSession {
         //   latches `bmp_stream_diverged` and forces a PeerDown/PeerUp
         //   peer-state reset once the channel drains, so collectors
         //   never keep a silently incomplete rib-out view.
-        let bmp_rib_out_pdu =
-            (self.config.bmp_rib_out && self.bmp_tx.is_some() && matches!(msg, Message::Update(_)))
-                .then(|| encoded.clone());
+        let bmp_rib_out_pdu = (self.config.bmp_rib_out && self.bmp_tx.is_some() && is_update)
+            .then(|| encoded.clone());
         match tx.try_send(encoded) {
             Ok(()) => {
                 if let Some(update_pdu) = bmp_rib_out_pdu {
