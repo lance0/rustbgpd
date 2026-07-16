@@ -3398,6 +3398,9 @@ fn direct_clean_transition_manager(
 ) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Zero flush budget parks the commit poll after every stride, making the
+    // per-poll batch boundaries deterministic for the seam assertions below.
+    manager.commit_flush_budget = std::time::Duration::ZERO;
     if let Some(readiness_rx) = readiness_rx {
         manager = manager.with_readiness_queries(readiness_rx);
     }
@@ -3617,6 +3620,46 @@ async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
     for &peer in &peers {
         assert_eq!(manager.grouped_member_of(peer), Some(destination));
     }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+}
+
+/// With wall-clock budget available, one commit poll keeps flushing strides
+/// instead of parking after a fixed member count — emission start must not
+/// scale with fleet size when the actor has time in hand.
+#[tokio::test]
+async fn commit_flush_uses_full_poll_budget_before_parking() {
+    const MEMBER_COUNT: usize = 3 * super::super::COMMIT_MEMBERS_PER_POLL + 2;
+    const ROUTE_COUNT: usize = 2;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    // The helper zeroes the budget for deterministic seam tests; restore a
+    // generous one so the whole cohort fits a single poll.
+    manager.commit_flush_budget = std::time::Duration::from_mins(1);
+    let next_policy = community_chain(0xFDE8_2105);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    let mut commit_polls = 0_usize;
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_ne!(outcome, "fallback");
+        if kind == "commit" {
+            commit_polls += 1;
+            if outcome == "committed" {
+                break;
+            }
+        } else {
+            assert_eq!(outcome, "continue");
+        }
+    }
+    assert_eq!(commit_polls, 1, "budgeted poll drains the whole cohort");
+    let delivered = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .count();
+    assert_eq!(delivered, MEMBER_COUNT);
     assert_eq!(
         response.try_recv().unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)

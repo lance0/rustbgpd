@@ -243,6 +243,14 @@ pub struct RibManager {
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
+    /// Wall-clock budget one commit-kind transition poll may spend flushing
+    /// validated members before parking for the readiness seam. Committing a
+    /// member is cheap (~0.1 ms), but ~10 ms of interleaved actor work
+    /// elapses between polls, so a fixed per-poll member count makes
+    /// emission start scale linearly with fleet size (measured ~0.88 s of
+    /// stagger at 700 members). Tests override this to force deterministic
+    /// per-stride parking.
+    commit_flush_budget: std::time::Duration,
     /// Peers whose next `distribute_changes` pass must bypass the
     /// `AdjRibOut`-already-matches suppression for currently-
     /// advertised routes. Used by `RibUpdate::RefreshPeerOutbound`
@@ -756,10 +764,17 @@ pub(in crate::manager) fn policy_transition_slice_end(
 }
 /// Maximum members classified by one strict shared-policy actor poll.
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
-/// Maximum validated members committed and flushed by one strict
-/// shared-policy actor poll (matches `QUERY_BUDGET_PER_CHUNK` so readiness
-/// keeps its per-seam service ratio through the commit flush).
+/// Stride of validated members committed between wall-clock checks inside
+/// one commit-kind actor poll (matches `QUERY_BUDGET_PER_CHUNK`). The poll
+/// keeps flushing strides until [`COMMIT_FLUSH_POLL_BUDGET`] elapses, then
+/// parks so the readiness lane gets its seam.
 pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
+/// Wall-clock budget for one commit-kind poll's member flush. Bounds the
+/// readiness-seam latency during a shared policy transition (well under the
+/// 200 ms readiness deadline) while decoupling emission start from fleet
+/// size — a fixed 8-member poll at ~10 ms of interleaved actor work per
+/// poll seam cost ~0.88 s of staggered emission at 700 members.
+const COMMIT_FLUSH_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
 /// Maximum dirty peers resynced by one resync-timer tick. Each dirty peer
 /// costs O(table) enumeration and staging, so an unbounded tick stalls the
 /// actor for the whole backlog; the same peers-keyed bound as the commit
@@ -1091,6 +1106,7 @@ impl RibManager {
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
+            commit_flush_budget: COMMIT_FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             pending_peer_export_context: HashMap::new(),

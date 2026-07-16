@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Shared policy-transition commit polls now flush validated members under a
+  25 ms wall-clock budget instead of parking after a fixed 8 members. The
+  readiness lane keeps its mid-flush seam (bounded at the budget, well under
+  the 200 ms readiness deadline), while emission start no longer scales
+  linearly with update-group size — a fixed-count poll cost ~0.88 s of
+  staggered first emission at 700 members.
+
 - **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP egress
   by default.** Routes received with either community are suppressed at
   export staging toward eBGP peers across unicast (incl. RFC 8950 next-hop
