@@ -758,6 +758,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             md5_password: None,
             tcp_ao: None,
             ttl_security: false,
@@ -1315,6 +1317,8 @@ mod tests {
             hold_time: Some(90),
             send_hold_time: None,
             max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             md5_password: None,
             tcp_ao: None,
             ttl_security: false,

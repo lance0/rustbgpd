@@ -4,8 +4,7 @@ use super::{
     EvpnRoute, EvpnRouteKey, FlowSpecKey, FlowSpecRoute, Instant, IpAddr, Ipv4Addr,
     LabeledRibRoute, LabeledRibRouteKey, NextHopScope, NotificationCode, NotificationMessage,
     PathAttribute, PeerSession, Prefix, RibUpdate, Route, RtcRibRoute, RtcRibRouteKey, Safi,
-    VpnRibRoute, VpnRibRouteKey, cease_subcode, debug, info, is_ipv6_link_local,
-    resolve_import_nexthop, warn,
+    VpnRibRoute, VpnRibRouteKey, debug, info, is_ipv6_link_local, resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteFamily, RouteModifications,
@@ -2311,23 +2310,7 @@ impl PeerSession {
         self.import_policy_routes_denied = self
             .import_policy_routes_denied
             .saturating_add(import_policy_routes_denied);
-        let prefix_count = self.known_prefix_count();
-        if let Some(max) = self.config.max_prefixes
-            && prefix_count > max as usize
-        {
-            warn!(
-                peer = %self.peer_label,
-                count = prefix_count,
-                max,
-                "max prefix exceeded"
-            );
-            self.metrics.record_max_prefix_exceeded(&self.peer_label);
-            let notif = NotificationMessage::new(
-                NotificationCode::Cease,
-                cease_subcode::MAX_PREFIXES,
-                bytes::Bytes::new(),
-            );
-            self.drive_fsm(Event::UpdateValidationError(notif)).await;
+        if self.enforce_max_prefix_limits(true).await {
             return;
         }
         if !announced.is_empty()

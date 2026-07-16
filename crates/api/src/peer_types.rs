@@ -1559,6 +1559,10 @@ pub struct PeerManagerNeighborConfig {
     pub send_hold_time: Option<u32>,
     /// Maximum prefixes accepted before Cease/1 (None = unlimited).
     pub max_prefixes: Option<u32>,
+    /// Independent IPv4-unicast prefix limit (ADR-0108; None = unlimited).
+    pub max_prefixes_ipv4: Option<u32>,
+    /// Independent IPv6-unicast prefix limit (ADR-0108; None = unlimited).
+    pub max_prefixes_ipv6: Option<u32>,
     /// Optional TCP MD5 password.
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.

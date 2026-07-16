@@ -244,6 +244,12 @@ pub(crate) struct PeerSession {
     /// Kept in sync with `known_paths` so max-prefix enforcement can count
     /// unique prefixes without rebuilding a temporary set on every UPDATE.
     known_prefix_refcounts: HashMap<Prefix, usize>,
+    /// Unique accepted IPv4-unicast prefixes (plain + Add-Path collapsed),
+    /// maintained alongside `known_plain_prefixes` / `known_prefix_refcounts`
+    /// so `max_prefixes_ipv4` enforcement is O(1) per UPDATE (ADR-0108).
+    known_unicast_v4: usize,
+    /// IPv6-unicast sibling of `known_unicast_v4` for `max_prefixes_ipv6`.
+    known_unicast_v6: usize,
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -331,6 +337,15 @@ pub(crate) struct PeerSession {
     /// rather than a global registry counter so a policy edit to an
     /// unrelated peer can't false-`STALE` this peer's decisions.
     import_policy_generation: u64,
+}
+
+/// One exceeded max-prefix bound: the offending count, the configured
+/// bound, and the family for a per-family limit (`None` = the legacy
+/// aggregate `max_prefixes`). ADR-0108.
+struct MaxPrefixViolation {
+    count: usize,
+    bound: u32,
+    family: Option<(Afi, Safi)>,
 }
 
 #[derive(Clone)]
@@ -475,6 +490,86 @@ impl PeerSession {
             + self.known_rtc.len()
     }
 
+    /// First exceeded max-prefix bound, checked in a fixed order: the
+    /// legacy aggregate `max_prefixes` (all counted families), then
+    /// `max_prefixes_ipv4`, then `max_prefixes_ipv6` (unique unicast
+    /// prefixes per family). Aggregate and per-family limits are
+    /// independent — ADR-0108.
+    fn max_prefix_violation(&self, include_aggregate: bool) -> Option<MaxPrefixViolation> {
+        if include_aggregate
+            && let Some(max) = self.config.max_prefixes
+            && self.known_prefix_count() > max as usize
+        {
+            return Some(MaxPrefixViolation {
+                count: self.known_prefix_count(),
+                bound: max,
+                family: None,
+            });
+        }
+        if let Some(max) = self.config.max_prefixes_ipv4
+            && self.known_unicast_v4 > max as usize
+        {
+            return Some(MaxPrefixViolation {
+                count: self.known_unicast_v4,
+                bound: max,
+                family: Some((Afi::Ipv4, Safi::Unicast)),
+            });
+        }
+        if let Some(max) = self.config.max_prefixes_ipv6
+            && self.known_unicast_v6 > max as usize
+        {
+            return Some(MaxPrefixViolation {
+                count: self.known_unicast_v6,
+                bound: max,
+                family: Some((Afi::Ipv6, Safi::Unicast)),
+            });
+        }
+        None
+    }
+
+    /// Enforce max-prefix limits against the current accounting: on a
+    /// violation, log it, count the metric, and tear the session down with
+    /// Cease/1 (RFC 4486). A per-family violation carries the optional
+    /// RFC 4486 data field — AFI (2 octets), SAFI (1 octet), upper bound
+    /// (4 octets); the aggregate keeps its historical empty data. Returns
+    /// `true` when a teardown was driven.
+    async fn enforce_max_prefix_limits(&mut self, include_aggregate: bool) -> bool {
+        let Some(violation) = self.max_prefix_violation(include_aggregate) else {
+            return false;
+        };
+        let data = match violation.family {
+            None => {
+                warn!(
+                    peer = %self.peer_label,
+                    count = violation.count,
+                    max = violation.bound,
+                    "max prefix exceeded"
+                );
+                Bytes::new()
+            }
+            Some((afi, safi)) => {
+                warn!(
+                    peer = %self.peer_label,
+                    count = violation.count,
+                    max = violation.bound,
+                    afi = afi as u16,
+                    safi = safi as u8,
+                    "per-family max prefix exceeded"
+                );
+                let mut data = Vec::with_capacity(7);
+                data.extend_from_slice(&(afi as u16).to_be_bytes());
+                data.push(safi as u8);
+                data.extend_from_slice(&violation.bound.to_be_bytes());
+                Bytes::from(data)
+            }
+        };
+        self.metrics.record_max_prefix_exceeded(&self.peer_label);
+        let notif =
+            NotificationMessage::new(NotificationCode::Cease, cease_subcode::MAX_PREFIXES, data);
+        self.drive_fsm(Event::UpdateValidationError(notif)).await;
+        true
+    }
+
     fn receives_add_path_for_family(&self, family: (Afi, Safi)) -> bool {
         self.add_path_receive_families.contains(&family)
     }
@@ -496,6 +591,21 @@ impl PeerSession {
         )
     }
 
+    /// Bump the per-family unique-prefix counter when a unique unicast
+    /// prefix appears (plain insert, or Add-Path refcount 0 → 1).
+    fn count_unique_unicast(&mut self, prefix: Prefix, delta_positive: bool) {
+        let counter = match prefix {
+            Prefix::V4(_) => &mut self.known_unicast_v4,
+            Prefix::V6(_) => &mut self.known_unicast_v6,
+        };
+        if delta_positive {
+            *counter += 1;
+        } else {
+            debug_assert!(*counter > 0, "per-family unicast counter underflow");
+            *counter = counter.saturating_sub(1);
+        }
+    }
+
     fn remember_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
         if !self.receives_add_path_for_prefix(prefix) {
             let inserted = self.known_plain_prefixes.insert(prefix);
@@ -507,22 +617,40 @@ impl PeerSession {
                         .any(|(known_prefix, _)| *known_prefix == prefix),
                 "plain unicast prefix leaked into Add-Path accounting"
             );
+            if inserted {
+                self.count_unique_unicast(prefix, true);
+            }
             return inserted;
         }
 
         if !self.known_paths.insert((prefix, path_id)) {
             return false;
         }
-        *self.known_prefix_refcounts.entry(prefix).or_insert(0) += 1;
+        let refcount = self.known_prefix_refcounts.entry(prefix).or_insert(0);
+        *refcount += 1;
+        if *refcount == 1 {
+            self.count_unique_unicast(prefix, true);
+        }
         true
     }
 
     fn forget_known_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
         if !self.receives_add_path_for_prefix(prefix) {
-            return self.known_plain_prefixes.remove(&prefix);
+            return self.forget_known_plain(prefix);
         }
 
         self.forget_known_add_path(prefix, path_id)
+    }
+
+    /// Remove one plain (non-Add-Path) unicast prefix, keeping the
+    /// per-family unique-prefix counters in sync. Every removal from
+    /// `known_plain_prefixes` must go through here (ADR-0108).
+    fn forget_known_plain(&mut self, prefix: Prefix) -> bool {
+        let removed = self.known_plain_prefixes.remove(&prefix);
+        if removed {
+            self.count_unique_unicast(prefix, false);
+        }
+        removed
     }
 
     fn forget_known_add_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
@@ -540,6 +668,7 @@ impl PeerSession {
                 *count -= 1;
             } else {
                 self.known_prefix_refcounts.remove(&prefix);
+                self.count_unique_unicast(prefix, false);
             }
         } else {
             debug_assert!(
@@ -555,6 +684,8 @@ impl PeerSession {
         self.known_plain_prefixes.clear();
         self.known_paths.clear();
         self.known_prefix_refcounts.clear();
+        self.known_unicast_v4 = 0;
+        self.known_unicast_v6 = 0;
         self.known_flowspec.clear();
         self.known_evpn.clear();
         self.known_bgpls.clear();
@@ -725,6 +856,8 @@ impl PeerSession {
             known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
+            known_unicast_v4: 0,
+            known_unicast_v6: 0,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
@@ -857,6 +990,8 @@ impl PeerSession {
             known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
+            known_unicast_v4: 0,
+            known_unicast_v6: 0,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),

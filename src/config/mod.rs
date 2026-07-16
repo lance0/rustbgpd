@@ -1177,6 +1177,12 @@ impl Config {
         transport.max_prefixes = neighbor
             .max_prefixes
             .or_else(|| group.and_then(|g| g.max_prefixes));
+        transport.max_prefixes_ipv4 = neighbor
+            .max_prefixes_ipv4
+            .or_else(|| group.and_then(|g| g.max_prefixes_ipv4));
+        transport.max_prefixes_ipv6 = neighbor
+            .max_prefixes_ipv6
+            .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
         transport.peer_group.clone_from(&neighbor.peer_group);
         transport.md5_password = neighbor
             .md5_password
@@ -1282,6 +1288,8 @@ impl Config {
             hold_time: None,
             send_hold_time: None,
             max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
             md5_password: None,
             tcp_ao: None,
             bfd: None,
@@ -2031,6 +2039,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
     Some(match field {
         "description"
         | "max_prefixes"
+        | "max_prefixes_ipv4"
+        | "max_prefixes_ipv6"
         | "gr_stale_routes_time"
         | "local_ipv6_nexthop"
         | "remove_private_as"
@@ -2190,6 +2200,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(hold_time);
     cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
+    cmp_field!(max_prefixes_ipv4);
+    cmp_field!(max_prefixes_ipv6);
     cmp_field!(ttl_security);
     cmp_field!(families);
     cmp_field!(graceful_restart);
@@ -2305,6 +2317,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.hold_time == new.hold_time
         && old.send_hold_time == new.send_hold_time
         && old.max_prefixes == new.max_prefixes
+        && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
+        && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
         && old.families == new.families
@@ -2971,6 +2985,12 @@ impl Config {
             neighbor.max_prefixes = neighbor
                 .max_prefixes
                 .or_else(|| group.and_then(|g| g.max_prefixes));
+            neighbor.max_prefixes_ipv4 = neighbor
+                .max_prefixes_ipv4
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv4));
+            neighbor.max_prefixes_ipv6 = neighbor
+                .max_prefixes_ipv6
+                .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
             neighbor.route_reflector_client = Some(
                 neighbor
                     .route_reflector_client
@@ -5332,6 +5352,8 @@ pub fn describe_peer_group_changes(
     cmp_field!(hold_time);
     cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
+    cmp_field!(max_prefixes_ipv4);
+    cmp_field!(max_prefixes_ipv6);
     cmp_field!(ttl_security);
     cmp_field!(families);
     cmp_field!(graceful_restart);

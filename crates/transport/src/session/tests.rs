@@ -317,6 +317,58 @@ fn ipv4_announce(prefix: Ipv4Prefix, path_id: u32, add_path: bool) -> UpdateMess
     )
 }
 
+fn ipv6_announce(prefix: Ipv6Prefix, path_id: u32) -> UpdateMessage {
+    UpdateMessage::build(
+        &[],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: "2001:db8::2".parse().unwrap(),
+                link_local_next_hop: None,
+                announced: vec![NlriEntry {
+                    path_id,
+                    prefix: Prefix::V6(prefix),
+                }],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            }),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+}
+
+/// Drain the session's outbound stream (OPEN, KEEPALIVE, UPDATEs) until the
+/// first NOTIFICATION and return it.
+async fn read_until_notification(stream: &mut TcpStream) -> NotificationMessage {
+    loop {
+        if let Message::Notification(notif) = read_single_bgp_message(stream).await {
+            return notif;
+        }
+    }
+}
+
+/// RFC 4486 optional Cease/1 data: AFI (2 octets), SAFI (1 octet),
+/// upper bound (4 octets).
+fn max_prefix_cease_data(afi: Afi, safi: Safi, bound: u32) -> Vec<u8> {
+    let mut data = Vec::with_capacity(7);
+    data.extend_from_slice(&(afi as u16).to_be_bytes());
+    data.push(safi as u8);
+    data.extend_from_slice(&bound.to_be_bytes());
+    data
+}
+
 fn ipv4_withdraw(prefix: Ipv4Prefix, path_id: u32, add_path: bool) -> UpdateMessage {
     UpdateMessage::build(
         &[],
@@ -10167,6 +10219,394 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
         "teardown must clear max-prefix accounting"
     );
 }
+
+/// Negotiate IPv4+IPv6 unicast on an established fixture session.
+fn install_dual_stack_session(session: &mut PeerSession, add_path: bool) {
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    if add_path {
+        negotiated
+            .add_path_families
+            .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+    }
+    install_test_negotiated_session(session, negotiated);
+}
+
+fn v6_prefix(index: u16) -> Ipv6Prefix {
+    Ipv6Prefix::new(
+        format!("2001:db8:{index:x}::").parse::<Ipv6Addr>().unwrap(),
+        64,
+    )
+}
+
+fn v4_prefix(index: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24)
+}
+
+/// Mutant: dropping the `max_prefixes_ipv4` check (or counting v6 into the
+/// v4 budget) keeps the session up past the v4 bound; encoding the wrong
+/// AFI/SAFI/bound corrupts the RFC 4486 Cease data.
+#[tokio::test]
+async fn per_family_max_prefix_limits_enforce_independently() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_ipv4 = Some(2);
+    session.config.max_prefixes_ipv6 = Some(1);
+    install_dual_stack_session(&mut session, false);
+
+    // v6 at its limit, v4 at its limit: both families full, session alive.
+    session.process_update(ipv6_announce(v6_prefix(1), 0)).await;
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_some(),
+        "both families at their exact limits must not tear down"
+    );
+    assert_eq!(session.known_unicast_v4, 2);
+    assert_eq!(session.known_unicast_v6, 1);
+
+    // One more v4 route exceeds only the v4 bound.
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_none(),
+        "exceeding the v4 bound must tear the session down"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 2).as_slice(),
+        "Cease/1 data must carry the exceeding family's AFI, SAFI, and bound"
+    );
+    // Session reset clears per-family accounting like the aggregate's.
+    assert_eq!(session.known_unicast_v4, 0);
+    assert_eq!(session.known_unicast_v6, 0);
+    assert_eq!(session.known_prefix_count(), 0);
+}
+
+/// Mutant: charging v6 unicast routes against `max_prefixes_ipv4` (a single
+/// shared counter) tears down before the v4 family used any of its budget.
+#[tokio::test]
+async fn one_family_cannot_consume_the_other_families_budget() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_ipv4 = Some(10);
+    install_dual_stack_session(&mut session, false);
+
+    for index in 1..=10 {
+        session
+            .process_update(ipv6_announce(v6_prefix(index), 0))
+            .await;
+    }
+    assert!(
+        session.read_half.is_some(),
+        "unlimited v6 routes must not consume the v4 budget"
+    );
+    for index in 1..=10 {
+        session
+            .process_update(ipv4_announce(v4_prefix(index), 0, false))
+            .await;
+    }
+    assert!(
+        session.read_half.is_some(),
+        "v4 must retain its full headroom after 10 v6 routes"
+    );
+    session
+        .process_update(ipv4_announce(v4_prefix(11), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_none(),
+        "11th v4 route exceeds the bound"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 10).as_slice()
+    );
+}
+
+/// Mutant: counting Add-Path multiplicity (paths instead of unique prefixes)
+/// against the per-family bound diverges from the aggregate's pinned
+/// unique-prefix semantics and tears down on the first UPDATE.
+#[tokio::test]
+async fn per_family_limit_counts_unique_prefixes_under_add_path() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_ipv4 = Some(1);
+    install_dual_stack_session(&mut session, true);
+
+    let prefix = v4_prefix(1);
+    session.process_update(ipv4_announce(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert!(
+        session.read_half.is_some(),
+        "two Add-Path IDs of one prefix count once against the per-family bound"
+    );
+    assert_eq!(session.known_unicast_v4, 1);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 3, true))
+        .await;
+    assert!(session.read_half.is_none());
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 1).as_slice()
+    );
+}
+
+/// Mutant: double-counting a duplicate announcement, or failing to decrement
+/// on withdrawal, falsely trips the bound at the boundary.
+#[tokio::test]
+async fn per_family_boundary_survives_duplicates_and_withdraw_reannounce() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_ipv4 = Some(2);
+    install_dual_stack_session(&mut session, false);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    // Duplicate announcement at the boundary must not double-count.
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_some(),
+        "duplicate announcement at the bound must not tear down"
+    );
+    assert_eq!(session.known_unicast_v4, 2);
+
+    // Withdrawal frees budget for a re-announcement at the boundary.
+    session
+        .process_update(ipv4_withdraw(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_some(),
+        "withdraw-then-announce at the bound must not tear down"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(4), 0, false))
+        .await;
+    assert!(session.read_half.is_none(), "one past the bound tears down");
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+}
+
+/// Mutant: sweeping ERR stale plain prefixes without decrementing the
+/// per-family counter leaves phantom v4 budget consumption; the post-EoRR
+/// announcement then falsely exceeds `max_prefixes_ipv4`. Mirrors the
+/// aggregate's `eorr_reconciles_omitted_prefix_before_later_max_prefix_check`.
+#[tokio::test]
+async fn eorr_reconciles_per_family_accounting_before_later_check() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    session.config.max_prefixes_ipv4 = Some(2);
+    let replayed = v4_prefix(1);
+    let omitted = v4_prefix(2);
+    session.remember_known_path(Prefix::V4(replayed), 0);
+    session.remember_known_path(Prefix::V4(omitted), 0);
+    assert_eq!(session.known_unicast_v4, 2);
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::BeginRouteRefresh { .. })
+    ));
+    session
+        .process_update(ipv4_announce(replayed, 0, false))
+        .await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::RoutesReceived { .. })
+    ));
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::EoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::EndRouteRefresh { .. })
+    ));
+    assert_eq!(
+        session.known_unicast_v4, 1,
+        "EoRR sweep must release the omitted prefix's per-family budget"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::RoutesReceived { .. })),
+        "post-EoRR announcement within the reconciled bound must be accepted"
+    );
+    assert_eq!(session.known_unicast_v4, 2);
+}
+
+/// Mutant: dropping the immediate evaluation on `UpdateRuntimeConfig` leaves
+/// a quiet peer holding more routes than the operator's new per-family bound
+/// until its next UPDATE.
+#[tokio::test]
+async fn runtime_lowering_per_family_limit_enforces_immediately() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    install_dual_stack_session(&mut session, false);
+    for index in 1..=3 {
+        session
+            .process_update(ipv4_announce(v4_prefix(index), 0, false))
+            .await;
+    }
+    assert!(session.read_half.is_some());
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                max_prefixes: None,
+                max_prefixes_ipv4: Some(1),
+                max_prefixes_ipv6: None,
+                gr_stale_routes_time: 360,
+                local_ipv6_nexthop: None,
+                remove_private_as: RemovePrivateAs::Disabled,
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    assert!(
+        session.read_half.is_none(),
+        "lowering max_prefixes_ipv4 below the current count must tear down immediately"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 1).as_slice()
+    );
+}
+
+/// Pins the aggregate's documented hot-apply semantics (ADR-0108): lowering
+/// the legacy `max_prefixes` below the current count trips on the NEXT
+/// received UPDATE, not on apply.
+#[tokio::test]
+async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    install_dual_stack_session(&mut session, false);
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                max_prefixes: Some(1),
+                max_prefixes_ipv4: None,
+                max_prefixes_ipv6: None,
+                gr_stale_routes_time: 360,
+                local_ipv6_nexthop: None,
+                remove_private_as: RemovePrivateAs::Disabled,
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    assert!(
+        session.read_half.is_some(),
+        "aggregate lowering must not enforce until the next UPDATE"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(session.read_half.is_none());
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert!(
+        notif.data.is_empty(),
+        "aggregate Cease/1 keeps its historical empty data"
+    );
+}
+
+/// Regression pin: with only the legacy aggregate configured, behavior is
+/// unchanged — teardown at the same point, empty NOTIFICATION data.
+#[tokio::test]
+async fn aggregate_max_prefix_alone_behaves_as_before() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes = Some(2);
+    install_dual_stack_session(&mut session, false);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session.process_update(ipv6_announce(v6_prefix(1), 0)).await;
+    assert!(session.read_half.is_some(), "at the aggregate bound: alive");
+    session.process_update(ipv6_announce(v6_prefix(2), 0)).await;
+    assert!(
+        session.read_half.is_none(),
+        "aggregate counts across families exactly as before"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert!(notif.data.is_empty(), "aggregate Cease/1 data stays empty");
+}
+
 #[test]
 fn notification_teardown_detects_inbound_notification() {
     let event = Event::NotificationReceived(NotificationMessage::new(
@@ -13274,6 +13714,8 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
             session
                 .handle_command(PeerCommand::UpdateRuntimeConfig {
                     max_prefixes: Some(123),
+                    max_prefixes_ipv4: None,
+                    max_prefixes_ipv6: None,
                     gr_stale_routes_time: 999,
                     local_ipv6_nexthop,
                     remove_private_as,

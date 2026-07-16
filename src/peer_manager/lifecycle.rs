@@ -69,6 +69,8 @@ impl PeerManager {
             hold_time: managed.hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),
             max_prefixes: managed.max_prefixes,
+            max_prefixes_ipv4: tc.max_prefixes_ipv4,
+            max_prefixes_ipv6: tc.max_prefixes_ipv6,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
             ttl_security: tc.ttl_security,
@@ -428,6 +430,8 @@ impl PeerManager {
                 || tc.remove_private_as != config.remove_private_as;
             (
                 tc.max_prefixes != config.max_prefixes
+                    || tc.max_prefixes_ipv4 != config.max_prefixes_ipv4
+                    || tc.max_prefixes_ipv6 != config.max_prefixes_ipv6
                     || tc.gr_stale_routes_time != config.gr_stale_routes_time
                     || export_knobs_changed,
                 export_knobs_changed,
@@ -460,6 +464,8 @@ impl PeerManager {
                 .handle
                 .update_runtime_config_timeout(
                     config.max_prefixes,
+                    config.max_prefixes_ipv4,
+                    config.max_prefixes_ipv6,
                     config.gr_stale_routes_time,
                     config.local_ipv6_nexthop,
                     config.remove_private_as,
@@ -531,6 +537,8 @@ impl PeerManager {
         managed.description.clone_from(&config.description);
         managed.max_prefixes = config.max_prefixes;
         managed.transport_config.max_prefixes = config.max_prefixes;
+        managed.transport_config.max_prefixes_ipv4 = config.max_prefixes_ipv4;
+        managed.transport_config.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         managed.transport_config.gr_stale_routes_time = config.gr_stale_routes_time;
         managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;
         managed.transport_config.remove_private_as = config.remove_private_as;

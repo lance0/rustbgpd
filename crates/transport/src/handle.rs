@@ -315,6 +315,12 @@ pub enum PeerCommand {
     UpdateRuntimeConfig {
         /// Maximum prefixes accepted before Cease/1 (None = unlimited).
         max_prefixes: Option<u32>,
+        /// Independent IPv4-unicast prefix limit (ADR-0108). Lowering
+        /// below the current count enforces immediately on apply.
+        max_prefixes_ipv4: Option<u32>,
+        /// Independent IPv6-unicast prefix limit (ADR-0108). Lowering
+        /// below the current count enforces immediately on apply.
+        max_prefixes_ipv6: Option<u32>,
         /// Stale-route retention after peer restart (seconds).
         gr_stale_routes_time: u64,
         /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
@@ -1515,9 +1521,15 @@ impl PeerHandle {
     ///
     /// Returns an error if the session is unreachable, replies with one,
     /// or doesn't acknowledge inside `deadline`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per hot-appliable runtime knob, mirroring PeerCommand::UpdateRuntimeConfig"
+    )]
     pub async fn update_runtime_config_timeout(
         &self,
         max_prefixes: Option<u32>,
+        max_prefixes_ipv4: Option<u32>,
+        max_prefixes_ipv6: Option<u32>,
         gr_stale_routes_time: u64,
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
         remove_private_as: crate::config::RemovePrivateAs,
@@ -1529,6 +1541,8 @@ impl PeerHandle {
             commands
                 .send(PeerCommand::UpdateRuntimeConfig {
                     max_prefixes,
+                    max_prefixes_ipv4,
+                    max_prefixes_ipv6,
                     gr_stale_routes_time,
                     local_ipv6_nexthop,
                     remove_private_as,

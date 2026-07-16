@@ -642,6 +642,8 @@ impl PeerManager {
         transport.peer_interface.clone_from(&config.interface);
         transport.peer_scope_id = scope_id;
         transport.max_prefixes = config.max_prefixes;
+        transport.max_prefixes_ipv4 = config.max_prefixes_ipv4;
+        transport.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         transport.peer_group.clone_from(&config.peer_group);
         transport.md5_password.clone_from(&config.md5_password);
         transport.tcp_ao.clone_from(&config.tcp_ao);
