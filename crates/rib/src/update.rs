@@ -1495,6 +1495,10 @@ pub enum RibUpdate {
         /// `Some` = explain the VPNv4/VPNv6 (SAFI 128) route identified
         /// by `(rd, prefix)` instead of the plain unicast prefix.
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        /// `true` = explain the labeled-unicast (SAFI 4, RFC 8277) route
+        /// for `prefix` instead of the plain unicast prefix. Mutually
+        /// exclusive with `rd` (callers validate; `rd` wins here).
+        labeled: bool,
         /// Response channel.
         reply: oneshot::Sender<Option<ExplainAdvertisedRoute>>,
     },

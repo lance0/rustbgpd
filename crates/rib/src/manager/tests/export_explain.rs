@@ -946,3 +946,205 @@ async fn vpn_explain_without_rtc_marks_rt_gate_not_applicable() {
     drop(tx);
     handle.await.unwrap();
 }
+
+// --- Labeled-unicast (SAFI 4) explain: the ladder is recorded by a dry
+// run of `stage_labeled_routes` itself, the same body live reflection
+// executes, so these tests pin the labeled truthfulness mechanism.
+
+async fn feed_labeled_routes(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    announced: Vec<crate::route::LabeledRibRoute>,
+) {
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        session_id: 0,
+        peer,
+        announced,
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+fn labeled_with_communities(
+    mut route: crate::route::LabeledRibRoute,
+    communities: Vec<u32>,
+) -> crate::route::LabeledRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(communities));
+    route
+}
+
+#[tokio::test]
+async fn labeled_split_horizon_gate_stops_route_to_its_source() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let _rx_s = explain_peer_up(
+        &tx,
+        source,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+
+    let route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100);
+    let prefix = route.nlri.prefix;
+    feed_labeled_routes(&tx, source, vec![route]).await;
+
+    let explain = query_explain_advertised_labeled_route(&tx, source, prefix).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    let stop = stopped_gate(&explain).expect("ladder must stop");
+    assert_eq!(
+        (stop.gate, stop.code),
+        ("split_horizon", "ibgp_split_horizon")
+    );
+    assert_eq!(explain.reasons[0].code, "ibgp_split_horizon");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn labeled_no_advertise_gate_stops_source_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let _rx_s = explain_peer_up(
+        &tx,
+        source,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    let _rx_t = explain_peer_up(
+        &tx,
+        target,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+
+    let route = labeled_with_communities(
+        make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 62, 100, 100),
+        vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE],
+    );
+    let prefix = route.nlri.prefix;
+    feed_labeled_routes(&tx, source, vec![route]).await;
+
+    let explain = query_explain_advertised_labeled_route(&tx, target, prefix).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    let stop = stopped_gate(&explain).expect("ladder must stop");
+    assert_eq!(
+        (stop.gate, stop.code),
+        ("no_advertise", "no_advertise_suppressed")
+    );
+    assert_eq!(explain.reasons[0].code, "no_advertise_suppressed");
+    // The full labeled ladder is named, in live body order, up to the stop.
+    let names: Vec<&str> = explain.gates.iter().map(|step| step.gate).collect();
+    assert_eq!(
+        names,
+        [
+            "family",
+            "best_route",
+            "llgr",
+            "split_horizon",
+            "rr_reflection",
+            "no_advertise"
+        ]
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn labeled_llgr_gate_stops_stale_route_toward_non_llgr_ebgp_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let no_llgr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let with_llgr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let _rx_s = explain_peer_up(
+        &tx,
+        source,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    let _rx_a = explain_peer_up(
+        &tx,
+        no_llgr,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    let _rx_b = explain_peer_up(
+        &tx,
+        with_llgr,
+        labeled_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        labeled_sendable(),
+    )
+    .await;
+
+    let route = labeled_with_communities(
+        make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 63, 100, 100),
+        vec![rustbgpd_wire::COMMUNITY_LLGR_STALE],
+    );
+    let prefix = route.nlri.prefix;
+    feed_labeled_routes(&tx, source, vec![route]).await;
+
+    let denied = query_explain_advertised_labeled_route(&tx, no_llgr, prefix).await;
+    assert_eq!(denied.decision, crate::update::ExplainDecision::Deny);
+    let stop = stopped_gate(&denied).expect("ladder must stop");
+    assert_eq!((stop.gate, stop.code), ("llgr", "llgr_stale_suppressed"));
+    assert_eq!(denied.reasons[0].code, "llgr_stale_suppressed");
+
+    // A peer that advertised the LLGR capability for the family clears it.
+    let permitted = query_explain_advertised_labeled_route(&tx, with_llgr, prefix).await;
+    assert_eq!(
+        permitted.decision,
+        crate::update::ExplainDecision::Advertise
+    );
+    assert!(stopped_gate(&permitted).is_none());
+    assert!(
+        permitted
+            .gates
+            .iter()
+            .any(|step| step.gate == "llgr" && step.verdict == ExportGateVerdict::Pass)
+    );
+    assert_eq!(permitted.route_peer, Some(source));
+
+    drop(tx);
+    handle.await.unwrap();
+}

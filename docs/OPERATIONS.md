@@ -1501,6 +1501,10 @@ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 # membership gate.
 rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.2 --explain --rd 65000:1
 
+# Labeled unicast (SAFI 4, RFC 8277): explain the labeled export ladder
+# for the prefix instead of the plain unicast one.
+rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.2 --explain --labeled
+
 # JSON for scripting
 rbgp --json rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 ```
@@ -1515,8 +1519,10 @@ RFC 5291 filter) -> `export_policy` (per-chain verdict, labeled
 advertised state: `staged_announce` = would send, `already_advertised`
 = identical route already advertised, peer in sync). The VPN ladder
 follows the live VPN staging order and adds `rt_membership`
-(RFC 4684). A family still held by the initial-ORF gate (RFC 5291
-section 6) stops at `orf_gate` before any per-prefix work.
+(RFC 4684); the labeled-unicast ladder follows the live labeled staging
+order (`family` first, no `rt_membership`/`orf`). A family still held by
+the initial-ORF gate (RFC 5291 section 6) stops at `orf_gate` before any
+per-prefix work.
 
 Truthfulness: the explanation is produced by a read-only dry run of
 the *same staging body* live distribution executes -- including for

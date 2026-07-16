@@ -247,6 +247,7 @@ impl RibService {
         peer: IpAddr,
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        labeled: bool,
     ) -> Result<Option<ExplainAdvertisedRoute>, Status> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -254,6 +255,7 @@ impl RibService {
                 peer,
                 prefix,
                 rd,
+                labeled,
                 reply: reply_tx,
             })
             .await
@@ -1461,8 +1463,13 @@ impl proto::rib_service_server::RibService for RibService {
                     .map_err(|e| Status::invalid_argument(format!("invalid rd: {e}")))?,
             )
         };
+        if req.labeled && rd.is_some() {
+            return Err(Status::invalid_argument(
+                "rd and labeled are mutually exclusive: a route is VPN or labeled-unicast, not both",
+            ));
+        }
         let Some(explain) = self
-            .query_explain_advertised_route(peer, prefix, rd)
+            .query_explain_advertised_route(peer, prefix, rd, req.labeled)
             .await?
         else {
             return Err(Status::not_found(
@@ -4005,6 +4012,7 @@ mod tests {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
             rd: String::new(),
+            labeled: false,
         });
         let err = svc.explain_advertised_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -4019,6 +4027,7 @@ mod tests {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
             rd: String::new(),
+            labeled: false,
         });
 
         let call = tokio::spawn(async move { svc.explain_advertised_route(req).await });
@@ -4028,10 +4037,12 @@ mod tests {
                 peer,
                 prefix,
                 rd,
+                labeled,
                 reply,
             } => {
                 assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
                 assert_eq!(rd, None);
+                assert!(!labeled);
                 assert_eq!(
                     prefix,
                     Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24))

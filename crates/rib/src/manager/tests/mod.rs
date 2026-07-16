@@ -354,6 +354,7 @@ async fn query_explain_advertised_route(
         peer,
         prefix,
         rd: None,
+        labeled: false,
         reply: reply_tx,
     })
     .await
@@ -373,6 +374,27 @@ async fn query_explain_advertised_vpn_route(
         peer,
         prefix,
         rd: Some(rd),
+        labeled: false,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap()
+}
+
+/// Labeled-unicast export explain helper (`labeled` set) for the
+/// export-explain tests.
+async fn query_explain_advertised_labeled_route(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    prefix: Prefix,
+) -> crate::update::ExplainAdvertisedRoute {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: None,
+        labeled: true,
         reply: reply_tx,
     })
     .await

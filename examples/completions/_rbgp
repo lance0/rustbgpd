@@ -652,6 +652,7 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--explain[Explain whether this exact prefix would be advertised to the peer]' \
+'(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -669,6 +670,7 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--explain[Explain whether this exact prefix would be advertised to the peer]' \
+'(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \

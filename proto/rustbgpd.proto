@@ -1494,6 +1494,10 @@ message ExplainAdvertisedRouteRequest {
   // (rd, prefix) identity - including the RFC 4684 RT-Constrain
   // membership gate - instead of the unicast ladder. Empty = unicast.
   string rd = 4;
+  // When true, the explain runs the labeled-unicast (SAFI 4, RFC 8277)
+  // export ladder for the prefix instead of the unicast ladder.
+  // Mutually exclusive with rd.
+  bool labeled = 5;
 }
 
 // Verdict of one export gate for one (route, peer) explain.
