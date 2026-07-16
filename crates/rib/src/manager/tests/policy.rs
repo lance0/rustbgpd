@@ -27,6 +27,7 @@ async fn export_policy_counter_records_single_best_permit() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -112,6 +113,7 @@ async fn graceful_restart_clears_export_policy_stats() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -185,6 +187,7 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -259,6 +262,7 @@ async fn export_policy_blocks_denied() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -324,6 +328,7 @@ async fn query_advertised_routes() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -417,6 +422,7 @@ async fn per_peer_export_policy() {
     let (send_filtered, mut recv_filtered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: peer1,
         peer_asn: 65000,
@@ -439,6 +445,7 @@ async fn per_peer_export_policy() {
     let (send_unfiltered, mut recv_unfiltered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: peer2,
         peer_asn: 65000,
@@ -531,6 +538,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -666,6 +674,7 @@ async fn export_policy_match_next_hop_filters_route() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -719,6 +728,7 @@ async fn explain_advertised_route_reports_no_best_route() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -765,6 +775,7 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -880,6 +891,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -976,6 +988,7 @@ async fn explain_advertised_route_reports_modifications() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -1068,6 +1081,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -1149,6 +1163,7 @@ async fn peer_down_cleans_up_export_policy() {
 
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -1226,6 +1241,7 @@ policy no-doc {
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65002,
@@ -1425,6 +1441,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             session_id: 0,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)),
             peer_asn: asn,

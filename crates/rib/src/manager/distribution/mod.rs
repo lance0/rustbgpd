@@ -665,6 +665,40 @@ pub(super) fn no_advertise_export_suppressed(communities: &[u32]) -> bool {
     communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
 }
 
+/// RFC 1997 `NO_EXPORT` / `NO_EXPORT_SUBCONFED` egress restriction: a
+/// route carrying either community "MUST NOT be advertised outside a BGP
+/// confederation boundary" / "outside the local AS". rustbgpd has no
+/// confederation support (see the inbound `AS_CONFED_*` rejection in
+/// transport), so both egress sets collapse to "all eBGP peers" and the
+/// two communities are enforced identically.
+///
+/// SOURCE-route-only, unlike `NO_ADVERTISE`: only the check on the
+/// pre-policy route runs. A policy-ADDED `NO_EXPORT` is deliberately
+/// delivered on the wire — attaching `NO_EXPORT` toward a peer is a
+/// standard route-server/export-policy idiom (the receiver enforces
+/// it), and rustbgpd's own RFC 9494 §4.6 LLGR form attaches `NO_EXPORT`
+/// post-staging in transport. A policy-REMOVED `NO_EXPORT` does not
+/// bypass the restriction: the source-route check runs before export
+/// policy can strip the community.
+///
+/// iBGP targets (including RR reflection/ORR) are never suppressed —
+/// RFC 1997 permits intra-AS advertisement. `interpret_rfc1997` is the
+/// per-peer honor/transparent knob (route-server clients default to
+/// transparent). This gate deliberately outranks RFC 9494 LLGR export
+/// eligibility: a received route already carrying `NO_EXPORT` (e.g. an
+/// upstream helper's §4.6 stale form) is suppressed toward eBGP peers
+/// even where the LLGR gate would pass it.
+pub(super) fn no_export_export_suppressed(
+    communities: &[u32],
+    target_is_ebgp: bool,
+    interpret_rfc1997: bool,
+) -> bool {
+    interpret_rfc1997
+        && target_is_ebgp
+        && (communities.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT)
+            || communities.contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED))
+}
+
 /// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
 /// carries OTC must not be propagated toward a Provider, Peer, or Route
 /// Server. The local role names our side of those relationships.
@@ -3428,6 +3462,7 @@ impl RibManager {
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
             let target_peer_asn = self.peer_asn.get(&peer).copied();
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -3515,6 +3550,7 @@ impl RibManager {
                         prefix_send_max,
                         false,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -3557,6 +3593,7 @@ impl RibManager {
                         1,
                         true,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -3590,6 +3627,7 @@ impl RibManager {
                         target_peer_asn,
                         target_peer_group,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -3624,6 +3662,7 @@ impl RibManager {
                         prefix,
                         &mut target,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -3698,6 +3737,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -3732,6 +3772,7 @@ impl RibManager {
                     &effective_l3vpn_keys,
                     &mut target,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -3759,6 +3800,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -3787,6 +3829,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),

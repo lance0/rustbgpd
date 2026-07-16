@@ -26,6 +26,7 @@ async fn channel_full_marks_dirty_and_resyncs() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -169,6 +170,10 @@ async fn channel_full_marks_dirty_and_resyncs() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves resync progress under sustained query load"
+)]
 async fn dirty_resync_not_starved_by_query_traffic() {
     tokio::time::pause();
 
@@ -183,6 +188,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -335,6 +341,7 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
 
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -410,6 +417,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
 
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -511,6 +519,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             peer,
             session_id,
             peer_asn: 65000,
@@ -584,6 +593,7 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -659,6 +669,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             peer,
             session_id,
             peer_asn: 65000,
@@ -703,6 +714,7 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -786,6 +798,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             peer,
             session_id,
             peer_asn: 65000,
@@ -914,6 +927,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let (source_tx, _source_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         peer: source,
         session_id: 3,
         peer_asn: 65000,
@@ -991,6 +1005,7 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             peer,
             session_id,
             peer_asn: 65000,
@@ -1089,6 +1104,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             peer,
             session_id,
             peer_asn: 65000,
@@ -1157,6 +1173,7 @@ fn session_peer_up(
 ) -> RibUpdate {
     RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         peer,
         session_id,
         peer_asn: 65000,

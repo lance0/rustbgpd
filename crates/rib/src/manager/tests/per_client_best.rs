@@ -97,6 +97,7 @@ async fn client_peer_up(
         route_reflector_client: false,
         orr_vantage: None,
         per_client_best,
+        interpret_rfc1997: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),

@@ -209,6 +209,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
             .unwrap();
             tx.send(RibUpdate::PeerUp {
                 per_client_best: false,
+                interpret_rfc1997: true,
                 session_id,
                 peer,
                 peer_asn: 64_512,

@@ -311,6 +311,11 @@ pub struct RibManager {
     /// Loc-RIB best. Families with negotiated Add-Path send take the
     /// multipath path instead.
     peer_per_client_best: HashSet<IpAddr>,
+    /// Peers with RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress
+    /// enforcement enabled (config `interpret_rfc1997`, default
+    /// `!route_server_client`). Source routes carrying either community
+    /// are suppressed at staging toward these peers when they are eBGP.
+    peer_interpret_rfc1997: HashSet<IpAddr>,
     /// Peer ASN, tracked for MRT `PEER_INDEX_TABLE`.
     peer_asn: HashMap<IpAddr, u32>,
     /// Peer-group membership used for export policy neighbor-set matching.
@@ -509,6 +514,10 @@ const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration = std::time::Durati
 /// an outbound-registration failover can re-register a surviving session
 /// (channel + negotiated metadata + initial table dump) after the active
 /// session goes down during the collision window.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent PeerUp registration booleans"
+)]
 pub(super) struct LiveSessionRecord {
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -521,6 +530,7 @@ pub(super) struct LiveSessionRecord {
     local_role: Option<BgpRole>,
     orr_vantage: Option<IpAddr>,
     per_client_best: bool,
+    interpret_rfc1997: bool,
     add_path_send_families: Vec<(Afi, Safi)>,
     add_path_send_max: u32,
     /// Per-family Paths-Limit caps (RFC-draft Paths-Limit), filtered to the
@@ -1122,6 +1132,7 @@ impl RibManager {
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_limits: HashMap::new(),
             peer_per_client_best: HashSet::new(),
+            peer_interpret_rfc1997: HashSet::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
             peer_rt_membership: HashMap::new(),
@@ -1705,6 +1716,7 @@ impl RibManager {
                 route_reflector_client,
                 orr_vantage,
                 per_client_best,
+                interpret_rfc1997,
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
@@ -1721,6 +1733,7 @@ impl RibManager {
                 route_reflector_client,
                 orr_vantage,
                 per_client_best,
+                interpret_rfc1997,
                 add_path_send_families,
                 add_path_send_max,
                 negotiated_orf_recv,
@@ -2919,6 +2932,7 @@ impl RibManager {
             .get(&peer)
             .and_then(|filters| filters.get(&family));
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let peer_asn = self.peer_asn.get(&peer).copied();
         let peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -2947,6 +2961,7 @@ impl RibManager {
                 peer_asn,
                 peer_group,
                 target_is_ebgp,
+                interpret_rfc1997,
                 target_is_rr_client,
                 self.peer_local_roles.get(&peer).copied().flatten(),
                 self.cluster_id,
@@ -3000,6 +3015,7 @@ impl RibManager {
             &prefix,
             &mut target,
             target_is_ebgp,
+            interpret_rfc1997,
             target_is_rr_client,
             self.cluster_id,
             sendable,
@@ -3069,6 +3085,7 @@ impl RibManager {
         let sendable = self.peer_sendable_families.get(&peer);
         let llgr = self.peer_advertised_llgr_families.get(&peer);
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let peer_asn = self.peer_asn.get(&peer).copied();
         let peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -3128,6 +3145,7 @@ impl RibManager {
             &keys,
             &mut target,
             target_is_ebgp,
+            interpret_rfc1997,
             target_is_rr_client,
             self.cluster_id,
             sendable,
@@ -3219,6 +3237,7 @@ impl RibManager {
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
             let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
+            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer_addr);
             let target_is_rr_client = self
                 .peer_is_rr_client
                 .get(&peer_addr)
@@ -3326,6 +3345,17 @@ impl RibManager {
                         local_pref: cand.local_pref_attr(),
                         med: cand.med_attr(),
                     };
+                    // Pre-policy source-route gates: NO_ADVERTISE, then the
+                    // eBGP-only NO_EXPORT/NO_EXPORT_SUBCONFED form. Kept in
+                    // lockstep with live staging so this candidate walk and
+                    // apply agree (plan-vs-apply equivalence).
+                    if distribution::no_export_export_suppressed(
+                        cand.communities(),
+                        target_is_ebgp,
+                        interpret_rfc1997,
+                    ) {
+                        continue;
+                    }
                     if distribution::no_advertise_export_suppressed(cand.communities()) {
                         continue;
                     }

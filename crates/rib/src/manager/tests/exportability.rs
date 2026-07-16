@@ -810,6 +810,7 @@ async fn peer_up_with_encoder(
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 7,
         peer,
         peer_asn: 65_100,
@@ -846,6 +847,7 @@ async fn vpn_peer_up_with_encoder(
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 9,
         peer,
         peer_asn: 65_100,
@@ -883,6 +885,7 @@ async fn add_path_peer_up_with_encoder(
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 8,
         peer,
         peer_asn: 65_100,

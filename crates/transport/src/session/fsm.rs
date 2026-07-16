@@ -505,6 +505,7 @@ impl PeerSession {
                             route_reflector_client: self.config.route_reflector_client,
                             orr_vantage: self.config.orr_vantage,
                             per_client_best: self.config.per_client_best,
+                            interpret_rfc1997: self.config.interpret_rfc1997,
                             add_path_send_families,
                             add_path_send_max,
                             negotiated_orf_recv: self

@@ -268,6 +268,7 @@ async fn peer_up_with_capacity(
     };
     tx.send(RibUpdate::PeerUp {
         per_client_best: spec.per_client_best,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: spec.peer,
         peer_asn: 65000,
@@ -383,6 +384,7 @@ fn register_direct_exact_peer(
         route_reflector_client: false,
         orr_vantage: None,
         per_client_best: false,
+        interpret_rfc1997: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
         negotiated_orf_recv: vec![],
@@ -904,6 +906,7 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: spec.per_client_best,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: orf_negotiated_peer,
         peer_asn: 65000,
@@ -2742,6 +2745,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -2843,6 +2847,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -3298,6 +3303,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     for (peer, out_tx, vantage) in [(grouped, g_tx, None), (ungrouped, u_tx, Some(vantage))] {
         tx.send(RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             session_id: 0,
             peer,
             peer_asn: 65000,
@@ -3429,6 +3435,7 @@ fn direct_clean_transition_manager(
             route_reflector_client: true,
             orr_vantage: None,
             per_client_best: false,
+            interpret_rfc1997: true,
             add_path_send_families: vec![],
             add_path_send_max: 0,
             negotiated_orf_recv: vec![],

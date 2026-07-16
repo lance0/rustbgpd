@@ -117,6 +117,7 @@ async fn orf_setup() -> (
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -460,6 +461,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -538,6 +540,7 @@ async fn graceful_restart_clears_orf_filter() {
     let (out_tx, mut out_rx2) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -624,6 +627,7 @@ async fn gr_flap_and_reup(
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -809,6 +813,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -929,6 +934,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     let (out_tx, _out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,
@@ -959,6 +965,7 @@ async fn peer_down_clears_gr_deferred_eor() {
     let (out_tx2, _out_rx2) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer,
         peer_asn: 65000,

@@ -130,6 +130,7 @@ async fn labeled_no_advertise_suppresses_resolved_orr_winner_without_plain_churn
         let (out_tx, mut out_rx) = mpsc::channel(32);
         tx.send(RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             session_id: 0,
             peer,
             peer_asn: 65000,
@@ -319,6 +320,7 @@ async fn labeled_add_path_no_advertise_compacts_and_withdraws_ranks() {
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65100,
@@ -455,6 +457,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -535,6 +538,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
         let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             session_id: 0,
             peer,
             peer_asn: 65000,
@@ -603,6 +607,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -676,6 +681,7 @@ async fn labeled_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -808,6 +814,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let (addpath_out_tx, mut addpath_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: addpath_target,
         peer_asn: 65000,
@@ -839,6 +846,7 @@ async fn labeled_addpath_send_stages_top_n_and_single_best_unchanged() {
     let (plain_out_tx, mut plain_out) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: plain_target,
         peer_asn: 65000,
@@ -966,6 +974,7 @@ async fn send_initial_table_includes_labeled_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1022,6 +1031,7 @@ async fn route_refresh_labeled_re_advertises_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1230,6 +1240,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -1305,6 +1316,7 @@ async fn labeled_gr_eor_clears_stale() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,

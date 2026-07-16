@@ -510,6 +510,7 @@ impl Oracle {
         self.tx
             .send(RibUpdate::PeerUp {
                 per_client_best: false,
+                interpret_rfc1997: true,
                 session_id,
                 peer: IpAddr::V4(peer),
                 peer_asn: if is_ebgp { 65010 } else { 65000 },

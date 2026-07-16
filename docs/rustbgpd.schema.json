@@ -1674,6 +1674,13 @@
             "null"
           ]
         },
+        "interpret_rfc1997": {
+          "description": "Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes\nreceived with either community are not advertised to this neighbor\nwhen it is eBGP. Default: `true` unless `route_server_client` is\nset (route servers pass communities through transparently and let\nclients enforce them). Set explicitly to override either default.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "llgr_stale_time": {
           "description": "Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).\nWhen > 0, LLGR capability is advertised and routes enter a long-lived\nstale phase instead of being purged when the GR timer expires.\nMax: `16_777_215` (24-bit, ≈ 194 days).",
           "type": [
@@ -1998,6 +2005,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "interpret_rfc1997": {
+          "description": "RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in\nthis group. See the neighbor-level `interpret_rfc1997`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "llgr_stale_time": {
           "description": "LLGR stale time (RFC 9494, seconds). See the neighbor-level\n`llgr_stale_time`.",

@@ -658,6 +658,7 @@ impl RibManager {
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
         let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let target_peer_asn = self.peer_asn.get(&peer).copied();
         let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
@@ -786,6 +787,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -862,6 +864,7 @@ impl RibManager {
                         &vpn_keys,
                         &mut target,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -911,6 +914,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -944,6 +948,7 @@ impl RibManager {
                     target_peer_asn,
                     target_peer_group,
                     target_is_ebgp,
+                    interpret_rfc1997,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -1009,6 +1014,7 @@ impl RibManager {
                         prefix_send_max,
                         false,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -1047,6 +1053,7 @@ impl RibManager {
                         1,
                         true,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -1080,6 +1087,7 @@ impl RibManager {
                         target_peer_asn,
                         target_peer_group,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),
@@ -1114,6 +1122,7 @@ impl RibManager {
                         prefix,
                         &mut target,
                         target_is_ebgp,
+                        interpret_rfc1997,
                         target_is_rr_client,
                         cluster_id,
                         sendable.as_ref(),

@@ -3265,6 +3265,95 @@ peer_group = "ixp-members"
 }
 
 #[test]
+fn interpret_rfc1997_defaults_true_for_plain_peers_false_for_rs_clients() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+route_server_client = true
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+route_server_client = true
+interpret_rfc1997 = true
+
+[[neighbors]]
+address = "10.0.0.5"
+remote_asn = 65005
+interpret_rfc1997 = false
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    // Plain eBGP: honor RFC 1997 by default.
+    assert!(peers[0].0.interpret_rfc1997);
+    // Route-server client: transparent by default.
+    assert!(!peers[1].0.interpret_rfc1997);
+    // Explicit opt-in on an RS client overrides the derived default.
+    assert!(peers[2].0.interpret_rfc1997);
+    // Explicit opt-out on a plain peer overrides the derived default.
+    assert!(!peers[3].0.interpret_rfc1997);
+}
+
+#[test]
+fn interpret_rfc1997_inherits_from_peer_group_and_derives_from_group_rs_flag() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.transit]
+interpret_rfc1997 = false
+
+[peer_groups.ixp-members]
+route_server_client = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "transit"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "ixp-members"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "ixp-members"
+interpret_rfc1997 = true
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    // Group-level explicit value inherits.
+    assert!(!peers[0].0.interpret_rfc1997);
+    // Group-level route_server_client drives the derived default.
+    assert!(peers[1].0.route_server_client);
+    assert!(!peers[1].0.interpret_rfc1997);
+    // Neighbor-level override beats both.
+    assert!(peers[2].0.interpret_rfc1997);
+}
+
+#[test]
 fn per_client_best_from_group_without_route_server_client_rejected() {
     let toml_str = r#"
 [global]
@@ -4850,6 +4939,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         orr_vantage: None,
         route_server_client: Some(false),
         per_client_best: None,
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -5537,6 +5627,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             orr_vantage: None,
             route_server_client: None,
             per_client_best: None,
+            interpret_rfc1997: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
@@ -5585,6 +5676,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -5622,6 +5714,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -5688,6 +5781,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        interpret_rfc1997: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,

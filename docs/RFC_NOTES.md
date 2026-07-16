@@ -18,7 +18,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Core BGP | RFC 4271, RFC 6793 (4-byte ASN) | FSM + UPDATE validation, dual-stack IPv4/IPv6 unicast (SAFI 1) |
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
-| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS |
+| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` and `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
@@ -39,14 +39,30 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   post-policy route is checked again before Adj-RIB-Out commit. A permit policy
   cannot remove the community to bypass the restriction; a policy that adds it
   suppresses the modified route.
-- `NO_ADVERTISE` is currently the only RFC 1997 well-known community with
-  built-in egress enforcement. `NO_EXPORT` (0xFFFFFF01) and
-  `NO_EXPORT_SUBCONFED` (0xFFFFFF03) are matchable and settable in policy but
-  are not enforced at egress: routes carrying either community are accepted
-  and re-advertised to eBGP peers. Note that the RFC 9494 §4.6 intra-AS form
-  attaches `NO_EXPORT` (with `LOCAL_PREF` 0) to LLGR-stale routes advertised
-  to iBGP peers and relies on the receiving speaker to honor it — a downstream
-  rustbgpd does not yet provide that containment itself.
+- `NO_EXPORT` (0xFFFFFF01) and `NO_EXPORT_SUBCONFED` (0xFFFFFF03) are enforced
+  at eBGP egress across the same family set: a route received with either
+  community is suppressed at staging toward every eBGP peer whose
+  `interpret_rfc1997` knob is on (the default for plain eBGP and iBGP peers;
+  route-server clients default to transparent pass-through, matching common
+  IXP route-server practice — set `interpret_rfc1997 = true` on an RS client
+  to opt in). iBGP targets — including RR reflection and ORR — are never
+  suppressed: RFC 1997 permits intra-AS advertisement. rustbgpd has no
+  confederation support, so the `NO_EXPORT_SUBCONFED` egress set collapses to
+  the `NO_EXPORT` one and both are enforced identically.
+- Unlike `NO_ADVERTISE`, the `NO_EXPORT` check is source-route-only. A policy
+  that ADDS `NO_EXPORT` produces a route that is still delivered — attaching
+  the community toward a peer that should honor it is the standard
+  route-server/export-policy idiom, and rustbgpd's own RFC 9494 §4.6 LLGR form
+  attaches `NO_EXPORT` (with `LOCAL_PREF` 0) post-staging in transport. A
+  policy that REMOVES `NO_EXPORT` cannot bypass the restriction: the
+  source-route check runs before export policy. The explain ladder reports the
+  suppression on its own stable `no_export` gate rung (beside `no_advertise`).
+- The `NO_EXPORT` gate deliberately outranks RFC 9494 LLGR export eligibility:
+  a route RECEIVED already carrying `NO_EXPORT` (the upstream §4.6 stale form
+  is `LLGR_STALE` + `NO_EXPORT`) is suppressed toward eBGP peers in honor mode
+  even where the peer advertised the LLGR capability for the family. RFC 1997
+  is a MUST; LLGR eligibility only makes a stale route *deliverable*, it does
+  not override the community's egress restriction.
 - The same predicate covers single-best plus Add-Path for unicast, VPN, and
   labeled routes; grouped/private and RFC 7947 per-client-best shapes apply to
   unicast, grouped/private applies to VPN, and RFC 9107 ORR applies to unicast
@@ -71,7 +87,8 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   mechanics are correct and fail-closed — the amplification is inherent to
   SAFI 132, where one NLRI stands for the whole class of VPN routes carrying
   that RT.
-- `NO_ADVERTISE` enforcement for EVPN and FlowSpec remains deferred.
+- `NO_ADVERTISE` and `NO_EXPORT` enforcement for EVPN and FlowSpec remains
+  deferred.
 
 ---
 

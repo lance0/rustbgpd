@@ -61,6 +61,7 @@ fn multipath_candidates<'a>(
     prefix: &'a Prefix,
     target_peer: IpAddr,
     target_is_ebgp: bool,
+    interpret_rfc1997: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
     family: (Afi, Safi),
@@ -81,6 +82,16 @@ fn multipath_candidates<'a>(
         // post-policy attribute rewrite. A permit policy that removes
         // the community must not make the route exportable.
         if super::no_advertise_export_suppressed(route.communities()) {
+            return false;
+        }
+        // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED are likewise source-route
+        // ineligibility, but only toward eBGP targets in honor mode — see
+        // `no_export_export_suppressed` for the source-only asymmetry.
+        if super::no_export_export_suppressed(
+            route.communities(),
+            target_is_ebgp,
+            interpret_rfc1997,
+        ) {
             return false;
         }
         // RFC 9494 §4.4: each staged candidate is gated individually —
@@ -122,6 +133,7 @@ impl RibManager {
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
+        clippy::fn_params_excessive_bools,
         reason = "explain mirrors live single-best export inputs for policy parity"
     )]
     pub(in crate::manager) fn explain_single_best_prefix(
@@ -135,6 +147,7 @@ impl RibManager {
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         target_local_role: Option<rustbgpd_wire::BgpRole>,
         cluster_id: Option<Ipv4Addr>,
@@ -361,6 +374,7 @@ impl RibManager {
                 &prefix,
                 target_peer,
                 target_is_ebgp,
+                interpret_rfc1997,
                 target_is_rr_client,
                 cluster_id,
                 family,
@@ -691,6 +705,31 @@ impl RibManager {
             );
             explain.reasons.push(ExplainReason {
                 code: "no_advertise_suppressed",
+                message,
+            });
+            return explain;
+        }
+
+        // RFC 1997 — NO_EXPORT/NO_EXPORT_SUBCONFED source-route
+        // suppression toward an eBGP target in honor mode. Same
+        // pre-policy placement as NO_ADVERTISE; the deliberate
+        // difference is that no post-policy form exists (policy-added
+        // NO_EXPORT is delivered).
+        if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
+        {
+            explain.decision = ExplainDecision::Deny;
+            let message = "route carries NO_EXPORT (or NO_EXPORT_SUBCONFED) and RFC 1997 \
+                           forbids advertisement to an eBGP peer"
+                .to_string();
+            gate(
+                &mut explain.gates,
+                "no_export",
+                "no_export_suppressed",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "no_export_suppressed",
                 message,
             });
             return explain;
@@ -1140,6 +1179,7 @@ impl RibManager {
         send_max: u32,
         stage_path_id_zero: bool,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -1192,6 +1232,7 @@ impl RibManager {
             prefix,
             target_peer,
             target_is_ebgp,
+            interpret_rfc1997,
             target_is_rr_client,
             cluster_id,
             family,
@@ -1331,6 +1372,7 @@ impl RibManager {
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
+        clippy::fn_params_excessive_bools,
         reason = "single-best export keeps target, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_single_best_prefix(
@@ -1340,6 +1382,7 @@ impl RibManager {
         prefix: &Prefix,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -1503,6 +1546,22 @@ impl RibManager {
             target.gate("no_advertise", "no_advertise_suppressed", Stop, || {
                 "route carries NO_ADVERTISE and RFC 1997 forbids advertisement to any BGP \
                      peer"
+                    .to_string()
+            });
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+        // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED are the same pre-policy
+        // source-route restriction toward an eBGP target in honor mode.
+        // Deliberately no post-policy twin — policy-added NO_EXPORT is
+        // delivered (see `no_export_export_suppressed`).
+        if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
+        {
+            target.gate("no_export", "no_export_suppressed", Stop, || {
+                "route carries NO_EXPORT (or NO_EXPORT_SUBCONFED) and RFC 1997 forbids \
+                     advertisement to an eBGP peer"
                     .to_string()
             });
             for &path_id in &existing_path_ids {
@@ -1732,6 +1791,7 @@ impl RibManager {
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
+        clippy::fn_params_excessive_bools,
         reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_orr_best_prefix(
@@ -1746,6 +1806,7 @@ impl RibManager {
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
+        interpret_rfc1997: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -1836,6 +1897,15 @@ impl RibManager {
         // that winner before policy. ORR does not fall back to its
         // runner-up merely because the selected best is NO_ADVERTISE.
         if super::no_advertise_export_suppressed(best.communities()) {
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
+        // RFC 1997: NO_EXPORT winner toward an eBGP target in honor mode
+        // — same winner-first placement, no runner-up fallback.
+        if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
+        {
             for &path_id in &existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }

@@ -69,6 +69,7 @@ fn candidate_input(
         llgr_families: live.input.llgr_families.clone(),
         add_path_send: live.input.add_path_send,
         per_client_best: candidate.transport_config.per_client_best,
+        interpret_rfc1997: candidate.transport_config.interpret_rfc1997,
         orr_vantage: candidate.transport_config.orr_vantage,
         orf_installed: live.input.orf_installed,
     }
@@ -368,6 +369,7 @@ mod tests {
             target_is_ebgp: true,
             target_is_rr_client: false,
             target_local_role: None,
+            interpret_rfc1997: true,
             sendable_families: vec![(1, 1)],
             llgr_families: vec![],
             add_path_send: false,
@@ -527,6 +529,7 @@ mod tests {
                 target_is_ebgp: false,
                 target_is_rr_client: true,
                 target_local_role: None,
+                interpret_rfc1997: true,
                 sendable_families: vec![(1, 1)],
                 llgr_families: vec![],
                 add_path_send: false,

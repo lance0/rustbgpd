@@ -50,6 +50,10 @@ pub struct UpdateGroupClassifierInput {
     /// Local RFC 9234 role. OTC egress eligibility is a RIB-staging
     /// decision, so groups with different roles must never share a table.
     pub target_local_role: Option<u8>,
+    /// RFC 1997 `NO_EXPORT` egress enforcement. A staging gate whose
+    /// outcome differs per peer (honor vs transparent), so peers that
+    /// differ must never share a staged winner.
+    pub interpret_rfc1997: bool,
     pub sendable_families: Vec<(u16, u8)>,
     pub llgr_families: Vec<(u16, u8)>,
     pub add_path_send: bool,
@@ -69,6 +73,7 @@ pub struct UpdateGroupFingerprint {
     pub target_is_ebgp: bool,
     pub target_is_rr_client: bool,
     pub target_local_role: Option<u8>,
+    pub interpret_rfc1997: bool,
     pub sendable_ipv4_unicast: bool,
     pub sendable_ipv6_unicast: bool,
     pub sendable_vpnv4: bool,
@@ -126,6 +131,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
             target_is_ebgp: input.target_is_ebgp,
             target_is_rr_client: input.target_is_rr_client,
             target_local_role: input.target_local_role,
+            interpret_rfc1997: input.interpret_rfc1997,
             sendable_ipv4_unicast: contains((1, 1)),
             sendable_ipv6_unicast: contains((2, 1)),
             sendable_vpnv4: contains((1, 128)),
@@ -219,6 +225,7 @@ mod update_group_classifier_tests {
             target_is_ebgp: false,
             target_is_rr_client: true,
             target_local_role: None,
+            interpret_rfc1997: true,
             sendable_families: vec![(2, 1), (1, 1), (1, 1)],
             llgr_families: vec![],
             add_path_send: false,
@@ -1248,6 +1255,11 @@ pub enum RibUpdate {
         /// multipath path instead (a negotiated capability outranks the
         /// fallback).
         per_client_best: bool,
+        /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement
+        /// for this peer: when `true` and the peer is eBGP, source routes
+        /// carrying either community are suppressed at staging. Resolved
+        /// in config (default `!route_server_client`).
+        interpret_rfc1997: bool,
         /// Families for which this peer negotiated Add-Path Send/Both.
         /// Multi-path export is only enabled for these families.
         add_path_send_families: Vec<(Afi, Safi)>,

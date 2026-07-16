@@ -72,7 +72,7 @@ releases rather than carried forward from older measurements.
 | ORIGIN / AS_PATH / NEXT_HOP | Yes | Yes | |
 | MED / LOCAL_PREF | Yes | Yes | |
 | ATOMIC_AGGREGATE / AGGREGATOR | Yes | Yes | |
-| Standard Communities (RFC 1997) | Yes | Yes | |
+| Standard Communities (RFC 1997) | Yes | Yes | rustbgpd additionally enforces `NO_EXPORT`/`NO_EXPORT_SUBCONFED` and `NO_ADVERTISE` at egress by default (per-peer `interpret_rfc1997` knob; route-server clients default transparent); GoBGP never enforces them |
 | Extended Communities (RFC 4360) | Yes | Yes | RT, RO, 4-byte AS |
 | Large Communities (RFC 8092) | Yes | Yes | Wire, RIB, API, policy |
 | ORIGINATOR_ID / CLUSTER_LIST | Yes | Yes | RR support |

@@ -596,6 +596,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
+| `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
@@ -1285,6 +1286,25 @@ per_client_best = true       # this member cannot do Add-Path receive
 Precedence: if the session negotiates Add-Path send for a family, that
 family uses Add-Path and `per_client_best` is ignored for it — the
 negotiated capability outranks the fallback (this is not an error).
+
+#### RFC 1997 `NO_EXPORT` egress enforcement (`interpret_rfc1997`)
+
+Routes received carrying `NO_EXPORT` (0xFFFFFF01) or `NO_EXPORT_SUBCONFED`
+(0xFFFFFF03) are suppressed at export staging toward eBGP neighbors whose
+`interpret_rfc1997` is on. The default is derived: `true` for plain eBGP
+and iBGP neighbors, `false` for route-server clients (transparent
+pass-through, matching common IXP route-server practice — arouteserver and
+IXP Manager deployments expect members, not the server, to enforce the
+community). Set the knob explicitly on a neighbor or peer-group to
+override either default.
+
+The check applies to the route as received: export policy that *adds*
+`NO_EXPORT` still delivers the route (attaching the community for the
+receiver to honor is the standard route-server action idiom), and export
+policy that *removes* it cannot bypass the suppression. iBGP neighbors
+are never suppressed — RFC 1997 permits intra-AS advertisement. The
+export-explain ladder reports the suppression on the `no_export` gate
+rung.
 
 Notes:
 

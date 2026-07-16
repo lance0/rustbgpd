@@ -665,6 +665,9 @@ impl PeerManager {
         // registers single-best (caught by M83; the RIB/CLI unit
         // layers are wired above this seam and never saw it).
         transport.per_client_best = config.per_client_best;
+        // RFC 1997: resolved in config (default !route_server_client);
+        // pinned by the build_transport_config field-threading test.
+        transport.interpret_rfc1997 = config.interpret_rfc1997;
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
         // ADR-0073: per-session import-decision explain cache wiring.

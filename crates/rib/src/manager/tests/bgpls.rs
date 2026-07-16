@@ -189,6 +189,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -274,6 +275,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
             per_client_best: false,
+            interpret_rfc1997: true,
             session_id: 0,
             peer: target,
             peer_asn: 65100,
@@ -389,6 +391,7 @@ async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -446,6 +449,7 @@ async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
     let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: source,
         peer_asn: 65000,
@@ -468,6 +472,7 @@ async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
     let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: other,
         peer_asn: 65000,
@@ -523,6 +528,7 @@ async fn bgpls_routes_received_does_not_reflect_to_unsendable_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -573,6 +579,7 @@ async fn dirty_resync_includes_bgpls_routes_after_channel_full() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
@@ -673,6 +680,7 @@ async fn send_initial_table_includes_bgpls_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
+        interpret_rfc1997: true,
         session_id: 0,
         peer: target,
         peer_asn: 65000,
