@@ -109,6 +109,68 @@ pub(super) fn rs_control_prepend_count(
     count
 }
 
+/// A standard community in the control space: administered by `0` or
+/// `RS`, excluding the RFC 1997 well-known `0xFFFF____` space.
+fn is_std_control(community: u32, rs_asn: u32) -> bool {
+    let admin = community >> 16;
+    admin != 0xFFFF && (admin == 0 || admin == rs_asn)
+}
+
+/// A large community in the control space: global administrator `RS`
+/// with a control function (`0`, `1`, `101`–`103`).
+fn is_large_control(lc: &LargeCommunity, rs_asn: u32) -> bool {
+    lc.global_admin == rs_asn
+        && (lc.local_data1 <= 1 || PREPEND_FUNCTIONS.iter().any(|&(f, _)| f == lc.local_data1))
+}
+
+/// Route-granular classification for the emit-time filter (LAN-474):
+/// does this route carry ANY control-form community for `rs_asn`? The
+/// domain is exactly the scrub domain — every suppression, override,
+/// and prepend form is also a scrub form — so untagged routes (the
+/// overwhelming majority) provably need no per-target divergence and
+/// keep riding the shared update-group emission.
+pub(in crate::manager) fn rs_control_route_tagged(
+    communities: &[u32],
+    large_communities: &[LargeCommunity],
+    rs_asn: u32,
+) -> bool {
+    communities.iter().any(|&c| is_std_control(c, rs_asn))
+        || large_communities
+            .iter()
+            .any(|lc| is_large_control(lc, rs_asn))
+}
+
+/// Per-target suppression at the group emit seam: `rs` is
+/// `(rs_asn, target_peer_asn)` for an enabled session, `None` when the
+/// knob is off (never suppressed).
+pub(in crate::manager) fn rs_control_route_suppressed(
+    route: &crate::route::Route,
+    rs: Option<(u32, u32)>,
+) -> bool {
+    rs.is_some_and(|(rs_asn, peer_asn)| {
+        rs_control_export_suppressed(
+            route.communities(),
+            route.large_communities(),
+            rs_asn,
+            peer_asn,
+        )
+    })
+}
+
+/// Per-target egress rewrite (prepend + scrub) at the group emit seam,
+/// for a route already cleared by [`rs_control_route_suppressed`].
+/// No-op (and allocation-free) for untagged routes or a disabled
+/// session.
+pub(in crate::manager) fn rs_control_route_rewrite(
+    route: &mut crate::route::Route,
+    rs: Option<(u32, u32)>,
+) {
+    if let Some((rs_asn, peer_asn)) = rs {
+        let prepend = rs_control_prepend_count(route.large_communities(), rs_asn, peer_asn);
+        apply_rs_control_egress(route, rs_asn, prepend);
+    }
+}
+
 /// The control communities present on an outbound attribute set that
 /// must be scrubbed before the wire: standard communities administered
 /// by `0` or `RS` (excluding the RFC 1997 well-known `0xFFFF____`
@@ -121,18 +183,11 @@ fn scrub_lists(
     let std_remove = communities
         .iter()
         .copied()
-        .filter(|&c| {
-            let admin = c >> 16;
-            admin != 0xFFFF && (admin == 0 || admin == rs_asn)
-        })
+        .filter(|&c| is_std_control(c, rs_asn))
         .collect();
     let large_remove = large_communities
         .iter()
-        .filter(|lc| {
-            lc.global_admin == rs_asn
-                && (lc.local_data1 <= 1
-                    || PREPEND_FUNCTIONS.iter().any(|&(f, _)| f == lc.local_data1))
-        })
+        .filter(|lc| is_large_control(lc, rs_asn))
         .copied()
         .collect();
     (std_remove, large_remove)
@@ -152,11 +207,11 @@ fn leftmost_asn(as_path: Option<&AsPath>) -> Option<u32> {
 /// route clone: prepend the announcing client's ASN `prepend` times
 /// and scrub the control communities. Reuses the policy crate's
 /// `apply_modifications` (attribute-drop on emptied community lists,
-/// tested prepend segment handling). `Arc::make_mut` keeps the
-/// pass-scoped `ExportMemo`'s shared attribute `Arc`s copy-on-write —
-/// affected routes pay a per-peer attribute clone (enabled sessions
-/// are already on the ungrouped per-peer path; memo-sharing the
-/// rewrite is a follow-up if profile data ever demands it).
+/// tested prepend segment handling). `Arc::make_mut` keeps shared
+/// attribute `Arc`s (pass-scoped `ExportMemo`, group-table shells)
+/// copy-on-write — only TAGGED routes pay a per-target attribute
+/// clone; untagged routes never reach this rewrite on the grouped
+/// emit-filter path (LAN-474).
 pub(super) fn apply_rs_control_egress(route: &mut crate::route::Route, rs_asn: u32, prepend: u8) {
     let (communities_remove, large_communities_remove) =
         scrub_lists(route.communities(), route.large_communities(), rs_asn);
@@ -300,6 +355,28 @@ mod tests {
         // Wrong global admin never counts.
         let lc = [large(64999, 103, PEER_A)];
         assert_eq!(rs_control_prepend_count(&lc, RS, PEER_A), 0);
+    }
+
+    #[test]
+    fn tagged_predicate_matches_exactly_the_scrub_domain() {
+        // Untagged: no communities, foreign admins, well-known space,
+        // informational large under the RS admin.
+        assert!(!rs_control_route_tagged(&[], &[], RS));
+        assert!(!rs_control_route_tagged(
+            &[
+                std(64999, 42),
+                rustbgpd_wire::COMMUNITY_NO_EXPORT,
+                rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN
+            ],
+            &[large(RS, 1000, 7), large(64999, 0, PEER_A)],
+            RS
+        ));
+        // Tagged: each control form flips the predicate on its own.
+        assert!(rs_control_route_tagged(&[std(0, PEER_A)], &[], RS));
+        assert!(rs_control_route_tagged(&[std(RS, PEER_A)], &[], RS));
+        assert!(rs_control_route_tagged(&[], &[large(RS, 0, PEER_A)], RS));
+        assert!(rs_control_route_tagged(&[], &[large(RS, 1, PEER_A)], RS));
+        assert!(rs_control_route_tagged(&[], &[large(RS, 102, 0)], RS));
     }
 
     #[test]

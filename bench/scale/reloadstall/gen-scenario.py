@@ -29,7 +29,11 @@ Usage:
     gen-scenario.py <n_peers> <out_dir> [listen_port] [changed_peers]
 
 Emits into <out_dir>: config.toml, member.rpol (live, starts as gen-a),
-gen-a.rpol (community 65500:1000), gen-b.rpol (community 65500:2000).
+gen-a.rpol (community 65400:1000), gen-b.rpol (community 65400:2000).
+Marker communities deliberately avoid the RS ASN's administrator space:
+rs_control_communities defaults on for the route-server-client neighbors,
+and RS-administered standard communities are control forms scrubbed from
+the wire (which would hide the generation markers from the observers).
 The optional `changed_peers` selects the first N neighbors whose effective
 export chain changes. The remaining neighbors receive a content-stable
 per-neighbor `stable-out` chain, while the import chain remains content-stable
@@ -76,12 +80,19 @@ def stub_asn(i: int) -> int:
 # (filename, import-reject prefix, export community) per generation. The mixed
 # mode deliberately keeps the import body equal so its selected changed-member
 # cohort is genuinely export-only.
+#
+# Marker communities MUST NOT be administered by GLOBAL_ASN (or 0): the
+# config's route-server-client neighbors default rs_control_communities on,
+# and standard communities under the RS ASN are RFC 7947 §2.3.2 control
+# forms — scrubbed from the wire toward enabled members, which would blind
+# the harness to its own generation evidence. 65400 is outside the stub
+# ASN range and is not the RS ASN.
 GENERATIONS = [
-    ("gen-a.rpol", "192.0.2.0/24", "65500:1000"),
+    ("gen-a.rpol", "192.0.2.0/24", "65400:1000"),
     (
         "gen-b.rpol",
         "192.0.2.0/24" if mixed_export_only else "198.51.100.0/24",
-        "65500:2000",
+        "65400:2000",
     ),
 ]
 
@@ -98,7 +109,7 @@ for fname, reject_prefix, community in GENERATIONS:
     stable_policy = """
 
 policy stable-out {
-    term tag { add community 65500:9000; accept }
+    term tag { add community 65400:9000; accept }
 }
 """ if mixed_export_only else ""
     (out / fname).write_text(

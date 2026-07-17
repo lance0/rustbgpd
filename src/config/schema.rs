@@ -793,10 +793,11 @@ pub struct Neighbor {
     /// `0:RS` / `RS:0:0`), and prepend toward a target
     /// (`RS:101|102|103:PEER`, RFC 8195 large-community forms). Matched
     /// control communities are scrubbed from this session's outbound
-    /// announcements. Default: `false` — opt-in per member, because an
-    /// enabled session is excluded from update-group sharing (per-target
-    /// outcomes cannot share a staged winner), which at large fanout
-    /// costs per-peer Adj-RIB-Out and per-peer encode for the session.
+    /// announcements. Default: `true` when `route_server_client` is set,
+    /// `false` otherwise. Enabled sessions stay in shared update-groups:
+    /// only routes actually carrying a control-form community pay
+    /// per-target divergence at emit; untagged routes (the overwhelming
+    /// majority) share staging and encoding fleet-wide.
     pub rs_control_communities: Option<bool>,
     /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
     pub role: Option<BgpRoleConfig>,

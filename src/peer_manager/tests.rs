@@ -197,7 +197,6 @@ log_format = "json"
                         target_is_rr_client: true,
                         target_local_role: None,
                         interpret_rfc1997: true,
-                        rs_control_communities: false,
                         sendable_families: vec![(1, 1)],
                         llgr_families: vec![],
                         add_path_send: false,

@@ -92,10 +92,17 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
    `requires_peer_context` and disqualify anyway. The scalable answer
    is the ADR-0099 Decision-2 pattern — steering as a per-member
    **emit-time filter** `pass_m(route)` = f(route communities, member
-   ASN), presence bit in the key, exactly like the VPN RT filter, which
-   keeps the whole steering fleet in one group — **deferred to v2**
-   with this sketch recorded; un-defer trigger: a real >100-member
-   deployment where steering chains measurably shatter grouping.
+   ASN), exactly like the VPN RT filter, which keeps the whole
+   steering fleet in one group — **delivered** for RFC 7947 §2.3.2 /
+   RFC 8195 control communities (LAN-474): routes are classified at
+   emit by a cheap control-form predicate (exactly the scrub domain),
+   untagged routes ride the shared group emission byte-identically,
+   and tagged routes diverge per target at the emit seams (matrix
+   walk, resync, join/refresh replays). No presence bit in the key was
+   needed — a disabled session's emission of an untagged route is
+   identical to an enabled one's, and tagged-route divergence is
+   evaluated per member. `rs_control_communities` defaults on for
+   rs-clients again on the strength of this.
 
 4. **RPKI/ASPA enforcement stays in policy — no hard-coded RS gate.**
    Validation state is computed at import; enforcement is rpol/TOML
@@ -146,9 +153,12 @@ Add-Path send, so mitigation (b) existed; the gap was (a).
   the shared body or disqualify (the ADR-0098 Decision-3 rule extends
   to modes).
 - Deferral register: per-client Loc-RIBs — rejected permanently;
-  community-steering emit-time filter — v2, sketch in Decision 3;
-  peer-parameterized policy matchers — rejected (superseded by the v2
-  filter); default-on mitigation — deferred pending soak history;
+  community-steering emit-time filter — **delivered** (Decision 3;
+  LAN-474 route-granular control-community divergence at the group
+  emit seams);
+  peer-parameterized policy matchers — rejected (superseded by the
+  emit-time filter); default-on mitigation — deferred pending soak
+  history;
   RFC 8097 validation-state extended-community tagging on import —
   **delivered** (the deferred small slice landed: `OV_VALID` /
   `OV_NOT_FOUND` / `OV_INVALID` well-known extended-community names in

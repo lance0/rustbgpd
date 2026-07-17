@@ -14,7 +14,7 @@ gen.conf, then `bgpctl reload` (the harness reload_cmd). Like
 gen-scenario.py's historical mode, each generation carries a flat two-term
 ruleset: a content-real but output-neutral import reject (an out-of-table
 prefix that changes between generations) and a match rule tagging the
-generation community 65500:1000 / 65500:2000 on export.
+generation community 65400:1000 / 65400:2000 on export.
 
 NEXT_HOP qualification: bgpd validates next hops against the kernel FIB even
 with `fib-update no` (see tests/interop/configs/bgpd-m86-c1.conf, where the
@@ -57,8 +57,8 @@ def stub_asn(i: int) -> int:
 
 
 GENERATIONS = [
-    ("gen-a.conf", "192.0.2.0/24", "65500:1000"),
-    ("gen-b.conf", "198.51.100.0/24", "65500:2000"),
+    ("gen-a.conf", "192.0.2.0/24", "65400:1000"),
+    ("gen-b.conf", "198.51.100.0/24", "65400:2000"),
 ]
 
 for fname, reject_prefix, community in GENERATIONS:

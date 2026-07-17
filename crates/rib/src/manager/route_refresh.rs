@@ -976,12 +976,25 @@ impl RibManager {
             // deferred-ORF withdraw sweep in the per-peer arm can never
             // apply to a grouped member.
             if let Some(group) = self.group_ribs.get(&gid) {
+                // LAN-474: same per-target divergence as the join
+                // replay — suppressed entries skipped, announced tagged
+                // entries rewritten per target.
+                let rs_control = rs_control_asn.zip(target_peer_asn);
                 for route in group.table.iter() {
-                    if route.peer == peer || prefix_family(&route.prefix) != family {
+                    if route.peer == peer
+                        || prefix_family(&route.prefix) != family
+                        || super::distribution::rs_control::rs_control_route_suppressed(
+                            route, rs_control,
+                        )
+                    {
                         continue;
                     }
                     nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
-                    announce.push(route.clone());
+                    let mut route = route.clone();
+                    super::distribution::rs_control::rs_control_route_rewrite(
+                        &mut route, rs_control,
+                    );
+                    announce.push(route);
                 }
                 current_policy_filtered_routes
                     .extend(group.policy_filtered_for_member(peer, &all_prefixes));

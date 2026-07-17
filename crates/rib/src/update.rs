@@ -58,10 +58,6 @@ pub struct UpdateGroupClassifierInput {
     pub llgr_families: Vec<(u16, u8)>,
     pub add_path_send: bool,
     pub per_client_best: bool,
-    /// RFC 7947 §2.3.2 control communities: the export outcome (and the
-    /// prepend/scrub rewrite) is keyed on the TARGET peer's ASN per
-    /// route, so no shared staged winner exists for enabled sessions.
-    pub rs_control_communities: bool,
     pub orr_vantage: Option<IpAddr>,
     pub orf_installed: bool,
 }
@@ -93,7 +89,6 @@ pub enum UpdateGroupClassification {
     PolicyPeerContext,
     AddPathSend,
     PerClientBest,
-    RsControlCommunities,
     OrrVantage,
     OrfInstalled,
 }
@@ -106,7 +101,6 @@ impl UpdateGroupClassification {
             Self::PolicyPeerContext => Some("policy_peer_context"),
             Self::AddPathSend => Some("add_path_send"),
             Self::PerClientBest => Some("per_client_best"),
-            Self::RsControlCommunities => Some("rs_control_communities"),
             Self::OrrVantage => Some("orr_vantage"),
             Self::OrfInstalled => Some("orf_installed"),
         }
@@ -126,8 +120,6 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
         UpdateGroupClassification::AddPathSend
     } else if input.per_client_best {
         UpdateGroupClassification::PerClientBest
-    } else if input.rs_control_communities {
-        UpdateGroupClassification::RsControlCommunities
     } else if input.orr_vantage.is_some() {
         UpdateGroupClassification::OrrVantage
     } else if input.orf_installed {
@@ -238,7 +230,6 @@ mod update_group_classifier_tests {
             llgr_families: vec![],
             add_path_send: false,
             per_client_best: false,
-            rs_control_communities: false,
             orr_vantage: None,
             orf_installed: false,
         }

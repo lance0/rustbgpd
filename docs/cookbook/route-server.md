@@ -199,21 +199,22 @@ Informational large communities under the RS ASN with other function
 values pass through.
 
 Enforcement is per-neighbor via `rs_control_communities` — **default
-off (opt-in)**, inheritable from a peer group. Enable it for the
-members that actually steer with control communities; on sessions left
-off, control communities reach that member verbatim (full
+on for `route_server_client` sessions** (the standard IXP posture),
+off otherwise, inheritable from a peer group. On sessions explicitly
+set off, control communities reach that member verbatim (full
 pass-through). Suppression shows up in
 `rbgp neighbor <ip> explain <prefix>` as the `rs_control` gate rung.
 
-Cost note (why the default is off): an enabled session's export
-outcome depends on the target ASN per route, so the whole session
-rides the ungrouped per-peer path (update-group snapshot reason
-`rs_control_communities`) — exactly like `per_client_best`. That is
-per-peer Adj-RIB-Out plus per-peer encode for every enabled session:
-enabling it fleet-wide on a 700-client full-table route server took
-daemon RSS from ~1.3 GiB to over 100 GiB. Enable it only for members
-that use steering; a route-granular emit-time filter (ADR-0101
-Decision 3) is the planned path to making this safe to default on.
+Cost note: the filter is route-granular at emit (ADR-0101 Decision 3).
+Enabled sessions stay in shared update-groups; a distribution pass
+with no control-tagged route — the overwhelming majority — is
+byte-identical to the feature being off, sharing staging and encoding
+fleet-wide. Only routes actually carrying a control-form community
+diverge per target (suppression/prepend/scrub evaluated against each
+target's ASN), paying a per-target clone for those routes alone. This
+replaced the earlier session-level exclusion, whose per-peer
+Adj-RIB-Out + per-peer encode took a 700-client full-table route
+server from ~1.3 GiB to over 100 GiB of RSS when enabled fleet-wide.
 
 ## Verify
 
