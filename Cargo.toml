@@ -77,7 +77,7 @@ toml = "1.1"
 toml_edit = "0.25"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 serde_json = "1"
 # Consumed by tools/rs-config-render: `arouteserver template-context`
 # output is YAML (JSON parses through the same path, YAML being a
