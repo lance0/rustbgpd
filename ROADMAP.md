@@ -122,7 +122,7 @@ the data-driven filtering/tooling wrapper, not the daemon.
   renderer consuming `arouteserver template-context` output feeds the existing
   parse-then-swap reload seam (inherits the whole industry ingest pipeline, no
   upstream gate); native ingestion demand-gated. Phase 1 = the renderer + the
-  `route.origin-as` rpol accessor + a differential BIRD/rustbgpd interop lab
+  a differential BIRD/rustbgpd interop lab (the origin-as accessor gap claimed at drafting was stale — already shipped)
   (LAN-467, umbrella).
 - ~~RFC 7947/8195 community-based announcement control~~ **Shipped (#968):**
   per-target announce / announce-only / announce-to-none / prepend via

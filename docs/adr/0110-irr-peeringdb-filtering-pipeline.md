@@ -173,7 +173,7 @@ lands (ADR-0107 and the community-based announcement-control track).
 | Path-hiding mitigation (RFC 7947 §2.3) | `per_client_best` + Add-Path send (`add_path.send`/`send_max`) | Shipped (ADR-0101) |
 | AS_PATH/MED/NEXT_HOP transparency | `route_server_client` transport seam | Shipped (ADR-0039/0101) |
 | IRR prefix filters (RFC 7948 §4.6.2) | generated `prefix-set` / `dataset` per client, trie-matched | Shipped substrate; sets are generated content |
-| IRR origin-AS enforcement | generated `asn-set` + origin match | **Gap (small):** rpol has no `route.origin-as` accessor; today needs an AS_PATH regex per client. First-class origin accessor is phase 1 |
+| IRR origin-AS enforcement | `route.origin-as` accessor (`==`/`!=`/asn-set `in`, three-valued on absent origin) + indexed `asn-set` | Shipped (#757; the gap claimed in earlier drafts was stale — verified end-to-end with docs and tests) |
 | RPKI ROA validation via RTR (RFC 6811/8097) | `[rpki.cache_servers]`, `route.rpki == valid\|invalid\|not-found`, `OV_*` ext-community tagging | Shipped |
 | RPKI ROAs merged as route objects | generator-side (arouteserver does the merge) | N/A to daemon |
 | Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108). **Partial:** teardown-only; arouteserver's `restart` action (timed re-establish) is an ADR-0108 deferral — OpenBGPD ships with the same restriction (shutdown + fixed 15-min restart), so teardown-only is target-viable, restart-timer is a parity follow-up |
@@ -210,25 +210,22 @@ item). None blocks a first pilot at OpenBGPD-equivalence level.
 
 **Phase 1 — pilot-ready renderer (each bullet files as one issue):**
 
-1. `route.origin-as` rpol accessor (u32 field usable with
-   `in <asn-set>`), so generated origin enforcement is a set lookup, not
-   a per-client regex.
-2. `rs-config-render` under `tools/`: consume `arouteserver
+1. `rs-config-render` under `tools/`: consume `arouteserver
    template-context` output, emit `config.toml` + per-client `.rpol`
    (basic filters, IRR prefix/origin sets, max-prefix, RPKI knobs,
    `reject`/`tag` policies), refuse unsupported knobs loudly
    (RTT communities, `same-as`, `tag_and_reject`), fingerprint the
    consumed context shape, abort on empty/implausible sets, write the
    refresh receipt.
-3. Refresh-loop cookbook: cron cadence, `--check` gate, SIGHUP,
+2. Refresh-loop cookbook: cron cadence, `--check` gate, SIGHUP,
    fail-stale semantics, staleness alerting; extends the existing
    route-server example.
-4. Differential interop lab (M-series): one `general.yml`/`clients.yml`
+3. Differential interop lab (M-series): one `general.yml`/`clients.yml`
    drives both a BIRD instance (via arouteserver proper) and rustbgpd
    (via the renderer); a canned announcement set must produce identical
    accept/reject verdicts across both, with the daemon's explain output
    naming the generated term for every rejection.
-5. Overlay/dataset freshness observability: expose generation timestamp
+4. Overlay/dataset freshness observability: expose generation timestamp
    and age for reloaded policy artifacts, so "pipeline stuck" is a
    metric, not a surprise.
 
