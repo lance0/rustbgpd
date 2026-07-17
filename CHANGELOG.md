@@ -219,6 +219,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Refreshed the `docs/BENCHMARKS.md` memory-footprint tables with fresh
+  clean-build measurements (RIB structural memory dropped, not grew: the
+  LAN-335 `RouteSlab` migration plus attribute interning corrects several
+  previously-overstated figures, e.g. Full RIB @ 500k 484.0 -> 316.6 MiB
+  real) and confirmed the `AdjRibIn` (1336 B) / `LocRib` (1008 B) stack
+  sizes against the current struct definitions. Also reconciled
+  `docs/gobgp-parity.md`'s Summary table against its own detail tables
+  under an explicit stated counting rule, correcting several category
+  tallies (e.g. Path attributes 13/9 -> 13/11, Monitoring 5/6 -> 5/9,
+  Best-path steps 11/11 -> 12/12).
+
 - Corrected the update-group shared-encode safety documentation (module
   docs and ADR-0109): the mid-stream fallback invariant is per-NLRI
   attribute identity with the ordinary encode — not byte-identical

@@ -18,7 +18,8 @@ current-main reconfirmation and memory attribution correction: 2026-06-02;
 structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
 distribution fanout A/B, update-group recovery, and grouped exact-precommit
 fast path: 2026-07-13; revision-pinned production-exact manager CPU and
-full-daemon DHAT rebaseline: 2026-07-13.
+full-daemon DHAT rebaseline: 2026-07-13; structured high-N RIB memory
+profile refresh (RouteSlab + attribute interning correction): 2026-07-17.
 
 | Field | Value |
 |-------|-------|
@@ -551,9 +552,13 @@ the lookup-heavy churn path).
 
 ## Memory Footprint
 
-> **Superseded (2026-07-17):** these figures predate the RouteSlab migration
-> (LAN-335) and `PathAttribute` enum growth; re-measurement on the pinned
-> host is pending.
+> **Run provenance (2026-07-17).** Clean build (`cargo clean` first) at HEAD
+> `96c1d6e9`, `RUSTBGPD_RIB_MEMORY_PROFILE=full cargo test -p rustbgpd-rib
+> --features bench-internals --test memory_profile memory_profile_high_n --
+> --ignored --nocapture`, on the pinned bench host. These figures replace an
+> older set that predated the RouteSlab migration (LAN-335) and the
+> `PathAttribute` enum growth to 208 bytes — see the correction note under the
+> at-scale tables below.
 
 Measured using a tracking global allocator that counts every `alloc` and
 `dealloc`. The normal test compiles and schema-checks the harness; the ignored
@@ -578,16 +583,26 @@ bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
 |------|------|
 | `Route` | 128 bytes |
 | `Prefix` | 18 bytes |
-| `PathAttribute` | 112 bytes |
+| `PathAttribute` | 208 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1032 bytes |
-| `LocRib` | 96 bytes |
+| `AdjRibIn` | 1336 bytes |
+| `LocRib` | 1008 bytes |
 
-`PathAttribute` grew from 72 to 112 bytes since the v0.30-era figures (new
-attribute variants). It is interned (globally, across all peers — LAN-336),
-so the per-route impact is amortized to near zero (see below), but it does
-raise the per-unique-attribute-set heap cost.
+`PathAttribute` grew from 112 to 208 bytes since the last figures in this
+doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
+`OnlyToCustomer`) plus larger payloads on the existing variants that now
+carry the newer RIB families (VPN, labeled-unicast, RT-Constrain, EVPN,
+BGP-LS). It is interned (globally, across all peers — LAN-336), so the
+per-route impact is amortized to near zero (see below), but it does raise
+the per-unique-attribute-set heap cost.
+
+`AdjRibIn` (1032 → 1336 bytes) and `LocRib` (96 → 1008 bytes) grew the same
+way — each struct picked up a route map and/or secondary index per added RIB
+family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
+`crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
+via `std::mem::size_of` against the current struct definitions; these two
+rows aren't in the allocator-tracked harness JSON.
 
 `Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
@@ -602,6 +617,12 @@ allocation instead of one copy per route or per peer.
 
 ### Per-Route Heap Allocation
 
+> **Not re-measured this pass.** `PathAttribute` grew 112 → 208 bytes
+> (confirmed above), which changes the per-attribute-set heap totals below,
+> but the nested-allocation breakdown (the `AsPath` segment `Vec`, the
+> `Communities` `Vec<u32>`, etc.) needs a fresh dhat pass to attribute
+> correctly. Treat the two rows below as stale pending that re-measure.
+
 | Attribute set | Heap | Stack | Total |
 |---------------|------|-------|-------|
 | Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 128 B | 892 B |
@@ -613,28 +634,33 @@ pointer.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
 
-| Routes | Live heap | Per-route | Route-map capacity | Prefix-index bytes |
-|--------|----------:|----------:|-------------------:|-------------------:|
-| 100,000 | 22.3 MiB | 233 B | 114,688 | 3.1 MiB |
-| 500,000 | 165.5 MiB | 347 B | 917,504 | 12.5 MiB |
-| 900,000 | 178.0 MiB | 207 B | 917,504 | 25.0 MiB |
+| Routes | Live heap | Per-route | Route-map capacity |
+|--------|----------:|----------:|--------------------:|
+| 100,000 | 15.3 MiB | 160 B | 100,000 |
+| 500,000 | 73.5 MiB | 154 B | 500,000 |
+| 900,000 | 134.9 MiB | 157 B | 900,000 |
 
-Per-route cost includes route-map overhead, the trie-backed prefix index, and
-the intern table. The non-smooth 500k/900k curve is expected: hash-map
-capacity grows in large steps, so a 500k profile can sit on the same route-map
-capacity plateau as 900k. The structured harness reports capacities so reviews
-can separate those cliffs from real storage regressions.
+Since LAN-335, `AdjRibIn` route storage is a dense `RouteSlab`
+(`crates/rib/src/slab.rs`), not a power-of-2-rounded `HashMap` — capacity now
+equals the exact route count, and the old rounded-plateau curve no longer
+applies. Per-route cost includes the slab, the trie-backed prefix index, and
+the intern table; this pass doesn't break out a separate prefix-index byte
+count (see the run-provenance note above the Type Sizes table).
 
 ### Full RIB: 2 Peers + LocRib (typical attrs)
 
 | Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
-|----------|----------:|-----------:|-------------:|-------------------:|
-| 100,000 | 63.6 MiB | 667 B | 300,000 | 344,064 |
-| 500,000 | 484.0 MiB | 1015 B | 1,500,000 | 2,752,512 |
-| 900,000 | 509.0 MiB | 593 B | 2,700,000 | 2,752,512 |
+|----------|----------:|-----------:|-------------:|--------------------:|
+| 100,000 | 51.9 MiB | 544 B | 300,000 | 314,688 |
+| 500,000 | 316.6 MiB | 663 B | 1,500,000 | 1,917,504 |
+| 900,000 | 439.7 MiB | 512 B | 2,700,000 | 2,717,504 |
 
-(Was 66.6 MB / 698 B before the trie-backed prefix indexes landed — see the
-*prefix-index migration* note below.) This is the **RIB-only, allocator-tracked**
+Route-map capacity is now a composite: two dense (`RouteSlab`, exact)
+Adj-RIB-In capacities plus one rounded (`HashMap`) Loc-RIB capacity — LAN-335
+only converted the per-peer Adj-RIB tables to a dense slab; Loc-RIB is
+deliberately kept `HashMap`-backed (its lookup-hot best-path recompute
+regressed on both compact-storage candidates tried — see
+`crates/rib/src/loc_rib.rs`). This is the **RIB-only, allocator-tracked**
 structural memory (2× Adj-RIB-In +
 Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
 across copies, and global attribute interning shares one allocation across
@@ -645,18 +671,32 @@ full-process RSS** below — it excludes the daemon's operational surfaces
 ### RR / Route-Server Fanout Shape: 2 In + LocRib + 2 Out
 
 | Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
-|----------|----------:|-----------:|-------------:|-------------------:|
-| 100,000 | 108.1 MiB | 1133 B | 500,000 | 573,440 |
-| 500,000 | 815.0 MiB | 1709 B | 2,500,000 | 4,587,520 |
-| 900,000 | 865.0 MiB | 1007 B | 4,500,000 | 4,587,520 |
+|----------|----------:|-----------:|-------------:|--------------------:|
+| 100,000 | 82.6 MiB | 865 B | 500,000 | 514,688 |
+| 500,000 | 463.7 MiB | 972 B | 2,500,000 | 2,917,504 |
+| 900,000 | 709.5 MiB | 826 B | 4,500,000 | 4,517,504 |
 
-This is the structural memory shape closest to the dhat finding below: received
+Route-map capacity here is a composite of four dense (`RouteSlab`, exact)
+Adj-RIB-In/Adj-RIB-Out capacities plus one rounded (`HashMap`) Loc-RIB
+capacity, for the same reason as the Full RIB table above. This is the
+structural memory shape closest to the dhat finding below: received
 routes, best paths, and advertised-route maps are all present. It still excludes
 full-daemon surfaces and allocator RSS behavior, so bgperf2 remains the
 operator-facing process-memory number. The A/B review rule for this harness is
 deliberately coarse: flag a row for review only when head grows by at least
 **+5% and +32 MiB** for the same shape/size; smaller movement is recorded but
 treated as allocator/map-capacity noise unless the PR is memory-targeted.
+
+> **Correction — LAN-335 RouteSlab + attribute interning (2026-07-17).** The
+> three tables above replace an older, larger set of numbers this doc carried
+> for several releases; those older numbers overstated real memory use. For
+> example, at 500k: Full RIB was previously reported as 484.0 MiB (now 316.6
+> MiB, real) and RR/Fanout was previously reported as 815.0 MiB (now 463.7
+> MiB, real). The drop is the dense `RouteSlab` storage (LAN-335) replacing
+> per-route `HashMap` buckets in `AdjRibIn`/`AdjRibOut`, plus the existing
+> benefit from global attribute interning (LAN-336) — not a regression in
+> either direction; actual daemon memory footprint is better than this doc
+> previously claimed.
 
 > **Correction (whole-daemon dhat profile, 2026-06-02).** A full-daemon dhat
 > heap profile at 2 peers × 100k (`profile='dhat'` bgperf2 build, SIGTERM at the
