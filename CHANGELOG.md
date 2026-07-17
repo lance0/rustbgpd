@@ -9,6 +9,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Post-flap re-announce latency: initial table dumps no longer
+  head-of-line block redistribution.** A peer's outbound registration at
+  `PeerUp` performed its full-table initial dump synchronously on the
+  RIB actor, so a mass reconnect (e.g. 50 route-server members
+  re-establishing after a flap) serialized N full-table passes ahead of
+  the re-announcements already queued behind the burst — survivors saw
+  the flapped prefixes only after the last dump finished (~9.5 s flat at
+  the 700x400k receipt shape, scaling with peers x table). When the
+  actor has queued work, the registration (and its dump) now defers to
+  the run loop, which completes one per iteration strictly after every
+  queued mutation batch has drained: imports and their fan-out to
+  established peers always preempt the reconnecting peers' full-table
+  catch-up. A quiet actor, or a table under 10k routes (whose dump is
+  sub-10-ms-class), still registers inline — registration-timing
+  semantics only change where deferring buys real latency back.
+  Session-semantic flags (eBGP / RR-client / RFC 9234 role /
+  per-client-best / RFC 1997 interpretation) always install immediately
+  at `PeerUp`, so inbound processing never runs with absent flags
+  during the deferral window. A session that drops, is superseded, or
+  fails over while
+  deferred resolves to its surviving live session, including the
+  inbound ROUTE-REFRESH re-solicitation on failover. GR/LLGR stale
+  retention, EoR emission, RFC 4724 selection deferral, and the RFC
+  5291 ORF gate are unchanged. Local flapstorm at 300 peers x 300k
+  prefixes, 30 flapped: survivor re-announce completion 4.43-4.56 s ->
+  0.32-0.33 s (first arrival 4.24-4.40 s -> 0.17 s), withdraws
+  unchanged at ~0.15 s. The flapstorm harness now also reports
+  per-survivor first re-announce arrival (`first_reann_s`), separating
+  delivery-start latency from fan-out completion.
+
 ### Changed
 
 - **jemalloc is now the default allocator feature.** Shipped artifacts
