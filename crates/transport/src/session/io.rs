@@ -229,6 +229,23 @@ impl PeerSession {
         }
     }
 
+    /// Sample this peer's outbound bulk-queue depth (coalesced update
+    /// frames buffered for its writer) at batch granularity. Called once
+    /// per RIB outbound envelope — never per message — as the growth-side
+    /// counterpart to the writer loop's drain-side sample: a slow or
+    /// wedged peer whose writer is parked mid-write still shows its
+    /// climbing backlog here. Both `max_capacity` and `capacity` are cheap
+    /// atomic reads. No-op while disconnected.
+    pub(super) fn sample_outbound_queue_depth(&self) {
+        if let Some(tx) = &self.writer_bulk_tx {
+            let depth = tx.max_capacity().saturating_sub(tx.capacity());
+            self.metrics.set_peer_outbound_queue_depth(
+                &self.peer_label,
+                i64::try_from(depth).unwrap_or(i64::MAX),
+            );
+        }
+    }
+
     /// Start an outbound TCP connection in the background so the main session
     /// loop can continue servicing commands while connect is in flight.
     pub(super) fn start_connect_attempt(&mut self) {

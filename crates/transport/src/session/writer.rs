@@ -358,7 +358,18 @@ impl WriterTask {
             };
 
             let bytes = if from_bulk {
-                coalesce_bulk(bytes, &mut self.bulk_rx)
+                let coalesced = coalesce_bulk(bytes, &mut self.bulk_rx);
+                // Drain-side queue-depth sample (shrink): the frames still
+                // buffered after this coalesce pass pulled a batch. Sampled
+                // once per drain wake — not per message; `coalesce_bulk`
+                // already pulls many frames per wake — and it walks the
+                // gauge back down as the peer catches up, so a peer that
+                // has drained never reads as pinned-high.
+                self.metrics.set_peer_outbound_queue_depth(
+                    &self.peer_label,
+                    i64::try_from(self.bulk_rx.len()).unwrap_or(i64::MAX),
+                );
+                coalesced
             } else {
                 bytes
             };
@@ -965,5 +976,77 @@ mod keepalive_cadence_tests {
         let mut buf = bytes::Bytes::copy_from_slice(&KEEPALIVE_FRAME);
         let msg = rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap();
         assert!(matches!(msg, rustbgpd_wire::Message::Keepalive));
+    }
+
+    /// The drain-side queue-depth gauge moves in both directions. With the
+    /// peer's socket buffers shrunk so the writer wedges after a little
+    /// data, a burst of bulk frames piles up in the channel and the writer
+    /// samples a positive backlog (growth). Once the peer drains the
+    /// socket, the writer flushes the backlog and the gauge walks back to
+    /// 0 (shrink) — proving the metric-refresh discipline: the gauge is
+    /// never pinned high after the last enqueue.
+    #[tokio::test]
+    async fn bulk_queue_depth_gauge_rises_then_drains() {
+        const FRAMES: usize = 200;
+        // Shrink both socket buffers so the writer wedges with little data,
+        // leaving a large observable backlog in the bulk channel.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4096).unwrap();
+            socket.connect(addr).await.unwrap()
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        let mut peer = connect.await.unwrap();
+
+        let (_read, write) = server.into_split();
+        let metrics = BgpMetrics::with_registry(prometheus::Registry::new());
+        let handle = spawn(write, 256, metrics.clone(), "depth-peer".to_string(), None);
+
+        // Enqueue a burst far larger than the wedged socket can absorb, so
+        // frames pile up faster than the writer can drain them.
+        let frame = vec![0u8; 1024];
+        for _ in 0..FRAMES {
+            handle
+                .bulk_tx
+                .send(Bytes::from(frame.clone()))
+                .await
+                .unwrap();
+        }
+
+        // Growth: the writer coalesces a batch, parks on the full socket,
+        // and records the residual backlog. Poll rather than sleep a fixed
+        // interval to stay robust under scheduler jitter.
+        let mut depth = 0;
+        for _ in 0..200 {
+            depth = metrics.peer_outbound_queue_depth("depth-peer");
+            if depth > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            depth > 0,
+            "expected outbound queue depth > 0 while backlogged, got {depth}"
+        );
+
+        // Drain the socket so the writer can flush the whole backlog.
+        let mut sink = vec![0u8; FRAMES * 1024];
+        peer.read_exact(&mut sink).await.unwrap();
+        let join = handle.join;
+        drop(handle.bulk_tx);
+        drop(handle.priority_tx);
+        join.await.unwrap().unwrap();
+
+        // Shrink: fully drained, the gauge is walked back to 0.
+        assert_eq!(
+            metrics.peer_outbound_queue_depth("depth-peer"),
+            0,
+            "expected outbound queue depth 0 after full drain"
+        );
     }
 }

@@ -97,6 +97,9 @@ pub struct BgpMetrics {
     messages_sent: IntCounterVec,
     messages_received: IntCounterVec,
 
+    // ── Outbound queue (per-peer writer back-pressure) ─────────────
+    peer_outbound_queue_depth: IntGaugeVec,
+
     // ── RIB ──────────────────────────────────────────────────────
     rib_prefixes: IntGaugeVec,
     rib_adj_out_prefixes: IntGaugeVec,
@@ -143,6 +146,7 @@ pub struct BgpMetrics {
     // ── Update groups (shadow-mode fingerprint registry) ────────
     update_groups: IntGauge,
     update_group_members: IntGaugeVec,
+    peer_update_group: IntGaugeVec,
     update_group_regroups: IntCounter,
     update_group_fallback_peers: IntGauge,
     update_group_residue_entries: IntGauge,
@@ -395,6 +399,19 @@ impl BgpMetrics {
                 "Number of prefixes in the Loc-RIB per AFI/SAFI",
             ),
             &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_queue_depth = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_queue_depth",
+                "Coalesced update frames buffered for a peer's outbound writer. \
+                 Sampled at batch granularity on enqueue (growth) and on writer \
+                 drain (shrink); a value pinned near the writer's bulk-buffer \
+                 capacity marks a slow or stuck client that is not draining our \
+                 output during convergence.",
+            ),
+            &["peer"],
         )
         .expect("valid metric definition");
 
@@ -676,6 +693,20 @@ impl BgpMetrics {
                  leaves.",
             ),
             &["group"],
+        )
+        .expect("valid metric definition");
+
+        let peer_update_group = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_update_group",
+                "The stable update-group id a peer currently belongs to \
+                 (matches the `group` label of bgp_update_group_members). \
+                 Grouped peers carry their group id (0, 1, 2, …); the sentinel \
+                 -1 marks a peer on the per-peer/ungrouped fallback path (a v1 \
+                 disqualifier — per-peer policy, Add-Path send, ORR vantage, or \
+                 negotiated ORF). Refreshed on every membership change.",
+            ),
+            &["peer"],
         )
         .expect("valid metric definition");
 
@@ -1489,6 +1520,9 @@ impl BgpMetrics {
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_outbound_queue_depth.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
@@ -1581,6 +1615,9 @@ impl BgpMetrics {
             .expect("metric not already registered");
         registry
             .register(Box::new(update_group_members.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_update_group.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(update_group_regroups.clone()))
@@ -1871,6 +1908,7 @@ impl BgpMetrics {
             notifications_received,
             messages_sent,
             messages_received,
+            peer_outbound_queue_depth,
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
@@ -1904,6 +1942,7 @@ impl BgpMetrics {
             rib_policy_transition_actor_poll_duration_seconds,
             update_groups,
             update_group_members,
+            peer_update_group,
             update_group_regroups,
             update_group_fallback_peers,
             update_group_residue_entries,
@@ -2034,6 +2073,8 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.notifications_received, peer);
         Self::reap_peer_series_from_vec(&self.messages_sent, peer);
         Self::reap_peer_series_from_vec(&self.messages_received, peer);
+        Self::reap_peer_series_from_vec(&self.peer_outbound_queue_depth, peer);
+        Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
@@ -2232,6 +2273,23 @@ impl BgpMetrics {
         self.rib_adj_out_prefixes
             .with_label_values(&[peer, afi_safi])
             .set(count);
+    }
+
+    /// Set the coalesced-frame backlog buffered for a peer's outbound
+    /// writer. Sampled at batch granularity — once per enqueue batch and
+    /// once per writer drain pass — never per BGP message.
+    pub fn set_peer_outbound_queue_depth(&self, peer: &str, depth: i64) {
+        self.peer_outbound_queue_depth
+            .with_label_values(&[peer])
+            .set(depth);
+    }
+
+    /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn peer_outbound_queue_depth(&self, peer: &str) -> i64 {
+        self.peer_outbound_queue_depth
+            .with_label_values(&[peer])
+            .get()
     }
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
@@ -2435,6 +2493,27 @@ impl BgpMetrics {
     pub fn remove_update_group_members(&self, group: &str) {
         // Removal fails only if the series never existed — fine either way.
         let _ = self.update_group_members.remove_label_values(&[group]);
+    }
+
+    /// Sentinel value of [`Self::set_peer_update_group`] for a peer on the
+    /// ungrouped (per-peer) fallback path. Real group ids start at 0, so a
+    /// negative value cannot collide with one.
+    pub const UPDATE_GROUP_UNGROUPED: i64 = -1;
+
+    /// Set the update-group id a peer currently belongs to. Pass the
+    /// stable group id for a grouped peer (matching the `group` label of
+    /// [`Self::set_update_group_members`]) or [`Self::UPDATE_GROUP_UNGROUPED`]
+    /// for a fallback/ungrouped peer.
+    pub fn set_peer_update_group(&self, peer: &str, group_id: i64) {
+        self.peer_update_group
+            .with_label_values(&[peer])
+            .set(group_id);
+    }
+
+    /// Read a peer's update-group-id gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn peer_update_group(&self, peer: &str) -> i64 {
+        self.peer_update_group.with_label_values(&[peer]).get()
     }
 
     /// Record an update-group membership change for a registered peer.
@@ -4844,6 +4923,8 @@ mod tests {
         m.record_message_received(peer, "update");
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
+        m.set_peer_outbound_queue_depth(peer, 3);
+        m.set_peer_update_group(peer, 1);
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
@@ -4904,8 +4985,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 34 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 35);
+        // 36 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 37);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -4915,7 +4996,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 35);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 37);
     }
 
     #[test]
