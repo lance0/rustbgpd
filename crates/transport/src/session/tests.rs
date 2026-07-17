@@ -14743,3 +14743,308 @@ async fn next_hop_ownership_disabled_by_default_accepts_foreign_next_hop() {
         "default (unset) must preserve transparent behavior"
     );
 }
+
+// ---------------------------------------------------------------------
+// RFC 7606 revised error handling — treat-as-withdraw / attribute-discard
+// ---------------------------------------------------------------------
+
+/// Craft raw attribute bytes: valid `ORIGIN` + `AS_PATH` (65002, 4-octet) +
+/// `NEXT_HOP`, followed by `extra`.
+fn rfc7606_attr_bytes(extra: &[u8]) -> Vec<u8> {
+    let mut attrs = vec![0x40, 1, 1, 0]; // ORIGIN = IGP
+    attrs.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH seq [65002]
+    attrs.extend([0x40, 3, 4, 10, 0, 0, 2]); // NEXT_HOP 10.0.0.2
+    attrs.extend_from_slice(extra);
+    attrs
+}
+
+/// Drain the establishment-time RIB messages (`SetPeerExportContext`, `PeerUp`,
+/// ...) so tests observe only what `process_update` produces.
+fn rfc7606_drain(rib_rx: &mut mpsc::Receiver<RibUpdate>) {
+    while rib_rx.try_recv().is_ok() {}
+}
+
+fn rfc7606_update(attr_bytes: Vec<u8>, announced: &[Ipv4Prefix]) -> UpdateMessage {
+    let mut nlri = Vec::new();
+    rustbgpd_wire::nlri::encode_nlri(announced, &mut nlri);
+    UpdateMessage {
+        withdrawn_routes: Bytes::new(),
+        path_attributes: Bytes::from(attr_bytes),
+        nlri: Bytes::from(nlri),
+    }
+}
+
+/// RFC 7606 §7.4 + §2: a malformed MED treats the UPDATE as though its
+/// routes had been withdrawn — previously accepted routes for the same
+/// NLRI are removed — and the session stays Established.
+#[tokio::test]
+async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    // Announce both prefixes cleanly.
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[]),
+            &[prefix_a, prefix_b],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial accepted routes");
+    };
+    assert_eq!(announced.len(), 2);
+    // Re-announce with a malformed MED appended (length 3, must be 4).
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0x80, 4, 3, 0, 0, 1]),
+            &[prefix_a, prefix_b],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(
+        announced.is_empty(),
+        "a malformed MED must not admit any announcement"
+    );
+    assert_eq!(withdrawn.len(), 2);
+    assert!(withdrawn.contains(&(Prefix::V4(prefix_a), 0)));
+    assert!(withdrawn.contains(&(Prefix::V4(prefix_b), 0)));
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "treat-as-withdraw must keep the session Established"
+    );
+}
+
+/// RFC 7606 §7.7: a malformed AGGREGATOR is attribute-discard — the UPDATE
+/// (and its announcements) proceed without the attribute, and the session
+/// stays Established.
+#[tokio::test]
+async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    // AGGREGATOR with length 5 (must be 8 under 4-octet-AS negotiation).
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0xC0, 7, 5, 0, 0, 0xFD, 0xEA, 1]),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected the announcement to survive attribute-discard");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 7606 §7.11: a malformed `MP_REACH_NLRI` means the NLRI cannot be
+/// located — the session-reset approach is retained.
+#[tokio::test]
+async fn rfc7606_malformed_mp_reach_still_resets_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    // MP_REACH_NLRI truncated to 2 bytes (minimum is 5).
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0x80, 14, 2, 0, 1]),
+            &[prefix],
+        ))
+        .await;
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "malformed MP_REACH_NLRI must reset the session"
+    );
+    // Teardown emits PeerDown/GR messages; none of them may carry routes.
+    while let Ok(msg) = rib_rx.try_recv() {
+        assert!(
+            !matches!(msg, RibUpdate::RoutesReceived { .. }),
+            "no routes may be delivered"
+        );
+    }
+}
+
+/// RFC 7606 §5.2: an UPDATE carrying path attributes but no reachable NLRI
+/// gives no confidence its NLRI parsed; a treat-as-withdraw-class error must
+/// escalate to session reset.
+#[tokio::test]
+async fn rfc7606_malformed_attr_without_reachable_nlri_resets_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    // Malformed MED, no NLRI anywhere in the UPDATE.
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[0x80, 4, 3, 0, 0, 1]),
+            &[],
+        ))
+        .await;
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "treat-as-withdraw with no reachable NLRI must reset (RFC 7606 §5.2)"
+    );
+    while let Ok(msg) = rib_rx.try_recv() {
+        assert!(
+            !matches!(msg, RibUpdate::RoutesReceived { .. }),
+            "no routes may be delivered"
+        );
+    }
+}
+
+/// An UPDATE whose only attributes were discarded as malformed must not be
+/// mistaken for an End-of-RIB marker.
+#[tokio::test]
+async fn rfc7606_discarded_attrs_do_not_fake_end_of_rib() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    // Only a malformed ATOMIC_AGGREGATE (attribute-discard), nothing else.
+    session
+        .process_update(rfc7606_update(vec![0x40, 6, 1, 0xAB], &[]))
+        .await;
+    assert!(rib_rx.try_recv().is_err());
+    assert!(
+        !session
+            .received_eor_families
+            .contains(&(Afi::Ipv4, Safi::Unicast)),
+        "an all-attributes-discarded UPDATE is junk, not an EoR"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 7606 §2: treat-as-withdraw must cover EVPN too — a previously
+/// accepted EVPN route re-announced in an UPDATE with a malformed attribute
+/// is withdrawn from the RIB, and the session stays Established.
+#[tokio::test]
+async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
+        MplsLabel, RouteDistinguisher,
+    };
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.negotiated_families.push((Afi::L2Vpn, Safi::Evpn));
+    rfc7606_drain(&mut rib_rx);
+    let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(0),
+        mac: MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]),
+        ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
+        label1: MplsLabel::new(100),
+        label2: None,
+    });
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![evpn_route.clone()],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+    session.process_update(clean.clone()).await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected the clean EVPN announcement to be accepted");
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    assert!(session.known_evpn.contains(&evpn_route.key()));
+    // Re-announce the same EVPN route with a malformed MED appended.
+    let mut attr_bytes = clean.path_attributes.to_vec();
+    attr_bytes.extend([0x80, 4, 3, 0, 0, 1]);
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attr_bytes),
+            nlri: Bytes::new(),
+        })
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived for the EVPN route");
+    };
+    assert!(evpn_announced.is_empty());
+    assert_eq!(evpn_withdrawn, vec![evpn_route.key()]);
+    assert!(
+        session.known_evpn.is_empty(),
+        "the previously accepted EVPN route must leave the session's accepted set"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+/// RFC 4724 §2 MP End-of-RIB: an UPDATE whose only content is an empty
+/// `MP_UNREACH_NLRI` marks End-of-RIB for that family and the session stays
+/// Established.
+#[tokio::test]
+async fn mp_eor_empty_mp_unreach_marks_end_of_rib() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    // Hand-crafted MP_UNREACH_NLRI: flags 0x80, type 15, len 3,
+    // AFI=2 (IPv6), SAFI=1 (unicast), no NLRI.
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[0x80, 15, 3, 0, 2, 1]),
+            nlri: Bytes::new(),
+        })
+        .await;
+    assert!(
+        session
+            .received_eor_families
+            .contains(&(Afi::Ipv6, Safi::Unicast)),
+        "an empty MP_UNREACH must mark End-of-RIB for its family"
+    );
+    match rib_rx.try_recv().unwrap() {
+        RibUpdate::EndOfRib { afi, safi, .. } => {
+            assert_eq!(afi, Afi::Ipv6);
+            assert_eq!(safi, Safi::Unicast);
+        }
+        _ => panic!("expected EndOfRib"),
+    }
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}

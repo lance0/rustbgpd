@@ -3,6 +3,7 @@ use crate::constants::{as_path_segment, attr_flags, attr_type};
 use crate::error::{DecodeError, EncodeError};
 use crate::nlri::{NlriEntry, Prefix};
 use crate::notification::update_subcode;
+use crate::validate::{ErrorDisposition, malformed_attr_disposition};
 use bytes::Bytes;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -793,49 +794,7 @@ pub fn decode_path_attributes_counted(
     let mut attrs = Vec::new();
     let mut bgpls_discarded = 0_u32;
     while !buf.is_empty() {
-        // Need at least flags(1) + type(1) = 2
-        if buf.len() < 2 {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: "truncated attribute header".to_string(),
-            });
-        }
-        let flags = buf[0];
-        let type_code = buf[1];
-        buf = &buf[2..];
-        let extended = (flags & attr_flags::EXTENDED_LENGTH) != 0;
-        let value_len = if extended {
-            if buf.len() < 2 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
-                    detail: "truncated extended-length attribute".to_string(),
-                });
-            }
-            let len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-            buf = &buf[2..];
-            len
-        } else {
-            if buf.is_empty() {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
-                    detail: "truncated attribute length".to_string(),
-                });
-            }
-            let len = buf[0] as usize;
-            buf = &buf[1..];
-            len
-        };
-        if buf.len() < value_len {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
-                detail: format!(
-                    "attribute type {type_code} value truncated: need {value_len}, have {}",
-                    buf.len()
-                ),
-            });
-        }
-        let value = &buf[..value_len];
-        buf = &buf[value_len..];
+        let (flags, type_code, value) = split_next_attribute(&mut buf)?;
         let attr = decode_attribute_value(
             flags,
             type_code,
@@ -847,6 +806,228 @@ pub fn decode_path_attributes_counted(
         attrs.push(attr);
     }
     Ok((attrs, bgpls_discarded))
+}
+/// Split the next `flags(1) + type(1) + length(1|2) + value` attribute off
+/// the front of `buf`, advancing it past the attribute. On error `buf` is
+/// left unchanged.
+fn split_next_attribute<'a>(buf: &mut &'a [u8]) -> Result<(u8, u8, &'a [u8]), DecodeError> {
+    // Need at least flags(1) + type(1) = 2
+    if buf.len() < 2 {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "truncated attribute header".to_string(),
+        });
+    }
+    let flags = buf[0];
+    let type_code = buf[1];
+    let mut rest = &buf[2..];
+    let extended = (flags & attr_flags::EXTENDED_LENGTH) != 0;
+    let value_len = if extended {
+        if rest.len() < 2 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "truncated extended-length attribute".to_string(),
+            });
+        }
+        let len = u16::from_be_bytes([rest[0], rest[1]]) as usize;
+        rest = &rest[2..];
+        len
+    } else {
+        if rest.is_empty() {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "truncated attribute length".to_string(),
+            });
+        }
+        let len = rest[0] as usize;
+        rest = &rest[1..];
+        len
+    };
+    if rest.len() < value_len {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "attribute type {type_code} value truncated: need {value_len}, have {}",
+                rest.len()
+            ),
+        });
+    }
+    let value = &rest[..value_len];
+    *buf = &rest[value_len..];
+    Ok((flags, type_code, value))
+}
+/// A malformed path attribute recovered during [`decode_path_attributes_revised`].
+///
+/// Carries enough context for the session layer to log the malformation and
+/// apply the RFC 7606 disposition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedAttribute {
+    /// Attribute type code of the offending attribute (0 if the attribute
+    /// header itself was too truncated to carry one).
+    pub type_code: u8,
+    /// RFC 7606 disposition for this malformation.
+    pub disposition: ErrorDisposition,
+    /// The underlying decode error.
+    pub error: DecodeError,
+}
+/// Result of [`decode_path_attributes_revised`]: the attributes that decoded
+/// cleanly plus the malformations recovered per RFC 7606.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisedAttributeDecode {
+    /// Attributes that decoded cleanly (malformed ones are omitted).
+    pub attributes: Vec<PathAttribute>,
+    /// BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552).
+    pub bgpls_nlri_discarded: u32,
+    /// Malformed attributes recovered without aborting the decode, each with
+    /// its RFC 7606 disposition. Empty means the UPDATE was clean.
+    pub malformed: Vec<MalformedAttribute>,
+}
+/// Decode path attributes with RFC 7606 revised error handling.
+///
+/// Unlike [`decode_path_attributes`], a malformed attribute does not abort
+/// the decode: the offending attribute is isolated (its length field is
+/// self-consistent, so the remaining attributes can still be located) and
+/// recorded in [`RevisedAttributeDecode::malformed`] with its RFC 7606 §7
+/// disposition. The caller applies the strongest recorded disposition
+/// (§3 (h)).
+///
+/// Differences from the legacy decoder, all per RFC 7606:
+///
+/// - §3 (g): a duplicate attribute type keeps the first occurrence and
+///   discards the rest; duplicate `MP_REACH_NLRI`/`MP_UNREACH_NLRI` is fatal.
+/// - §4: an attribute whose length overruns the section is treat-as-withdraw
+///   (the NLRI field was already located from the UPDATE section lengths),
+///   and attribute parsing stops.
+/// - §7.6/§7.7: `ATOMIC_AGGREGATE` with a non-zero length and `AGGREGATOR`
+///   with a length other than 6/8 (by the 4-octet-AS negotiation) are
+///   attribute-discard. The legacy decoder passes both through opaquely.
+///
+/// `is_ibgp` selects the internal-neighbor branch of
+/// [`malformed_attr_disposition`] for `LOCAL_PREF` / `ORIGINATOR_ID` /
+/// `CLUSTER_LIST`.
+///
+/// # Errors
+///
+/// Returns `Err` only for session-reset-class problems: a malformed or
+/// duplicated `MP_REACH_NLRI`/`MP_UNREACH_NLRI` (§7.11 — the NLRI cannot be
+/// reliably located).
+pub fn decode_path_attributes_revised(
+    mut buf: &[u8],
+    four_octet_as: bool,
+    is_ibgp: bool,
+    add_path_families: &[(Afi, Safi)],
+) -> Result<RevisedAttributeDecode, DecodeError> {
+    let mut attrs = Vec::new();
+    let mut bgpls_discarded = 0_u32;
+    let mut malformed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    while !buf.is_empty() {
+        let (flags, type_code, value) = match split_next_attribute(&mut buf) {
+            Ok(split) => split,
+            Err(error) => {
+                // RFC 7606 §4: framing overrun/underrun inside the attribute
+                // section is treat-as-withdraw — the section boundaries (and
+                // thus the NLRI field) were already fixed by the UPDATE
+                // length fields. Nothing after this point can be parsed.
+                malformed.push(MalformedAttribute {
+                    type_code: if buf.len() >= 2 { buf[1] } else { 0 },
+                    disposition: ErrorDisposition::TreatAsWithdraw,
+                    error,
+                });
+                break;
+            }
+        };
+        if !seen.insert(type_code) {
+            // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal; any
+            // other duplicate keeps the first occurrence and discards the
+            // rest while the UPDATE continues to be processed.
+            let error = DecodeError::UpdateAttributeError {
+                subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                data: vec![],
+                detail: format!("duplicate attribute type {type_code}"),
+            };
+            if matches!(
+                type_code,
+                attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
+            ) {
+                return Err(error);
+            }
+            malformed.push(MalformedAttribute {
+                type_code,
+                disposition: ErrorDisposition::AttributeDiscard,
+                error,
+            });
+            continue;
+        }
+        // RFC 7606 §7.6/§7.7 length checks. The legacy decoder stores both
+        // types opaquely as Unknown(RawAttribute) with no length validation,
+        // so these checks live only on the revised path. The attribute-discard
+        // shortcut applies only when the flags are correct: a flag conflict
+        // must fall through to decode_attribute_value, whose flags error is
+        // classified treat-as-withdraw below (§3 (c) — the stronger action
+        // wins per §3 (h)).
+        let flags_ok = expected_flags(type_code).is_none_or(|expected| {
+            (flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE)) == expected
+        });
+        let expected_aggregator_len = if four_octet_as { 8 } else { 6 };
+        let bad_aggregate_len = flags_ok
+            && match type_code {
+                attr_type::ATOMIC_AGGREGATE => !value.is_empty(),
+                attr_type::AGGREGATOR => value.len() != expected_aggregator_len,
+                _ => false,
+            };
+        if bad_aggregate_len {
+            malformed.push(MalformedAttribute {
+                type_code,
+                disposition: ErrorDisposition::AttributeDiscard,
+                error: DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("attribute type {type_code} length {}", value.len()),
+                },
+            });
+            continue;
+        }
+        match decode_attribute_value(
+            flags,
+            type_code,
+            value,
+            four_octet_as,
+            add_path_families,
+            &mut bgpls_discarded,
+        ) {
+            Ok(attr) => attrs.push(attr),
+            Err(error) => {
+                // RFC 7606 §3 (c): an Optional/Transitive flag conflict is
+                // treat-as-withdraw for every attribute — the §7.6/§7.7
+                // attribute-discard covers length malformations only. max()
+                // keeps MP_REACH/MP_UNREACH at session-reset (§5.3 lists
+                // inconsistent flags among what makes the MP attribute
+                // itself incorrect).
+                let mut disposition = malformed_attr_disposition(type_code, is_ibgp);
+                if matches!(
+                    &error,
+                    DecodeError::UpdateAttributeError { subcode, .. }
+                        if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
+                ) {
+                    disposition = disposition.max(ErrorDisposition::TreatAsWithdraw);
+                }
+                if disposition == ErrorDisposition::SessionReset {
+                    return Err(error);
+                }
+                malformed.push(MalformedAttribute {
+                    type_code,
+                    disposition,
+                    error,
+                });
+            }
+        }
+    }
+    Ok(RevisedAttributeDecode {
+        attributes: attrs,
+        bgpls_nlri_discarded: bgpls_discarded,
+        malformed,
+    })
 }
 /// Decode a single attribute value given its flags, type code, and raw bytes.
 #[expect(
@@ -939,11 +1120,15 @@ fn decode_attribute_value(
             Ok(PathAttribute::LocalPref(lp))
         }
         attr_type::COMMUNITIES => {
-            if !value.len().is_multiple_of(4) {
+            // RFC 7606 §7.8: the length must be a NON-ZERO multiple of 4.
+            if value.is_empty() || !value.len().is_multiple_of(4) {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
-                    detail: format!("COMMUNITIES length {} not a multiple of 4", value.len()),
+                    detail: format!(
+                        "COMMUNITIES length {} not a non-zero multiple of 4",
+                        value.len()
+                    ),
                 });
             }
             let communities = value
@@ -953,12 +1138,13 @@ fn decode_attribute_value(
             Ok(PathAttribute::Communities(communities))
         }
         attr_type::EXTENDED_COMMUNITIES => {
-            if !value.len().is_multiple_of(8) {
+            // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
+            if value.is_empty() || !value.len().is_multiple_of(8) {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
                     detail: format!(
-                        "EXTENDED_COMMUNITIES length {} not a multiple of 8",
+                        "EXTENDED_COMMUNITIES length {} not a non-zero multiple of 8",
                         value.len()
                     ),
                 });
@@ -3559,11 +3745,12 @@ mod tests {
         assert_eq!(attrs[0], PathAttribute::Communities(vec![c1, c2]));
     }
     #[test]
-    fn decode_communities_empty() {
-        // flags=0xC0, type=8, len=0
+    fn decode_communities_empty_rejected() {
+        // flags=0xC0, type=8, len=0 — RFC 7606 §7.8: the length must be a
+        // NON-ZERO multiple of 4, so a vacuous Communities attribute is
+        // malformed (treat-as-withdraw on the revised path).
         let buf = [0xC0, 0x08, 0x00];
-        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert_eq!(attrs[0], PathAttribute::Communities(vec![]));
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
     #[test]
     fn decode_communities_odd_length_rejected() {
@@ -3614,10 +3801,10 @@ mod tests {
         assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec1, ec2]));
     }
     #[test]
-    fn decode_extended_communities_empty() {
+    fn decode_extended_communities_empty_rejected() {
+        // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
         let buf = [0xC0, 0x10, 0x00];
-        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![]));
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
     #[test]
     fn decode_extended_communities_bad_length() {
@@ -5004,6 +5191,305 @@ mod tests {
             buf[0],
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             "locally-constructed OTC must emit 0xC0, never 0xE0"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // RFC 7606 revised error handling — decode_path_attributes_revised
+    // -----------------------------------------------------------------
+    fn attr_bytes(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
+        let mut buf = vec![flags, type_code, u8::try_from(value.len()).unwrap()];
+        buf.extend_from_slice(value);
+        buf
+    }
+    fn valid_origin_bytes() -> Vec<u8> {
+        attr_bytes(attr_flags::TRANSITIVE, attr_type::ORIGIN, &[0])
+    }
+    fn valid_as_path_bytes() -> Vec<u8> {
+        // One 4-octet AS_SEQUENCE segment holding ASN 65001.
+        attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0, 0, 0xFD, 0xE9],
+        )
+    }
+    fn valid_next_hop_bytes() -> Vec<u8> {
+        attr_bytes(attr_flags::TRANSITIVE, attr_type::NEXT_HOP, &[10, 0, 0, 2])
+    }
+    /// Craft `<valid ORIGIN, AS_PATH, NEXT_HOP> + extra` attribute bytes.
+    fn valid_attrs_plus(extra: &[u8]) -> Vec<u8> {
+        let mut buf = valid_origin_bytes();
+        buf.extend(valid_as_path_bytes());
+        buf.extend(valid_next_hop_bytes());
+        buf.extend_from_slice(extra);
+        buf
+    }
+    #[test]
+    fn revised_malformed_med_is_treat_as_withdraw() {
+        // RFC 7606 §7.4: MULTI_EXIT_DISC with length != 4 → treat-as-withdraw.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 1],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 3, "valid attributes must survive");
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::MULTI_EXIT_DISC);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        // The legacy decoder still aborts on the same bytes.
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
+    }
+    #[test]
+    fn revised_malformed_communities_is_treat_as_withdraw() {
+        // RFC 7606 §7.8: Community length not a non-zero multiple of 4.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::COMMUNITIES,
+            &[0, 0, 0, 1, 2],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 3);
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_malformed_as_path_is_treat_as_withdraw_not_reset() {
+        // RFC 7606 §7.2: a malformed AS_PATH is treat-as-withdraw — 7606
+        // moved it OFF the session-reset ladder. Segment claims two ASNs
+        // but carries bytes for one.
+        let mut buf = valid_origin_bytes();
+        buf.extend(attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 2, 0, 0, 0xFD, 0xE9],
+        ));
+        buf.extend(valid_next_hop_bytes());
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 2);
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::AS_PATH);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_malformed_aggregator_is_attribute_discard() {
+        // RFC 7606 §7.7: AGGREGATOR length must be 8 under 4-octet-AS
+        // negotiation; anything else is attribute-discard. The legacy
+        // decoder passes AGGREGATOR through opaquely, so this check only
+        // exists on the revised path.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD, 0xE9, 10],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 3);
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::AGGREGATOR);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+        // A correct-length AGGREGATOR still passes through untouched.
+        let good = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD, 0xE9, 10, 0, 0, 1],
+        ));
+        let decoded = decode_path_attributes_revised(&good, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 4);
+        assert!(decoded.malformed.is_empty());
+    }
+    #[test]
+    fn revised_malformed_atomic_aggregate_is_attribute_discard() {
+        // RFC 7606 §7.6: ATOMIC_AGGREGATE length must be 0.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::ATOMIC_AGGREGATE,
+            &[0xAB],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 3);
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+    #[test]
+    fn revised_flag_conflict_on_aggregator_is_treat_as_withdraw() {
+        // RFC 7606 §3 (c): a flag conflict is treat-as-withdraw for every
+        // attribute — §7.6/§7.7 attribute-discard covers length
+        // malformations only. AGGREGATOR expects Optional|Transitive; send
+        // Transitive only, with a CORRECT length.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD, 0xE9, 10, 0, 0, 1],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::AGGREGATOR);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        // Flag conflict AND bad length: §3 (h) — the stronger action
+        // (treat-as-withdraw) still wins over the length discard.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_zero_length_communities_are_treat_as_withdraw() {
+        // RFC 7606 §7.8 / §7.14: the length must be a NON-ZERO multiple of
+        // 4 (Communities) / 8 (Extended Communities).
+        for type_code in [attr_type::COMMUNITIES, attr_type::EXTENDED_COMMUNITIES] {
+            let buf = valid_attrs_plus(&attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                type_code,
+                &[],
+            ));
+            // Legacy decoder now rejects the vacuous attribute outright.
+            assert!(decode_path_attributes(&buf, true, &[]).is_err());
+            let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+            assert_eq!(decoded.attributes.len(), 3);
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].type_code, type_code);
+            assert_eq!(
+                decoded.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw
+            );
+        }
+    }
+    #[test]
+    fn revised_local_pref_disposition_depends_on_session_type() {
+        // RFC 7606 §7.5: malformed LOCAL_PREF is attribute-discard from an
+        // external neighbor, treat-as-withdraw from an internal one.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::LOCAL_PREF,
+            &[0, 0, 1],
+        ));
+        let ibgp = decode_path_attributes_revised(&buf, true, true, &[]).unwrap();
+        assert_eq!(
+            ibgp.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        let ebgp = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(
+            ebgp.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+    #[test]
+    fn revised_flag_conflict_is_treat_as_withdraw() {
+        // RFC 7606 §3 (c): Optional/Transitive bits conflicting with the
+        // attribute's specified values → treat-as-withdraw.
+        let mut buf = attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::ORIGIN,
+            &[0],
+        );
+        buf.extend(valid_as_path_bytes());
+        buf.extend(valid_next_hop_bytes());
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 2);
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::ORIGIN);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_malformed_mp_reach_is_session_reset() {
+        // RFC 7606 §7.11: a malformed MP_REACH_NLRI means the NLRI cannot
+        // be located — session reset stays the only safe approach.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            &[0, 1],
+        ));
+        assert!(decode_path_attributes_revised(&buf, true, false, &[]).is_err());
+    }
+    #[test]
+    fn revised_duplicate_attribute_keeps_first_and_discards_rest() {
+        // RFC 7606 §3 (g): occurrences other than the first are discarded
+        // and the UPDATE continues to be processed.
+        let mut buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 0, 5],
+        ));
+        buf.extend(attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 0, 9],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert!(decoded.attributes.contains(&PathAttribute::Med(5)));
+        assert!(!decoded.attributes.contains(&PathAttribute::Med(9)));
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+    #[test]
+    fn revised_duplicate_mp_unreach_is_session_reset() {
+        // RFC 7606 §3 (g): duplicate MP_REACH_NLRI / MP_UNREACH_NLRI is a
+        // Malformed Attribute List NOTIFICATION.
+        let mp_unreach = attr_bytes(attr_flags::OPTIONAL, attr_type::MP_UNREACH_NLRI, &[0, 2, 1]);
+        let mut buf = mp_unreach.clone();
+        buf.extend(mp_unreach);
+        assert!(decode_path_attributes_revised(&buf, true, false, &[]).is_err());
+    }
+    #[test]
+    fn revised_attribute_overrun_is_treat_as_withdraw_and_stops() {
+        // RFC 7606 §4: an attribute length that overruns the section is
+        // treat-as-withdraw; nothing beyond it can be parsed.
+        let mut buf = valid_origin_bytes();
+        buf.extend([attr_flags::OPTIONAL, attr_type::MULTI_EXIT_DISC, 200, 1, 2]);
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(
+            decoded.attributes.len(),
+            1,
+            "attributes before the overrun survive"
+        );
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::MULTI_EXIT_DISC);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_clean_update_reports_nothing() {
+        let buf = valid_attrs_plus(&[]);
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.attributes.len(), 3);
+        assert!(decoded.malformed.is_empty());
+        // Matches the legacy decoder on clean input.
+        assert_eq!(
+            decoded.attributes,
+            decode_path_attributes(&buf, true, &[]).unwrap()
         );
     }
 }
