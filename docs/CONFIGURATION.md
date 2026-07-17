@@ -2380,6 +2380,77 @@ only when at least one collector monitors `loc_rib`.
 
 ---
 
+## `[gnmi_dialout]`
+
+Optional. Configures gNMI dial-out streaming telemetry: the daemon opens a
+persistent gRPC connection OUT to each configured collector and pushes the
+same OpenConfig telemetry a dial-in `gnmi.gNMI/Subscribe` STREAM
+subscription would produce — an initial snapshot, a `sync_response`
+marker, then updates (periodic samples or ON_CHANGE events). This is the
+device-behind-NAT / central-sink ingestion model large fleets use instead
+of per-device dial-in. The wire contract is
+`rustbgpd.gnmi_dialout.v1.GnmiDialout/Publish` (a device-initiated
+`stream gnmi.SubscribeResponse`; see `proto/rustbgpd_dialout.proto`).
+
+```toml
+[gnmi_dialout]
+
+[[gnmi_dialout.targets]]
+name = "collector-a"                    # unique; metric label + log key
+address = "telemetry.example.net:57400" # host:port, DNS allowed
+paths = [
+  "network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state",
+]
+mode = "on_change"                      # or "sample" (default)
+# sample_interval = 10                  # seconds, SAMPLE mode only
+# backoff_initial = 1                   # seconds, first retry delay
+# backoff_max = 30                      # seconds, retry delay cap
+tls_ca_file = "/etc/rustbgpd/collector-ca.pem"
+tls_cert_file = "/etc/rustbgpd/client.pem"   # optional (mutual TLS)
+tls_key_file = "/etc/rustbgpd/client.key"    # required with tls_cert_file
+# tls_server_name = "collector.example"      # when dialing by IP
+```
+
+### Target fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | yes | -- | Unique target name; the `gnmi_dialout_connected{target}` metric label and log key |
+| `address` | string | yes | -- | Collector `host:port` (DNS names allowed; bracket IPv6 literals) |
+| `paths` | array | yes | -- | OpenConfig gNMI paths in xpath form — the same path surface the dial-in Subscribe server supports (see `docs/GNMI.md`) |
+| `mode` | string | no | `"sample"` | `"sample"` (periodic resample) or `"on_change"` (event-driven; v1 covers the `session-state` leaf and requires `[event_history].enabled = true`) |
+| `sample_interval` | u64 | no | 10 | Seconds between samples in SAMPLE mode, clamped to [1s, 1h] like dial-in |
+| `backoff_initial` | u64 | no | 1 | First reconnect delay in seconds; doubles per consecutive failure |
+| `backoff_max` | u64 | no | 30 | Reconnect delay cap in seconds |
+| `tls_ca_file` | string | no | -- | CA bundle (PEM path) verifying the collector's server certificate; setting it enables TLS |
+| `tls_cert_file` | string | no | -- | Client certificate (PEM path) for mutual TLS; requires `tls_key_file` + `tls_ca_file` |
+| `tls_key_file` | string | no | -- | Client private key (PEM path); required together with `tls_cert_file` |
+| `tls_server_name` | string | no | dialed host | Expected TLS server name when dialing by IP |
+
+**TLS rules.** `tls_cert_file` and `tls_key_file` must be set together, and
+either requires `tls_ca_file`. Without `tls_ca_file` the target dials
+plaintext `http://`. Key material is never logged or held on long-lived
+structs; the key file is re-read on each connection attempt, so rotating
+the file takes effect on the next (re)connect without a reload.
+
+**Validation.** Every path is validated at config load with the exact
+checks a dial-in `Subscribe` request would get — an unsupported path,
+a mixed SAMPLE/ON_CHANGE list, or an ON_CHANGE-unsupported leaf is
+rejected before the daemon starts (or before a SIGHUP reload is applied).
+
+**Robustness.** A collector that is down (at startup or any time later)
+never affects BGP operation: each target retries independently with capped
+exponential backoff, logs one `warn` per outage (`debug` for repeated
+retries), and surfaces its state as the `gnmi_dialout_connected{target}`
+gauge. Every (re)connection starts a fresh subscription — collectors
+resync from the initial snapshot exactly as a dial-in reconnect would.
+
+**Reload.** Reload-applied: SIGHUP reconciles targets in place (removed
+targets stop and their gauge series is reaped, added targets start,
+changed targets redial; unchanged targets keep their live connection).
+
+---
+
 ## `[mrt]`
 
 Optional. Configures periodic MRT TABLE_DUMP_V2 (RFC 6396) RIB snapshots for

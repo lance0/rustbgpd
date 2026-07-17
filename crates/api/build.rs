@@ -25,5 +25,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("protoc-bin-vendored include path is not valid UTF-8")?,
         ],
     )?;
+    // The dial-out proto imports the gnmi package compiled above. Compile it
+    // separately with `extern_path` so its references resolve to the flat
+    // `crate::gnmi` module instead of prost's package-relative `super::…`
+    // chain (which assumes package-shaped module nesting we don't use), and
+    // into its own out_dir so this invocation cannot clobber the gnmi/
+    // gnmi_ext files the first invocation just wrote.
+    let dialout_out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("dialout");
+    std::fs::create_dir_all(&dialout_out_dir)?;
+    tonic_prost_build::configure()
+        .extern_path(".gnmi", "crate::gnmi")
+        .out_dir(&dialout_out_dir)
+        .compile_protos(
+            &["../../proto/rustbgpd_dialout.proto"],
+            &[
+                "../../proto",
+                well_known_include
+                    .to_str()
+                    .ok_or("protoc-bin-vendored include path is not valid UTF-8")?,
+            ],
+        )?;
     Ok(())
 }

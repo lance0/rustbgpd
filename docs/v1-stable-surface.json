@@ -122,6 +122,7 @@
       {"path": "Config.evpn_instances", "classification": "alpha"},
       {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
       {"path": "Config.fib_tables", "classification": "alpha"},
+      {"path": "Config.gnmi_dialout", "classification": "outside_v1"},
       {"path": "Config.managed_netdevs", "classification": "alpha"},
       {"path": "Neighbor.bfd", "classification": "outside_v1"},
       {"path": "Neighbor.interface", "classification": "outside_v1"},

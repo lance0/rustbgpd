@@ -88,6 +88,18 @@
       "description": "Daemon-wide BGP settings (ASN, router ID, listeners, telemetry).",
       "$ref": "#/$defs/Global"
     },
+    "gnmi_dialout": {
+      "description": "gNMI dial-out streaming telemetry (device-initiated push to\ncentral collectors).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GnmiDialoutConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "managed_netdevs": {
       "description": "Optional rustbgpd-managed EVPN Linux netdev lifecycle\n(ADR-0091). Empty by default — existing deployments keep the\noperator-provisioned / observe-only contract. Configured rows opt\ninto class-scoped bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper,\nVRF, and L3VXLAN create/adopt/reap.",
       "$ref": "#/$defs/ManagedNetdevsConfig",
@@ -1044,6 +1056,117 @@
         "router_id",
         "listen_port",
         "telemetry"
+      ]
+    },
+    "GnmiDialoutConfig": {
+      "description": "gNMI dial-out streaming telemetry (LAN-471): the daemon connects OUT\nto each configured collector and pushes the same `SubscribeResponse`\nstream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would\nproduce. Reload-applied: SIGHUP starts/stops/redials targets in place.",
+      "type": "object",
+      "properties": {
+        "targets": {
+          "description": "Collector targets to dial out to.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GnmiDialoutTarget"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "GnmiDialoutModeConfig": {
+      "description": "gNMI dial-out delivery mode.",
+      "oneOf": [
+        {
+          "description": "Periodic resample of the subscribed paths.",
+          "type": "string",
+          "const": "sample"
+        },
+        {
+          "description": "Event-driven updates from the durable event outbox.",
+          "type": "string",
+          "const": "on_change"
+        }
+      ]
+    },
+    "GnmiDialoutTarget": {
+      "description": "One gNMI dial-out collector target.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "Collector endpoint as `host:port` (DNS names allowed).",
+          "type": "string"
+        },
+        "backoff_initial": {
+          "description": "First reconnect delay in seconds after a connection failure;\ndoubles per consecutive failure. Default 1.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "backoff_max": {
+          "description": "Reconnect delay cap in seconds. Default 30.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "mode": {
+          "description": "Delivery mode: `\"sample\"` (periodic resample, default) or\n`\"on_change\"` (event-driven; v1 supports the `session-state` leaf\nand requires `[event_history].enabled = true`).",
+          "$ref": "#/$defs/GnmiDialoutModeConfig",
+          "default": "sample"
+        },
+        "name": {
+          "description": "Unique target name — the `gnmi_dialout_connected{target}` metric\nlabel and the log key for this collector.",
+          "type": "string"
+        },
+        "paths": {
+          "description": "`OpenConfig` gNMI paths to subscribe, in xpath form (the same paths\na dial-in collector would put in a `SubscribeRequest`), e.g.\n`network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sample_interval": {
+          "description": "SAMPLE resample interval in seconds. Default 10; clamped to\n[1s, 1h] like a dial-in subscription's requested interval.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "tls_ca_file": {
+          "description": "CA certificate(s) (PEM file path) used to verify the collector's\nserver certificate. Setting this enables TLS for the target.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_cert_file": {
+          "description": "Client certificate (PEM file path) presented to the collector for\nmutual TLS. Requires `tls_key_file` and `tls_ca_file`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_key_file": {
+          "description": "Client private key (PEM file path). Required together with\n`tls_cert_file`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_server_name": {
+          "description": "Expected TLS server name, overriding the dialed host (needed when\ndialing a collector by IP whose certificate carries a DNS name).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "address",
+        "paths"
       ]
     },
     "GrpcAccessModeConfig": {

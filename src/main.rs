@@ -4302,6 +4302,27 @@ async fn run<T>(
         });
     }
 
+    // gNMI dial-out (LAN-471): device-initiated telemetry push. The manager
+    // reuses the dial-in Subscribe machinery via its own GnmiService handle
+    // (same peer-manager snapshot source + event outbox as the served gNMI
+    // surface) and reconciles targets again after every successful SIGHUP
+    // reload in the outcome arm below. A collector being down never affects
+    // the daemon: each target retries independently with capped backoff.
+    let mut gnmi_dialout_manager = rustbgpd_api::gnmi_dialout::DialoutManager::new(
+        rustbgpd_api::gnmi_dialout::GnmiService::new(
+            config.global.asn,
+            config.global.router_id.clone(),
+            peer_mgr_tx.clone(),
+        )
+        .with_event_history(event_history_handle.clone()),
+        metrics.clone(),
+    );
+    match config::gnmi_dialout_targets(&config) {
+        Ok(targets) => gnmi_dialout_manager.apply(&targets),
+        // Unreachable in practice: Config::load validated the section.
+        Err(reason) => error!(error = %reason, "invalid [gnmi_dialout] section; dial-out disabled"),
+    }
+
     // Signal handlers (unix-only, which is our target)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
@@ -4438,7 +4459,23 @@ async fn run<T>(
             } => {
                 reload_in_flight = None;
                 match outcome {
-                    Ok(Some(Ok(advanced))) => config = advanced,
+                    Ok(Some(Ok(advanced))) => {
+                        config = advanced;
+                        // [gnmi_dialout] is reload-applied: reconcile the
+                        // dial-out targets against the advanced config —
+                        // removed targets stop (gauge series reaped), added
+                        // start, changed redial, unchanged keep their live
+                        // collector connections.
+                        match config::gnmi_dialout_targets(&config) {
+                            Ok(targets) => gnmi_dialout_manager.apply(&targets),
+                            // Unreachable in practice: the reload path
+                            // re-validated the config before advancing.
+                            Err(reason) => error!(
+                                error = %reason,
+                                "invalid [gnmi_dialout] after reload; dial-out targets unchanged"
+                            ),
+                        }
+                    }
                     Ok(Some(Err(stage))) => error!(
                         stage,
                         "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
@@ -6316,6 +6353,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             policy: crate::config::PolicyConfig::default(),
             rpki: None,
             bmp: None,
+            gnmi_dialout: None,
             mrt: None,
             file_path: None,
             dynamic_neighbors: Vec::new(),

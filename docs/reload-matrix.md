@@ -270,6 +270,12 @@ chains all add/change/remove cleanly via reload.
 | `[bmp]` | restart-required | BMP exporter binds once. |
 | `[mrt]` | restart-required | MRT writer opens its output dir at startup. |
 
+## `[gnmi_dialout]`
+
+| Section | Class | Notes |
+|---|---|---|
+| `[gnmi_dialout]` (whole section) | reload-applied | SIGHUP reconciles the dial-out target set in place: removed targets stop (their `gnmi_dialout_connected{target}` series is reaped), added targets start, changed targets tear down and redial, unchanged targets keep their live collector connection. The new section is validated during reload preflight; a rejected config leaves the running targets untouched. TLS key/cert *file contents* rotate without any reload — the files are re-read on every (re)connection attempt. |
+
 ## `[[evpn_instances]]`, `[[evpn_ip_vrfs]]`, `[[ethernet_segments]]`
 
 SIGHUP reuses the ADR-0063 EVPN runtime coordinator for the same supported

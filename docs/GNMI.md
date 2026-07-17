@@ -252,6 +252,34 @@ accepted.
 Broad subtree requests are bounded; v1 does not use gNMI to stream
 the full route table.
 
+## Dial-out (device-initiated push)
+
+Everything above is dial-in: a collector connects to the daemon. The
+`[gnmi_dialout]` config section inverts only the transport direction —
+the daemon opens a persistent gRPC connection to each configured
+collector and pushes the exact `SubscribeResponse` stream the dial-in
+`Subscribe` server would produce for the same subscription (initial
+snapshot, `sync_response`, then SAMPLE ticks or ON_CHANGE events; same
+supported paths, same ON_CHANGE scope, same validation). This is the
+ingestion model large fleets use: devices behind NAT push to a central
+sink instead of every collector dialing every device.
+
+The wire contract is `rustbgpd.gnmi_dialout.v1.GnmiDialout/Publish`
+(`proto/rustbgpd_dialout.proto`): the device is the gRPC client and
+sends `stream gnmi.SubscribeResponse`; the collector's response stream
+is reserved for future flow control and may stay silent. This mirrors
+the de-facto vendor dial-out shape without impersonating any vendor
+namespace; a collector implements one trivially by serving that proto.
+The OpenConfig grpc-tunnel model solves the same reachability inversion
+at the transport layer and remains a possible future alternative.
+
+Subscriptions are declared in config (paths + `sample`/`on_change` mode
+per target), TLS uses the standard `tls_ca_file`/`tls_cert_file`/
+`tls_key_file` path idiom, reconnects use capped exponential backoff,
+and connection state is exported as `gnmi_dialout_connected{target}`.
+Full field reference: `docs/CONFIGURATION.md` `[gnmi_dialout]`;
+operational behavior: `docs/OPERATIONS.md`.
+
 ## Supported Paths
 
 All paths hang under the default network instance and BGP protocol:

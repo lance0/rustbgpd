@@ -65,6 +65,7 @@ type SubscribeStream =
 
 impl GnmiService {
     /// Create a gNMI service backed by the daemon's peer manager.
+    #[must_use]
     pub fn new(
         asn: u32,
         router_id: String,
@@ -491,6 +492,51 @@ impl GnmiService {
         };
         tx.send(Ok(response)).await.is_ok()
     }
+
+    /// Spawn the STREAM-mode subscription described by `list` and return the
+    /// response channel. This is the dial-out reuse seam: the dial-out client
+    /// drives the exact `Subscribe` update-generation tasks (`SAMPLE` /
+    /// `ON_CHANGE`) a dial-in collector would, then forwards the channel over
+    /// its device-initiated connection. The spawned task exits when the
+    /// returned receiver is dropped, so each (re)connection gets a fresh
+    /// initial snapshot + `sync_response` — the same resync contract dial-in
+    /// reconnects have.
+    ///
+    /// # Errors
+    /// Returns the same `Status` a dial-in `Subscribe` would for an invalid
+    /// or non-STREAM subscription list.
+    pub(crate) fn spawn_stream_subscription(
+        &self,
+        list: &gnmi::SubscriptionList,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<gnmi::SubscribeResponse, Status>>, Status> {
+        let plan = validate_stream_subscription_list(list)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let service = self.clone();
+        tokio::spawn(async move {
+            match plan.stream_mode {
+                Some(gnmi::SubscriptionMode::OnChange) => service.run_on_change(plan, tx).await,
+                _ => service.run_stream_sample(plan, tx).await,
+            }
+        });
+        Ok(rx)
+    }
+}
+
+/// Validate a dial-out subscription list without spawning anything — shared
+/// by config-load validation (fail fast on a bad `[gnmi_dialout]` path or
+/// mode) and by [`GnmiService::spawn_stream_subscription`]. Dial-out only
+/// makes sense as STREAM: ONCE/POLL are request/response shapes driven by a
+/// dial-in client.
+pub(crate) fn validate_stream_subscription_list(
+    list: &gnmi::SubscriptionList,
+) -> Result<SubscriptionPlan, Status> {
+    let plan = parse_subscription_list(list)?;
+    if plan.mode != gnmi::subscription_list::Mode::Stream {
+        return Err(Status::invalid_argument(
+            "dial-out subscriptions require STREAM mode",
+        ));
+    }
+    Ok(plan)
 }
 
 fn supported_models() -> Vec<gnmi::ModelData> {
@@ -612,7 +658,7 @@ impl SupportedPath {
 }
 
 #[derive(Clone, Debug)]
-struct SubscriptionPlan {
+pub(crate) struct SubscriptionPlan {
     mode: gnmi::subscription_list::Mode,
     /// Per-subscription delivery mode. v1 `ON_CHANGE` is a homogeneous
     /// plan attribute (the upstream `parse_subscription_list` already

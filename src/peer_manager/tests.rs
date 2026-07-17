@@ -421,6 +421,7 @@ fn make_dynamic_manager_config() -> Config {
         }],
         rpki: None,
         bmp: None,
+        gnmi_dialout: None,
         mrt: None,
         file_path: None,
         evpn_instances: Vec::new(),

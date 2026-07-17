@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+// gNMI dial-out: device-initiated telemetry push.
+//
+// In dial-in gNMI the collector connects to the device and drives
+// `gnmi.gNMI/Subscribe`. Dial-out inverts the transport direction only:
+// the device opens a gRPC connection to a central collector and pushes
+// the same `gnmi.SubscribeResponse` stream a dial-in subscription would
+// have produced (initial snapshot, `sync_response`, then updates).
+// This mirrors the de-facto vendor dial-out shape (a device-initiated
+// `Publish(stream SubscribeResponse)` RPC) without impersonating any
+// vendor namespace; the OpenConfig grpc-tunnel model solves the same
+// reachability inversion at the transport layer and remains a possible
+// future alternative.
+package rustbgpd.gnmi_dialout.v1;
+
+import "github.com/openconfig/gnmi/proto/gnmi/gnmi.proto";
+
+// Collector-side service. rustbgpd implements the *client* of this
+// service; a central collector (or the bundled test stub) implements
+// the server.
+service GnmiDialout {
+  // One long-lived stream per configured collector target. The device
+  // sends SubscribeResponse messages exactly as the dial-in Subscribe
+  // server would. The response stream exists for connection liveness
+  // and future flow control; collectors need not send anything.
+  rpc Publish(stream gnmi.SubscribeResponse) returns (stream PublishResponse);
+}
+
+// Reserved for future collector-to-device flow control. Empty today.
+message PublishResponse {}

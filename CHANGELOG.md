@@ -89,6 +89,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a `bgp_rejected_routes_retained{peer}` gauge (peer-reaped) tracks
   occupancy. Docs: OPERATIONS.md runbook, route-server cookbook
   member-support section, CONFIGURATION.md.
+- **gNMI dial-out streaming telemetry (LAN-471).** New `[gnmi_dialout]`
+  config section: the daemon opens a persistent gRPC connection OUT to
+  each configured collector and pushes the same `SubscribeResponse`
+  stream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would
+  produce (initial snapshot, `sync_response`, then SAMPLE ticks or
+  ON_CHANGE session-state events) — the central-sink ingestion model
+  large fleets use instead of per-device dial-in. Wire contract:
+  `rustbgpd.gnmi_dialout.v1.GnmiDialout/Publish`
+  (`proto/rustbgpd_dialout.proto`), a device-initiated
+  `stream gnmi.SubscribeResponse` mirroring the de-facto vendor
+  dial-out shape. Per-target TLS/mTLS (`tls_ca_file` /
+  `tls_cert_file` / `tls_key_file`, key files re-read per connection
+  attempt so rotation needs no reload), capped exponential reconnect
+  backoff (`backoff_initial` doubling to `backoff_max`), and a
+  `gnmi_dialout_connected{target}` 0/1 gauge refreshed on both
+  transitions and reaped on target removal. Subscription paths are
+  validated at config load with the exact dial-in Subscribe checks.
+  Reload-applied: SIGHUP reconciles the target set in place (removed
+  stop, added start, changed redial; unchanged targets keep their
+  connection). A collector being down never affects BGP operation.
+  Docs: `docs/GNMI.md` (dial-out section), `docs/CONFIGURATION.md`,
+  `docs/OPERATIONS.md`, `docs/reload-matrix.md`.
 
 - **IXP route-server receipt matrix** (`docs/perf/ixp-matrix-2026-07.md`):
   rustbgpd vs BIRD 3.3.1 vs OpenBGPD 9.1 at 700 peers × 400,400

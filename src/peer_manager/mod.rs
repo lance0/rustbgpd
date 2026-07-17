@@ -398,6 +398,7 @@ impl PeerManager {
                 policy: crate::config::PolicyConfig::default(),
                 rpki: None,
                 bmp: None,
+                gnmi_dialout: None,
                 mrt: None,
                 file_path: None,
                 dynamic_neighbors: Vec::new(),

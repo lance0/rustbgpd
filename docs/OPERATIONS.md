@@ -411,6 +411,20 @@ observational. On reconnect, the client sends a fresh Initiation message;
 the collector rebuilds state from subsequent Peer Up and Route Monitoring
 messages.
 
+### gNMI dial-out collector unreachable
+
+Each `[gnmi_dialout]` target dials its collector independently and
+reconnects with capped exponential backoff (`backoff_initial`, doubling to
+`backoff_max`). A collector that is down — at startup or later — never
+affects BGP operation; telemetry for that target is simply not delivered
+while disconnected. The daemon logs one `warn` when a target becomes
+unreachable and one `info` when it (re)connects; repeated retries log at
+`debug` only. Watch `gnmi_dialout_connected{target}` (0/1) for the live
+connection state. Every (re)connection restarts the subscription, so the
+collector resyncs from a fresh initial snapshot + `sync_response` — the
+disconnect window is not replayed (same contract as a dial-in Subscribe
+reconnect; use the durable event cursor for gap-free history).
+
 ### MRT dump failure
 
 If the output directory is not writable, the MRT manager logs an error and
@@ -561,6 +575,12 @@ without a `reason` label encode the mechanism in the metric name.
 durable queues. Non-zero `bgp_event_stream_lagged_total` means at least one
 client missed events and should combine a fresh snapshot or `ListRouteEvents`
 query with a new live watch.
+
+### gNMI dial-out
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `gnmi_dialout_connected{target}` | 1 while the dial-out Publish stream to this `[gnmi_dialout]` target is established, 0 while disconnected/retrying. Refreshed on both transitions; the series exists (at 0) from startup even when the collector is down, and is reaped when the target is removed from config (SIGHUP) |
 
 ### Durable Event Cursor (ADR-0072)
 
