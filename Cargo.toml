@@ -83,7 +83,7 @@ serde_json = "1"
 # output is YAML (JSON parses through the same path, YAML being a
 # superset). Generate-time tooling only — never a daemon dependency.
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 owo-colors = { version = "4", features = ["supports-colors"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
