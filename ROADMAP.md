@@ -101,6 +101,54 @@ soak, or bench receipts), because credibility is a technical artifact, not
 marketing. Concretely: no speculative service-provider breadth just because FRR
 has it, no broad performance sprints without profile evidence.
 
+### Strategic direction — the operational frontier (2026-07-17)
+
+A discovery pass (IXP route-server + iBGP route-reflector + internal-quality)
+landed one conclusion: **rustbgpd's protocol and control-plane are already
+ahead of the open-source field.** The BMP 7854+8671+9069 trio, role-aware
+ASPA, RFC 9234 Roles/OTC, ORR (first OSS), per-client-best path-hiding, the
+export-explain trilogy, and the `.rpol` language with live-RIB dry-run and
+per-term hit counters are a stack no other OSS daemon ships together. So the
+path to best-in-class RS/RR is **not** more protocol breadth — it is closing
+the *operational* gap between "great control-plane guts" and "a daemon an
+operator actually puts in production." This is the same technical-merit-first,
+in-niche posture as above: every item deepens the existing identity, and none
+adds PE/MPLS/dataplane breadth. Three tracks:
+
+**1. Route-server adoption pipeline.** What keeps IXPs on BIRD+arouteserver is
+the data-driven filtering/tooling wrapper, not the daemon.
+- IRR/PeeringDB-driven prefix filtering — MANRS Action 1, the #1 adoption
+  blocker. Lazy-leverage: become a native arouteserver *output target* rather
+  than rebuild IRR/PeeringDB/RPKI ingestion (LAN-467).
+- RFC 7947/8195 community-based announcement control (announce / prepend /
+  no-export per target peer) — table-stakes at every major IX (LAN-466).
+- Reject-reason retention → Alice-LG looking glass — the member-support
+  surface; the reasons are already computed by the explain ladder (LAN-472).
+- Ship ADR-0107 NEXT_HOP self-consistency (`strict_peer`) — the RFC 7948 §4.8
+  next-hop-hijack guard, already designed (LAN-473).
+
+**2. Route-reflector robustness + fanout observability.**
+- General RFC 7606 treat-as-withdraw — the top RR gap and a robustness
+  *defect*: one malformed attribute resets a whole session today, a reset-storm
+  amplifier at fanout scale; the treat-as-withdraw primitive already exists
+  (LAN-465). **First move once v0.52 ships** — in-niche, bounded, and the one
+  thing every competitor already has that we don't.
+- Fanout-observability trio — per-update-group / queue-depth metrics →
+  slow-peer detection → gNMI dial-out (LAN-469 / LAN-470 / LAN-471). Turns the
+  existing observability lead into large-network operability the incumbents
+  don't provide ("which client is slow, and why did convergence stall").
+
+**3. Release hygiene (timing-critical).** Absorb `#[non_exhaustive]` onto the
+growing wire/fsm protocol enums into the in-flight 0.15.0 breaking cut, rather
+than trickle breaking bumps one variant at a time — the `Capability::PathsLimit`
+pattern will recur as IANA/RFC registries grow (LAN-468).
+
+Deliberately *not* on this frontier (verified already-shipped or hard-deferred):
+RPKI/ASPA, Roles/OTC, graceful-shutdown, blackhole, Prefix-ORF, the BMP trio,
+Add-Path send (shipped, several ahead of the field — keep ASPA
+conformance-current, it is a moat); AIGP, conditional advertisement, Add-Path
+update-group scaling (ADR-0099), send-side ORF (ROADMAP-tracked / demand-shaped).
+
 ### Immediate: post-v0.50 audit remediation (2026-07-09)
 
 A repository-wide read-only audit at `155b24c2` found the workspace test,
