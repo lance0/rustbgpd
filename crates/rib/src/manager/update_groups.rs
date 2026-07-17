@@ -2726,11 +2726,20 @@ impl RibManager {
     fn refresh_update_group_gauges(&self) {
         let mut member_counts: HashMap<usize, i64> = HashMap::new();
         let mut fallback = 0i64;
-        for membership in self.update_groups.members.values() {
-            match membership {
-                GroupMembership::Grouped(id) => *member_counts.entry(*id).or_default() += 1,
-                _ => fallback += 1,
-            }
+        // Recomputed for every member on each call, so the per-peer group
+        // gauge is refreshed on every membership-change path (join, leave,
+        // grouped↔grouped move, grouped↔fallback) — no guard. Peers that
+        // left the map are dropped here and reaped on peer-down.
+        for (peer, membership) in &self.update_groups.members {
+            let group_id = if let GroupMembership::Grouped(id) = membership {
+                *member_counts.entry(*id).or_default() += 1;
+                i64::try_from(*id).unwrap_or(i64::MAX)
+            } else {
+                fallback += 1;
+                rustbgpd_telemetry::BgpMetrics::UPDATE_GROUP_UNGROUPED
+            };
+            self.metrics
+                .set_peer_update_group(&peer.to_string(), group_id);
         }
         self.metrics
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));
@@ -3158,6 +3167,62 @@ mod tests {
         assert_eq!(announced, HashSet::from([k1, k6]));
         let withdrawn: HashSet<(Prefix, u32)> = withdraw.into_iter().collect();
         assert_eq!(withdrawn, HashSet::from([(k5, 0)]));
+    }
+
+    /// The per-peer update-group gauge tracks membership: it reports the
+    /// group id after grouping, changes on regroup, drops to the ungrouped
+    /// sentinel on the fallback path, and is reaped on peer-down.
+    #[test]
+    fn peer_update_group_gauge_tracks_membership() {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let peer = MEMBER.to_string();
+
+        // Grouped: the gauge reports the peer's group id.
+        manager
+            .update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(2));
+        manager.refresh_update_group_gauges();
+        assert_eq!(manager.metrics.peer_update_group(&peer), 2);
+
+        // Regroup: moving to another group id updates the gauge.
+        manager
+            .update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(5));
+        manager.refresh_update_group_gauges();
+        assert_eq!(manager.metrics.peer_update_group(&peer), 5);
+
+        // Grouped → fallback: the ungrouped sentinel, which can never
+        // collide with a real (≥ 0) group id.
+        manager
+            .update_groups
+            .members
+            .insert(MEMBER, GroupMembership::OrrVantage);
+        manager.refresh_update_group_gauges();
+        assert_eq!(
+            manager.metrics.peer_update_group(&peer),
+            rustbgpd_telemetry::BgpMetrics::UPDATE_GROUP_UNGROUPED
+        );
+
+        // Peer-down: the series is reaped. Re-reading re-instantiates a
+        // fresh child at 0 (the default), proving the stale -1 series was
+        // removed rather than left behind.
+        manager.update_groups.members.remove(&MEMBER);
+        manager.metrics.reap_peer_series(&peer);
+        assert_eq!(
+            manager.metrics.peer_update_group(&peer),
+            0,
+            "reaped series must be removed; a fresh read defaults to 0, not the stale -1"
+        );
     }
 
     /// Carried-over extra withdraws (a dirty member regrouping) emit

@@ -425,9 +425,11 @@ impl PeerSession {
             && shared_encode_eligible(&update)
             && self.try_send_shared_group(&shared, &update).await
         {
+            self.sample_outbound_queue_depth();
             return;
         }
         self.send_route_update(update);
+        self.sample_outbound_queue_depth();
     }
 
     /// Returns `true` when this envelope was fully handled through the
