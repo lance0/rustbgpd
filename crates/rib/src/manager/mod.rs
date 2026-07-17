@@ -196,6 +196,10 @@ pub struct RibManager {
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
+    /// Session-stamped RFC 7947 §2.3.2 control-community context staged
+    /// before `PeerUp` (the RS-side local ASN when the session interprets
+    /// route-server control communities).
+    pending_peer_rs_control: HashMap<(IpAddr, u64), Option<u32>>,
     /// Session-stamped exact encoder staged immediately before `PeerUp`.
     /// Keeping the handle separate from the legacy registration payload
     /// avoids making every non-transport `PeerUp` producer construct a fake
@@ -332,6 +336,12 @@ pub struct RibManager {
     /// `!route_server_client`). Source routes carrying either community
     /// are suppressed at staging toward these peers when they are eBGP.
     peer_interpret_rfc1997: HashSet<IpAddr>,
+    /// Peers whose sessions interpret RFC 7947 §2.3.2 route-server
+    /// control communities at export staging (config
+    /// `rs_control_communities`, default `route_server_client`), mapped
+    /// to the RS-side local ASN the control communities are keyed on.
+    /// Enabled peers are disqualified from update-group sharing.
+    peer_rs_control: HashMap<IpAddr, u32>,
     /// Peer ASN, tracked for MRT `PEER_INDEX_TABLE`.
     peer_asn: HashMap<IpAddr, u32>,
     /// Peer-group membership used for export policy neighbor-set matching.
@@ -565,6 +575,10 @@ pub(super) struct LiveSessionRecord {
     orr_vantage: Option<IpAddr>,
     per_client_best: bool,
     interpret_rfc1997: bool,
+    /// RFC 7947 §2.3.2 control-community context: the RS-side local ASN
+    /// when the session interprets control communities, staged via
+    /// `SetPeerRsControl` before `PeerUp`.
+    rs_control_asn: Option<u32>,
     add_path_send_families: Vec<(Afi, Safi)>,
     add_path_send_max: u32,
     /// Per-family Paths-Limit caps (RFC-draft Paths-Limit), filtered to the
@@ -1139,6 +1153,7 @@ impl RibManager {
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),
             pending_peer_export_context: HashMap::new(),
+            pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
             peer_export_encoders: HashMap::new(),
@@ -1179,6 +1194,7 @@ impl RibManager {
             peer_add_path_send_limits: HashMap::new(),
             peer_per_client_best: HashSet::new(),
             peer_interpret_rfc1997: HashSet::new(),
+            peer_rs_control: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
             slow_isolated_peers: HashSet::new(),
@@ -1958,6 +1974,17 @@ impl RibManager {
                 // id because collision-window senders can interleave.
                 self.pending_peer_export_context
                     .insert((peer, session_id), local_role);
+            }
+            RibUpdate::SetPeerRsControl {
+                peer,
+                session_id,
+                rs_control_asn,
+            } => {
+                // Staged before `PeerUp` like the role context above so the
+                // initial table build already honors control communities;
+                // keyed by session id against collision-window interleaving.
+                self.pending_peer_rs_control
+                    .insert((peer, session_id), rs_control_asn);
             }
             RibUpdate::SetPeerExportEncoder {
                 peer,
@@ -3084,6 +3111,7 @@ impl RibManager {
                 peer_group,
                 target_is_ebgp,
                 interpret_rfc1997,
+                self.peer_rs_control.get(&peer).copied(),
                 target_is_rr_client,
                 self.peer_local_roles.get(&peer).copied().flatten(),
                 self.cluster_id,
@@ -3138,6 +3166,7 @@ impl RibManager {
             &mut target,
             target_is_ebgp,
             interpret_rfc1997,
+            self.peer_rs_control.get(&peer).copied(),
             target_is_rr_client,
             self.cluster_id,
             sendable,

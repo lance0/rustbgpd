@@ -1613,6 +1613,10 @@ pub struct PeerManagerNeighborConfig {
     /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement
     /// (resolved; config default `!route_server_client`).
     pub interpret_rfc1997: bool,
+    /// RFC 7947 §2.3.2 route-server control communities: per-target
+    /// announce/prepend steering plus outbound scrub (resolved; config
+    /// default `route_server_client`).
+    pub rs_control_communities: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Enable Add-Path receive capability.

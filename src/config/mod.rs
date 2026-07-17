@@ -1257,6 +1257,13 @@ impl Config {
             .interpret_rfc1997
             .or_else(|| group.and_then(|g| g.interpret_rfc1997))
             .unwrap_or(!transport.route_server_client);
+        // RFC 7947 §2.3.2 control communities default on for
+        // route-server clients (the standard IXP posture) and off for
+        // everyone else; set explicitly to override either default.
+        transport.rs_control_communities = neighbor
+            .rs_control_communities
+            .or_else(|| group.and_then(|g| g.rs_control_communities))
+            .unwrap_or(transport.route_server_client);
         transport.route_reflector_client = neighbor
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))
@@ -1336,6 +1343,7 @@ impl Config {
             per_client_best: None,
             next_hop_ownership: None,
             interpret_rfc1997: None,
+            rs_control_communities: None,
             role: None,
             strict_role: None,
             prefix_orf_receive: None,
@@ -2111,7 +2119,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "route_server_client"
         | "per_client_best"
         | "next_hop_ownership"
-        | "interpret_rfc1997" => (
+        | "interpret_rfc1997"
+        | "rs_control_communities" => (
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
         ),
@@ -2252,6 +2261,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(per_client_best);
     cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);
+    cmp_field!(rs_control_communities);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);
@@ -2372,6 +2382,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.per_client_best == new.per_client_best
         && old.next_hop_ownership == new.next_hop_ownership
         && old.interpret_rfc1997 == new.interpret_rfc1997
+        && old.rs_control_communities == new.rs_control_communities
         && old.role == new.role
         && old.strict_role == new.strict_role
         && old.prefix_orf_receive == new.prefix_orf_receive
@@ -3065,6 +3076,12 @@ impl Config {
                     .interpret_rfc1997
                     .or_else(|| group.and_then(|g| g.interpret_rfc1997))
                     .unwrap_or_else(|| neighbor.route_server_client != Some(true)),
+            );
+            neighbor.rs_control_communities = Some(
+                neighbor
+                    .rs_control_communities
+                    .or_else(|| group.and_then(|g| g.rs_control_communities))
+                    .unwrap_or_else(|| neighbor.route_server_client == Some(true)),
             );
             neighbor.strict_role = Some(
                 neighbor
@@ -5424,6 +5441,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(per_client_best);
     cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);
+    cmp_field!(rs_control_communities);
     cmp_field!(role);
     cmp_field!(strict_role);
     cmp_field!(prefix_orf_receive);

@@ -274,6 +274,8 @@ impl RibManager {
         self.live_sessions.remove(&peer);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_rs_control
+            .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_export_encoders
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_gr_context
@@ -469,6 +471,7 @@ impl RibManager {
         self.peer_add_path_send_families.remove(&peer);
         self.peer_per_client_best.remove(&peer);
         self.peer_interpret_rfc1997.remove(&peer);
+        self.peer_rs_control.remove(&peer);
         // ORF state is per-session (RFC 5291): a surviving §6 gate can never
         // be lifted by a reconnecting session that didn't negotiate ORF
         // (suppressing the family's flood indefinitely), and a surviving
@@ -588,6 +591,10 @@ impl RibManager {
             .pending_peer_export_context
             .remove(&(peer, session_id))
             .flatten();
+        let rs_control_asn = self
+            .pending_peer_rs_control
+            .remove(&(peer, session_id))
+            .flatten();
         let exact_export_encoder = self
             .pending_peer_export_encoders
             .remove(&(peer, session_id));
@@ -606,6 +613,7 @@ impl RibManager {
             orr_vantage,
             per_client_best,
             interpret_rfc1997,
+            rs_control_asn,
             add_path_send_families,
             add_path_send_max,
             // Filled in by the `PeerAddPathLimits` handler; the session
@@ -666,6 +674,7 @@ impl RibManager {
         let orr_vantage = record.orr_vantage;
         let per_client_best = record.per_client_best;
         let interpret_rfc1997 = record.interpret_rfc1997;
+        let rs_control_asn = record.rs_control_asn;
         let add_path_send_families = record.add_path_send_families.clone();
         let add_path_send_max = record.add_path_send_max;
         let add_path_send_limits = record.add_path_send_limits.clone();
@@ -877,6 +886,15 @@ impl RibManager {
         } else {
             self.peer_interpret_rfc1997.remove(&peer);
         }
+        // Per-registration like the knobs above — and installed before
+        // `recompute_update_group` below reads it (an enabled session is
+        // disqualified from grouping) and before `send_initial_table`
+        // stages the first Adj-RIB-Out.
+        if let Some(rs_asn) = rs_control_asn {
+            self.peer_rs_control.insert(peer, rs_asn);
+        } else {
+            self.peer_rs_control.remove(&peer);
+        }
         // Shadow-mode update-group fingerprint (slice 1): record this
         // registration's group membership / ungrouped reason. Runs after
         // every fingerprint input map above is populated; distribution
@@ -1007,6 +1025,7 @@ impl RibManager {
             .unwrap_or_default();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+        let rs_control_asn = self.peer_rs_control.get(&peer).copied();
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let target_peer_asn = self.peer_asn.get(&peer).copied();
         // Owned so no `&self` borrow spans the join-counters call below.
@@ -1127,6 +1146,7 @@ impl RibManager {
                     false,
                     target_is_ebgp,
                     interpret_rfc1997,
+                    rs_control_asn,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -1172,6 +1192,7 @@ impl RibManager {
                     true,
                     target_is_ebgp,
                     interpret_rfc1997,
+                    rs_control_asn,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
@@ -1245,6 +1266,7 @@ impl RibManager {
                     &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
+                    rs_control_asn,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),

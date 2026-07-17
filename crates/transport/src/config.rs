@@ -392,6 +392,14 @@ pub struct TransportConfig {
     /// config with default `!route_server_client` (plain eBGP/iBGP
     /// peers honor RFC 1997; route-server clients are transparent).
     pub interpret_rfc1997: bool,
+    /// RFC 7947 §2.3.2 route-server control communities: when `true`,
+    /// the RIB interprets member-set control communities
+    /// (`0:PEER`/`RS:PEER`/`0:RS` and the RFC 8195 large forms
+    /// `RS:{0,1,101,102,103}:PEER`) at export staging toward this peer
+    /// — per-target announce suppression, prepend, and outbound scrub.
+    /// Resolved in config with default `route_server_client`. Enabled
+    /// sessions are disqualified from update-group sharing.
+    pub rs_control_communities: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
@@ -468,6 +476,7 @@ impl TransportConfig {
             per_client_best: false,
             next_hop_ownership_strict_peer: false,
             interpret_rfc1997: true,
+            rs_control_communities: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
             explain_enabled: true,

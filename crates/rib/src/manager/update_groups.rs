@@ -131,6 +131,10 @@ pub(super) enum GroupMembership {
     /// per-target (the member sourcing the Loc-RIB best gets the
     /// runner-up), so no shared staged winner exists.
     PerClientBest,
+    /// RFC 7947 §2.3.2 route-server control communities interpreted:
+    /// announce/prepend/scrub outcomes are keyed on the TARGET peer's
+    /// ASN per route, so no shared staged winner exists.
+    RsControlCommunities,
     /// ORR vantage bound: per-vantage winners are per-target
     /// (ADR-0095 Decision 5).
     OrrVantage,
@@ -152,6 +156,7 @@ impl GroupMembership {
             Self::PolicyPeerContext => "policy_peer_context".to_string(),
             Self::AddPathSend => "add_path_send".to_string(),
             Self::PerClientBest => "per_client_best".to_string(),
+            Self::RsControlCommunities => "rs_control_communities".to_string(),
             Self::OrrVantage => "orr_vantage".to_string(),
             Self::OrfInstalled => "orf_installed".to_string(),
             Self::SlowPeer => "slow_peer".to_string(),
@@ -1372,6 +1377,10 @@ impl RibManager {
                     &mut target,
                     group.is_ebgp,
                     group.interpret_rfc1997,
+                    // Control-community sessions are classifier-disqualified
+                    // from grouping (`RsControlCommunities`), so a group
+                    // member never interprets them.
+                    None,
                     group.is_rr_client,
                     self.cluster_id,
                     Some(&group.sendable),
@@ -2538,6 +2547,9 @@ impl RibManager {
             }
             UpdateGroupClassification::AddPathSend => return GroupMembership::AddPathSend,
             UpdateGroupClassification::PerClientBest => return GroupMembership::PerClientBest,
+            UpdateGroupClassification::RsControlCommunities => {
+                return GroupMembership::RsControlCommunities;
+            }
             UpdateGroupClassification::OrrVantage => return GroupMembership::OrrVantage,
             UpdateGroupClassification::OrfInstalled => return GroupMembership::OrfInstalled,
             UpdateGroupClassification::Groupable(fingerprint) => fingerprint,
@@ -2724,6 +2736,7 @@ impl RibManager {
             // of GroupKey before this disqualifier is relaxed.
             add_path_send: self.peer_has_any_add_path_send(peer),
             per_client_best: self.peer_per_client_best.contains(&peer),
+            rs_control_communities: self.peer_rs_control.contains_key(&peer),
             orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
             orf_installed,
         }

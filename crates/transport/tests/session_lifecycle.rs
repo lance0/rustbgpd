@@ -99,6 +99,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         per_client_best: false,
         next_hop_ownership_strict_peer: false,
         interpret_rfc1997: true,
+        rs_control_communities: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         cluster_id: None,
         explain_enabled: true,

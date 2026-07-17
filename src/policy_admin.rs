@@ -209,6 +209,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         // Not exposed on the peer-group gRPC definition: absent means the
         // config-derived default (!route_server_client) applies at resolve.
         interpret_rfc1997: None,
+        rs_control_communities: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -468,6 +469,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         .next_hop_ownership_strict_peer
                         .then_some(NextHopOwnershipConfig::StrictPeer),
                     interpret_rfc1997: None,
+                    rs_control_communities: None,
                     role: cfg.local_role.map(wire_role_to_config),
                     strict_role: Some(cfg.strict_role),
                     prefix_orf_receive: Some(cfg.prefix_orf_receive),
@@ -912,6 +914,7 @@ remote_asn = 65002
                     slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
                     slow_peer_isolation: false,
                     interpret_rfc1997: true,
+                    rs_control_communities: false,
                     remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
                     add_path_receive: false,
                     add_path_send: false,

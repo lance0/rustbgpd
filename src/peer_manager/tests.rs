@@ -65,6 +65,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         per_client_best: false,
         next_hop_ownership_strict_peer: false,
         interpret_rfc1997: true,
+        rs_control_communities: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         add_path_receive: false,
         add_path_send: false,
@@ -196,6 +197,7 @@ log_format = "json"
                         target_is_rr_client: true,
                         target_local_role: None,
                         interpret_rfc1997: true,
+                        rs_control_communities: false,
                         sendable_families: vec![(1, 1)],
                         llgr_families: vec![],
                         add_path_send: false,
@@ -1866,6 +1868,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         per_client_best: None,
         next_hop_ownership: None,
         interpret_rfc1997: None,
+        rs_control_communities: None,
         role: None,
         strict_role: None,
         prefix_orf_receive: None,
@@ -4686,6 +4689,7 @@ fn build_transport_config_reflects_every_transport_field() {
         per_client_best: true,
         next_hop_ownership_strict_peer: true,
         interpret_rfc1997: false,
+        rs_control_communities: true,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::All,
         add_path_receive: true,
         add_path_send: true,
@@ -4731,6 +4735,7 @@ fn build_transport_config_reflects_every_transport_field() {
         slow_peer_duration,
         slow_peer_isolation,
         interpret_rfc1997,
+        rs_control_communities,
         remove_private_as,
         add_path_receive,
         add_path_send,
@@ -4824,6 +4829,13 @@ fn build_transport_config_reflects_every_transport_field() {
     // (false) differs from the TransportConfig::new default (true), so a
     // dropped assignment fails here rather than shipping silently.
     assert_eq!(t.interpret_rfc1997, *interpret_rfc1997, "interpret_rfc1997");
+    // RFC 7947 control communities: fixture value (true) differs from the
+    // TransportConfig::new default (false) — a dropped assignment fails
+    // here rather than shipping silently.
+    assert_eq!(
+        t.rs_control_communities, *rs_control_communities,
+        "rs_control_communities"
+    );
     assert_eq!(t.remove_private_as, *remove_private_as, "remove_private_as");
     assert_eq!(
         t.peer.add_path_receive, *add_path_receive,

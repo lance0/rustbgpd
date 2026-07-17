@@ -46,6 +46,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (which only tears down a fully wedged socket); modeled on IOS-XR
   BGP Slow Peer Detection/Handling.
 
+- **Route-server control communities (RFC 7947 §2.3.2 / RFC 8195).**
+  A route-server client can steer per-target-peer distribution by
+  tagging its announcements: "do not announce to PEER" (`0:PEER` /
+  `RS:0:PEER`), "announce to no one" (`0:RS` / `RS:0:0`) overridable
+  per target by `RS:PEER` / `RS:1:PEER`, and prepend-toward-target
+  (`RS:101|102|103:PEER` for 1–3 copies of the announcing client's own
+  ASN, `RS:10x:0` for every target). Standard and RFC 8195 large forms
+  compose; extended-community control forms are deliberately not
+  implemented (draft-ietf-grow-ixp-ext-comms). Matched control
+  communities are scrubbed from the outbound announcement toward
+  enabled sessions; everyone else keeps byte-level transparency.
+  Per-neighbor / per-group knob `rs_control_communities`, default on
+  for `route_server_client` sessions and off otherwise. Enforcement is
+  a per-target export-staging decision (suppression sits beside the
+  RFC 1997 gates with its own `rs_control` explain rung; Add-Path and
+  per-client-best exclude suppressed candidates before ranking), so
+  enabled sessions ride the ungrouped per-peer path — the new
+  `rs_control_communities` update-group disqualifier reason.
+
 - **Per-peer fanout observability gauges.**
   `bgp_peer_outbound_queue_depth{peer}` reports the coalesced update
   frames buffered for a peer's outbound writer — the "which clients are

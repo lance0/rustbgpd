@@ -167,6 +167,51 @@ role = "route_server"
 max_prefixes = 50000
 ```
 
+## Member-set control communities (RFC 7947 §2.3.2 / RFC 8195)
+
+A member with a selective peering policy steers what the route server
+redistributes on its behalf by tagging its announcements with control
+communities keyed on the *target* member's ASN — the same convention
+the major IXPs document. `RS` below is the route server's ASN, `PEER`
+the target member's ASN. The standard (16-bit) forms exist only when
+both ASNs fit 16 bits; the large-community forms (RFC 8195) work for
+4-byte ASNs. Extended-community control forms are deliberately not
+implemented (draft-ietf-grow-ixp-ext-comms).
+
+| Member intent | Standard | Large |
+|---|---|---|
+| Do not announce to `PEER` | `0:PEER` | `RS:0:PEER` |
+| Announce to no one | `0:RS` | `RS:0:0` |
+| …except announce to `PEER` | `RS:PEER` | `RS:1:PEER` |
+| Prepend my ASN 1× / 2× / 3× toward `PEER` | — | `RS:101:PEER` / `RS:102:PEER` / `RS:103:PEER` |
+| Prepend toward every member | — | `RS:101:0` / `RS:102:0` / `RS:103:0` |
+
+Evaluation follows the deny-specific ladder: a target-specific "do not
+announce" always suppresses; otherwise "announce to no one" suppresses
+unless a target-specific "announce to" overrides it; otherwise the
+route is announced. Prepending inserts the *announcing member's* own
+leftmost ASN (the RS stays transparent and never inserts its own), and
+the largest matching count wins. Acted-on control communities are
+scrubbed from the outbound announcement: standard communities
+administered by `0` or `RS` (the `0xFFFF____` well-known space is
+never touched) and large communities `RS:{0,1,101,102,103}:*`.
+Informational large communities under the RS ASN with other function
+values pass through.
+
+Enforcement is per-neighbor via `rs_control_communities` — **default
+on for `route_server_client` sessions**, off for everyone else, and
+inheritable from a peer group. Set `rs_control_communities = false` on
+an RS client to restore full pass-through (control communities then
+reach that member verbatim). Suppression shows up in
+`rbgp neighbor <ip> explain <prefix>` as the `rs_control` gate rung.
+
+Cost note: an enabled session's export outcome depends on the target
+ASN per route, so it rides the ungrouped per-peer path (update-group
+snapshot reason `rs_control_communities`) — exactly like
+`per_client_best`. Members that don't need steering keep sharing
+update groups; only the sessions with the knob on pay the per-peer
+fan-out.
+
 ## Verify
 
 ```console

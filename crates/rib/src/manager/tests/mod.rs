@@ -1031,6 +1031,7 @@ mod per_client_best;
 mod policy;
 mod refresh;
 mod rpki;
+mod rs_control;
 mod rtc;
 mod selection_deferral;
 mod unicast;

@@ -960,6 +960,10 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
     ));
     assert!(matches!(
         rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerRsControl { .. }
+    ));
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerExportEncoder { .. }
     ));
     assert!(matches!(
