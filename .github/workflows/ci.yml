@@ -50,6 +50,11 @@ jobs:
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
       - run: cargo check -p rustbgpd --all-features --lib
+      # jemalloc became the default feature; keep the stock-glibc build
+      # compiling (debug/fallback builds use it) and keep the
+      # deny(unsafe_code) lint posture — it is only armed when neither
+      # allocator feature is on, so the default build no longer checks it.
+      - run: cargo check -p rustbgpd --no-default-features --all-targets
       - name: Check standalone scale harnesses and receipt classifiers
         run: |
           set -euo pipefail

@@ -120,6 +120,16 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
+# jemalloc is the default allocator: a long-lived routing daemon's
+# reload/resync transients are glibc-malloc's worst case (arenas grow to
+# absorb them and are never returned — RSS ratchets upward across policy
+# reloads while live bytes stay flat), and the shipped artifacts (GHCR
+# image, release tarballs) have built with jemalloc since v0.50.0+.
+# Defaulting it means local builds, receipts, and shipped binaries are
+# the same build, and the jemalloc_* allocator gauges are always on
+# /metrics. Build with --no-default-features for a stock-glibc binary
+# (CI keeps that build compiling; it also re-arms deny(unsafe_code)).
+default = ["jemalloc"]
 bench-internals = []
 jemalloc = ["tikv-jemallocator", "rustbgpd-telemetry/jemalloc"]
 dhat-heap = ["dhat"]
