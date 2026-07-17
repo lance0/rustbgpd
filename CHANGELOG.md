@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Shared export-policy transitions now pre-stage their destination
+  update-group before the fence, halving the reload wall during which
+  interleaved churn stalls.** The cohort transaction first sends
+  `PrepareExportPolicyDestination`: the RIB creates the prospective
+  destination group and stages it in budgeted actor slices *without* the
+  transition fence — ordinary churn keeps flowing between slices, and the
+  same all-groups staging pass keeps the prepared table live rather than
+  a stale snapshot. The transition then finds the destination
+  `Maintained` and skips its fenced full-table staging walk. Preparation
+  is best-effort (any failure falls back to the ordinary fenced staging),
+  a superseded or abandoned preparation is discarded so an orphaned
+  staged table cannot keep consuming per-churn staging work, and a
+  partially staged leftover is rejected by the existing table-length
+  validation. Measured at 700 route-server members x 400,400 routes
+  (mixed export-only reload under churn): fenced transition wall
+  0.95 s -> 0.45 s, per-observer max inter-UPDATE gap p50 ~1.0 s ->
+  ~0.53-0.64 s.
+
+- The shared-transition exact-export probe now reuses one exact result
+  per probe shape (prepared-attribute identity, MP framing inputs, and
+  prefix bit-length) within a batch instead of building a single-entry
+  UPDATE message per route, and the strict-cohort ceiling proof consults
+  a maximum computed once at store time instead of rescanning the
+  per-route length vector for every member (quadratic at fleet scale:
+  ~200 ms of fenced actor wall at 700 members x 400k routes). Together
+  the fenced probe phase drops ~40% at the reload-stall receipt shape.
+
 - Every pre-commit phase of a shared policy transition (member
   classification, destination staging, inventory build, and the
   exact-export probe) now strides under the same 25 ms wall-clock poll

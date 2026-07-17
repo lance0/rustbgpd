@@ -85,6 +85,17 @@ async fn subscribe_session_events(
     reply_rx.await.unwrap()
 }
 
+/// The export-only cohort transaction opens with a best-effort destination
+/// preparation; scripted RIB dialogues answer it with a skip so the cohort
+/// proceeds on its ordinary staging path.
+async fn skip_destination_prestage(rib_rx: &mut mpsc::Receiver<RibUpdate>) {
+    let RibUpdate::PrepareExportPolicyDestination { reply, .. } = rib_rx.recv().await.unwrap()
+    else {
+        panic!("expected destination preparation to open the cohort dialogue");
+    };
+    let _ = reply.send(Err("test: prestage skipped".to_string()));
+}
+
 async fn subscribe_policy_events(
     tx: &mpsc::Sender<PeerManagerCommand>,
 ) -> broadcast::Receiver<PolicyEvent> {
@@ -8318,6 +8329,7 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
             .collect(),
     );
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort commit");
@@ -8467,6 +8479,7 @@ async fn policy_rollback_rib_deadline_starts_after_session_restores() {
             .collect(),
     );
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let mut replies = Vec::new();
         for expected_peer in peers[..peers.len() - 1].iter().rev() {
             let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } =
@@ -8946,6 +8959,7 @@ async fn import_tolerant_cohort_defers_refresh_past_committed_batch() {
     let apply = manager.apply_resolved_policy_snapshot(targets);
     let refresh_watch = counters.clone();
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies {
             replacements,
             reply,
@@ -9064,6 +9078,7 @@ async fn import_tolerant_cohort_handoff_fires_deferred_refresh_once() {
     );
     let refresh_watch = counters.clone();
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort RIB command");
@@ -9374,6 +9389,7 @@ async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
             .collect(),
     );
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort RIB command");
@@ -9434,6 +9450,10 @@ async fn export_only_snapshot_handoff_applies_one_rib_peer_at_a_time() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the handoff fixture scripts the full prestage + cohort + per-peer dialogue"
+)]
 async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_rollback() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
@@ -9477,6 +9497,7 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
             .collect(),
     );
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort RIB command");
@@ -9557,6 +9578,7 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
     let installs = Arc::new(AtomicUsize::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
     let rib_task = tokio::spawn(async move {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort RIB command");
@@ -9703,6 +9725,7 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
             .collect(),
     );
     let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
         let RibUpdate::ReplacePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected cohort RIB command");
@@ -9971,6 +9994,7 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
             .await
     });
 
+    skip_destination_prestage(&mut rib_rx).await;
     let RibUpdate::ReplacePeerExportPolicy {
         peer: first_restore,
         reply,
@@ -10058,6 +10082,7 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
         })
         .await
         .unwrap();
+    skip_destination_prestage(&mut rib_rx).await;
     let RibUpdate::ReplacePeerExportPolicies {
         reply: rib_reply, ..
     } = rib_rx.recv().await.unwrap()
@@ -10228,6 +10253,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         })
         .await
         .unwrap();
+    skip_destination_prestage(&mut rib_rx).await;
     entered.await.unwrap();
     state_queries.store(0, Ordering::SeqCst);
     tokio::time::advance(std::time::Duration::from_millis(250)).await;

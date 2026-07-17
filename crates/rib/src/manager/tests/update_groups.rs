@@ -4105,3 +4105,318 @@ async fn mark_outbound_dirty_drops_peer_with_closed_channel() {
         "an open-channel dirty peer is untouched"
     );
 }
+
+/// Prepare a cohort's destination group before the transition, churn a new
+/// route through the ordinary path AFTER the preparation completed, then
+/// commit the transition. The prepared group must be found `Maintained`
+/// (skipping the fenced staging walk), the churned route must appear in the
+/// shared transition inventory (the prepared table is live, not a snapshot),
+/// and every member must carry the same encode-once cell.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture keeps prepare, churn, and commit phases in one scenario"
+)]
+async fn prepared_destination_commits_with_interleaved_churn() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 61, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 61, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 61,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 61);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+                source,
+            ),
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24),
+                source,
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 2);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(next_policy.clone()),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        1,
+        "the prepared destination is a staged, still-unowned group"
+    );
+
+    // Churn AFTER preparation completed: the new prefix reaches members
+    // through the ordinary delta path AND must land in the prepared table.
+    let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(churned, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    let mut shared_cells = Vec::new();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert!(update.withdraw.is_empty());
+        assert_eq!(update.announce.len(), 3, "all three routes changed chains");
+        assert!(
+            update
+                .announce
+                .iter()
+                .any(|route| route.prefix == Prefix::V4(churned)),
+            "the prepared table must have tracked the post-preparation churn"
+        );
+        shared_cells.push(Arc::clone(update.shared_group_encode.as_ref().unwrap()));
+    }
+    assert!(Arc::ptr_eq(&shared_cells[0], &shared_cells[1]));
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "the committed destination is owned; nothing uncommitted remains"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A prepared destination whose cohort never commits is removed by the
+/// explicit discard command, so an orphaned staged table cannot keep
+/// consuming per-churn staging work.
+#[tokio::test]
+async fn discarded_prepared_destination_is_removed() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up(&tx, spec).await);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 62);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
+            source,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(next_policy.clone()),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    assert_eq!(query_uncommitted_policy_transition_groups(&tx).await, 1);
+
+    tx.send(RibUpdate::DiscardPreparedExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(next_policy),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "the unowned prepared group must be removed"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A transition sent immediately after (or racing) a preparation must
+/// commit and leave no uncommitted group behind, whether the preparation
+/// completed (Maintained path) or was superseded mid-walk (discarded, then
+/// ordinary Created path).
+#[tokio::test]
+async fn transition_immediately_after_prepare_commits_without_leaks() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 63, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 63, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 63,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 63);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24),
+            source,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    // No await between the two commands: the transition may supersede the
+    // preparation mid-walk or find it complete — both must commit cleanly.
+    let (prepare_reply, prepare_response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(next_policy.clone()),
+        reply: prepare_reply,
+    })
+    .await
+    .unwrap();
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    // The prepare reply resolved either way (Ok if it finished first, or
+    // dropped/Err when superseded); it must never hang.
+    let _ = prepare_response.await;
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert!(update.shared_group_encode.is_some());
+    }
+    assert_eq!(query_uncommitted_policy_transition_groups(&tx).await, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}

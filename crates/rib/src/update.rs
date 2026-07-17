@@ -1707,6 +1707,44 @@ pub enum RibUpdate {
         /// Response channel for failure or the committed/per-peer-handoff outcome.
         reply: oneshot::Sender<Result<ExportPolicyCohortOutcome, String>>,
     },
+    /// Create and stage the prospective destination update-group of an
+    /// upcoming [`RibUpdate::ReplacePeerExportPolicies`] cohort — without
+    /// the transition fence.
+    ///
+    /// Staging proceeds in budgeted actor slices interleaved with ordinary
+    /// mutation traffic, and the created group is kept current by the
+    /// ordinary all-groups staging pass exactly like any owned group, so
+    /// its table is live (not a stale snapshot) whenever the cohort
+    /// transition arrives. The transition's `StageDestination` phase then
+    /// finds the destination `Maintained` and skips its fenced full-table
+    /// staging walk — the dominant share of the fenced reload wall at
+    /// route-server scale, during which every queued churn delta stalls.
+    ///
+    /// Best-effort: an `Err` reply (or a dropped reply) only means the
+    /// transition will stage the destination itself under the fence, as
+    /// before. The caller owns sending
+    /// [`RibUpdate::DiscardPreparedExportPolicyDestination`] if its cohort
+    /// transaction fails before the transition command is sent.
+    PrepareExportPolicyDestination {
+        /// Exemplar cohort member; its peer flags seed the group profile.
+        peer: IpAddr,
+        /// The destination export chain (`None` = permit-all resolved).
+        export_policy: Option<PolicyChain>,
+        /// Resolves once the destination is fully staged, or with the
+        /// reason the preparation was skipped.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Discard a previously prepared, still-unowned destination group after
+    /// the cohort transaction failed before its transition was sent, so an
+    /// orphaned staged table does not keep consuming per-churn staging
+    /// work. A destination that gained members (the transition committed)
+    /// is never removed.
+    DiscardPreparedExportPolicyDestination {
+        /// The exemplar peer passed to the matching prepare.
+        peer: IpAddr,
+        /// The destination export chain passed to the matching prepare.
+        export_policy: Option<PolicyChain>,
+    },
     /// Force re-emission of all currently-advertised routes to a peer
     /// without changing policy. Used when an outbound *attribute*
     /// surface changes (e.g. RFC 8326 `GRACEFUL_SHUTDOWN` community

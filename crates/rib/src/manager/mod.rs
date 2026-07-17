@@ -434,6 +434,12 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
+    /// In-progress unfenced staging of a prospective clean-transition
+    /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
+    /// Advanced one budgeted slice at a time only when no ordinary
+    /// mutation traffic is queued — churn keeps flowing, and keeps the
+    /// staged table current, while this walk covers the snapshot.
+    pending_destination_prestage: Option<distribution::DestinationPrestage>,
     /// Withdrawn NLRI identities accumulated across the currently-draining
     /// batch. Retired only after distribution so the exact overlay can
     /// suppress any rejected-only wire withdrawal first.
@@ -1202,6 +1208,7 @@ impl RibManager {
             readiness_rx: None,
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
+            pending_destination_prestage: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
@@ -2119,6 +2126,15 @@ impl RibManager {
                 replacements,
                 reply,
             } => self.handle_replace_peer_export_policies(replacements, reply),
+            RibUpdate::PrepareExportPolicyDestination {
+                peer,
+                export_policy,
+                reply,
+            } => self.begin_destination_prestage(peer, export_policy.as_ref(), reply),
+            RibUpdate::DiscardPreparedExportPolicyDestination {
+                peer,
+                export_policy,
+            } => self.discard_prepared_export_destination(peer, export_policy.as_ref()),
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }
@@ -4940,6 +4956,23 @@ impl RibManager {
                     continue;
                 }
                 self.expire_selection_deferral();
+                continue;
+            }
+
+            // Unfenced destination pre-staging: advance one budgeted slice
+            // only when no ordinary mutation traffic is queued, so churn
+            // keeps flowing (and keeps already-staged prefixes current)
+            // between slices. Readiness and a bounded query budget are
+            // served every iteration, mirroring the paced-flush seams.
+            if self.pending_destination_prestage.is_some() {
+                if self.drain_ready_updates() {
+                    self.drain_readiness_queries(None);
+                    continue;
+                }
+                self.drain_readiness_queries(None);
+                self.advance_destination_prestage();
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
                 continue;
             }
 

@@ -1077,6 +1077,19 @@ impl RibManager {
     ) -> Option<()> {
         let old = self.group_ribs.get(&source)?;
         let new = self.group_ribs.get(&destination)?;
+        // Fold permit counts per chunk keyed by borrowed labels, then merge
+        // into the owned builder maps once: the per-route path used to clone
+        // the `Option<String>` label twice per route, which dominated this
+        // walk at reload-stall scale. The merge clones one label per
+        // distinct (label) / (source, label) pair per chunk instead.
+        let mut chunk_totals: FxHashMap<Option<&str>, u64> = FxHashMap::default();
+        let mut chunk_by_source: FxHashMap<IpAddr, FxHashMap<Option<&str>, u64>> =
+            FxHashMap::default();
+        // Run-length fold for the permit counters: tables interleave far
+        // fewer (source, label) flips than routes (contiguous prefix blocks
+        // from one source are the common shape), so accumulate runs and
+        // touch the maps once per flip instead of twice per route.
+        let mut run: Option<(IpAddr, Option<&str>, u64)> = None;
         for &(prefix, path_id) in keys {
             let route = new.table.get(&prefix, path_id)?;
             let key = (prefix, path_id);
@@ -1090,14 +1103,45 @@ impl RibManager {
                 inventory.next_hop_override.push(next_hop);
             }
 
-            let label = new.staged_labels.get(&key).cloned().unwrap_or(None);
-            *inventory.permit_totals.entry(label.clone()).or_default() += 1;
-            *inventory
-                .permit_by_source
-                .entry(route.peer)
+            let label = new
+                .staged_labels
+                .get(&key)
+                .and_then(|label| label.as_deref());
+            run = Some(match run {
+                Some((peer, run_label, count)) if peer == route.peer && run_label == label => {
+                    (peer, run_label, count + 1)
+                }
+                Some((peer, run_label, count)) => {
+                    *chunk_totals.entry(run_label).or_default() += count;
+                    *chunk_by_source
+                        .entry(peer)
+                        .or_default()
+                        .entry(run_label)
+                        .or_default() += count;
+                    (route.peer, label, 1)
+                }
+                None => (route.peer, label, 1),
+            });
+        }
+        if let Some((peer, run_label, count)) = run {
+            *chunk_totals.entry(run_label).or_default() += count;
+            *chunk_by_source
+                .entry(peer)
                 .or_default()
-                .entry(label)
-                .or_default() += 1;
+                .entry(run_label)
+                .or_default() += count;
+        }
+        for (label, count) in chunk_totals {
+            *inventory
+                .permit_totals
+                .entry(label.map(str::to_owned))
+                .or_default() += count;
+        }
+        for (peer, counts) in chunk_by_source {
+            let by_source = inventory.permit_by_source.entry(peer).or_default();
+            for (label, count) in counts {
+                *by_source.entry(label.map(str::to_owned)).or_default() += count;
+            }
         }
         Some(())
     }
