@@ -1,0 +1,122 @@
+# Hand-written `arouteserver template-context` fixture, shaped after the
+# builder's render context (top-level keys pinned in EXPECTED_TOP_LEVEL_KEYS).
+#
+# Three clients:
+#   - AS4242_1   — 16-bit ASN, IPv4, plain defaults;
+#   - AS197000_1 — 32-bit ASN, IPv6, explicit strict next-hop, GTSM;
+#   - AS51325_1  — deliberately EMPTY IRR prefix bundle, proving the
+#     implausible-set abort (fail-stale, never fail-open).
+ip_ver: null
+list_ip_vers: [4, 6]
+live_tests: false
+rtt_based_functions_are_used: false
+perform_graceful_shutdown: false
+any_reject_cause_map_community_set: false
+asn3216_map: {}
+arin_whois_records: {}
+registrobr_whois_records: {}
+rpki_roas: {}
+reject_reasons:
+  "1": "Invalid AS_PATH length"
+  "2": "Prefix is bogon"
+never_via_route_servers_asns: [39999]
+bogons:
+  - {prefix: "10.0.0.0", length: 8, comment: "RFC 1918"}
+  - {prefix: "192.168.0.0", length: 16, comment: "RFC 1918"}
+  - {prefix: "fc00::", length: 7, comment: "unique local"}
+cfg:
+  rs_as: 65500
+  router_id: "192.0.2.1"
+  prepend_rs_as: false
+  path_hiding: true
+  passive: true
+  gtsm: false
+  multihop: null
+  add_path: false
+  rfc8950: false
+  graceful_shutdown:
+    enabled: true
+    local_pref: 0
+  blackhole_filtering:
+    policy_ipv4: null
+    policy_ipv6: null
+  rtt_thresholds: null
+  communities:
+    blackholing: {std: null, lrg: null, ext: null}
+    do_not_announce_to_any: {std: "0:65500", lrg: null, ext: null}
+    do_not_announce_to_peers_with_rtt_lower_than: {std: null, lrg: null, ext: null}
+  filtering:
+    next_hop:
+      policy: strict
+    ipv4_pref_len: {min: 8, max: 24}
+    ipv6_pref_len: {min: 12, max: 48}
+    global_black_list_pref:
+      - {prefix: "192.0.2.0", length: 24, comment: "IXP peering LAN"}
+    max_as_path_len: 32
+    reject_invalid_as_in_as_path: true
+    transit_free:
+      action: reject
+      asns: [174, 3356]
+    irrdb:
+      enforce_origin_in_as_set: true
+      enforce_prefix_in_as_set: true
+      allow_longer_prefixes: false
+      tag_as_set: true
+    rpki_bgp_origin_validation:
+      enabled: true
+      reject_invalid: true
+    max_prefix:
+      action: shutdown
+      peering_db: {enabled: true}
+      general_limit_ipv4: 170000
+      general_limit_ipv6: 12000
+    reject_policy:
+      policy: reject
+asns:
+  AS4242: {as_sets: ["AS-EXAMPLE-FOUR"]}
+  AS197000: {as_sets: ["AS-EXAMPLE-BIG"]}
+  AS51325: {as_sets: ["AS-EXAMPLE-EMPTY"]}
+clients:
+  - id: AS4242_1
+    asn: 4242
+    ip: "192.0.2.11"
+    description: "member-one"
+    cfg:
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS4242_bundle"]
+        max_prefix: {limit_ipv4: 5000, limit_ipv6: 0, action: shutdown}
+  - id: AS197000_1
+    asn: 197000
+    ip: "2001:db8:0:1::22"
+    description: "member-two-v6"
+    cfg:
+      gtsm: true
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS197000_bundle"]
+        next_hop:
+          policy: strict
+        max_prefix: {limit_ipv4: 0, limit_ipv6: 1000}
+  - id: AS51325_1
+    asn: 51325
+    ip: "192.0.2.13"
+    description: "member-empty-irr"
+    cfg:
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS51325_bundle"]
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 0}
+irrdb_info:
+  AS4242_bundle:
+    asns: [4242, 4243]
+    prefixes:
+      - {prefix: "203.0.113.0", length: 24, exact: true, comment: "route object 203.0.113.0/24"}
+      - {prefix: "198.51.100.0", length: 24, le: 26}
+  AS197000_bundle:
+    asns: ["AS197000"]
+    prefixes:
+      - {prefix: "2a10:cc40::", length: 29, le: 48}
+  AS51325_bundle:
+    asns: [51325]
+    prefixes: []

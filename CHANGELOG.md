@@ -124,6 +124,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing `bgp_policy_dataset_refresh_errors_total`) are now reaped
   when a dataset is removed from config. Alert expressions documented
   in `OPERATIONS.md` ("Policy artifact freshness").
+- **`rs-config-render`: IRR/PeeringDB-driven route-server configuration
+  from arouteserver data (ADR-0110 phase 1).** New standalone tool
+  (`tools/rs-config-render/`) that consumes `arouteserver
+  template-context` output — the fully-resolved IRR/PeeringDB/RPKI data
+  model behind the incumbent IXP stack — and emits rustbgpd
+  configuration: `config.toml` with transparent route-server-client
+  sessions (strict next-hop ownership, per-family max-prefix ceilings,
+  per-client import chains, per-client-best or Add-Path), a shared
+  hygiene `.rpol` (AS_SET reject first, invalid-ASN/transit-free/
+  never-via-RS path terms, prefix-length windows, bogons, black-list,
+  RPKI origin validation with RFC 8097 tagging), per-client IRR
+  prefix/origin `.rpol` filters with a default-reject tail, and a
+  refresh receipt. Fail-stale, never fail-open: unsupported knobs (RTT
+  communities, `next_hop.policy: same-as`, `tag`/`tag_and_reject`
+  reject policies, …) refuse loudly with distinct exit codes, empty or
+  implausibly shrunken per-client sets abort the render, and a
+  context-shape fingerprint refuses silent upstream drift. Generated
+  policies carry in-language `test` blocks derived from the site's own
+  data; a workspace test gates the emitted output through the real
+  `rustbgpd --check`. Cookbook pointer in
+  `docs/cookbook/route-server.md`; usage and the cron loop in
+  `tools/rs-config-render/README.md`.
 
 - **Looking-glass filtered-route surface: rejected inbound routes are
   retained with their reject reason (LAN-472).** Every rejected unicast

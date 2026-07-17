@@ -216,7 +216,9 @@ item). None blocks a first pilot at OpenBGPD-equivalence level.
    `reject`/`tag` policies), refuse unsupported knobs loudly
    (RTT communities, `same-as`, `tag_and_reject`), fingerprint the
    consumed context shape, abort on empty/implausible sets, write the
-   refresh receipt.
+   refresh receipt. *Delivered: `tools/rs-config-render/` (reject
+   policy only; `tag` is refused pending the reject-reason wiring
+   below).*
 2. Refresh-loop cookbook: cron cadence, `--check` gate, SIGHUP,
    fail-stale semantics, staleness alerting; extends the existing
    route-server example.
