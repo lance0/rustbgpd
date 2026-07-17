@@ -81,6 +81,7 @@ pub(super) fn build_peer_info(
         tcp_ao_rotation: managed.tcp_ao_rotation.clone(),
         is_dynamic: managed.is_dynamic,
         stale,
+        slow_peer: session_state.is_some_and(|s| s.slow_peer),
     }
 }
 

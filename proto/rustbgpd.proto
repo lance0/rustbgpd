@@ -484,6 +484,11 @@ message NeighborState {
   string tcp_ao_rotation_phase = 34;
   // Secret-free actionable add failure. Empty when the phase is healthy.
   string tcp_ao_rotation_error = 35;
+  // Slow-peer flag: the session is alive but its outbound queue has
+  // stayed above the configured backlog threshold for the configured
+  // duration (slow_peer_threshold_pct / slow_peer_duration). Clears
+  // when the queue drains and on session teardown.
+  bool slow_peer = 36;
 }
 
 message SelectionDeferralFamilyState {

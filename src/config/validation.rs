@@ -389,6 +389,18 @@ impl Config {
                 return Err(ConfigError::InvalidSendHoldTime { value, hold_time });
             }
 
+            // Slow-peer backlog threshold is a fraction of the outbound
+            // writer buffer: 0 would flag an empty queue and >100 could
+            // never fire. Checked on the effective (inherited) value.
+            let slow_peer_threshold_pct = neighbor
+                .slow_peer_threshold_pct
+                .or_else(|| group.and_then(|g| g.slow_peer_threshold_pct));
+            if let Some(value) = slow_peer_threshold_pct
+                && !(1..=100).contains(&value)
+            {
+                return Err(ConfigError::InvalidSlowPeerThreshold { value });
+            }
+
             // Validate route_reflector_client: must be iBGP
             let route_reflector_client = neighbor
                 .route_reflector_client

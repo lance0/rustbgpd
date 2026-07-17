@@ -15048,3 +15048,112 @@ async fn mp_eor_empty_mp_unreach_marks_end_of_rib() {
     }
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Slow-peer detection (LAN-470)
+// ─────────────────────────────────────────────────────────────────────
+
+/// End-to-end detector proof on a real wedged socket (the #962 writer
+/// test pattern: shrunk socket buffers + burst): the flag must NOT
+/// raise before the configured duration, MUST raise once the backlog
+/// has persisted past it, and MUST clear — flag and `bgp_peer_slow`
+/// gauge both — after the peer drains. A flag that never clears is a
+/// false-alarm generator.
+#[tokio::test]
+async fn slow_peer_flag_fires_on_wedged_backlog_and_clears_after_drain() {
+    const FRAMES: usize = 3000;
+    const FRAME_LEN: usize = 1024;
+
+    let mut session = make_test_session(65001, 65002);
+    session.config.slow_peer_duration = 1;
+    session.config.slow_peer_threshold_pct = 50;
+
+    // Wedged TCP pair: tiny buffers on both sides, peer never reads.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.connect(addr).await.unwrap()
+    });
+    let (server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    let mut peer = connect.await.unwrap();
+    session.test_install_stream(server);
+
+    // Burst far beyond the wedged socket: > threshold (50% of
+    // OUTBOUND_BUFFER = 2048) frames stay queued behind the parked
+    // writer.
+    let bulk_tx = session.writer_bulk_tx.clone().unwrap();
+    for _ in 0..FRAMES {
+        bulk_tx
+            .send(Bytes::from(vec![0u8; FRAME_LEN]))
+            .await
+            .unwrap();
+    }
+
+    // Above threshold but duration not yet elapsed: candidate, not slow.
+    session.evaluate_slow_peer();
+    assert!(
+        !session.slow_peer,
+        "flag must not raise before the configured duration"
+    );
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "backlog episode must be tracked from the first over-threshold sample"
+    );
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 0);
+
+    // Backlog persists past the duration: the flag raises.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer, "flag must raise after the duration");
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 1);
+
+    // Peer recovers: drain everything the writer sends.
+    let mut sink = vec![0u8; FRAMES * FRAME_LEN];
+    peer.read_exact(&mut sink).await.unwrap();
+
+    // Fully drained: the flag and the gauge both clear.
+    session.evaluate_slow_peer();
+    assert!(!session.slow_peer, "flag must clear after the queue drains");
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 0);
+    assert!(session.slow_peer_backlog_since.is_none());
+
+    // Teardown resets detector state without leaving the gauge high.
+    session.handle_tcp_disconnect();
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 0);
+}
+
+/// `slow_peer_duration = 0` disables detection entirely: no episode
+/// tracking, no flag, no re-check timer — the documented off switch.
+#[tokio::test]
+async fn slow_peer_detection_disabled_by_zero_duration() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.slow_peer_duration = 0;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.connect(addr).await.unwrap()
+    });
+    let (server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    let _peer = connect.await.unwrap();
+    session.test_install_stream(server);
+
+    let bulk_tx = session.writer_bulk_tx.clone().unwrap();
+    for _ in 0..3000 {
+        bulk_tx.send(Bytes::from(vec![0u8; 1024])).await.unwrap();
+    }
+    session.evaluate_slow_peer();
+    assert!(!session.slow_peer);
+    assert!(session.slow_peer_backlog_since.is_none());
+    assert!(session.slow_peer_timer.is_none());
+}

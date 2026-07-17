@@ -344,6 +344,12 @@ pub struct RibManager {
     /// `(AFI, SAFI)`. Consulted as an additional outbound filter before export
     /// policy when distributing to the peer. Absent ⇒ no ORF constraint.
     peer_orf_filters: HashMap<IpAddr, HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
+    /// Peers currently isolated from shared update-groups because their
+    /// transport flagged them slow (LAN-470, `slow_peer_isolation`).
+    /// Membership recomputes classify these as
+    /// `GroupMembership::SlowPeer` (per-peer fallback path). Per-session
+    /// state: cleared on session teardown like the ORF gate above.
+    slow_isolated_peers: HashSet<IpAddr>,
     /// Per-peer RT-Constrain membership (RFC 4684) gating VPNv4/VPNv6
     /// distribution. Present (possibly empty = advertise NO VPN routes,
     /// the strict rule) from peer-up for every peer that negotiated
@@ -1175,6 +1181,7 @@ impl RibManager {
             peer_interpret_rfc1997: HashSet::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_orf_filters: HashMap::new(),
+            slow_isolated_peers: HashSet::new(),
             peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
@@ -1443,6 +1450,7 @@ impl RibManager {
             // so advancing here at acceptance covers the whole transaction.
             RibUpdate::PeerAddPathLimits { .. }
             | RibUpdate::PeerOrfUpdate { .. }
+            | RibUpdate::PeerSlowState { .. }
             | RibUpdate::SetPeerPolicyContext { .. }
             | RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
@@ -1915,6 +1923,15 @@ impl RibManager {
                     )));
                 } else {
                     self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply);
+                }
+            }
+            RibUpdate::PeerSlowState {
+                peer,
+                session_id,
+                slow,
+            } => {
+                if !self.stale_session_message(peer, session_id, "PeerSlowState", "slow_peer") {
+                    self.handle_peer_slow_state(peer, slow);
                 }
             }
             RibUpdate::SetPeerPolicyContext {

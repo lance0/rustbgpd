@@ -495,6 +495,10 @@ pub struct PeerSessionState {
     pub import_policy_routes_permitted: u64,
     /// Import policy evaluations that denied a route.
     pub import_policy_routes_denied: u64,
+    /// Slow-peer flag (LAN-470): the session is alive but its outbound
+    /// queue has stayed above the configured backlog threshold for the
+    /// configured duration. Clears on drain and on session teardown.
+    pub slow_peer: bool,
 }
 
 /// Actor-consistent negotiated session identity used only while publishing a

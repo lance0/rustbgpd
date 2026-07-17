@@ -312,6 +312,14 @@ inactive). Optional `effective_send_limit` is the normalized view: presence
 means active, with zero unlimited and non-zero finite; absence means inactive.
 New clients fall back to the legacy field when reading an older server.
 
+`NeighborState.slow_peer` is `true` while the peer is flagged slow: the
+session is Established and alive but its outbound queue has stayed above
+the configured backlog threshold for the configured duration
+(`slow_peer_threshold_pct` / `slow_peer_duration` in the neighbor
+config). It clears when the queue drains and on session teardown, and
+mirrors the `bgp_peer_slow{peer}` gauge. See the "Slow peers" section
+in `OPERATIONS.md` for interpretation.
+
 ---
 
 ## ConfigService

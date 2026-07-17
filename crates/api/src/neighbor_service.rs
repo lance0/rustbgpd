@@ -581,6 +581,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_applied_generation: info.tcp_ao_rotation.applied.as_u64(),
         tcp_ao_rotation_phase: info.tcp_ao_rotation.phase.as_str().to_string(),
         tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
+        slow_peer: info.slow_peer,
     }
 }
 
@@ -777,6 +778,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             orr_vantage: None,
             route_server_client: config.route_server_client,
             per_client_best: config.per_client_best,
+            // Not exposed on the runtime neighbor-add gRPC surface:
+            // dynamic peers take the compiled-in detection defaults.
+            // Configure exceptions via the static TOML slow_peer_* knobs.
+            slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+            slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+            slow_peer_isolation: false,
             // Not exposed on the runtime neighbor-add gRPC surface
             // (ADR-0039 precedent): enable ADR-0107 ownership
             // enforcement via the static TOML `next_hop_ownership` knob.
@@ -1343,6 +1350,9 @@ mod tests {
             route_server_client: false,
             per_client_best: false,
             next_hop_ownership_strict_peer: false,
+            slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+            slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+            slow_peer_isolation: false,
             interpret_rfc1997: true,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,

@@ -177,6 +177,11 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
     PeerGroupConfig {
         hold_time: definition.hold_time,
         send_hold_time: definition.send_hold_time,
+        // Slow-peer knobs are config-file knobs (LAN-470); the gRPC
+        // peer-group surface does not carry them.
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: definition.max_prefixes,
         // Per-family limits are config-file knobs (ADR-0108); the gRPC
         // peer-group surface does not carry them.
@@ -411,6 +416,12 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     peer_group: cfg.peer_group.clone(),
                     hold_time: cfg.hold_time,
                     send_hold_time: cfg.send_hold_time,
+                    // Not carried on the runtime neighbor-add surface:
+                    // persist as unset so resolution re-applies the
+                    // compiled-in detection defaults (LAN-470).
+                    slow_peer_threshold_pct: None,
+                    slow_peer_duration: None,
+                    slow_peer_isolation: None,
                     max_prefixes: cfg.max_prefixes,
                     max_prefixes_ipv4: cfg.max_prefixes_ipv4,
                     max_prefixes_ipv6: cfg.max_prefixes_ipv6,
@@ -897,6 +908,9 @@ remote_asn = 65002
                     route_server_client: false,
                     per_client_best: false,
                     next_hop_ownership_strict_peer: false,
+                    slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+                    slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+                    slow_peer_isolation: false,
                     interpret_rfc1997: true,
                     remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
                     add_path_receive: false,

@@ -1238,6 +1238,18 @@ impl Config {
                 .or_else(|| group.and_then(|g| g.next_hop_ownership)),
             Some(NextHopOwnershipConfig::StrictPeer)
         );
+        transport.slow_peer_threshold_pct = neighbor
+            .slow_peer_threshold_pct
+            .or_else(|| group.and_then(|g| g.slow_peer_threshold_pct))
+            .unwrap_or(rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT);
+        transport.slow_peer_duration = neighbor
+            .slow_peer_duration
+            .or_else(|| group.and_then(|g| g.slow_peer_duration))
+            .unwrap_or(rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS);
+        transport.slow_peer_isolation = neighbor
+            .slow_peer_isolation
+            .or_else(|| group.and_then(|g| g.slow_peer_isolation))
+            .unwrap_or(false);
         // RFC 1997 egress enforcement defaults to on, except for
         // route-server clients (transparent pass-through unless the
         // operator opts in explicitly).
@@ -1302,6 +1314,9 @@ impl Config {
             peer_group: Some(peer_group_name.to_string()),
             hold_time: None,
             send_hold_time: None,
+            slow_peer_threshold_pct: None,
+            slow_peer_duration: None,
+            slow_peer_isolation: None,
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,

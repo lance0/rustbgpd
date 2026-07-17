@@ -413,7 +413,30 @@ pub struct TransportConfig {
     /// event channel is not doubled for collectors that never see the
     /// rib-out stream.
     pub bmp_rib_out: bool,
+    /// Slow-peer detection backlog threshold, as a percentage of the
+    /// writer's outbound bulk-buffer capacity (1–100). The peer is a
+    /// slow-peer candidate while its buffered outbound frames stay at
+    /// or above this fraction. Operator knob: `slow_peer_threshold_pct`.
+    pub slow_peer_threshold_pct: u8,
+    /// How long (seconds) the backlog must stay above the threshold
+    /// before the peer is flagged slow. `0` disables detection.
+    /// Operator knob: `slow_peer_duration`.
+    pub slow_peer_duration: u32,
+    /// Move a flagged-slow peer onto the per-peer (ungrouped) update
+    /// path so it stops holding back its update-group's shared encode;
+    /// it regroups when the flag clears. Operator knob:
+    /// `slow_peer_isolation`. Default off — detection alone is purely
+    /// observational.
+    pub slow_peer_isolation: bool,
 }
+
+/// Default slow-peer backlog threshold: half the writer's outbound
+/// bulk-buffer capacity.
+pub const DEFAULT_SLOW_PEER_THRESHOLD_PCT: u8 = 50;
+
+/// Default slow-peer persistence duration (seconds) before the flag is
+/// raised.
+pub const DEFAULT_SLOW_PEER_DURATION_SECS: u32 = 30;
 
 impl TransportConfig {
     /// Default TCP connect timeout (30 seconds).
@@ -450,6 +473,9 @@ impl TransportConfig {
             explain_enabled: true,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
             bmp_rib_out: false,
+            slow_peer_threshold_pct: DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+            slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,
+            slow_peer_isolation: false,
         }
     }
 }

@@ -43,6 +43,9 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         peer_group: None,
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+        slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+        slow_peer_isolation: false,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -1205,6 +1208,7 @@ fn established_export_policy_test_session(
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -1277,6 +1281,7 @@ fn rollback_ordering_policy_session(
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1355,6 +1360,7 @@ fn stalled_export_policy_test_session(
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -1552,6 +1558,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1837,6 +1844,9 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         peer_group: None,
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -4644,6 +4654,9 @@ fn build_transport_config_reflects_every_transport_field() {
         peer_group: Some("rr-clients".to_string()),
         hold_time: Some(240),
         send_hold_time: Some(600),
+        slow_peer_threshold_pct: 77,
+        slow_peer_duration: 120,
+        slow_peer_isolation: true,
         max_prefixes: Some(1000),
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -4714,6 +4727,9 @@ fn build_transport_config_reflects_every_transport_field() {
         route_server_client,
         per_client_best,
         next_hop_ownership_strict_peer,
+        slow_peer_threshold_pct,
+        slow_peer_duration,
+        slow_peer_isolation,
         interpret_rfc1997,
         remove_private_as,
         add_path_receive,
@@ -4791,6 +4807,18 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.next_hop_ownership_strict_peer, *next_hop_ownership_strict_peer,
         "next_hop_ownership_strict_peer"
+    );
+    assert_eq!(
+        t.slow_peer_threshold_pct, *slow_peer_threshold_pct,
+        "slow_peer_threshold_pct"
+    );
+    assert_eq!(
+        t.slow_peer_duration, *slow_peer_duration,
+        "slow_peer_duration"
+    );
+    assert_eq!(
+        t.slow_peer_isolation, *slow_peer_isolation,
+        "slow_peer_isolation"
     );
     // Same class of pin for the RFC 1997 egress knob: the fixture value
     // (false) differs from the TransportConfig::new default (true), so a
@@ -5222,6 +5250,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -6080,6 +6109,7 @@ fn policy_test_peer_state(peer_addr: IpAddr, state: SessionState) -> PeerSession
         last_error: String::new(),
         tcp_ao_info: None,
         tcp_ao_protected: false,
+        slow_peer: false,
     }
 }
 
@@ -6121,6 +6151,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -6233,6 +6264,7 @@ fn sequenced_policy_state_handle(
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -6300,6 +6332,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -6364,6 +6397,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -6426,6 +6460,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -7254,6 +7289,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -7368,6 +7404,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -7500,6 +7537,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             last_error: String::new(),
                             tcp_ao_info: None,
                             tcp_ao_protected: false,
+                            slow_peer: false,
                         });
                     }
                     PeerCommand::Shutdown => break,
@@ -10741,6 +10779,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 _ => {}
@@ -10875,6 +10914,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             last_error: String::new(),
                             tcp_ao_info: None,
                             tcp_ao_protected: false,
+                            slow_peer: false,
                         });
                     }
                     PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -11052,6 +11092,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -11231,6 +11272,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -11404,6 +11446,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -11608,6 +11651,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -11833,6 +11877,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -12200,6 +12245,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         last_error: String::new(),
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
+                        slow_peer: false,
                     });
                 }
                 PeerCommand::CollisionDump => {

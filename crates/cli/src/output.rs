@@ -227,6 +227,10 @@ pub struct JsonNeighborDetail {
     /// See [`JsonNeighbor::stale`].
     #[serde(skip_serializing_if = "is_false")]
     pub stale: bool,
+    /// Slow-peer flag: alive but persistently not draining its
+    /// outbound queue (LAN-470). Omitted while false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub slow_peer: bool,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
@@ -1147,6 +1151,7 @@ mod tests {
             remote_asn: 65002,
             state: "Established".to_string(),
             stale: true,
+            slow_peer: true,
             uptime_seconds: 42,
             prefixes_received: 1,
             prefixes_sent: 2,

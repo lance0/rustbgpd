@@ -236,13 +236,121 @@ impl PeerSession {
     /// wedged peer whose writer is parked mid-write still shows its
     /// climbing backlog here. Both `max_capacity` and `capacity` are cheap
     /// atomic reads. No-op while disconnected.
-    pub(super) fn sample_outbound_queue_depth(&self) {
+    pub(super) fn sample_outbound_queue_depth(&mut self) {
         if let Some(tx) = &self.writer_bulk_tx {
             let depth = tx.max_capacity().saturating_sub(tx.capacity());
             self.metrics.set_peer_outbound_queue_depth(
                 &self.peer_label,
                 i64::try_from(depth).unwrap_or(i64::MAX),
             );
+        }
+        self.evaluate_slow_peer();
+    }
+
+    /// Slow-peer detector (LAN-470): flag a peer that is Established and
+    /// alive (keepalives flowing, so RFC 9687 send-hold never fires) but
+    /// persistently not draining its outbound queue — the client that
+    /// drags its update-group's shared staging pass on a route
+    /// reflector / route server.
+    ///
+    /// Semantics: the peer is flagged slow once its buffered outbound
+    /// bulk frames have stayed at or above
+    /// `slow_peer_threshold_pct`% of the writer's bulk-buffer capacity
+    /// for `slow_peer_duration` seconds, and the flag clears at the
+    /// first evaluation that sees the backlog below the threshold.
+    /// Evaluated at batch granularity — once per outbound RIB envelope
+    /// (piggybacked on [`Self::sample_outbound_queue_depth`]) plus a
+    /// 1s re-check timer that is armed only while an episode is in
+    /// progress — never per message, the same cost discipline as the
+    /// queue-depth gauge itself. Both transitions refresh the
+    /// `bgp_peer_slow` gauge and emit a warn log; a flag that never
+    /// cleared would be a false-alarm generator.
+    pub(super) fn evaluate_slow_peer(&mut self) {
+        if self.config.slow_peer_duration == 0 {
+            return; // detection disabled
+        }
+        let Some(tx) = &self.writer_bulk_tx else {
+            // No live connection — the flag cannot outlive its session.
+            self.reset_slow_peer_state();
+            return;
+        };
+        let capacity = tx.max_capacity();
+        let depth = capacity.saturating_sub(tx.capacity());
+        let threshold = (capacity * usize::from(self.config.slow_peer_threshold_pct)).div_ceil(100);
+        if depth >= threshold.max(1) {
+            let since = *self
+                .slow_peer_backlog_since
+                .get_or_insert_with(std::time::Instant::now);
+            if !self.slow_peer
+                && since.elapsed()
+                    >= std::time::Duration::from_secs(u64::from(self.config.slow_peer_duration))
+            {
+                self.slow_peer = true;
+                self.metrics.set_peer_slow(&self.peer_label, true);
+                warn!(
+                    peer = %self.peer_label,
+                    depth,
+                    capacity,
+                    backlog_for = ?since.elapsed(),
+                    "peer flagged slow: session alive but outbound queue \
+                     persistently backlogged (LAN-470)"
+                );
+            }
+        } else {
+            self.slow_peer_backlog_since = None;
+            if self.slow_peer {
+                self.slow_peer = false;
+                self.metrics.set_peer_slow(&self.peer_label, false);
+                warn!(
+                    peer = %self.peer_label,
+                    depth,
+                    "slow-peer flag cleared: outbound queue drained below threshold"
+                );
+            }
+        }
+        self.sync_slow_peer_isolation();
+        // Keep re-evaluating while an episode is in progress (or an
+        // isolation signal is still undelivered) so the detector fires
+        // and clears without depending on further outbound envelopes.
+        // Disarmed when healthy: zero steady-state cost.
+        let episode_live = self.slow_peer_backlog_since.is_some()
+            || self.slow_peer
+            || (self.config.slow_peer_isolation && self.slow_peer_isolation_sent != self.slow_peer);
+        self.slow_peer_timer =
+            episode_live.then(|| Box::pin(tokio::time::sleep(std::time::Duration::from_secs(1))));
+    }
+
+    /// Deliver the current slow flag to the RIB manager for update-group
+    /// isolation, exactly-once per transition. `try_send` keeps the
+    /// (sync) evaluation path non-blocking; a send that hits RIB
+    /// backpressure leaves `slow_peer_isolation_sent` stale, and the
+    /// detector's re-check timer retries until delivered.
+    fn sync_slow_peer_isolation(&mut self) {
+        if !self.config.slow_peer_isolation || self.slow_peer_isolation_sent == self.slow_peer {
+            return;
+        }
+        let update = RibUpdate::PeerSlowState {
+            peer: self.peer_ip,
+            session_id: self.session_identity.id,
+            slow: self.slow_peer,
+        };
+        if self.rib_tx.try_send(update).is_ok() {
+            self.slow_peer_isolation_sent = self.slow_peer;
+        }
+    }
+
+    /// Drop all slow-peer detector state (TCP teardown). No isolation
+    /// signal or transition log: the session's `PeerDown` clears the
+    /// RIB-side isolation state, and the teardown itself is already
+    /// logged. The gauge is still refreshed so a down peer can never
+    /// keep reading slow.
+    pub(super) fn reset_slow_peer_state(&mut self) {
+        self.slow_peer_backlog_since = None;
+        self.slow_peer_timer = None;
+        self.slow_peer_isolation_sent = false;
+        if self.slow_peer {
+            self.slow_peer = false;
+            self.metrics.set_peer_slow(&self.peer_label, false);
         }
     }
 
@@ -359,6 +467,7 @@ impl PeerSession {
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
         self.clear_bmp_stream_repair();
+        self.reset_slow_peer_state();
     }
 
     /// Clear TCP state after disconnect or error. Same writer-channel
@@ -377,6 +486,7 @@ impl PeerSession {
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
         self.clear_bmp_stream_repair();
+        self.reset_slow_peer_state();
     }
 
     /// Abandon any pending BMP divergence repair (LAN-200). Once the TCP

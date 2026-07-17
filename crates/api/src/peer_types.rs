@@ -1638,6 +1638,15 @@ pub struct PeerManagerNeighborConfig {
     pub import_policy: Option<PolicyChain>,
     /// Export policy chain applied to outbound routes.
     pub export_policy: Option<PolicyChain>,
+    /// Slow-peer backlog threshold as a percentage of the outbound
+    /// writer buffer (resolved; config default 50).
+    pub slow_peer_threshold_pct: u8,
+    /// Seconds the backlog must persist before the peer is flagged
+    /// slow; 0 disables detection (resolved; config default 30).
+    pub slow_peer_duration: u32,
+    /// Move a flagged-slow peer onto the per-peer update path
+    /// (resolved; config default false).
+    pub slow_peer_isolation: bool,
 }
 
 /// Crate-boundary mirror of a binary `FibTableConfig` (`[[fib_tables]]`).
@@ -1967,6 +1976,11 @@ pub struct PeerInfo {
     /// observability — should treat `stale = true` as "state unknown" rather
     /// than as an authoritative Idle reading.
     pub stale: bool,
+    /// Slow-peer flag (LAN-470): the session is alive but its outbound
+    /// queue has stayed above the configured backlog threshold for the
+    /// configured duration. Clears when the queue drains and on session
+    /// teardown.
+    pub slow_peer: bool,
 }
 
 /// One `QueryPolicyDatasets` reply row (LAN-305): the policy crate's

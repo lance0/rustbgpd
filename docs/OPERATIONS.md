@@ -496,7 +496,8 @@ authenticated sensitive-read surface.
 | `bgp_messages_received_total` | Inbound BGP messages by type |
 | `bgp_messages_sent_total` | Outbound BGP messages by type |
 | `bgp_peer_outbound_queue_depth{peer}` | Coalesced update frames buffered for a peer's outbound writer — the "which clients are behind" signal during convergence. Sampled at batch granularity (once per enqueue batch and once per writer drain pass, never per message). A value pinned near the writer's bulk-buffer capacity marks a slow or stuck client that is not draining our output; a healthy peer's depth returns to 0 after each burst. At large route-reflector fanout, sort peers by this gauge to find the laggard holding up convergence. Series reaped on session teardown |
-| `bgp_peer_update_group{peer}` | Which update group a peer currently belongs to — the "which group is this client in" lookup that `bgp_update_group_members{group}` (member counts) cannot answer. The value is the stable numeric group id (matches the `group` label of `bgp_update_group_members`); the sentinel `-1` marks a peer on the per-peer/ungrouped fallback path (a v1 disqualifier — peer-context policy, Add-Path send, ORR vantage, or negotiated ORF). Refreshed on every membership change; series reaped on session teardown |
+| `bgp_peer_update_group{peer}` | Which update group a peer currently belongs to — the "which group is this client in" lookup that `bgp_update_group_members{group}` (member counts) cannot answer. The value is the stable numeric group id (matches the `group` label of `bgp_update_group_members`); the sentinel `-1` marks a peer on the per-peer/ungrouped fallback path (a v1 disqualifier — peer-context policy, Add-Path send, ORR vantage, negotiated ORF, or slow-peer isolation). Refreshed on every membership change; series reaped on session teardown |
+| `bgp_peer_slow{peer}` | 1 while the peer is flagged slow: Established and alive (keepalives flowing, so the RFC 9687 send-hold teardown never fires) but persistently not draining its outbound queue — backlog at or above `slow_peer_threshold_pct` of the writer buffer for `slow_peer_duration` seconds. See "Slow peers" below for interpretation and actions. Refreshed on both transitions and on session teardown; series reaped on peer delete |
 | `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
 | `bgp_route_refresh_stale_entries{peer,afi_safi}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
 | `bgp_rib_outbound_registered_peers` | Peers currently registered for outbound route distribution. An Established session whose peer is missing here has a wedged advertisement path: keepalives still flow but no UPDATE can reach the peer until a new session re-registers |
@@ -664,6 +665,53 @@ reference skeleton. The pattern is:
    across event categories. The durable `event_id` is
    order-of-arrival at the EHM actor, not order-of-occurrence at
    each producer.
+
+## Slow peers (detection and isolation)
+
+A **slow peer** is a client that is Established and alive — keepalives
+flow in both directions, so neither the hold timer nor the RFC 9687
+send-hold timer fires — but persistently fails to keep up with the
+update stream we send it. On a route reflector or route server with
+shared update-groups, one such client can drag the shared staging pass
+for its whole group. Typical causes: an undersized control plane on the
+client, a congested or lossy path (small effective TCP window), or a
+client busy with its own convergence.
+
+Detection is on by default and purely observational: once a peer's
+outbound backlog stays at or above `slow_peer_threshold_pct` (default
+50%) of the writer buffer for `slow_peer_duration` seconds (default
+30), the daemon
+
+- raises the `slow_peer` flag in `rbgp neighbor <ip>` (and the
+  `GetNeighborState`/`ListNeighbors` gRPC surface),
+- sets `bgp_peer_slow{peer}` to 1, and
+- logs a warn (`peer flagged slow: session alive but outbound queue
+  persistently backlogged`).
+
+All three clear as soon as the backlog drains below the threshold —
+the flag can never latch — and on session teardown. Set
+`slow_peer_duration = 0` on a neighbor or peer group to disable
+detection.
+
+What to do when it fires:
+
+1. Confirm with `bgp_peer_outbound_queue_depth{peer}` — a persistent
+   plateau (rather than sawtooth bursts) matches the flag.
+2. Check whether the whole group is slow (many peers flagged →
+   suspect the local box or an upstream burst) or one client lags its
+   group-mates (→ suspect that client / its path).
+3. For a chronically slow client on a shared update-group, enable
+   `slow_peer_isolation = true` for it (or its peer group): the daemon
+   moves the flagged peer onto its own per-peer update path
+   (`bgp_peer_update_group` shows the ungrouped sentinel `-1`, reason
+   `slow_peer`) so the rest of the group converges at full speed, and
+   regroups it automatically when it recovers. Isolation trades the
+   shared-encode saving for that one peer against group convergence —
+   it is off by default.
+4. A peer that stops draining *entirely* is handled by the existing
+   guards, not this feature: the RFC 9687 send-hold timer tears down a
+   wedged socket, and outbound-buffer saturation tears the session
+   down with `Cease/Out of Resources`.
 
 ## gRPC authorization audit and resource guardrails
 

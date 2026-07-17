@@ -4769,3 +4769,92 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Slow-peer isolation (LAN-470): a transport `PeerSlowState` signal
+/// moves a grouped member onto the per-peer fallback path (ungrouped
+/// reason `slow_peer`) without disturbing its group-mates, and the
+/// clear signal regroups it with its old group through the ordinary
+/// regroup lifecycle.
+#[tokio::test]
+async fn slow_peer_isolation_moves_member_to_fallback_and_back() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
+    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+    let _rx_a = peer_up(&tx, PeerUpSpec::ibgp(a)).await;
+    let _rx_b = peer_up(&tx, PeerUpSpec::ibgp(b)).await;
+    assert_eq!(query_update_group(&tx, a).await, "group:0");
+    assert_eq!(query_update_group(&tx, b).await, "group:0");
+
+    // Transport flags `a` slow: it leaves the shared group for the
+    // per-peer path; its group-mate is untouched.
+    tx.send(RibUpdate::PeerSlowState {
+        peer: a,
+        session_id: 0,
+        slow: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_update_group(&tx, a).await, "slow_peer");
+    assert_eq!(query_update_group(&tx, b).await, "group:0");
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
+        1.0,
+        "bgp_update_group_fallback_peers while isolated",
+    );
+
+    // Duplicate signal: idempotent, still isolated.
+    tx.send(RibUpdate::PeerSlowState {
+        peer: a,
+        session_id: 0,
+        slow: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_update_group(&tx, a).await, "slow_peer");
+
+    // The flag clears: the peer regroups with its old group.
+    tx.send(RibUpdate::PeerSlowState {
+        peer: a,
+        session_id: 0,
+        slow: false,
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_update_group(&tx, a).await, "group:0");
+    assert_eq!(query_update_group(&tx, b).await, "group:0");
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
+        0.0,
+        "bgp_update_group_fallback_peers after recovery",
+    );
+
+    // Session teardown clears any lingering isolation: a replacement
+    // session for the same address starts on the shared path.
+    tx.send(RibUpdate::PeerSlowState {
+        peer: a,
+        session_id: 0,
+        slow: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(query_update_group(&tx, a).await, "slow_peer");
+    tx.send(RibUpdate::PeerDown {
+        peer: a,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let _rx_a2 = peer_up(&tx, PeerUpSpec::ibgp(a)).await;
+    assert_eq!(
+        query_update_group(&tx, a).await,
+        "group:0",
+        "isolation must not survive the session that reported it"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
