@@ -1572,13 +1572,15 @@ branch is between features.
   new public surface) and intentionally divergent fixtures (the blackhole
   community-route builder, the EVPN MAC/IP route family, per-module
   minimal-config TOML snippets).
-- [ ] **`unwrap()` audit on daemon-runtime paths.** Production-code unwraps
-  outside `#[cfg(test)]` measure at ~5 sites after the v0.30 quality scan
-  (mostly startup metric-registration invariants, poisoned-lock guards, and a
-  few defensive parses of already-validated strings). The practical prefix-map
-  conversion, BFD socket-option setup, BFD timer-pop sites, and raw EVPN
-  nexthop netlink encode length conversions have been cleaned up; keep this
-  open as a forcing function when the remaining invariants come up for refactor.
+- [x] **`unwrap()` audit on daemon-runtime paths.** Effectively resolved
+  (2026-07-17 re-measure): real daemon-runtime `.unwrap()` outside test
+  modules is now ~0 — the two remaining non-test sites are an ADR spike
+  prototype (`docs/adr/0103-rpol-execution-model-spike/`) and a `pub`
+  test-fake dataplane used only by test harnesses (`crates/evpn-linux/src/
+  in_memory.rs`), neither on a daemon-runtime path. The prior startup /
+  poisoned-lock / defensive-parse sites, prefix-map conversions, BFD socket
+  and timer-pop sites, and EVPN nexthop encode conversions were all cleaned
+  up. Keep the discipline as a forcing function for future invariants.
 - [x] **`panic!` → typed-error sweep on the one production site.**
   `crates/bfd/src/discriminator.rs` now returns a typed discriminator-exhaustion
   error instead of panicking. The daemon logs and refuses to install the new BFD
@@ -1687,19 +1689,28 @@ branch is between features.
   lock with SIGHUP through config-persistence acknowledgement. Persistence
   rejection rolls the accepted runtime mutation back, completing the same
   lock/ack/rollback invariant used by FIB-table and dynamic-neighbor CRUD.
-- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~30 suppressions
-  workspace-wide (down from 94). Concentrated in long dispatchers (FSM action
-  loop, EVPN reconcilers, encode/decode match arms). Some are honest match-heavy
-  dispatch; track the absolute count downward release over release rather than
-  gating individual PRs.
-- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~25 sites —
-  RIB distribution functions, EVPN originators, BFD socket setup. A
+- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~282 occurrences
+  workspace-wide (2026-07-17 re-measure; ~120 outside test paths) — the
+  earlier "~30" figure was stale and the direction is *up*, tracking the
+  RIB-manager / policy-language / EVPN expansion of the last sprints.
+  Concentrated in long dispatchers (FSM action loop, EVPN reconcilers,
+  `manager/{mod,distribution/*}`, `rpol/{typeck,lower}`, encode/decode match
+  arms). Some are honest match-heavy dispatch; this tracks the trend, not a
+  per-PR gate. One concrete win: `metrics.rs::with_registry` carries its own
+  suppression across 275 identical `.expect("valid metric definition")` call
+  sites — a tiny `counter_vec`/`gauge_vec` helper collapses it.
+- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~104
+  occurrences workspace-wide (2026-07-17; ~39 outside tests) — RIB
+  distribution functions, EVPN originators, BFD socket setup. A
   `DistributionContext` parameter struct would absorb the metric / policy
   threading; same trick fits the EVPN originators.
-- [ ] **`#[allow(clippy::result_large_err)]` in `crates/api/src/rib_service.rs`.**
-  6 suppressions for a large `Result<_, RibServiceError>` enum. Box the error
-  variant only if it shows up in a benchmark or RIB query hot-path; cosmetic
-  until then.
+- [ ] **`#[allow(clippy::result_large_err)]` — now spread across 6 files.**
+  15 suppressions (2026-07-17): `rib_service.rs` (8), `neighbor_service.rs`
+  (2), `policy_helpers.rs` (2), `peer_group_service.rs` (1),
+  `policy_service.rs` (1), `event-history/lib.rs` (1). The pattern has
+  leaked beyond its original single location — the *spread*, not a benchmark,
+  is now the signal to box the large `Result<_, …Error>` variant behind a
+  shared boxed-error alias rather than keep suppressing per-site.
 - [ ] **Measurement-gated hash-map hasher audit.** The durable unicast RIB
   storage now uses `FxHashMap` / trie-backed prefix indexes, but manager,
   route-refresh, EVPN, RPKI, config, and API support paths still contain
@@ -1757,11 +1768,24 @@ branch is between features.
   RTC/ORR arcs) is now a directory module with per-family concern submodules.
   `crates/rib/src/manager/tests.rs` (the largest file in the repo) is now
   `manager/tests/` — shared fixtures in `mod.rs` plus per-concern sibling test
-  modules. `crates/api/src/event_service.rs` remains borderline. Keep splitting
-  only where it reduces real conflict or review cost.
+  modules. `crates/api/src/event_service.rs` is no longer a candidate — its
+  2,318-line total is mostly the test module; real production body is ~630
+  lines. The current largest *production* files (test modules excluded,
+  2026-07-17) are `crates/rib/src/manager/mod.rs` (~5,090 lines) and
+  `src/config/mod.rs` (~6,168) — the two best next split candidates, since
+  neither has a test-module discount available. Keep splitting only where it
+  reduces real conflict or review cost.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the actionable
   residue is documentation/policy drift, all low-risk:
+  - Status (2026-07-17): the ARCHITECTURE.md channel-enumeration,
+    ownership-table EVPN exception, and SECURITY.md unsafe-code-wording
+    sub-items below landed across the v0.41–v0.51 doc passes, and
+    `#![deny(unsafe_code)]` is on the event-history and cli crates. The one
+    live residue is the thiserror 1.x/2.x duplicate — upstream-blocked
+    (thiserror 1.x is pulled only by `protobuf` via `prometheus`, not by any
+    first-party crate), so it is periodic hygiene, not actionable until
+    upstream moves off it.
   - ARCHITECTURE.md design-invariant #3 understates the intentional
     unbounded-channel set — it names only the collision-notification channel, but
     `bfd_runtime` (state-change fan-out), `peer_manager` (internal + session-notify),
