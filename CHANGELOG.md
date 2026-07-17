@@ -27,6 +27,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **IXP route-server receipt matrix** (`docs/perf/ixp-matrix-2026-07.md`):
+  rustbgpd vs BIRD 3.3.1 vs OpenBGPD 9.1 at 700 peers × 400,400
+  prefixes through the shared reload-stall harness — reload stall +
+  completion over two independent runs, flapstorm withdraw/re-announce,
+  convergence, and process-tree RSS, with a scale ladder, full config
+  disclosure, and raw per-cell artifacts committed under
+  `docs/perf/artifacts/ixp-matrix-2026-07/`. Cross-linked from
+  `docs/RECEIPTS.md` and `docs/COMPARISON.md`.
+
 - **Slow-peer detection + optional update-group isolation (LAN-470).**
   A peer that is Established and alive but persistently fails to drain
   its outbound queue — backlog at or above `slow_peer_threshold_pct`
