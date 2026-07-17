@@ -234,7 +234,10 @@ IPv4/IPv6 `Prefix` routes.
     neighbor `session-state` when `[event_history]` is enabled) over UDS or
     mTLS TCP, plus an operator-tier `Set` subset — transaction-backed static
     numbered-neighbor create/update/delete and the commit-confirmed extension
-    via ADR-0076, with unsupported paths returning `Unimplemented`. M54 verifies
+    via ADR-0076, with unsupported paths returning `Unimplemented`. Dial-out is
+    also supported: `[gnmi_dialout]` pushes the same `SubscribeResponse` stream
+    over a device-initiated gRPC connection to central collectors (TLS/mTLS,
+    capped-backoff reconnect, per-target connection gauge). M54 verifies
     both read and Set with `gnmic`; M56 covers the ON_CHANGE flow. FRR's OpenConfig story is
     through broader management frameworks such as `mgmtd` / SONiC-style
     northbound layers rather than a clean per-`bgpd` gNMI service.

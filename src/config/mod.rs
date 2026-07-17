@@ -2471,6 +2471,11 @@ pub struct ConfigDiff {
     pub global_changed: bool,
     pub rpki_changed: bool,
     pub bmp_changed: bool,
+    /// `[gnmi_dialout]` changed. Reload-applied: the dial-out manager
+    /// diffs the target set on SIGHUP — removed targets stop (their
+    /// `gnmi_dialout_connected` series is reaped), added targets start,
+    /// changed targets redial, unchanged targets keep their connection.
+    pub gnmi_dialout_changed: bool,
     pub mrt_changed: bool,
     /// `[[evpn_instances]]` blocks added/removed/modified between old and
     /// new. Surfaced as restart-required today — the Phase-2 foundation
@@ -2739,6 +2744,7 @@ impl ConfigDiff {
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_reload_applied_changed
+            || self.gnmi_dialout_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
     }
@@ -3299,6 +3305,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .unsupported_sections
             .push("EVPN runtime coordinator".to_string());
     }
+    if diff.gnmi_dialout_changed {
+        class
+            .unsupported_sections
+            .push("[gnmi_dialout] (apply via SIGHUP reload)".to_string());
+    }
 
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
@@ -3494,6 +3505,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
+            "gnmi_dialout_changed": diff.gnmi_dialout_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
             "evpn_instances_changed": diff.evpn_runtime_change_class.is_reload_applied() && diff.evpn_instances_changed,
@@ -3710,6 +3722,14 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
+        if diff.gnmi_dialout_changed {
+            let _ = writeln!(
+                out,
+                "  {} [gnmi_dialout] targets reconciled (removed stop, added start, \
+                 changed redial)",
+                style.change_marker
+            );
+        }
         if let Some(steps) = diff.evpn_runtime_change_class.decomposed_steps() {
             let _ = writeln!(
                 out,
@@ -3892,6 +3912,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         global_changed: global_restart_required_changed(old, new),
         rpki_changed: old.rpki != new.rpki,
         bmp_changed: old.bmp != new.bmp,
+        gnmi_dialout_changed: old.gnmi_dialout != new.gnmi_dialout,
         mrt_changed: old.mrt != new.mrt,
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
@@ -6244,6 +6265,105 @@ fn parse_esi(raw: &str) -> Result<EthernetSegmentIdentifier, &'static str> {
         bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
     }
     Ok(EthernetSegmentIdentifier::new(bytes))
+}
+
+/// Resolve the `[gnmi_dialout]` section into runtime dial-out target
+/// specs. Single source of truth for the section's semantic validation:
+/// `Config::validate` calls this at load (startup AND SIGHUP reload
+/// preflight) so a config that loads always translates, and the daemon /
+/// reload wiring reuses the same resolution to (re)apply targets.
+///
+/// Subscription paths and modes are validated through the api crate's
+/// `build_subscription_list`, which runs the exact checks a dial-in
+/// `Subscribe` request would — a path the Subscribe server would reject
+/// is rejected here, at config load.
+pub(crate) fn gnmi_dialout_targets(
+    config: &Config,
+) -> Result<Vec<rustbgpd_api::gnmi_dialout::DialoutTarget>, String> {
+    use rustbgpd_api::gnmi_dialout as dialout;
+
+    let Some(section) = config.gnmi_dialout.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut seen_names = HashSet::new();
+    let mut targets = Vec::with_capacity(section.targets.len());
+    for (i, target) in section.targets.iter().enumerate() {
+        let fail = |reason: String| format!("targets[{i}]: {reason}");
+        if target.name.is_empty() {
+            return Err(fail("name must not be empty".to_string()));
+        }
+        if !seen_names.insert(target.name.as_str()) {
+            return Err(fail(format!("duplicate name {:?}", target.name)));
+        }
+        // host:port shape (DNS names allowed, IPv6 literals bracketed).
+        let addr_ok = target
+            .address
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if !addr_ok {
+            return Err(fail(format!(
+                "address {:?} must be host:port",
+                target.address
+            )));
+        }
+        match (&target.tls_cert_file, &target.tls_key_file) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(fail(
+                    "tls_cert_file and tls_key_file must be set together".to_string(),
+                ));
+            }
+            (Some(_), Some(_)) if target.tls_ca_file.is_none() => {
+                return Err(fail(
+                    "tls_cert_file/tls_key_file require tls_ca_file".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if target.tls_server_name.is_some() && target.tls_ca_file.is_none() {
+            return Err(fail("tls_server_name requires tls_ca_file".to_string()));
+        }
+        if target.sample_interval == 0 {
+            return Err(fail("sample_interval must be > 0".to_string()));
+        }
+        if target.backoff_initial == 0 {
+            return Err(fail("backoff_initial must be > 0".to_string()));
+        }
+        if target.backoff_max < target.backoff_initial {
+            return Err(fail("backoff_max must be >= backoff_initial".to_string()));
+        }
+        let mode = match target.mode {
+            GnmiDialoutModeConfig::Sample => dialout::DialoutMode::Sample,
+            GnmiDialoutModeConfig::OnChange => dialout::DialoutMode::OnChange,
+        };
+        if mode == dialout::DialoutMode::OnChange && !config.event_history.enabled {
+            return Err(fail(
+                "mode = \"on_change\" requires [event_history].enabled = true \
+                 (the durable event outbox sources the transitions)"
+                    .to_string(),
+            ));
+        }
+        let subscriptions = dialout::build_subscription_list(
+            &target.paths,
+            mode,
+            std::time::Duration::from_secs(target.sample_interval),
+        )
+        .map_err(fail)?;
+        let tls = target.tls_ca_file.as_ref().map(|ca| dialout::DialoutTls {
+            ca_file: PathBuf::from(ca),
+            cert_file: target.tls_cert_file.as_ref().map(PathBuf::from),
+            key_file: target.tls_key_file.as_ref().map(PathBuf::from),
+            server_name: target.tls_server_name.clone(),
+        });
+        targets.push(dialout::DialoutTarget {
+            name: target.name.clone(),
+            endpoint: dialout::endpoint_uri(&target.address, tls.is_some()),
+            tls,
+            subscriptions,
+            backoff_initial: std::time::Duration::from_secs(target.backoff_initial),
+            backoff_max: std::time::Duration::from_secs(target.backoff_max),
+        });
+    }
+    Ok(targets)
 }
 
 #[cfg(test)]

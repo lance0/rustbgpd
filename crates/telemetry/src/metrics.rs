@@ -89,6 +89,9 @@ pub struct BgpMetrics {
     bfd_session_up: IntGaugeVec,
     bfd_session_flaps_total: IntCounterVec,
 
+    // ── gNMI dial-out (LAN-471) ────────────────────────────────────
+    gnmi_dialout_connected: IntGaugeVec,
+
     // ── Notifications ──────────────────────────────────────────────
     notifications_sent: IntCounterVec,
     notifications_received: IntCounterVec,
@@ -323,6 +326,16 @@ impl BgpMetrics {
                 "BFD session state per peer (1 = Up, 0 = not Up)",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let gnmi_dialout_connected = IntGaugeVec::new(
+            Opts::new(
+                "gnmi_dialout_connected",
+                "gNMI dial-out collector connection state per configured target \
+                 (1 = Publish stream established, 0 = disconnected/retrying)",
+            ),
+            &["target"],
         )
         .expect("valid metric definition");
 
@@ -1522,6 +1535,9 @@ impl BgpMetrics {
             .register(Box::new(bfd_session_flaps_total.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(gnmi_dialout_connected.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(stale_timer_events.clone()))
             .expect("metric not already registered");
         registry
@@ -1936,6 +1952,7 @@ impl BgpMetrics {
             stale_timer_events,
             bfd_session_up,
             bfd_session_flaps_total,
+            gnmi_dialout_connected,
             notifications_sent,
             notifications_received,
             messages_sent,
@@ -2216,6 +2233,21 @@ impl BgpMetrics {
         if to == "established" {
             self.session_established.with_label_values(&[peer]).inc();
         }
+    }
+
+    /// Set the gNMI dial-out connection gauge for a configured target.
+    /// Refreshed on BOTH transitions (connect and disconnect) so the series
+    /// always reflects the live Publish-stream state.
+    pub fn set_gnmi_dialout_connected(&self, target: &str, connected: bool) {
+        self.gnmi_dialout_connected
+            .with_label_values(&[target])
+            .set(i64::from(connected));
+    }
+
+    /// Reap the dial-out connection series for a target removed from the
+    /// config (SIGHUP reload), so `/metrics` stops exporting stale targets.
+    pub fn remove_gnmi_dialout_target(&self, target: &str) {
+        let _ = self.gnmi_dialout_connected.remove_label_values(&[target]);
     }
 
     /// Record a BFD session state change: set the per-peer up gauge and count a

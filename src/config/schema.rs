@@ -47,6 +47,10 @@ pub struct Config {
     /// BGP Monitoring Protocol (RFC 7854) export.
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
+    /// gNMI dial-out streaming telemetry (device-initiated push to
+    /// central collectors).
+    #[serde(default)]
+    pub gnmi_dialout: Option<GnmiDialoutConfig>,
     /// Periodic MRT RIB dumps.
     #[serde(default)]
     pub mrt: Option<MrtConfig>,
@@ -358,6 +362,84 @@ pub enum BmpMonitorView {
     /// Loc-RIB instance monitoring with collector-connect table sync
     /// (RFC 9069).
     LocRib,
+}
+
+/// gNMI dial-out streaming telemetry (LAN-471): the daemon connects OUT
+/// to each configured collector and pushes the same `SubscribeResponse`
+/// stream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would
+/// produce. Reload-applied: SIGHUP starts/stops/redials targets in place.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GnmiDialoutConfig {
+    /// Collector targets to dial out to.
+    #[serde(default)]
+    pub targets: Vec<GnmiDialoutTarget>,
+}
+
+/// One gNMI dial-out collector target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GnmiDialoutTarget {
+    /// Unique target name — the `gnmi_dialout_connected{target}` metric
+    /// label and the log key for this collector.
+    pub name: String,
+    /// Collector endpoint as `host:port` (DNS names allowed).
+    pub address: String,
+    /// `OpenConfig` gNMI paths to subscribe, in xpath form (the same paths
+    /// a dial-in collector would put in a `SubscribeRequest`), e.g.
+    /// `network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=*]/state/session-state`.
+    pub paths: Vec<String>,
+    /// Delivery mode: `"sample"` (periodic resample, default) or
+    /// `"on_change"` (event-driven; v1 supports the `session-state` leaf
+    /// and requires `[event_history].enabled = true`).
+    #[serde(default)]
+    pub mode: GnmiDialoutModeConfig,
+    /// SAMPLE resample interval in seconds. Default 10; clamped to
+    /// [1s, 1h] like a dial-in subscription's requested interval.
+    #[serde(default = "default_gnmi_dialout_sample_interval")]
+    pub sample_interval: u64,
+    /// First reconnect delay in seconds after a connection failure;
+    /// doubles per consecutive failure. Default 1.
+    #[serde(default = "default_gnmi_dialout_backoff_initial")]
+    pub backoff_initial: u64,
+    /// Reconnect delay cap in seconds. Default 30.
+    #[serde(default = "default_gnmi_dialout_backoff_max")]
+    pub backoff_max: u64,
+    /// CA certificate(s) (PEM file path) used to verify the collector's
+    /// server certificate. Setting this enables TLS for the target.
+    pub tls_ca_file: Option<String>,
+    /// Client certificate (PEM file path) presented to the collector for
+    /// mutual TLS. Requires `tls_key_file` and `tls_ca_file`.
+    pub tls_cert_file: Option<String>,
+    /// Client private key (PEM file path). Required together with
+    /// `tls_cert_file`.
+    pub tls_key_file: Option<String>,
+    /// Expected TLS server name, overriding the dialed host (needed when
+    /// dialing a collector by IP whose certificate carries a DNS name).
+    pub tls_server_name: Option<String>,
+}
+
+/// gNMI dial-out delivery mode.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GnmiDialoutModeConfig {
+    /// Periodic resample of the subscribed paths.
+    #[default]
+    Sample,
+    /// Event-driven updates from the durable event outbox.
+    OnChange,
+}
+
+fn default_gnmi_dialout_sample_interval() -> u64 {
+    10
+}
+
+fn default_gnmi_dialout_backoff_initial() -> u64 {
+    1
+}
+
+fn default_gnmi_dialout_backoff_max() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2185,6 +2267,8 @@ pub enum ConfigError {
     InvalidNeighborSet { reason: String },
     #[error("invalid BMP collector config: {reason}")]
     InvalidBmpCollector { reason: String },
+    #[error("invalid gNMI dial-out config: {reason}")]
+    InvalidGnmiDialout { reason: String },
     #[error("invalid MRT config: {reason}")]
     InvalidMrtConfig { reason: String },
     #[error("invalid remove_private_as config: {reason}")]

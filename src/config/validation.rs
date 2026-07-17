@@ -821,6 +821,14 @@ impl Config {
             }
         }
 
+        // Validate the gNMI dial-out section. The semantic checks live in
+        // the shared translation the daemon wiring uses, so a config that
+        // loads always resolves into runnable dial-out targets — including
+        // running each subscription path through the exact validation a
+        // dial-in Subscribe request would get.
+        super::gnmi_dialout_targets(self)
+            .map_err(|reason| ConfigError::InvalidGnmiDialout { reason })?;
+
         // Validate dynamic neighbor ranges
         let mut seen_prefixes = std::collections::HashSet::new();
         let mut parsed_dynamic_prefixes = Vec::with_capacity(self.dynamic_neighbors.len());

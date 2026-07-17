@@ -22,6 +22,7 @@ pub mod event_history_sinks;
 mod event_service;
 pub mod evpn_service;
 mod global_service;
+pub mod gnmi_dialout;
 mod gnmi_service;
 pub mod health_probe;
 mod injection_service;
@@ -87,4 +88,18 @@ pub mod gnmi_ext {
 )]
 pub mod gnmi {
     tonic::include_proto!("gnmi");
+}
+
+/// Generated gNMI dial-out (device-initiated push) service types.
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    missing_docs,
+    reason = "tonic-generated protobuf modules control their own lint shape"
+)]
+pub mod gnmi_dialout_proto {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/dialout/rustbgpd.gnmi_dialout.v1.rs"
+    ));
 }
