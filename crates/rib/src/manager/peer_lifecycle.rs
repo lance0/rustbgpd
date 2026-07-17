@@ -76,9 +76,21 @@ impl RibManager {
         event: &str,
     ) -> SessionTeardownDisposition {
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
-            // No registration — nothing to protect and nothing to fail
-            // over to (`live_sessions` is empty for the peer whenever no
-            // registration exists; a full teardown clears both together).
+            // No registration. Ordinarily `live_sessions` is empty for the
+            // peer here and the full teardown proceeds; during the LAN-475
+            // deferral window sessions are tracked but not yet registered,
+            // so classify against them: prune the stamped session, and when
+            // another live session remains take the ordinary failover path
+            // (reset + re-register + inbound ROUTE-REFRESH request) — the
+            // survivor's registration may simply defer again.
+            let survivor_remains = self.live_sessions.get_mut(&peer).is_some_and(|sessions| {
+                sessions.retain(|s| s.session_id != session_id);
+                !sessions.is_empty()
+            });
+            if survivor_remains {
+                return SessionTeardownDisposition::FailOver;
+            }
+            self.live_sessions.remove(&peer);
             return SessionTeardownDisposition::NoRegistration;
         };
         if registered != session_id {
@@ -564,7 +576,9 @@ impl RibManager {
         // retention is the exception to the reset: routes deliberately
         // held stale for a restarting peer stay put — deadline-bounded
         // and swept on End-of-RIB, exactly as on a plain GR reconnect.
-        if self.outbound_peers.contains_key(&peer) {
+        if self.outbound_peers.contains_key(&peer)
+            || self.pending_initial_registrations.contains(&peer)
+        {
             if let Some(previous_session_id) = self.outbound_session_ids.get(&peer).copied()
                 && let Some(selection) = self.selection_deferral.as_mut()
             {
@@ -651,7 +665,7 @@ impl RibManager {
     /// classification.
     #[expect(
         clippy::too_many_lines,
-        reason = "active-session registration installs every negotiated outbound capability"
+        reason = "session classification (GR, LLGR, RTC, selection deferral) stays in one auditable pass"
     )]
     fn register_active_session(&mut self, peer: IpAddr, registration: ActiveSessionRegistration) {
         let Some(record) = self
@@ -665,29 +679,37 @@ impl RibManager {
         let session_id = record.session_id;
         let peer_asn = record.peer_asn;
         let peer_router_id = record.peer_router_id;
-        let outbound_tx = record.outbound_tx.clone();
-        let export_policy = record.export_policy.clone();
         let sendable_families = record.sendable_families.clone();
+        let negotiated_orf_recv = record.negotiated_orf_recv.clone();
+        let gr_context = record.gr_context.clone();
         let is_ebgp = record.is_ebgp;
         let route_reflector_client = record.route_reflector_client;
         let local_role = record.local_role;
-        let orr_vantage = record.orr_vantage;
         let per_client_best = record.per_client_best;
         let interpret_rfc1997 = record.interpret_rfc1997;
-        let rs_control_asn = record.rs_control_asn;
-        let add_path_send_families = record.add_path_send_families.clone();
-        let add_path_send_max = record.add_path_send_max;
-        let add_path_send_limits = record.add_path_send_limits.clone();
-        let negotiated_orf_recv = record.negotiated_orf_recv.clone();
-        let negotiated_llgr_families = record.negotiated_llgr_families.clone();
-        let gr_context = record.gr_context.clone();
-        let exact_export_encoder = record.exact_export_encoder.clone();
-        #[cfg(test)]
-        let exact_export_encoder =
-            exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
 
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
+        // Session-semantic flags install IMMEDIATELY, not with the deferred
+        // outbound registration: inbound processing (RFC 9234 role checks,
+        // RR reflection's source classification, community interpretation,
+        // per-client-best candidate handling) consults them for routes that
+        // can arrive before a deferred outbound registration completes
+        // (LAN-475). Insert/remove for the optional knobs: a replacement
+        // session that dropped one must not inherit it.
+        self.peer_is_ebgp.insert(peer, is_ebgp);
+        self.peer_is_rr_client.insert(peer, route_reflector_client);
+        self.peer_local_roles.insert(peer, local_role);
+        if per_client_best {
+            self.peer_per_client_best.insert(peer);
+        } else {
+            self.peer_per_client_best.remove(&peer);
+        }
+        if interpret_rfc1997 {
+            self.peer_interpret_rfc1997.insert(peer);
+        } else {
+            self.peer_interpret_rfc1997.remove(&peer);
+        }
 
         // RFC 5291 §6: gate the initial advertisement for ORF-receive families
         // until the peer sends a ROUTE-REFRESH, so we don't flood the full
@@ -822,6 +844,64 @@ impl RibManager {
             "all ordinary selection waiters satisfied or excluded",
         );
 
+        // LAN-475: the initial table dump is a full O(table) staged pass on
+        // the single-threaded RIB actor. A mass reconnect (e.g. tens of
+        // route-server members re-establishing after a flap) queues one
+        // `PeerUp` per session, and completing every dump inline serializes
+        // N full-table passes ahead of the imports already queued behind the
+        // burst — survivors then see the re-announcements only after the
+        // last dump finishes. When the actor has queued work AND the dump
+        // is actually expensive (large table), defer the outbound
+        // registration to the run loop, which advances one registration at
+        // a time between drained mutation batches. A quiet actor, or a
+        // small table whose dump costs microseconds, completes inline
+        // exactly as before — registration-timing semantics only change
+        // where deferring buys real latency back.
+        let actor_busy = !self.rx.is_empty() || !self.pending_initial_registrations.is_empty();
+        let dump_expensive = self.loc_rib.len() >= self.initial_dump_defer_min_routes;
+        if actor_busy && dump_expensive {
+            if !self.pending_initial_registrations.contains(&peer) {
+                debug!(
+                    %peer,
+                    session_id,
+                    "deferring outbound registration behind queued actor work"
+                );
+                self.pending_initial_registrations.push_back(peer);
+            }
+        } else {
+            self.complete_outbound_registration(peer);
+        }
+    }
+
+    /// Install the active session's outbound registration and send its
+    /// initial table dump. The second half of `register_active_session`,
+    /// either inline (quiet actor) or deferred to the run loop (LAN-475);
+    /// re-reads the live-session record so a deferred completion always
+    /// registers the CURRENT session's negotiated state.
+    pub(super) fn complete_outbound_registration(&mut self, peer: IpAddr) {
+        let Some(record) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+        else {
+            debug_assert!(false, "complete_outbound_registration with no live session");
+            return;
+        };
+        let session_id = record.session_id;
+        let outbound_tx = record.outbound_tx.clone();
+        let export_policy = record.export_policy.clone();
+        let sendable_families = record.sendable_families.clone();
+        let orr_vantage = record.orr_vantage;
+        let rs_control_asn = record.rs_control_asn;
+        let add_path_send_families = record.add_path_send_families.clone();
+        let add_path_send_max = record.add_path_send_max;
+        let add_path_send_limits = record.add_path_send_limits.clone();
+        let negotiated_llgr_families = record.negotiated_llgr_families.clone();
+        let exact_export_encoder = record.exact_export_encoder.clone();
+        #[cfg(test)]
+        let exact_export_encoder =
+            exact_export_encoder.or_else(|| Some(super::permissive_test_exact_export_encoder()));
+
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
@@ -836,9 +916,10 @@ impl RibManager {
         self.peer_sendable_families.insert(peer, sendable_families);
         self.peer_advertised_llgr_families
             .insert(peer, negotiated_llgr_families);
-        self.peer_is_ebgp.insert(peer, is_ebgp);
-        self.peer_is_rr_client.insert(peer, route_reflector_client);
-        self.peer_local_roles.insert(peer, local_role);
+        // (peer_is_ebgp / peer_is_rr_client / peer_local_roles /
+        // peer_per_client_best / peer_interpret_rfc1997 install in
+        // `register_active_session` — inbound semantics must not wait for
+        // a deferred outbound registration.)
         if let Some(encoder) = exact_export_encoder {
             self.peer_export_encoders.insert(peer, encoder);
         } else {
@@ -872,24 +953,11 @@ impl RibManager {
             self.peer_add_path_send_limits
                 .insert(peer, add_path_send_limits);
         }
-        // Per-registration like the vantage: a replacement session that
-        // dropped the knob must not inherit it.
-        if per_client_best {
-            self.peer_per_client_best.insert(peer);
-        } else {
-            self.peer_per_client_best.remove(&peer);
-        }
-        // Per-registration like `per_client_best`: a replacement session
-        // that dropped the knob must not inherit it.
-        if interpret_rfc1997 {
-            self.peer_interpret_rfc1997.insert(peer);
-        } else {
-            self.peer_interpret_rfc1997.remove(&peer);
-        }
-        // Per-registration like the knobs above — and installed before
-        // `recompute_update_group` below reads it (an enabled session is
-        // disqualified from grouping) and before `send_initial_table`
-        // stages the first Adj-RIB-Out.
+        // Per-registration knob (like `per_client_best`, installed in the
+        // immediate half) — installed before `recompute_update_group`
+        // below reads it (an enabled session is disqualified from
+        // grouping) and before `send_initial_table` stages the first
+        // Adj-RIB-Out.
         if let Some(rs_asn) = rs_control_asn {
             self.peer_rs_control.insert(peer, rs_asn);
         } else {

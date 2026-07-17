@@ -1713,3 +1713,235 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
 // registers two peers (source + target, both RR clients), and drives
 // RibUpdate events to exercise the stale lifecycle.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// LAN-475: deferred outbound registration — a mass reconnect must not
+// head-of-line block re-announcement delivery to established peers behind
+// the reconnecting peers' full-table initial dumps.
+// ---------------------------------------------------------------------------
+
+fn test_peer_up(
+    peer: IpAddr,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
+fn test_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    }
+}
+
+/// With queued actor work, a re-established peer's registration (and its
+/// full-table initial dump) is deferred, and the peer's inbound routes
+/// distribute to already-established peers BEFORE the dump runs — the
+/// LAN-475 property. The deferred dump then completes and reflects the
+/// current table. Driven synchronously for determinism.
+#[tokio::test]
+async fn deferred_registration_lets_queued_imports_distribute_first() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Exercise the deferral without bulk data: treat any table as expensive.
+    manager.initial_dump_defer_min_routes = 0;
+
+    let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let third = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let restarter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let third_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let restarter_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+    // Survivor establishes on a quiet actor: registration is synchronous,
+    // exactly the pre-LAN-475 behavior.
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(survivor, 1, survivor_tx));
+    let eor = survivor_rx
+        .try_recv()
+        .expect("quiet-actor PeerUp dumps synchronously");
+    assert!(!eor.end_of_rib.is_empty());
+
+    // A third peer's route lands in the table (feeds the eventual dump).
+    manager.handle_update(test_routes_received(
+        third,
+        vec![make_route(third_prefix, Ipv4Addr::new(10, 0, 0, 3))],
+    ));
+    drain_route_chunks(&mut manager);
+    let update = survivor_rx
+        .try_recv()
+        .expect("survivor gets the third peer's route");
+    assert_eq!(update.announce.len(), 1);
+
+    // Queue work on the actor channel (a mass-reconnect burst in miniature),
+    // then re-establish the restarter: its registration must defer.
+    tx.try_send(test_routes_received(third, vec![])).unwrap();
+    let (restarter_tx, mut restarter_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(restarter, 2, restarter_tx));
+    assert!(
+        restarter_rx.try_recv().is_err(),
+        "busy-actor PeerUp must not dump inline"
+    );
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+
+    // The restarter's re-announcements import and distribute to the
+    // survivor while the restarter's own dump is still pending.
+    manager.handle_update(test_routes_received(
+        restarter,
+        vec![make_route(restarter_prefix, Ipv4Addr::new(10, 0, 0, 2))],
+    ));
+    drain_route_chunks(&mut manager);
+    let update = survivor_rx
+        .try_recv()
+        .expect("re-announced route reaches the survivor before the deferred dump");
+    assert!(
+        update
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(restarter_prefix)),
+        "survivor receives the re-announced prefix"
+    );
+    assert!(
+        restarter_rx.try_recv().is_err(),
+        "the deferred dump has still not run"
+    );
+
+    // The deferred registration completes: the restarter receives the
+    // current table (the third peer's route, not its own) and an EoR.
+    manager.advance_pending_initial_registration();
+    assert!(manager.pending_initial_registrations.is_empty());
+    let dump = restarter_rx.try_recv().expect("deferred dump delivered");
+    assert!(
+        dump.announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(third_prefix)),
+        "dump reflects the table at completion time"
+    );
+    let mut saw_eor = !dump.end_of_rib.is_empty();
+    while let Ok(update) = restarter_rx.try_recv() {
+        saw_eor |= !update.end_of_rib.is_empty();
+    }
+    assert!(saw_eor, "initial dump still ends with End-of-RIB");
+}
+
+/// A peer whose session goes down while its registration is deferred must
+/// not be registered by the later advance; a full teardown still applies
+/// (no survivor session), matching the pre-deferral invariant.
+#[tokio::test]
+async fn deferred_registration_dropped_when_session_dies_first() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+
+    let restarter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.try_send(test_routes_received(restarter, vec![]))
+        .unwrap();
+    let (restarter_tx, mut restarter_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(restarter, 7, restarter_tx));
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: restarter,
+        session_id: 7,
+    });
+    manager.advance_pending_initial_registration();
+    assert!(manager.pending_initial_registrations.is_empty());
+    assert!(
+        restarter_rx.try_recv().is_err(),
+        "no dump for a session that died before its deferred registration"
+    );
+    assert!(!manager.outbound_peers.contains_key(&restarter));
+}
+
+/// End-to-end through the run loop: a reconnect burst (`PeerUp`s and the
+/// re-announcements queued behind them) still delivers the re-announced
+/// routes to the survivor AND completes every deferred initial dump.
+#[tokio::test]
+async fn run_loop_advances_deferred_registrations() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+    let handle = tokio::spawn(manager.run());
+
+    let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(64);
+    tx.send(test_peer_up(survivor, 1, survivor_tx))
+        .await
+        .unwrap();
+    drain_eor(&mut survivor_rx).await;
+
+    // Reconnect burst: two peers re-establish and re-announce.
+    let r1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let r2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+    let (r1_tx, mut r1_rx) = mpsc::channel(64);
+    let (r2_tx, mut r2_rx) = mpsc::channel(64);
+    tx.send(test_peer_up(r1, 2, r1_tx)).await.unwrap();
+    tx.send(test_peer_up(r2, 3, r2_tx)).await.unwrap();
+    tx.send(test_routes_received(
+        r1,
+        vec![make_route(p1, Ipv4Addr::new(10, 0, 0, 2))],
+    ))
+    .await
+    .unwrap();
+    tx.send(test_routes_received(
+        r2,
+        vec![make_route(p2, Ipv4Addr::new(10, 0, 0, 3))],
+    ))
+    .await
+    .unwrap();
+
+    // The survivor receives both re-announced prefixes...
+    let deadline = std::time::Duration::from_secs(5);
+    let mut seen = HashSet::new();
+    while seen.len() < 2 {
+        let update = tokio::time::timeout(deadline, survivor_rx.recv())
+            .await
+            .expect("survivor delivery must not stall")
+            .unwrap();
+        for route in update.announce.iter() {
+            seen.insert(route.prefix);
+        }
+    }
+    assert!(seen.contains(&Prefix::V4(p1)) && seen.contains(&Prefix::V4(p2)));
+
+    // ...and both reconnecting peers' deferred initial dumps complete
+    // (liveness: the run loop advances the queue), ending in EoR.
+    for rx in [&mut r1_rx, &mut r2_rx] {
+        let mut saw_eor = false;
+        while !saw_eor {
+            let update = tokio::time::timeout(deadline, rx.recv())
+                .await
+                .expect("deferred initial dump must complete from the run loop")
+                .unwrap();
+            saw_eor = !update.end_of_rib.is_empty();
+        }
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}

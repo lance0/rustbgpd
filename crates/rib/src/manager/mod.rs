@@ -280,6 +280,18 @@ pub struct RibManager {
     pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Families with an outstanding enhanced route refresh response retry.
     pending_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Outbound registrations (initial table dumps) deferred behind queued
+    /// actor work, completed one per run-loop iteration between drained
+    /// mutation batches (LAN-475). Peer-keyed (deduplicated): the advance
+    /// registers the peer's CURRENT last live session, so a session
+    /// superseded or failed over while queued resolves to its survivor.
+    pending_initial_registrations: VecDeque<IpAddr>,
+    /// Loc-RIB size below which a `PeerUp` initial dump always completes
+    /// inline even with queued actor work — a small dump costs microseconds,
+    /// so deferring it buys nothing and only perturbs registration-timing
+    /// semantics. Defaults to [`INITIAL_DUMP_DEFER_MIN_ROUTES`]; tests pin
+    /// it to 0 to exercise the deferral without bulk data.
+    initial_dump_defer_min_routes: usize,
     /// Active inbound enhanced route refresh windows by peer/family.
     refresh_in_progress: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Per-peer/per-family deadlines for active enhanced route refresh windows.
@@ -830,6 +842,13 @@ const RESYNC_PEERS_PER_TICK: usize = 8;
 const DIRTY_RESYNC_BACKLOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
+/// Loc-RIB size at which a `PeerUp` initial dump is expensive enough to
+/// defer behind queued actor work (LAN-475). Below this an inline dump is
+/// sub-10-ms-class (measured ~2M NLRI/s staged-dump throughput at the IXP
+/// receipt shape), so even a 50-peer reconnect burst serializes well under
+/// a second; above it, mass-reconnect dump serialization visibly delays
+/// re-announcement fan-out and the deferral engages.
+const INITIAL_DUMP_DEFER_MIN_ROUTES: usize = 10_000;
 
 fn initial_route_page_version() -> RoutePageVersion {
     let state = std::collections::hash_map::RandomState::new();
@@ -1174,6 +1193,8 @@ impl RibManager {
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
+            pending_initial_registrations: VecDeque::new(),
+            initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
             refresh_deadlines: HashMap::new(),
             refresh_stale_routes: HashMap::new(),
@@ -1620,6 +1641,35 @@ impl RibManager {
             }
             if poll_start.elapsed() >= self.flush_poll_budget {
                 return true;
+            }
+        }
+    }
+
+    /// Complete one deferred outbound registration (LAN-475), targeting the
+    /// peer's CURRENT last live session. Entries whose peer no longer has a
+    /// live session (torn down while queued) or whose session already
+    /// registered are discarded until one real registration completes (or
+    /// the queue empties). A closed outbound channel does NOT skip the
+    /// registration — the synchronous path never skipped it either; its
+    /// sends fail harmlessly and the session's `PeerDown` cleans up.
+    fn advance_pending_initial_registration(&mut self) {
+        while let Some(peer) = self.pending_initial_registrations.pop_front() {
+            let target = self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .map(|record| record.session_id);
+            match target {
+                Some(session_id) if self.outbound_session_ids.get(&peer) != Some(&session_id) => {
+                    self.complete_outbound_registration(peer);
+                    return;
+                }
+                _ => {
+                    debug!(
+                        %peer,
+                        "dropping deferred outbound registration — session gone or already registered"
+                    );
+                }
             }
         }
     }
@@ -5023,6 +5073,24 @@ impl RibManager {
                 }
                 self.drain_readiness_queries(None);
                 self.advance_destination_prestage();
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            // Deferred outbound registrations (LAN-475): complete one
+            // initial table dump per iteration, and only after every queued
+            // mutation batch has drained — imports and their fan-out to
+            // established peers always preempt the reconnecting peers'
+            // full-table catch-up, so a mass reconnect cannot head-of-line
+            // block re-announcement delivery to survivors.
+            if !self.pending_initial_registrations.is_empty() {
+                if self.drain_ready_updates() {
+                    self.drain_readiness_queries(None);
+                    continue;
+                }
+                self.drain_readiness_queries(None);
+                self.advance_pending_initial_registration();
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;

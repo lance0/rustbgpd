@@ -811,6 +811,20 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
             .map(|tc| tc.saturating_sub(t_reann) as f64 / 1e6)
             .collect();
         let reannounce = stats_line(&format!("flap {round} reannounce_s"), reann_s);
+        // First re-announce arrival per survivor: distinguishes a steady
+        // drain (first ≪ completion: fan-out throughput) from an
+        // idle-then-burst gate (first ≈ completion: a daemon-side timer).
+        let first_s: Vec<f64> = survivors
+            .clone()
+            .filter_map(|i| {
+                let events = ctx.obs[i].events.lock().unwrap();
+                events
+                    .iter()
+                    .find(|e| e.t_us >= t_reann && e.base_ann > 0)
+                    .map(|e| e.t_us.saturating_sub(t_reann) as f64 / 1e6)
+            })
+            .collect();
+        stats_line(&format!("flap {round} first_reann_s"), first_s);
         for observer in ctx.obs.iter().skip(k as usize) {
             observer.flap_mode.store(FLAP_OFF, Ordering::Release);
         }
