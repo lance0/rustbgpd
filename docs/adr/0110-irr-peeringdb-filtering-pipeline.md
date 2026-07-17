@@ -227,7 +227,13 @@ item). None blocks a first pilot at OpenBGPD-equivalence level.
    naming the generated term for every rejection.
 4. Overlay/dataset freshness observability: expose generation timestamp
    and age for reloaded policy artifacts, so "pipeline stuck" is a
-   metric, not a surprise.
+   metric, not a surprise. *Delivered:*
+   `bgp_policy_generation_loaded_timestamp_seconds` (last successful
+   full policy apply) and
+   `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` (last
+   accepted dataset swap), both frozen across rejected loads;
+   alert expressions in `OPERATIONS.md` ("Policy artifact
+   freshness").
 
 **Phase 2 — parity and upstream (after a pilot transcript exists):**
 max-prefix restart-timer action; reject-reason retention wiring for the

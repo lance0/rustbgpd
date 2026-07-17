@@ -510,6 +510,12 @@ impl PeerManager {
         let (session_notification_event_tx, session_notification_event_rx) = mpsc::channel(4096);
         let (session_events_tx, _) = broadcast::channel(4096);
         let (policy_events_tx, _) = broadcast::channel(4096);
+        // ADR-0110 freshness: constructing the manager is the initial
+        // policy apply — stamp the generation and every bound dataset.
+        metrics.record_policy_generation_loaded();
+        for handle in current_config.policy.dataset_bindings.handles() {
+            metrics.record_policy_dataset_loaded(handle.name());
+        }
         Self {
             peers: HashMap::new(),
             session_index: HashMap::new(),
@@ -846,6 +852,9 @@ impl PeerManager {
                                 self.dynamic_ranges =
                                     Self::parse_dynamic_ranges(&self.current_config);
                                 self.config_snapshot_staged = true;
+                                // ADR-0110 freshness: the staged config
+                                // transaction is live from this point.
+                                self.metrics.record_policy_generation_loaded();
                                 Ok(previous)
                             });
                             let _ = reply.send(result);
@@ -869,6 +878,9 @@ impl PeerManager {
                                     self.dynamic_ranges =
                                         Self::parse_dynamic_ranges(&self.current_config);
                                     self.config_snapshot_staged = false;
+                                    // ADR-0110 freshness: rollback re-applies
+                                    // the previous (accepted) config.
+                                    self.metrics.record_policy_generation_loaded();
                                     self.reap_dynamic_peers_not_allowed_by_current_ranges()
                                         .await;
                                     let _ = reply.send(Ok(()));
@@ -1378,6 +1390,12 @@ impl PeerManager {
                         // reflects any accepted runtime CRUD, so a plain re-parse is
                         // correct — no merge/provenance needed.
                         self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+                        // ADR-0110 freshness: every successful reload flows
+                        // through this snapshot replacement — stamp the
+                        // generation even when policy content is unchanged
+                        // (the daemon re-accepted the artifacts). A rejected
+                        // reload aborts before this command is ever sent.
+                        self.metrics.record_policy_generation_loaded();
                         if let Some(ack) = ack {
                             let _ = ack.send(());
                         }

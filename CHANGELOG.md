@@ -110,6 +110,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Policy artifact freshness metrics (ADR-0110): alert when the
+  filter-render pipeline is stuck instead of discovering it later.**
+  `bgp_policy_generation_loaded_timestamp_seconds` stamps every
+  successful full policy apply (initial load, SIGHUP reload — including
+  content-unchanged re-accepts — and config transactions);
+  `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` stamps each
+  external dataset's last accepted generation swap. Both deliberately
+  freeze across rejected loads — the moment the daemon *accepted*
+  artifacts is the source of truth, not file mtime — so
+  `time() - <gauge>` is a truthful staleness age even while a broken
+  render keeps rewriting files. Per-dataset series (including the
+  existing `bgp_policy_dataset_refresh_errors_total`) are now reaped
+  when a dataset is removed from config. Alert expressions documented
+  in `OPERATIONS.md` ("Policy artifact freshness").
+
 - **Looking-glass filtered-route surface: rejected inbound routes are
   retained with their reject reason (LAN-472).** Every rejected unicast
   announcement — import-policy deny (including RPKI/ASPA-driven denies),
