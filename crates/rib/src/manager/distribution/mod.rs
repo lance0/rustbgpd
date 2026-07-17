@@ -101,6 +101,12 @@ struct SharedUnicastProbeCacheEntry {
     next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
     source_snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
     encoded_lengths: Vec<usize>,
+    /// Largest entry of `encoded_lengths`, computed once at `store` time:
+    /// the strict-cohort maximum proof consults it once per member, and
+    /// re-scanning the full per-route vector per member is quadratic at
+    /// fleet scale (measured ~200 ms of fenced actor wall at 700 members
+    /// x 400k routes).
+    encoded_maximum: usize,
 }
 
 impl SharedUnicastProbeCache {
@@ -151,9 +157,10 @@ impl SharedUnicastProbeCache {
             .iter()
             .filter(|entry| Self::entry_matches_payload(entry, announce, next_hop_override))
             .find_map(|entry| {
-                let maximum = entry.encoded_lengths.iter().copied().max().unwrap_or(0);
-                let mut results =
-                    target.reuse_successful_probes(entry.source_snapshot.as_ref(), &[maximum])?;
+                let mut results = target.reuse_successful_probes(
+                    entry.source_snapshot.as_ref(),
+                    &[entry.encoded_maximum],
+                )?;
                 (results.len() == 1).then(|| results.pop().expect("one result validated above"))
             })
     }
@@ -170,11 +177,13 @@ impl SharedUnicastProbeCache {
         if group_entries.len() >= MAX_SHARED_UNICAST_PROBE_COHORTS {
             return;
         }
+        let encoded_maximum = encoded_lengths.iter().copied().max().unwrap_or(0);
         group_entries.push(SharedUnicastProbeCacheEntry {
             announce,
             next_hop_override,
             source_snapshot,
             encoded_lengths,
+            encoded_maximum,
         });
     }
 }
@@ -243,6 +252,23 @@ struct PreparedCleanPolicyTransitionPeer {
     snapshot: Option<Arc<dyn crate::update::ExactExportSnapshot>>,
     sender: tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
     permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+}
+
+/// An in-progress unfenced staging walk for a prospective clean-transition
+/// destination group (`RibUpdate::PrepareExportPolicyDestination`). Unlike
+/// [`PendingCleanPolicyTransition`], this holds no fence: the run loop
+/// advances one budgeted slice only when no ordinary mutation traffic is
+/// queued, and interleaved churn keeps the already-staged prefixes current
+/// through the ordinary all-groups staging pass. The prefix snapshot only
+/// drives walk coverage — every staged prefix is computed from live state
+/// at its staging instant, so a prefix that churns after its slice is
+/// restaged by the churn pass itself.
+pub(super) struct DestinationPrestage {
+    pub(super) destination: usize,
+    prefixes: Vec<Prefix>,
+    cursor: usize,
+    memo: ExportMemo,
+    reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 /// One actor-owned, pre-emission clean policy transition. The RIB run loop
@@ -1265,6 +1291,16 @@ impl RibManager {
                         pending.replacements[0].export_policy.as_ref(),
                     ) {
                         super::update_groups::PolicyTransitionGroupStart::Maintained => {
+                            if self
+                                .group_ribs
+                                .get(&destination)
+                                .is_some_and(|group| group.members.is_empty())
+                            {
+                                // A prepared (still unowned) destination: the
+                                // transition owns its cleanup on fallback
+                                // exactly like one it created itself.
+                                pending.created_destination = Some(destination);
+                            }
                             pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                                 source,
                                 destination,
@@ -2480,9 +2516,125 @@ impl RibManager {
             ));
             return;
         }
+        // A still-running destination preparation cannot be trusted
+        // mid-walk: discard the partial group so the transition stages the
+        // destination deterministically on its ordinary `Created` path.
+        // (The peer manager awaits the prepare reply before sending the
+        // transition, so this is a belt-and-braces guard.)
+        if let Some(prestage) = self.pending_destination_prestage.take() {
+            self.discard_uncommitted_policy_transition_group(prestage.destination);
+        }
         self.metrics.set_rib_policy_transition_in_progress(true);
         self.pending_clean_policy_transition =
             Some(PendingCleanPolicyTransition::new(replacements, Some(reply)));
+    }
+
+    /// Begin the unfenced staging of a prospective clean-transition
+    /// destination group ([`crate::update::RibUpdate::PrepareExportPolicyDestination`]).
+    /// The reply is held until [`Self::advance_destination_prestage`]
+    /// finishes the walk; an immediate `Err` means the preparation was
+    /// skipped and the transition will stage under its fence, as before.
+    pub(super) fn begin_destination_prestage(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if self.pending_clean_policy_transition.is_some()
+            || self.pending_destination_prestage.is_some()
+        {
+            let _ = reply.send(Err(
+                "another policy transition or preparation is pending".to_string()
+            ));
+            return;
+        }
+        let Some((_, destination)) = self.clean_policy_transition_destination(peer, export_policy)
+        else {
+            let _ = reply.send(Err(
+                "peer/policy pair does not classify as a clean grouped transition".to_string(),
+            ));
+            return;
+        };
+        // A leftover unowned group under this id may be partially staged
+        // from an aborted attempt; recreate it deterministically. An OWNED
+        // group is maintained by definition — nothing to stage.
+        self.discard_uncommitted_policy_transition_group(destination);
+        match self.begin_policy_transition_group(destination, peer, export_policy) {
+            super::update_groups::PolicyTransitionGroupStart::Maintained => {
+                let _ = reply.send(Ok(()));
+            }
+            super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => {
+                self.pending_destination_prestage = Some(DestinationPrestage {
+                    destination,
+                    prefixes,
+                    cursor: 0,
+                    memo: ExportMemo::default(),
+                    reply: Some(reply),
+                });
+            }
+        }
+    }
+
+    /// One budgeted, unfenced staging slice of a pending destination
+    /// preparation. Runs from the actor loop only after queued mutation
+    /// traffic has been drained, so ordinary churn keeps flowing between
+    /// slices — and that same churn keeps already-staged prefixes current
+    /// through the ordinary all-groups staging pass.
+    pub(super) fn advance_destination_prestage(&mut self) {
+        let Some(mut prestage) = self.pending_destination_prestage.take() else {
+            return;
+        };
+        let poll_start = std::time::Instant::now();
+        loop {
+            let end = super::policy_transition_slice_end(
+                prestage.cursor,
+                prestage.prefixes.len(),
+                super::POLICY_TRANSITION_ROUTE_SLICE,
+            );
+            if prestage.cursor < end {
+                self.stage_policy_transition_group_chunk(
+                    prestage.destination,
+                    &prestage.prefixes[prestage.cursor..end],
+                    &mut prestage.memo,
+                );
+                prestage.cursor = end;
+            }
+            if prestage.cursor == prestage.prefixes.len() {
+                debug!(
+                    destination = prestage.destination,
+                    prefixes = prestage.prefixes.len(),
+                    "prepared clean-transition destination group without the fence"
+                );
+                if let Some(reply) = prestage.reply.take() {
+                    let _ = reply.send(Ok(()));
+                }
+                return;
+            }
+            if poll_start.elapsed() >= self.flush_poll_budget {
+                self.pending_destination_prestage = Some(prestage);
+                return;
+            }
+        }
+    }
+
+    /// Discard a prepared destination that will never be committed
+    /// ([`crate::update::RibUpdate::DiscardPreparedExportPolicyDestination`]).
+    /// Only a memberless group is removed; a committed destination has
+    /// members and stays.
+    pub(super) fn discard_prepared_export_destination(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+    ) {
+        if let Some(prestage) = self.pending_destination_prestage.take() {
+            self.discard_uncommitted_policy_transition_group(prestage.destination);
+            return;
+        }
+        if let Some((_, destination)) =
+            self.clean_policy_transition_destination(peer, export_policy)
+        {
+            self.discard_uncommitted_policy_transition_group(destination);
+        }
     }
 
     /// Force re-emission of all currently-advertised routes to a peer

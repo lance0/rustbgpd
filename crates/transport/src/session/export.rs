@@ -950,6 +950,80 @@ impl SessionExportProfile {
         }
     }
 
+    /// Exact unicast probe with per-call length reuse: candidates whose
+    /// [`UnicastProbeShapeKey`] matches an already-probed candidate share its
+    /// exact result instead of re-building a single-entry message. See the
+    /// cache comment in `probe_announcements` for the exactness argument.
+    fn probe_unicast_with_length_cache(
+        &self,
+        route: &Route,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+        attrs: PreparedUnicastAttributes,
+        length_cache: &mut FxHashMap<UnicastProbeShapeKey, ExactExportResult>,
+    ) -> Result<ExactExportResult, ExactExportError> {
+        let candidate = match self.finish_unicast_candidate(route, next_hop_override, attrs) {
+            Ok(candidate) => candidate,
+            Err(error) => return exact_export_result(Err(error)),
+        };
+        let key = match &candidate {
+            PreparedUnicastCandidate::Ipv4Body { attrs, entry } => UnicastProbeShapeKey {
+                attrs_ptr: Arc::as_ptr(attrs) as usize,
+                mp: None,
+                prefix_bits: entry.prefix.len,
+            },
+            PreparedUnicastCandidate::Mp {
+                afi,
+                next_hop,
+                link_local_next_hop,
+                attrs,
+                entry,
+                ipv4_mode,
+            } => UnicastProbeShapeKey {
+                attrs_ptr: Arc::as_ptr(attrs) as usize,
+                mp: Some((
+                    *afi,
+                    *next_hop,
+                    *link_local_next_hop,
+                    matches!(ipv4_mode, Ipv4UnicastMode::MpReach),
+                )),
+                prefix_bits: match entry.prefix {
+                    Prefix::V4(prefix) => prefix.len,
+                    Prefix::V6(prefix) => prefix.len,
+                },
+            },
+        };
+        if let Some(hit) = length_cache.get(&key) {
+            return Ok(*hit);
+        }
+        let result = exact_export_result(match candidate {
+            PreparedUnicastCandidate::Ipv4Body { attrs, entry } => self
+                .probe_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
+                .map_err(Into::into),
+            PreparedUnicastCandidate::Mp {
+                afi,
+                next_hop,
+                link_local_next_hop,
+                attrs,
+                entry,
+                ipv4_mode,
+            } => self
+                .probe_mp_reach(
+                    afi,
+                    Safi::Unicast,
+                    next_hop,
+                    link_local_next_hop,
+                    &attrs,
+                    ReachNlri::Unicast(std::slice::from_ref(&entry)),
+                    ipv4_mode,
+                )
+                .map_err(Into::into),
+        });
+        if let Ok(ok) = &result {
+            length_cache.insert(key, *ok);
+        }
+        result
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "enumerates every supported export family"
@@ -1720,6 +1794,19 @@ impl ExactExportEncoder for SessionExportEncoder {
     }
 }
 
+/// Everything that determines a single-entry unicast probe's encoded length
+/// within one `probe_announcements` call (profile constant): the prepared
+/// attribute identity, the MP framing inputs, and the entry's prefix
+/// bit-length (which fixes the NLRI byte count — the prefix *address* bytes
+/// never change a length).
+#[derive(PartialEq, Eq, Hash)]
+struct UnicastProbeShapeKey {
+    attrs_ptr: usize,
+    /// `None` = legacy IPv4 body framing; `Some` = `MP_REACH` framing inputs.
+    mp: Option<(Afi, IpAddr, Option<Ipv6Addr>, bool)>,
+    prefix_bits: u8,
+}
+
 fn exact_export_result(
     probe: Result<ExactExportProbe, ExportProbeError>,
 ) -> Result<ExactExportResult, ExactExportError> {
@@ -1785,6 +1872,19 @@ impl ExactExportSnapshot for SessionExportProfile {
         candidates: &[ExactExportCandidate<'_>],
     ) -> Vec<Result<ExactExportResult, ExactExportError>> {
         let mut prepared_attr_cache = PreparedAttrCache::default();
+        // Exact length-reuse cache for unicast probes. A probed message's
+        // length is a pure function of the prepared attribute bytes
+        // (identified by `Arc` pointer — the prepared-attr cache keeps every
+        // bundle alive for the whole call, so pointers are stable and
+        // distinct), the MP framing inputs, and the entry's wire size; with
+        // the profile constant across one call, the prefix bit-length
+        // determines the NLRI bytes (Add-Path emission is a per-family
+        // profile constant). The first candidate of each shape runs the
+        // real message build; equal-shape candidates reuse its exact
+        // result. Errors are never cached: they are the rare aborting case
+        // and stay on the fully built path.
+        let mut length_cache: FxHashMap<UnicastProbeShapeKey, ExactExportResult> =
+            FxHashMap::default();
         let local_ipv4 = self.local_ipv4();
         candidates
             .iter()
@@ -1802,11 +1902,12 @@ impl ExactExportSnapshot for SessionExportProfile {
                             next_hop_override,
                         )
                         .clone();
-                    exact_export_result(self.probe_prepared_unicast_announcement(
+                    self.probe_unicast_with_length_cache(
                         route,
                         next_hop_override,
                         attrs,
-                    ))
+                        &mut length_cache,
+                    )
                 }
                 _ => <Self as ExactExportSnapshot>::probe_announcement(self, candidate),
             })

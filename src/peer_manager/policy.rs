@@ -550,6 +550,29 @@ impl PeerManager {
             peer_keys.push(peer_key);
         }
 
+        // Pre-stage the shared destination group in the RIB without the
+        // transition fence, so the fenced transition later finds it
+        // `Maintained` and skips its full-table staging walk — the dominant
+        // share of the reload wall during which queued churn stalls at
+        // route-server scale. Best-effort: on any error the transition
+        // stages the destination itself, exactly as before. This must
+        // precede the session hot-applies so a failure here costs nothing.
+        let prestaged = {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let send_result = self
+                .rib_tx
+                .send(RibUpdate::PrepareExportPolicyDestination {
+                    peer: targets[0].address,
+                    export_policy: targets[0].export_policy.clone(),
+                    reply: reply_tx,
+                })
+                .await;
+            match send_result {
+                Err(_) => false,
+                Ok(()) => matches!(self.await_with_readiness(reply_rx).await, Ok(Ok(()))),
+            }
+        };
+
         let mut captured = Vec::with_capacity(targets.len());
         for ((target, peer_key), &import_changed) in
             targets.iter().zip(&peer_keys).zip(&import_deltas)
@@ -594,6 +617,9 @@ impl PeerManager {
                     )
                     .await;
                 if let Err(error) = import_result {
+                    if prestaged {
+                        self.discard_prepared_export_destination(targets[0]).await;
+                    }
                     // Mirror the authoritative forward-import bail: bookkeeping
                     // retains the prior chain so the next call still sees the
                     // delta and retries, and `pending_refresh` carries the
@@ -639,6 +665,9 @@ impl PeerManager {
                 ))
                 .await;
             if let Err(error) = apply_result {
+                if prestaged {
+                    self.discard_prepared_export_destination(targets[0]).await;
+                }
                 // A failed session command is not proof that the session kept
                 // its prior chain (the reply may fail after a partial local
                 // apply). Reassert the failing peer's prior chain first, then
@@ -757,12 +786,23 @@ impl PeerManager {
         let rib_result = match cohort_result {
             Ok(ExportPolicyCohortOutcome::Committed) => Ok(()),
             Ok(ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply) => {
+                // A fallback that never reached the transition's staging
+                // phase leaves the prepared destination unowned; remove it
+                // before the per-peer applies rebuild membership through the
+                // ordinary join path (memberless-only removal, so this is a
+                // no-op whenever the group is actually in use).
+                if prestaged {
+                    self.discard_prepared_export_destination(targets[0]).await;
+                }
                 self.apply_export_policy_replacements_authoritatively(&replacements)
                     .await
             }
             Err(error) => Err(error),
         };
         if let Err(error) = rib_result {
+            if prestaged {
+                self.discard_prepared_export_destination(targets[0]).await;
+            }
             let rollback = self
                 .restore_resolved_policies(captured, rollback_rib_budget)
                 .await;
@@ -844,6 +884,20 @@ impl PeerManager {
             captured[index].forward_completed = true;
         }
         Some(Ok(captured))
+    }
+
+    /// Fire-and-forget cleanup of a prepared clean-transition destination
+    /// after the cohort failed before its transition committed. The RIB only
+    /// removes a memberless group, so a race with a committed transition is
+    /// harmless — callers still restrict this to pre-commit failure paths.
+    async fn discard_prepared_export_destination(&self, target: &ResolvedPeerPolicy) {
+        let _ = self
+            .rib_tx
+            .send(RibUpdate::DiscardPreparedExportPolicyDestination {
+                peer: target.address,
+                export_policy: target.export_policy.clone(),
+            })
+            .await;
     }
 
     /// Await the cohort RIB reply while admitting only the dedicated
