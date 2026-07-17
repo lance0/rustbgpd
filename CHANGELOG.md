@@ -41,6 +41,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `unscoped_link_local`). The RFC 7948 `same-AS` and
   `explicit-authorized` relationships remain deferred per the ADR.
   (LAN-473)
+- **RFC 7606 revised BGP UPDATE error handling** — a malformed path
+  attribute no longer resets the session by default. The wire crate
+  classifies every attribute error with an RFC 7606 disposition
+  (`wire::validate::ErrorDisposition`): treat-as-withdraw (ORIGIN, AS_PATH,
+  NEXT_HOP, MED, communities, flag conflicts, missing mandatory attributes,
+  attribute-section overruns) withdraws the routes carried in the UPDATE
+  while the session stays Established; attribute-discard (ATOMIC_AGGREGATE,
+  AGGREGATOR, duplicate occurrences per §3 (g), and eBGP-received
+  LOCAL_PREF / ORIGINATOR_ID / CLUSTER_LIST) drops the attribute and
+  processes the rest. Session reset is retained only where the NLRI cannot
+  be trusted: section-length inconsistencies, malformed or duplicated
+  MP_REACH_NLRI / MP_UNREACH_NLRI, unparseable NLRI fields, and the §5.2
+  no-reachable-NLRI escalation. New `UpdateMessage::parse_revised` /
+  `decode_path_attributes_revised` APIs carry the per-attribute error
+  taxonomy; `UpdateError` gains a `disposition` field. The transport's
+  AS_PATH-loop and reflection-loop discard paths now share the same
+  treat-as-withdraw engine. Malformations are logged at `warn` with peer,
+  attribute type, and disposition. See `docs/RFC_NOTES.md` for the
+  per-attribute table and interpretation decisions.
 
 - **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
   reloadstall harness extensions). The reload-stall harness gains an

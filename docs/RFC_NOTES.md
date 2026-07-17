@@ -15,7 +15,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 | Area | Standards | Scope |
 |------|-----------|-------|
-| Core BGP | RFC 4271, RFC 6793 (4-byte ASN) | FSM + UPDATE validation, dual-stack IPv4/IPv6 unicast (SAFI 1) |
+| Core BGP | RFC 4271, RFC 6793 (4-byte ASN), RFC 7606 (revised error handling) | FSM + UPDATE validation with treat-as-withdraw / attribute-discard, dual-stack IPv4/IPv6 unicast (SAFI 1) |
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
 | Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` and `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS |
@@ -339,6 +339,55 @@ prevents pathologically short hold times that would cause false flaps.
 RFC 4271 recommends a minimum of 3 seconds; we enforce it.
 
 ---
+
+## RFC 7606 — Revised BGP UPDATE Error Handling
+
+Implemented on the inbound UPDATE path: a malformed path attribute no longer
+tears the session down by default. `wire::validate::ErrorDisposition`
+classifies every attribute error as attribute-discard, treat-as-withdraw, or
+session-reset; the transport applies the strongest disposition found in the
+message (§3 (h)).
+
+- **Treat-as-withdraw** (§2): the UPDATE's routes — body NLRI and every
+  MP family — are withdrawn from the Adj-RIB-In (previously accepted
+  routes for the same NLRI are removed), announcements are dropped,
+  explicit withdrawals still apply, and the session stays Established.
+  Covers ORIGIN, AS_PATH (§7.2 — no longer a session reset), NEXT_HOP,
+  MULTI_EXIT_DISC, communities of all sizes, attribute-flag conflicts
+  (§3 (c)), missing mandatory attributes (§3 (d)), and attribute-section
+  framing overruns (§4).
+- **Attribute-discard** (§2): ATOMIC_AGGREGATE with a non-zero length and
+  AGGREGATOR with a length other than 6/8 (§7.6, §7.7) are dropped and the
+  UPDATE proceeds. Malformed LOCAL_PREF / ORIGINATOR_ID / CLUSTER_LIST from
+  an *external* neighbor are discarded (§7.5, §7.9, §7.10); from an internal
+  neighbor they are treat-as-withdraw. Duplicate attributes keep the first
+  occurrence and discard the rest (§3 (g)).
+- **Session-reset** is retained only where the NLRI cannot be trusted:
+  UPDATE section-length inconsistencies (§3 (b), unchanged), a malformed or
+  duplicated MP_REACH_NLRI / MP_UNREACH_NLRI (§7.11, §3 (g)), syntactically
+  incorrect NLRI or Withdrawn Routes fields (§5.3), and the §5.2 escalation
+  (a treat-as-withdraw-class error in an UPDATE that encodes no reachable
+  NLRI).
+
+Interpretation decisions:
+
+- An unrecognized attribute claiming to be well-known (Optional=0, unknown
+  type) is handled treat-as-withdraw. RFC 7606 §3 (c) only literally covers
+  flag conflicts on *recognized* attributes, but resetting the session for a
+  tunneled unknown attribute is exactly the amplification §1 warns about;
+  FRR makes the same call.
+- Dispositions are keyed by attribute type code, not by which specific check
+  failed — a flag conflict on AGGREGATOR is attribute-discard, not
+  treat-as-withdraw. Discard is the weaker action and AGGREGATOR never
+  affects route selection here.
+- An UPDATE whose only attributes were discarded as malformed is not
+  mistaken for an End-of-RIB marker (RFC 4724 §2 detection requires a clean
+  decode).
+- Malformed attributes are logged at `warn` with peer, attribute type, and
+  disposition (§6 debugging facility). Per-disposition counters are a
+  follow-up.
+- AS4_PATH / AS4_AGGREGATOR are not decoded as typed attributes (they pass
+  through opaquely), so no malformation can be detected for them today.
 
 ## Milestone 1 — RFC 4271 Sections
 

@@ -15,6 +15,11 @@ fuzz_target!(|data: &[u8]| {
         let _ = update.parse(true, false, &[]);
         let _ = update.parse(false, false, &[]);
         let _ = update.parse(true, true, &[]);
+        // RFC 7606 revised decode: recoverable per-attribute error handling
+        // (iBGP and eBGP disposition branches).
+        let _ = update.parse_revised(true, true, false, &[]);
+        let _ = update.parse_revised(true, false, false, &[]);
+        let _ = update.parse_revised(false, true, true, &[]);
         let _ = update.parse(
             true,
             false,

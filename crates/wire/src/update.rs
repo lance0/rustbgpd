@@ -46,6 +46,17 @@ pub struct ParsedUpdate {
     /// silent drop with peer context.
     pub bgpls_nlri_discarded: u32,
 }
+/// A parsed UPDATE from [`UpdateMessage::parse_revised`]: the cleanly decoded
+/// parts plus the malformed attributes recovered per RFC 7606.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisedParsedUpdate {
+    /// The parsed UPDATE. Malformed attributes are omitted from
+    /// `update.attributes`.
+    pub update: ParsedUpdate,
+    /// Malformed attributes recovered without aborting the parse, each with
+    /// its RFC 7606 disposition. Empty means the UPDATE decoded cleanly.
+    pub malformed: Vec<crate::attribute::MalformedAttribute>,
+}
 impl UpdateMessage {
     /// Decode an UPDATE message body from a buffer.
     /// The header must already be consumed; `body_len` is
@@ -147,6 +158,63 @@ impl UpdateMessage {
             attributes,
             announced,
             bgpls_nlri_discarded,
+        })
+    }
+    /// Parse the raw UPDATE with RFC 7606 revised error handling.
+    ///
+    /// Like [`parse()`](Self::parse), but a malformed path attribute does not
+    /// abort the parse: it is omitted from `update.attributes` and recorded in
+    /// `malformed` with its RFC 7606 disposition (see
+    /// [`crate::attribute::decode_path_attributes_revised`]). The caller
+    /// applies the strongest recorded disposition (§3 (h)).
+    ///
+    /// `is_ibgp` selects the internal-neighbor disposition branch for
+    /// `LOCAL_PREF` / `ORIGINATOR_ID` / `CLUSTER_LIST` (§7.5, §7.9, §7.10).
+    ///
+    /// # Errors
+    ///
+    /// Returns `DecodeError` only for session-reset-class problems: malformed
+    /// or duplicated `MP_REACH_NLRI`/`MP_UNREACH_NLRI` (§7.11), or
+    /// syntactically incorrect body NLRI / Withdrawn Routes fields (§5.3 —
+    /// treat-as-withdraw is impossible when the NLRI itself cannot be parsed,
+    /// §3 (j)).
+    pub fn parse_revised(
+        &self,
+        four_octet_as: bool,
+        is_ibgp: bool,
+        add_path_ipv4: bool,
+        add_path_families: &[(Afi, Safi)],
+    ) -> Result<RevisedParsedUpdate, DecodeError> {
+        let withdrawn = if add_path_ipv4 {
+            crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
+        } else {
+            crate::nlri::decode_nlri(&self.withdrawn_routes)?
+                .into_iter()
+                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+                .collect()
+        };
+        let decoded = crate::attribute::decode_path_attributes_revised(
+            &self.path_attributes,
+            four_octet_as,
+            is_ibgp,
+            add_path_families,
+        )?;
+        let announced = if add_path_ipv4 {
+            crate::nlri::decode_nlri_addpath(&self.nlri)?
+        } else {
+            crate::nlri::decode_nlri(&self.nlri)?
+                .into_iter()
+                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+                .collect()
+        };
+        Ok(RevisedParsedUpdate {
+            update: ParsedUpdate {
+                withdrawn,
+                attributes: decoded.attributes,
+                announced,
+                bgpls_nlri_discarded: decoded.bgpls_nlri_discarded,
+            },
+            malformed: decoded.malformed,
         })
     }
     /// Encode a complete UPDATE message (header + body) into a buffer.
@@ -561,5 +629,39 @@ mod tests {
             msg.encode(&mut buf),
             Err(EncodeError::MessageTooLong { .. })
         ));
+    }
+
+    #[test]
+    fn parse_revised_recovers_malformed_attribute_and_keeps_nlri() {
+        // ORIGIN + AS_PATH + NEXT_HOP + malformed MED (length 3), one
+        // announced prefix. RFC 7606: the malformed attribute is reported
+        // with its disposition; the NLRI still parses.
+        let mut attrs = vec![0x40, 1, 1, 0]; // ORIGIN
+        attrs.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xE9]); // AS_PATH (65001)
+        attrs.extend([0x40, 3, 4, 10, 0, 0, 2]); // NEXT_HOP
+        attrs.extend([0x80, 4, 3, 0, 0, 1]); // MED, bad length
+        let msg = UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from(attrs),
+            nlri: Bytes::from_static(&[24, 203, 0, 113]),
+        };
+        // The legacy parse still aborts on the same bytes.
+        assert!(msg.parse(true, false, &[]).is_err());
+        let revised = msg.parse_revised(true, false, false, &[]).unwrap();
+        assert_eq!(revised.update.attributes.len(), 3);
+        assert_eq!(revised.update.announced.len(), 1);
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(revised.malformed[0].type_code, 4);
+    }
+    #[test]
+    fn parse_revised_still_rejects_unparseable_nlri() {
+        // RFC 7606 §5.3 / §3 (j): treat-as-withdraw is impossible when the
+        // NLRI field itself cannot be parsed — hard error (session reset).
+        let msg = UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::new(),
+            nlri: Bytes::from_static(&[33, 10, 0, 0, 0]), // prefix length 33
+        };
+        assert!(msg.parse_revised(true, false, false, &[]).is_err());
     }
 }

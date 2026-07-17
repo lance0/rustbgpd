@@ -13,7 +13,7 @@ use rustbgpd_policy::{
 use rustbgpd_telemetry::reason_labels::{
     NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
 };
-use rustbgpd_wire::{AspaValidationContext, ParsedUpdate};
+use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
@@ -543,6 +543,290 @@ impl PeerSession {
             first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
+    /// RFC 7606 treat-as-withdraw primitive: drop every announcement carried
+    /// in the UPDATE, withdraw any previously accepted route those
+    /// announcements replace, process the explicit withdrawals normally
+    /// (unicast, `FlowSpec`, EVPN, BGP-LS, L3VPN, labeled-unicast, and RTC —
+    /// no family may accumulate stale state downstream), and leave the
+    /// session Established. Shared by the AS_PATH-loop, reflection-loop,
+    /// and RFC 7606 malformed-attribute paths.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one withdraw-conversion pass per address family over the same sequence"
+    )]
+    async fn treat_update_as_withdraw(&mut self, parsed: &ParsedUpdate) {
+        let rejected_unicast = self.eligible_unicast_announcements(parsed);
+        let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
+            .withdrawn
+            .iter()
+            .map(|e| (Prefix::V4(e.prefix), e.path_id))
+            .collect();
+        let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
+        let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+        let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
+        let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
+        let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
+        let mut loop_l3vpn_rejected: Vec<VpnRibRouteKey> = Vec::new();
+        let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
+        let mut loop_labeled_rejected: Vec<LabeledRibRouteKey> = Vec::new();
+        let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
+        let mut loop_rtc_rejected: Vec<RtcRibRouteKey> = Vec::new();
+        for attr in &parsed.attributes {
+            if let PathAttribute::MpUnreachNlri(mp) = attr {
+                let family = (mp.afi, mp.safi);
+                if self.negotiated_families.contains(&family) {
+                    loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
+                    loop_fs_withdrawn.extend(
+                        mp.flowspec_withdrawn
+                            .iter()
+                            .cloned()
+                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
+                    );
+                    loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
+                    if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
+                        loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
+                            BgpLsRouteKey {
+                                family: bgpls_family,
+                                nlri: nlri.key(),
+                                path_id: 0,
+                            }
+                        }));
+                    }
+                    if mp.safi == Safi::MplsVpn {
+                        loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| {
+                            VpnRibRouteKey {
+                                nlri_key: entry.nlri.key(),
+                                path_id: entry.path_id,
+                            }
+                        }));
+                    }
+                    if mp.safi == Safi::LabeledUnicast {
+                        loop_labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(|entry| {
+                            LabeledRibRouteKey {
+                                prefix: entry.nlri.key(),
+                                path_id: entry.path_id,
+                            }
+                        }));
+                    }
+                    if mp.safi == Safi::RtConstrain {
+                        loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
+                            RtcRibRouteKey {
+                                nlri: *nlri,
+                                path_id: 0,
+                            }
+                        }));
+                    }
+                }
+            }
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
+                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+            {
+                loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| BgpLsRouteKey {
+                    family: bgpls_family,
+                    nlri: nlri.key(),
+                    path_id: 0,
+                }));
+            }
+            // A loop-rejected announcement replaces only an exact route
+            // that this session previously accepted.
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && mp.safi == Safi::MplsVpn
+                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+            {
+                loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| VpnRibRouteKey {
+                    nlri_key: entry.nlri.key(),
+                    path_id: entry.path_id,
+                }));
+            }
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && mp.safi == Safi::LabeledUnicast
+                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+            {
+                loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
+                    LabeledRibRouteKey {
+                        prefix: entry.nlri.key(),
+                        path_id: entry.path_id,
+                    }
+                }));
+            }
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && mp.safi == Safi::RtConstrain
+                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+            {
+                loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
+                    nlri: *nlri,
+                    path_id: 0,
+                }));
+            }
+        }
+        for &(prefix, path_id) in &loop_withdrawn {
+            self.forget_known_path(prefix, path_id);
+        }
+        for (prefix, path_id) in rejected_unicast {
+            if self.forget_known_path(prefix, path_id) {
+                loop_withdrawn.push((prefix, path_id));
+            }
+        }
+        if self.import_explain_enabled {
+            for &(prefix, path_id) in &loop_withdrawn {
+                let afi = match prefix {
+                    Prefix::V4(_) => Afi::Ipv4,
+                    Prefix::V6(_) => Afi::Ipv6,
+                };
+                self.import_decision_cache
+                    .mark_withdrawn(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix,
+                        path_id,
+                    });
+            }
+        }
+        for rule in &loop_fs_withdrawn {
+            self.known_flowspec.remove(rule);
+        }
+        for key in &loop_evpn_withdrawn {
+            self.known_evpn.remove(key);
+        }
+        for key in &loop_bgpls_withdrawn {
+            self.known_bgpls.remove(key);
+        }
+        for key in loop_bgpls_rejected {
+            if self.known_bgpls.remove(&key) {
+                loop_bgpls_withdrawn.push(key);
+            }
+        }
+        for key in &loop_l3vpn_withdrawn {
+            self.known_vpn.remove(key);
+        }
+        for key in loop_l3vpn_rejected {
+            if self.known_vpn.remove(&key) {
+                loop_l3vpn_withdrawn.push(key);
+            }
+        }
+        for key in &loop_labeled_withdrawn {
+            self.known_labeled.remove(key);
+        }
+        for key in loop_labeled_rejected {
+            if self.known_labeled.remove(&key) {
+                loop_labeled_withdrawn.push(key);
+            }
+        }
+        for key in &loop_rtc_withdrawn {
+            self.known_rtc.remove(key);
+        }
+        for key in loop_rtc_rejected {
+            if self.known_rtc.remove(&key) {
+                loop_rtc_withdrawn.push(key);
+            }
+        }
+        if !loop_withdrawn.is_empty()
+            || !loop_fs_withdrawn.is_empty()
+            || !loop_evpn_withdrawn.is_empty()
+        {
+            let refresh_delta = self.capture_routes_refresh_delta(
+                &[],
+                &loop_withdrawn,
+                &[],
+                &loop_fs_withdrawn,
+                &[],
+                &loop_evpn_withdrawn,
+            );
+            if self
+                .deliver_routes_to_rib(RibUpdate::RoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vec![],
+                    withdrawn: loop_withdrawn,
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: loop_fs_withdrawn,
+                    evpn_announced: vec![],
+                    evpn_withdrawn: loop_evpn_withdrawn,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
+        }
+        if !loop_bgpls_withdrawn.is_empty() {
+            let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
+            if self
+                .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vec![],
+                    withdrawn: loop_bgpls_withdrawn,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
+        }
+        if !loop_l3vpn_withdrawn.is_empty() {
+            let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
+            if self
+                .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vec![],
+                    withdrawn: loop_l3vpn_withdrawn,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
+        }
+        if !loop_labeled_withdrawn.is_empty() {
+            let refresh_delta = self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
+            if self
+                .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vec![],
+                    withdrawn: loop_labeled_withdrawn,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
+        }
+        if !loop_rtc_withdrawn.is_empty() {
+            let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
+            if self
+                .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    announced: vec![],
+                    withdrawn: loop_rtc_withdrawn,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if let Some(delta) = refresh_delta {
+                self.apply_refresh_accounting_delta(delta);
+            }
+        }
+        self.drive_fsm(Event::UpdateReceived).await;
+    }
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
@@ -558,19 +842,43 @@ impl PeerSession {
         let add_path_ipv4 = self
             .add_path_receive_families
             .contains(&(Afi::Ipv4, Safi::Unicast));
-        // 1. Structural decode
-        let parsed = match update.parse(
+        // 1. Structural decode — RFC 7606 revised error handling: recoverable
+        // per-attribute malformations are collected alongside the parse
+        // instead of aborting it. `Err` stays reserved for session-reset-class
+        // problems (RFC 7606 §3 (j), §5.3): syntactically incorrect NLRI /
+        // Withdrawn Routes fields, or a malformed or duplicated
+        // MP_REACH_NLRI / MP_UNREACH_NLRI whose NLRI cannot be located.
+        let is_ebgp = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
+        let revised = match update.parse_revised(
             four_octet_as,
+            !is_ebgp,
             add_path_ipv4,
             &self.add_path_receive_families,
         ) {
-            Ok(p) => p,
+            Ok(r) => r,
             Err(e) => {
                 warn!(peer = %self.peer_label, error = %e, "UPDATE decode error");
                 self.drive_fsm(Event::DecodeError(e)).await;
                 return;
             }
         };
+        let malformed = revised.malformed;
+        let parsed = revised.update;
+        for m in &malformed {
+            warn!(
+                peer = %self.peer_label,
+                attr_type = m.type_code,
+                disposition = m.disposition.as_str(),
+                error = %m.error,
+                "malformed path attribute (RFC 7606 revised error handling)"
+            );
+        }
+        // RFC 7606 §3 (h): when multiple attribute errors exist, the approach
+        // with the strongest action wins.
+        let mut disposition = malformed.iter().map(|m| m.disposition).max();
         // Observe recoverable BGP-LS NLRI discards (RFC 9552 fault management,
         // PR #616): known NLRIs with out-of-order descriptor TLVs are dropped
         // while the session survives. Fatal framing errors take the Err arm
@@ -594,14 +902,11 @@ impl PeerSession {
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
         let has_body_nlri = !parsed.announced.is_empty();
         let has_nlri = has_body_nlri || has_mp_nlri;
-        let is_ebgp = self
-            .negotiated
-            .as_ref()
-            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
         let validation_options = rustbgpd_wire::UpdateValidationOptions {
             allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
                 && self.use_extended_nexthop_ipv4(),
         };
+        let mut validation_payload: Option<(u8, Vec<u8>)> = None;
         if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes_with_options(
             &parsed.attributes,
             has_nlri,
@@ -612,18 +917,67 @@ impl PeerSession {
             warn!(
                 peer = %self.peer_label,
                 subcode = update_err.subcode,
+                disposition = update_err.disposition.as_str(),
                 "UPDATE validation error"
             );
-            let notif = NotificationMessage::new(
-                NotificationCode::UpdateMessage,
-                update_err.subcode,
-                bytes::Bytes::from(update_err.data),
+            if update_err.disposition == ErrorDisposition::SessionReset {
+                let notif = NotificationMessage::new(
+                    NotificationCode::UpdateMessage,
+                    update_err.subcode,
+                    bytes::Bytes::from(update_err.data),
+                );
+                self.drive_fsm(Event::UpdateValidationError(notif)).await;
+                return;
+            }
+            disposition = disposition.max(Some(update_err.disposition));
+            validation_payload = Some((update_err.subcode, update_err.data));
+        }
+        // Apply the strongest RFC 7606 disposition. Attribute-discard needs no
+        // action here — the offending attributes were already omitted from
+        // `parsed.attributes` and the UPDATE proceeds without them (§2).
+        // Treat-as-withdraw removes every route the UPDATE carries while the
+        // session stays Established.
+        if disposition >= Some(ErrorDisposition::TreatAsWithdraw) {
+            // RFC 7606 §5.2: an UPDATE with path attributes but no reachable
+            // NLRI encoded gives no confidence that its NLRI was parsed
+            // successfully; for any error stronger than attribute-discard the
+            // session-reset approach MUST be used instead.
+            if parsed.announced.is_empty() && !has_mp_nlri {
+                warn!(
+                    peer = %self.peer_label,
+                    "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
+                );
+                if let Some(m) = malformed
+                    .iter()
+                    .find(|m| m.disposition == ErrorDisposition::TreatAsWithdraw)
+                {
+                    self.drive_fsm(Event::DecodeError(m.error.clone())).await;
+                } else {
+                    let (subcode, data) = validation_payload.unwrap_or((
+                        rustbgpd_wire::notification::update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                        Vec::new(),
+                    ));
+                    let notif = NotificationMessage::new(
+                        NotificationCode::UpdateMessage,
+                        subcode,
+                        bytes::Bytes::from(data),
+                    );
+                    self.drive_fsm(Event::UpdateValidationError(notif)).await;
+                }
+                return;
+            }
+            warn!(
+                peer = %self.peer_label,
+                announced = parsed.announced.len(),
+                "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
-            self.drive_fsm(Event::UpdateValidationError(notif)).await;
+            self.treat_update_as_withdraw(&parsed).await;
             return;
         }
-        // 3. End-of-RIB detection (RFC 4724 §2)
-        if parsed.announced.is_empty() && parsed.withdrawn.is_empty() {
+        // 3. End-of-RIB detection (RFC 4724 §2). An UPDATE that only became
+        // empty because malformed attributes were discarded is junk, not an
+        // EoR signal — require a clean decode.
+        if parsed.announced.is_empty() && parsed.withdrawn.is_empty() && malformed.is_empty() {
             // IPv4 EoR: empty UPDATE (no NLRI, no withdrawn, no attributes)
             if parsed.attributes.is_empty() {
                 info!(peer = %self.peer_label, family = "ipv4_unicast", "received End-of-RIB");
@@ -825,7 +1179,6 @@ impl PeerSession {
             }
         });
         if as_path_loop {
-            let rejected_unicast = self.eligible_unicast_announcements(&parsed);
             // Count rejected announced prefixes (body NLRI + MP_REACH_NLRI)
             let rejected_count = parsed.announced.len()
                 + parsed
@@ -854,281 +1207,7 @@ impl PeerSession {
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the AS_PATH-loop branch must
             // not silently drop withdrawals for any family, or stale non-unicast state
             // accumulates downstream until the next session reset / refresh.
-            let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
-                .withdrawn
-                .iter()
-                .map(|e| (Prefix::V4(e.prefix), e.path_id))
-                .collect();
-            let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
-            let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
-            let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
-            let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
-            let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
-            let mut loop_l3vpn_rejected: Vec<VpnRibRouteKey> = Vec::new();
-            let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
-            let mut loop_labeled_rejected: Vec<LabeledRibRouteKey> = Vec::new();
-            let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
-            let mut loop_rtc_rejected: Vec<RtcRibRouteKey> = Vec::new();
-            for attr in &parsed.attributes {
-                if let PathAttribute::MpUnreachNlri(mp) = attr {
-                    let family = (mp.afi, mp.safi);
-                    if self.negotiated_families.contains(&family) {
-                        loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                        loop_fs_withdrawn.extend(
-                            mp.flowspec_withdrawn
-                                .iter()
-                                .cloned()
-                                .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                        );
-                        loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
-                        if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
-                            loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
-                                BgpLsRouteKey {
-                                    family: bgpls_family,
-                                    nlri: nlri.key(),
-                                    path_id: 0,
-                                }
-                            }));
-                        }
-                        if mp.safi == Safi::MplsVpn {
-                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| {
-                                VpnRibRouteKey {
-                                    nlri_key: entry.nlri.key(),
-                                    path_id: entry.path_id,
-                                }
-                            }));
-                        }
-                        if mp.safi == Safi::LabeledUnicast {
-                            loop_labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(
-                                |entry| LabeledRibRouteKey {
-                                    prefix: entry.nlri.key(),
-                                    path_id: entry.path_id,
-                                },
-                            ));
-                        }
-                        if mp.safi == Safi::RtConstrain {
-                            loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
-                                RtcRibRouteKey {
-                                    nlri: *nlri,
-                                    path_id: 0,
-                                }
-                            }));
-                        }
-                    }
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| {
-                        BgpLsRouteKey {
-                            family: bgpls_family,
-                            nlri: nlri.key(),
-                            path_id: 0,
-                        }
-                    }));
-                }
-                // A loop-rejected announcement replaces only an exact route
-                // that this session previously accepted.
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::MplsVpn
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| {
-                        VpnRibRouteKey {
-                            nlri_key: entry.nlri.key(),
-                            path_id: entry.path_id,
-                        }
-                    }));
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::LabeledUnicast
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
-                        LabeledRibRouteKey {
-                            prefix: entry.nlri.key(),
-                            path_id: entry.path_id,
-                        }
-                    }));
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::RtConstrain
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
-                        nlri: *nlri,
-                        path_id: 0,
-                    }));
-                }
-            }
-            for &(prefix, path_id) in &loop_withdrawn {
-                self.forget_known_path(prefix, path_id);
-            }
-            for (prefix, path_id) in rejected_unicast {
-                if self.forget_known_path(prefix, path_id) {
-                    loop_withdrawn.push((prefix, path_id));
-                }
-            }
-            if self.import_explain_enabled {
-                for &(prefix, path_id) in &loop_withdrawn {
-                    let afi = match prefix {
-                        Prefix::V4(_) => Afi::Ipv4,
-                        Prefix::V6(_) => Afi::Ipv6,
-                    };
-                    self.import_decision_cache
-                        .mark_withdrawn(&ImportDecisionKey {
-                            afi,
-                            safi: Safi::Unicast,
-                            prefix,
-                            path_id,
-                        });
-                }
-            }
-            for rule in &loop_fs_withdrawn {
-                self.known_flowspec.remove(rule);
-            }
-            for key in &loop_evpn_withdrawn {
-                self.known_evpn.remove(key);
-            }
-            for key in &loop_bgpls_withdrawn {
-                self.known_bgpls.remove(key);
-            }
-            for key in loop_bgpls_rejected {
-                if self.known_bgpls.remove(&key) {
-                    loop_bgpls_withdrawn.push(key);
-                }
-            }
-            for key in &loop_l3vpn_withdrawn {
-                self.known_vpn.remove(key);
-            }
-            for key in loop_l3vpn_rejected {
-                if self.known_vpn.remove(&key) {
-                    loop_l3vpn_withdrawn.push(key);
-                }
-            }
-            for key in &loop_labeled_withdrawn {
-                self.known_labeled.remove(key);
-            }
-            for key in loop_labeled_rejected {
-                if self.known_labeled.remove(&key) {
-                    loop_labeled_withdrawn.push(key);
-                }
-            }
-            for key in &loop_rtc_withdrawn {
-                self.known_rtc.remove(key);
-            }
-            for key in loop_rtc_rejected {
-                if self.known_rtc.remove(&key) {
-                    loop_rtc_withdrawn.push(key);
-                }
-            }
-            if !loop_withdrawn.is_empty()
-                || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty()
-            {
-                let refresh_delta = self.capture_routes_refresh_delta(
-                    &[],
-                    &loop_withdrawn,
-                    &[],
-                    &loop_fs_withdrawn,
-                    &[],
-                    &loop_evpn_withdrawn,
-                );
-                if self
-                    .deliver_routes_to_rib(RibUpdate::RoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_withdrawn,
-                        flowspec_announced: vec![],
-                        flowspec_withdrawn: loop_fs_withdrawn,
-                        evpn_announced: vec![],
-                        evpn_withdrawn: loop_evpn_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_bgpls_withdrawn.is_empty() {
-                let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_bgpls_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_l3vpn_withdrawn.is_empty() {
-                let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_l3vpn_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_labeled_withdrawn.is_empty() {
-                let refresh_delta =
-                    self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_labeled_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_rtc_withdrawn.is_empty() {
-                let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_rtc_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            self.drive_fsm(Event::UpdateReceived).await;
+            self.treat_update_as_withdraw(&parsed).await;
             return;
         }
         // Route reflector loop detection (RFC 4456 §8):
@@ -1148,7 +1227,6 @@ impl PeerSession {
                 .any(|a| matches!(a, PathAttribute::ClusterList(ids) if ids.contains(&cluster_id)))
         });
         if originator_loop || cluster_loop {
-            let rejected_unicast = self.eligible_unicast_announcements(&parsed);
             let reason = if originator_loop {
                 RrLoopReason::OriginatorId
             } else {
@@ -1164,281 +1242,7 @@ impl PeerSession {
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the reflected-loop
             // detection must not silently drop withdrawals for any family,
             // or stale state accumulates downstream.
-            let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
-                .withdrawn
-                .iter()
-                .map(|e| (Prefix::V4(e.prefix), e.path_id))
-                .collect();
-            let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
-            let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
-            let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
-            let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
-            let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
-            let mut loop_l3vpn_rejected: Vec<VpnRibRouteKey> = Vec::new();
-            let mut loop_labeled_withdrawn: Vec<LabeledRibRouteKey> = Vec::new();
-            let mut loop_labeled_rejected: Vec<LabeledRibRouteKey> = Vec::new();
-            let mut loop_rtc_withdrawn: Vec<RtcRibRouteKey> = Vec::new();
-            let mut loop_rtc_rejected: Vec<RtcRibRouteKey> = Vec::new();
-            for attr in &parsed.attributes {
-                if let PathAttribute::MpUnreachNlri(mp) = attr {
-                    let family = (mp.afi, mp.safi);
-                    if self.negotiated_families.contains(&family) {
-                        loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                        loop_fs_withdrawn.extend(
-                            mp.flowspec_withdrawn
-                                .iter()
-                                .cloned()
-                                .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                        );
-                        loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
-                        if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
-                            loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
-                                BgpLsRouteKey {
-                                    family: bgpls_family,
-                                    nlri: nlri.key(),
-                                    path_id: 0,
-                                }
-                            }));
-                        }
-                        if mp.safi == Safi::MplsVpn {
-                            loop_l3vpn_withdrawn.extend(mp.vpn_withdrawn.iter().map(|entry| {
-                                VpnRibRouteKey {
-                                    nlri_key: entry.nlri.key(),
-                                    path_id: entry.path_id,
-                                }
-                            }));
-                        }
-                        if mp.safi == Safi::LabeledUnicast {
-                            loop_labeled_withdrawn.extend(mp.labeled_withdrawn.iter().map(
-                                |entry| LabeledRibRouteKey {
-                                    prefix: entry.nlri.key(),
-                                    path_id: entry.path_id,
-                                },
-                            ));
-                        }
-                        if mp.safi == Safi::RtConstrain {
-                            loop_rtc_withdrawn.extend(mp.rtc_withdrawn.iter().map(|nlri| {
-                                RtcRibRouteKey {
-                                    nlri: *nlri,
-                                    path_id: 0,
-                                }
-                            }));
-                        }
-                    }
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && let Some(bgpls_family) = bgpls_family_from_safi(mp.safi)
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_bgpls_rejected.extend(mp.bgpls_announced.iter().map(|nlri| {
-                        BgpLsRouteKey {
-                            family: bgpls_family,
-                            nlri: nlri.key(),
-                            path_id: 0,
-                        }
-                    }));
-                }
-                // A loop-rejected announcement replaces only an exact route
-                // that this session previously accepted.
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::MplsVpn
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_l3vpn_rejected.extend(mp.vpn_announced.iter().map(|entry| {
-                        VpnRibRouteKey {
-                            nlri_key: entry.nlri.key(),
-                            path_id: entry.path_id,
-                        }
-                    }));
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::LabeledUnicast
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_labeled_rejected.extend(mp.labeled_announced.iter().map(|entry| {
-                        LabeledRibRouteKey {
-                            prefix: entry.nlri.key(),
-                            path_id: entry.path_id,
-                        }
-                    }));
-                }
-                if let PathAttribute::MpReachNlri(mp) = attr
-                    && mp.safi == Safi::RtConstrain
-                    && self.negotiated_families.contains(&(mp.afi, mp.safi))
-                {
-                    loop_rtc_rejected.extend(mp.rtc_announced.iter().map(|nlri| RtcRibRouteKey {
-                        nlri: *nlri,
-                        path_id: 0,
-                    }));
-                }
-            }
-            for &(prefix, path_id) in &loop_withdrawn {
-                self.forget_known_path(prefix, path_id);
-            }
-            for (prefix, path_id) in rejected_unicast {
-                if self.forget_known_path(prefix, path_id) {
-                    loop_withdrawn.push((prefix, path_id));
-                }
-            }
-            if self.import_explain_enabled {
-                for &(prefix, path_id) in &loop_withdrawn {
-                    let afi = match prefix {
-                        Prefix::V4(_) => Afi::Ipv4,
-                        Prefix::V6(_) => Afi::Ipv6,
-                    };
-                    self.import_decision_cache
-                        .mark_withdrawn(&ImportDecisionKey {
-                            afi,
-                            safi: Safi::Unicast,
-                            prefix,
-                            path_id,
-                        });
-                }
-            }
-            for rule in &loop_fs_withdrawn {
-                self.known_flowspec.remove(rule);
-            }
-            for key in &loop_evpn_withdrawn {
-                self.known_evpn.remove(key);
-            }
-            for key in &loop_bgpls_withdrawn {
-                self.known_bgpls.remove(key);
-            }
-            for key in loop_bgpls_rejected {
-                if self.known_bgpls.remove(&key) {
-                    loop_bgpls_withdrawn.push(key);
-                }
-            }
-            for key in &loop_l3vpn_withdrawn {
-                self.known_vpn.remove(key);
-            }
-            for key in loop_l3vpn_rejected {
-                if self.known_vpn.remove(&key) {
-                    loop_l3vpn_withdrawn.push(key);
-                }
-            }
-            for key in &loop_labeled_withdrawn {
-                self.known_labeled.remove(key);
-            }
-            for key in loop_labeled_rejected {
-                if self.known_labeled.remove(&key) {
-                    loop_labeled_withdrawn.push(key);
-                }
-            }
-            for key in &loop_rtc_withdrawn {
-                self.known_rtc.remove(key);
-            }
-            for key in loop_rtc_rejected {
-                if self.known_rtc.remove(&key) {
-                    loop_rtc_withdrawn.push(key);
-                }
-            }
-            if !loop_withdrawn.is_empty()
-                || !loop_fs_withdrawn.is_empty()
-                || !loop_evpn_withdrawn.is_empty()
-            {
-                let refresh_delta = self.capture_routes_refresh_delta(
-                    &[],
-                    &loop_withdrawn,
-                    &[],
-                    &loop_fs_withdrawn,
-                    &[],
-                    &loop_evpn_withdrawn,
-                );
-                if self
-                    .deliver_routes_to_rib(RibUpdate::RoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_withdrawn,
-                        flowspec_announced: vec![],
-                        flowspec_withdrawn: loop_fs_withdrawn,
-                        evpn_announced: vec![],
-                        evpn_withdrawn: loop_evpn_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_bgpls_withdrawn.is_empty() {
-                let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_bgpls_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_l3vpn_withdrawn.is_empty() {
-                let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_l3vpn_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_labeled_withdrawn.is_empty() {
-                let refresh_delta =
-                    self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_labeled_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            if !loop_rtc_withdrawn.is_empty() {
-                let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
-                if self
-                    .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
-                        peer: self.peer_ip,
-                        session_id: self.session_identity.id,
-                        announced: vec![],
-                        withdrawn: loop_rtc_withdrawn,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                if let Some(delta) = refresh_delta {
-                    self.apply_refresh_accounting_delta(delta);
-                }
-            }
-            self.drive_fsm(Event::UpdateReceived).await;
+            self.treat_update_as_withdraw(&parsed).await;
             return;
         }
         // Normalize the attributes that policy and the RIB are allowed to

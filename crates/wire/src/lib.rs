@@ -211,8 +211,8 @@ impl std::str::FromStr for AspaValidation {
 
 // Re-export attribute types
 pub use attribute::{
-    AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
-    PathAttribute, RawAttribute, is_private_asn,
+    AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MalformedAttribute, MpReachNlri,
+    MpUnreachNlri, Origin, PathAttribute, RawAttribute, RevisedAttributeDecode, is_private_asn,
 };
 pub use bgpls::{
     BGP_LS_AFI, BGP_LS_ROUTE_DISTINGUISHER_LEN, BGP_LS_SAFI, BGP_LS_VPN_SAFI, BgpLsNlri,
@@ -235,8 +235,11 @@ pub use orf::{
     OrfPayload, OrfSendReceive, OrfType, WhenToRefresh,
 };
 pub use pmsi::{PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
-pub use update::ParsedUpdate;
-pub use validate::{UpdateError, UpdateValidationOptions, is_valid_ipv6_nexthop};
+pub use update::{ParsedUpdate, RevisedParsedUpdate};
+pub use validate::{
+    ErrorDisposition, UpdateError, UpdateValidationOptions, is_valid_ipv6_nexthop,
+    malformed_attr_disposition,
+};
 
 // Re-export FlowSpec types
 pub use flowspec::{

@@ -4,15 +4,69 @@ use crate::constants::{attr_flags, attr_type};
 use crate::notification::update_subcode;
 use std::collections::HashSet;
 use std::net::IpAddr;
+/// RFC 7606 §2 error-handling approach for a malformed UPDATE, ordered from
+/// the weakest action to the strongest. The `Ord` derive implements the
+/// §3 (h) rule directly: when multiple attribute errors exist, the approach
+/// with the strongest action wins — `max()` over the dispositions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ErrorDisposition {
+    /// Discard the malformed attribute and keep processing the UPDATE.
+    /// Only for attributes with no effect on route selection (RFC 7606 §2).
+    AttributeDiscard,
+    /// Treat the UPDATE as though all contained routes had been withdrawn;
+    /// the session stays Established (RFC 7606 §2).
+    TreatAsWithdraw,
+    /// NOTIFICATION + session reset — the RFC 4271 §6.3 behavior, retained
+    /// only where the NLRI cannot be trusted (RFC 7606 §3 (j), §5).
+    SessionReset,
+}
+impl ErrorDisposition {
+    /// Stable label for logs.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AttributeDiscard => "attribute-discard",
+            Self::TreatAsWithdraw => "treat-as-withdraw",
+            Self::SessionReset => "session-reset",
+        }
+    }
+}
+/// RFC 7606 §7 per-attribute disposition for a malformed path attribute.
+///
+/// `is_ibgp` selects the internal-neighbor branch for `LOCAL_PREF`,
+/// `ORIGINATOR_ID`, and `CLUSTER_LIST` (§7.5, §7.9, §7.10): from an external
+/// neighbor they are attribute-discard; from an internal neighbor a
+/// malformation is treat-as-withdraw.
+///
+/// `MP_REACH_NLRI` / `MP_UNREACH_NLRI` stay session-reset (§7.11: the NLRI
+/// cannot be reliably located). `ATOMIC_AGGREGATE` and `AGGREGATOR` are
+/// attribute-discard (§7.6, §7.7). Everything else — including `AS_PATH`
+/// (§7.2) — is treat-as-withdraw.
+#[must_use]
+pub fn malformed_attr_disposition(type_code: u8, is_ibgp: bool) -> ErrorDisposition {
+    match type_code {
+        attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI => ErrorDisposition::SessionReset,
+        attr_type::ATOMIC_AGGREGATE | attr_type::AGGREGATOR => ErrorDisposition::AttributeDiscard,
+        attr_type::LOCAL_PREF | attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST if !is_ibgp => {
+            ErrorDisposition::AttributeDiscard
+        }
+        _ => ErrorDisposition::TreatAsWithdraw,
+    }
+}
 /// Error produced by UPDATE attribute validation.
 ///
-/// Contains the NOTIFICATION subcode and data bytes per RFC 4271 §6.3.
+/// Contains the NOTIFICATION subcode and data bytes per RFC 4271 §6.3, plus
+/// the RFC 7606 disposition a revised-error-handling caller should apply.
+/// Legacy callers that ignore `disposition` keep the RFC 4271 behavior
+/// (every validation error is a session reset).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateError {
     /// NOTIFICATION subcode for this validation error.
     pub subcode: u8,
     /// Raw bytes for the NOTIFICATION data field.
     pub data: Vec<u8>,
+    /// RFC 7606 disposition for this error.
+    pub disposition: ErrorDisposition,
 }
 /// Context-dependent UPDATE validation knobs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -109,6 +163,7 @@ fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
             return Err(UpdateError {
                 subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
                 data: vec![],
+                disposition: ErrorDisposition::SessionReset,
             });
         }
     }
@@ -123,6 +178,7 @@ fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateErr
                 return Err(UpdateError {
                     subcode: update_subcode::UNRECOGNIZED_WELLKNOWN,
                     data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+                    disposition: ErrorDisposition::TreatAsWithdraw,
                 });
             }
         }
@@ -146,6 +202,7 @@ fn check_mandatory_present(
             return Err(UpdateError {
                 subcode: update_subcode::MISSING_WELLKNOWN,
                 data: vec![tc],
+                disposition: ErrorDisposition::TreatAsWithdraw,
             });
         }
     }
@@ -155,6 +212,7 @@ fn check_mandatory_present(
         return Err(UpdateError {
             subcode: update_subcode::MISSING_WELLKNOWN,
             data: vec![attr_type::NEXT_HOP],
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     Ok(())
@@ -167,6 +225,7 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
         return Err(UpdateError {
             subcode: update_subcode::INVALID_NEXT_HOP,
             data: octets.to_vec(),
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     // 127.0.0.0/8
@@ -174,6 +233,7 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
         return Err(UpdateError {
             subcode: update_subcode::INVALID_NEXT_HOP,
             data: octets.to_vec(),
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     // 224.0.0.0/4 (multicast)
@@ -181,6 +241,7 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
         return Err(UpdateError {
             subcode: update_subcode::INVALID_NEXT_HOP,
             data: octets.to_vec(),
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     // 255.255.255.255
@@ -188,6 +249,7 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
         return Err(UpdateError {
             subcode: update_subcode::INVALID_NEXT_HOP,
             data: octets.to_vec(),
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     Ok(())
@@ -220,6 +282,7 @@ fn check_mp_reach_next_hop(
                 return Err(UpdateError {
                     subcode: update_subcode::INVALID_NEXT_HOP,
                     data: v6.octets().to_vec(),
+                    disposition: ErrorDisposition::TreatAsWithdraw,
                 });
             }
         }
@@ -230,6 +293,7 @@ fn check_mp_reach_next_hop(
         return Err(UpdateError {
             subcode: update_subcode::INVALID_NEXT_HOP,
             data: ll.octets().to_vec(),
+            disposition: ErrorDisposition::TreatAsWithdraw,
         });
     }
     Ok(())
@@ -259,6 +323,7 @@ fn check_as_path(path: &AsPath) -> Result<(), UpdateError> {
             return Err(UpdateError {
                 subcode: update_subcode::MALFORMED_AS_PATH,
                 data: vec![],
+                disposition: ErrorDisposition::TreatAsWithdraw,
             });
         }
     }
@@ -756,5 +821,88 @@ mod tests {
             }),
         ];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());
+    }
+
+    // --- RFC 7606 dispositions ---
+    #[test]
+    fn dispositions_follow_rfc7606_section7() {
+        use ErrorDisposition::{AttributeDiscard, SessionReset, TreatAsWithdraw};
+        // §7.11: MP attributes stay session reset.
+        assert_eq!(
+            malformed_attr_disposition(attr_type::MP_REACH_NLRI, true),
+            SessionReset
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::MP_UNREACH_NLRI, false),
+            SessionReset
+        );
+        // §7.6 / §7.7: aggregation attributes are attribute-discard.
+        assert_eq!(
+            malformed_attr_disposition(attr_type::AGGREGATOR, true),
+            AttributeDiscard
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::ATOMIC_AGGREGATE, false),
+            AttributeDiscard
+        );
+        // §7.5 / §7.9 / §7.10: discard from external, withdraw from internal.
+        assert_eq!(
+            malformed_attr_disposition(attr_type::LOCAL_PREF, true),
+            TreatAsWithdraw
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::LOCAL_PREF, false),
+            AttributeDiscard
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::ORIGINATOR_ID, false),
+            AttributeDiscard
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::CLUSTER_LIST, true),
+            TreatAsWithdraw
+        );
+        // §7.2 / §7.4 / §7.8: everything else — including AS_PATH — is
+        // treat-as-withdraw, not session reset.
+        assert_eq!(
+            malformed_attr_disposition(attr_type::AS_PATH, false),
+            TreatAsWithdraw
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::MULTI_EXIT_DISC, false),
+            TreatAsWithdraw
+        );
+        // §3 (h): strongest action wins — the derive order IS the ladder.
+        assert!(SessionReset > TreatAsWithdraw);
+        assert!(TreatAsWithdraw > AttributeDiscard);
+    }
+    #[test]
+    fn validation_errors_carry_rfc7606_dispositions() {
+        // Missing mandatory well-known attribute (§3 (d)) → treat-as-withdraw.
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+        let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
+        assert_eq!(err.disposition, ErrorDisposition::TreatAsWithdraw);
+        // Malformed AS_PATH (§7.2) → treat-as-withdraw.
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+        let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
+        assert_eq!(err.disposition, ErrorDisposition::TreatAsWithdraw);
+        // Duplicate attribute at the validation layer stays session reset:
+        // the revised decode already deduplicated per §3 (g), so reaching
+        // this check means the caller bypassed it.
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::Origin(Origin::Egp),
+        ];
+        let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
+        assert_eq!(err.disposition, ErrorDisposition::SessionReset);
     }
 }
