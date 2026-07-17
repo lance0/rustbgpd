@@ -14143,3 +14143,288 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
         generation + 3
     );
 }
+
+// ===========================================================================
+// Shared-group encode invariant regressions: per-source chunk integrity,
+// override alignment under the source sort, live-encoder streaming, and the
+// wire-equivalence normalization boundary.
+// ===========================================================================
+
+/// Read UPDATEs until `expected_prefixes` announced prefixes were seen and
+/// map each prefix to the exact (ordered) attribute list of its UPDATE.
+async fn shared_group_read_prefix_attr_map(
+    stream: &mut TcpStream,
+    expected_prefixes: usize,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut seen = 0_usize;
+    while seen < expected_prefixes {
+        let msg = tokio::time::timeout(Duration::from_secs(5), read_single_bgp_message(stream))
+            .await
+            .expect("wire read timed out");
+        let Message::Update(message) = msg else {
+            panic!("expected UPDATE");
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        let attrs: Vec<String> = parsed
+            .attributes
+            .iter()
+            .map(|attr| format!("{attr:?}"))
+            .collect();
+        for nlri in &parsed.announced {
+            map.insert(nlri.prefix.to_string(), attrs.clone());
+            seen += 1;
+        }
+    }
+    map
+}
+
+/// Two different source peers whose routes carry a pointer-identical
+/// attribute `Arc` (the shape global attribute interning produces) must
+/// still land in distinct per-source chunks. If the shared group key ever
+/// merged them, split horizon would compose wrongly: the excluded member
+/// would either lose the other source's route (silent under-advertise) or
+/// receive its own route back (leak).
+#[tokio::test]
+async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
+    let shared_attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![64_601])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 40, 0, 9)),
+    ]);
+    let source_a = Ipv4Addr::new(10, 40, 0, 1);
+    let source_b = Ipv4Addr::new(10, 40, 0, 2);
+    let source_c = Ipv4Addr::new(10, 40, 0, 3);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let prefix_c = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let route_a = Route {
+        prefix: Prefix::V4(prefix_a),
+        peer: IpAddr::V4(source_a),
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9)),
+        attributes: Arc::clone(&shared_attrs),
+        ..make_route(100)
+    };
+    let route_b = Route {
+        prefix: Prefix::V4(prefix_b),
+        peer: IpAddr::V4(source_b),
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9)),
+        attributes: Arc::clone(&shared_attrs),
+        ..make_route(100)
+    };
+    let route_c = make_sourced_route(source_c, prefix_c, 64_603);
+    let announce = vec![route_a, route_b, route_c];
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
+    member_a.handle_outbound_route_update(update).await;
+    let (chunk_count, terminal) = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .unwrap()
+        .test_snapshot();
+    assert_eq!(
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete)
+    );
+    assert_eq!(
+        chunk_count, 3,
+        "pointer-identical attrs across two sources must still yield two distinct chunks"
+    );
+    let map_a = shared_group_read_prefix_attr_map(&mut wire_a, 2).await;
+    assert_eq!(
+        map_a
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [prefix_b.to_string(), prefix_c.to_string()].into(),
+        "member A: everything except its own source, despite interned attrs"
+    );
+
+    let (mut member_b, mut wire_b) = shared_group_member(65001).await;
+    let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
+    member_b.handle_outbound_route_update(update).await;
+    let map_b = shared_group_read_prefix_attr_map(&mut wire_b, 2).await;
+    assert_eq!(
+        map_b
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [prefix_a.to_string(), prefix_c.to_string()].into(),
+        "member B: everything except its own source"
+    );
+
+    // Ordinary-path reference with an identical profile: same envelope, no
+    // cell. The shared bytes must be attribute-identical per prefix.
+    let (mut member_r, mut wire_r) = shared_group_member(65001).await;
+    let mut reference = shared_group_envelope(&member_r, &shared, source_b, &announce);
+    reference.shared_group_encode = None;
+    member_r.handle_outbound_route_update(reference).await;
+    let map_r = shared_group_read_prefix_attr_map(&mut wire_r, 2).await;
+    assert_eq!(
+        map_b, map_r,
+        "shared stream must be attribute-identical to the ordinary per-session encode"
+    );
+}
+
+/// The encoder walks the inventory through a source-sorted index while
+/// `next_hop_override` stays parallel to the ORIGINAL announce order. If
+/// the encoder ever indexed the overrides by sorted position, an override
+/// would land on the wrong prefix — a silent wrong next hop on the wire.
+#[tokio::test]
+async fn shared_group_nh_override_alignment_survives_source_sort() {
+    // Original order deliberately unsorted by source so the sorted index
+    // walk permutes positions: sources .3, .1, .2.
+    let prefix_0 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let prefix_2 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let announce = vec![
+        make_sourced_route(Ipv4Addr::new(10, 41, 0, 3), prefix_0, 64_603),
+        make_sourced_route(Ipv4Addr::new(10, 41, 0, 1), prefix_1, 64_601),
+        make_sourced_route(Ipv4Addr::new(10, 41, 0, 2), prefix_2, 64_602),
+    ];
+    let overrides: Vec<Option<rustbgpd_policy::NextHopAction>> =
+        vec![None, Some(rustbgpd_policy::NextHopAction::Self_), None];
+    let excluded = Ipv4Addr::new(10, 41, 0, 9);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+
+    let (mut member, mut wire) = shared_group_member(65001).await;
+    let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+    update.next_hop_override = overrides.clone().into();
+    member.handle_outbound_route_update(update).await;
+    let map_shared = shared_group_read_prefix_attr_map(&mut wire, 3).await;
+
+    let self_hop = format!("{:?}", PathAttribute::NextHop(Ipv4Addr::LOCALHOST));
+    assert!(
+        map_shared[&prefix_1.to_string()].contains(&self_hop),
+        "override at original index 1 must produce next-hop-self on prefix_1; got {:?}",
+        map_shared[&prefix_1.to_string()]
+    );
+    assert!(
+        map_shared[&prefix_0.to_string()].contains(&format!(
+            "{:?}",
+            PathAttribute::NextHop(Ipv4Addr::new(10, 41, 0, 3))
+        )),
+        "prefix_0 keeps its source next hop"
+    );
+    assert!(
+        map_shared[&prefix_2.to_string()].contains(&format!(
+            "{:?}",
+            PathAttribute::NextHop(Ipv4Addr::new(10, 41, 0, 2))
+        )),
+        "prefix_2 keeps its source next hop"
+    );
+
+    // Attribute-equivalence against the ordinary path with the same
+    // overrides.
+    let (mut member_r, mut wire_r) = shared_group_member(65001).await;
+    let mut reference = shared_group_envelope(&member_r, &shared, excluded, &announce);
+    reference.next_hop_override = overrides.into();
+    reference.shared_group_encode = None;
+    member_r.handle_outbound_route_update(reference).await;
+    let map_r = shared_group_read_prefix_attr_map(&mut wire_r, 3).await;
+    assert_eq!(map_shared, map_r);
+}
+
+/// A consumer that starts streaming BEFORE the encoder has published
+/// anything must observe every later slice and the terminal, with
+/// publications racing its notify loop (lost-wakeup / stale-snapshot
+/// regression guard).
+#[tokio::test]
+async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    let source_a = Ipv4Addr::new(10, 42, 0, 1);
+    let source_b = Ipv4Addr::new(10, 42, 0, 2);
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let announce = vec![
+        make_sourced_route(source_a, prefix_a, 64_601),
+        make_sourced_route(source_b, prefix_b, 64_602),
+    ];
+    let (member, mut wire) = shared_group_member(65001).await;
+    let profile = (*member.publish_export_profile()).clone();
+    let mut cache = super::export::PreparedAttrCache::default();
+    let slice_1 = super::shared_group::encode_shared_unicast_slice(
+        &profile,
+        &mut cache,
+        &announce,
+        &[None, None],
+        &[0],
+    )
+    .unwrap();
+    let slice_2 = super::shared_group::encode_shared_unicast_slice(
+        &profile,
+        &mut cache,
+        &announce,
+        &[None, None],
+        &[1],
+    )
+    .unwrap();
+    let typed = Arc::new(ProgressiveUnicastEncode::test_new(profile));
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    assert!(
+        shared
+            .cell
+            .set(Arc::clone(&typed) as Arc<dyn std::any::Any + Send + Sync>)
+            .is_ok()
+    );
+    let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 42, 0, 9), &announce);
+    let mut member = member;
+    let consumer = tokio::spawn(async move {
+        member.handle_outbound_route_update(update).await;
+    });
+    // Publish while the consumer is (very likely) parked on the notify.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    typed.test_publish(slice_1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    typed.test_publish(slice_2);
+    typed.test_finish(StreamTerminal::Complete);
+    tokio::time::timeout(Duration::from_secs(5), consumer)
+        .await
+        .expect("consumer must terminate once the stream completes")
+        .unwrap();
+    let map = shared_group_read_prefix_attr_map(&mut wire, 2).await;
+    assert_eq!(
+        map.keys().cloned().collect::<Vec<_>>(),
+        {
+            let mut v = vec![prefix_a.to_string(), prefix_b.to_string()];
+            v.sort();
+            v
+        },
+        "both progressively published slices reach the wire, none skipped"
+    );
+}
+
+/// The wire-equivalence proof must ignore ONLY byte-inert fields. Extended
+/// Messages changes the negotiated ceiling but never the bytes of a
+/// 4096-fitting message (shared chunks are encoded at the standard
+/// ceiling), so it must NOT break sharing; Add-Path send changes NLRI
+/// framing and MUST break it.
+#[tokio::test]
+async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
+    let (a, _wire_a) = shared_group_member(65001).await;
+    let (mut b, _wire_b) = shared_group_member(65001).await;
+    b.negotiated.as_mut().unwrap().peer_extended_message = true;
+    let profile_a = a.publish_export_profile();
+    let profile_b = b.publish_export_profile();
+    assert!(
+        profile_a.has_same_wire_encoding(&profile_b),
+        "extended-message ceiling is byte-inert at the shared 4096 ceiling"
+    );
+    let (mut c, _wire_c) = shared_group_member(65001).await;
+    c.negotiated
+        .as_mut()
+        .unwrap()
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Send);
+    let profile_c = c.publish_export_profile();
+    assert!(
+        !profile_a.has_same_wire_encoding(&profile_c),
+        "Add-Path send changes NLRI bytes and must break the proof"
+    );
+}
