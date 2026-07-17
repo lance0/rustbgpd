@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-peer fanout observability gauges.**
+  `bgp_peer_outbound_queue_depth{peer}` reports the coalesced update
+  frames buffered for a peer's outbound writer — the "which clients are
+  behind" signal during route-reflector convergence — sampled at batch
+  granularity on both enqueue and writer drain (never per message).
+  `bgp_peer_update_group{peer}` reports the stable update-group id a
+  peer currently belongs to (sentinel `-1` = ungrouped fallback path),
+  complementing the existing per-group member-count gauge. Both series
+  are reaped on session teardown.
+
 - **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
   reloadstall harness extensions). The reload-stall harness gains an
   optional `reload_cmd` trailing argument (reloads run `sh -c <cmd>`, e.g.
