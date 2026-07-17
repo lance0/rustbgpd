@@ -9,10 +9,16 @@ established rustbgpd's own numbers against a pre-committed gate; this
 receipt puts the same scenario through BIRD 3.3.1 and OpenBGPD 9.1 and
 publishes every cell, the losses as plainly as the wins.
 
-**Commit measured:** `40fd0a0c` (jemalloc-default build plus the
-route-server control-communities opt-in fix — see the
-[first anomaly](#anomaly-a-the-matrix-caught-a-fleet-scale-regression),
-which this campaign itself caught).
+**Commit measured:** rustbgpd cells at `576c6c9b` (jemalloc-default
+build plus two fixes this campaign itself surfaced: the route-server
+control-communities opt-in — see the
+[first anomaly](#anomaly-a-the-matrix-caught-a-fleet-scale-regression)
+— and the deferred PeerUp initial-dump fix — see the
+[post-publication fix note](#post-publication-fix-the-re-announce-plateau)).
+The BIRD and OpenBGPD cells are from the original campaign at
+`40fd0a0c`; the two commits are code-identical for those cells (the
+harness, driver, and their configurations are unchanged between them),
+so they were not rerun.
 
 ## Headline
 
@@ -22,10 +28,10 @@ independent campaign runs (A and B), 4 reloads each:
 
 | Reload KPI (range over 8 reloads, both runs) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
 |---|---|---|---|
-| UPDATE stall, p50 across 700 observers | **0.45–0.81 s** | 1.61–2.29 s | **0.25–0.29 s** |
-| UPDATE stall, worst single observer | 1.69 s | 7.73 s | **0.36 s** |
-| New-policy completion, p50 | **1.5–1.8 s** | 77–86 s | 249–253 s |
-| New-policy completion, worst observer | **2.8 s** | 93.8 s | 252.9 s |
+| UPDATE stall, p50 across 700 observers | **0.43–0.84 s** | 1.61–2.29 s | **0.25–0.29 s** |
+| UPDATE stall, worst single observer | 1.85 s | 7.73 s | **0.36 s** |
+| New-policy completion, p50 | **1.5–2.2 s** | 77–86 s | 249–253 s |
+| New-policy completion, worst observer | **2.9 s** | 93.8 s | 252.9 s |
 | Session flaps / decode errors, all reloads | 0 / 0 | 0 / 0 | 0 / 0 |
 
 **Verdict: three different trade-offs, honestly stated.** OpenBGPD has
@@ -35,10 +41,13 @@ RDE recomputes — but takes ~4 minutes to deliver the new policy (and
 the largest stalls (p50 1.6–2.3 s, single observers up to 7.7 s). rustbgpd
 is the only daemon in the matrix that holds both a **sub-second median
 stall and single-digit-seconds completion**: every one of the 700 members
-verifiably holds the full new-policy table within 2.8 s of the reload,
-worst case, in both runs. On the flapstorm re-announce leg BIRD is
-~2.5× faster than rustbgpd, and BIRD wins settled memory outright —
-both published below.
+verifiably holds the full new-policy table within 2.9 s of the reload,
+worst case, in both runs. On the flapstorm leg rustbgpd now propagates
+both member-down and member-up fastest (re-announce p50 0.46–0.49 s vs
+BIRD's 2.8–4.2 s — a loss in the first publication of this receipt,
+fixed and rerun; see the
+[post-publication fix note](#post-publication-fix-the-re-announce-plateau)).
+BIRD wins settled memory outright — published below.
 
 ## Method and fairness protocol
 
@@ -77,7 +86,7 @@ both published below.
 |---|---|
 | Hardware | AMD Ryzen Threadripper 7970X (32 cores / 64 threads), 125 GiB RAM |
 | Kernel | Linux 6.17.0-35-generic |
-| rustbgpd | `--release` at `40fd0a0c`, bare binary, stock config (8 tokio workers — the capped default), jemalloc (the shipped default) |
+| rustbgpd | `--release` at `576c6c9b`, bare binary, stock config (8 tokio workers — the capped default), jemalloc (the shipped default) |
 | BIRD | 3.3.1, built from `tests/interop/Dockerfile.bird3`, `docker run --network=host` |
 | OpenBGPD | 9.1, image `openbgpd/openbgpd:9.1`, `docker run --network=host` |
 | RSS instrument | `bench/scale/matrix/rss-sampler.sh`: full process tree, 5 s cadence (OpenBGPD is 7 processes; the others 1) |
@@ -109,21 +118,22 @@ The control row is the expected worst per-observer gap from churn alone
 
 | Daemon | Run | stall p50 | stall p95 | worst observer | completion p50 | completion max |
 |---|---|---|---|---|---|---|
-| rustbgpd | A | 0.46–0.65 s | 0.70–1.38 s | 1.43 s | 1.51–1.77 s | 2.71 s |
-| rustbgpd | B | 0.45–0.81 s | 0.67–1.59 s | 1.69 s | 1.65–1.80 s | 2.77 s |
+| rustbgpd | A | 0.51–0.84 s | 0.88–1.62 s | 1.85 s | 1.75–2.23 s | 2.86 s |
+| rustbgpd | B | 0.43–0.68 s | 0.70–1.01 s | 1.26 s | 1.52–1.69 s | 2.71 s |
 | BIRD 3.3.1 | A | 1.61–2.29 s | 3.57–5.23 s | 7.31 s | 79.1–86.1 s | 93.8 s |
 | BIRD 3.3.1 | B | 1.76–1.88 s | 3.34–4.75 s | 7.73 s | 77.4–83.7 s | 92.8 s |
 | OpenBGPD 9.1 | A | 0.25–0.29 s | 0.30–0.33 s | 0.36 s | 248.8–251.8 s | 251.8 s |
 | OpenBGPD 9.1 | B | 0.25–0.28 s | 0.28–0.32 s | 0.35 s | 251.2–252.9 s | 252.9 s |
-| *control (churn only), p50* | A / B | 20 / 71 ms | 40 / 45 ms | 13 / 15 ms | — | — |
+| *control (churn only), p50* | A / B | 19 / 19 ms | 40 / 45 ms | 13 / 15 ms | — | — |
 
 Reading the table:
 
 - **rustbgpd**: stall p50 drifts upward across the 4 consecutive
-  reloads within a session (0.46→0.65 s in run A, 0.45→0.81 s in run B)
-  and the p95 tail widens with it — published as observed; the
-  per-reload progression is in the raw CSV lines. Completion is stable
-  at 1.5–1.8 s p50 / ≤2.8 s worst across all 8 reloads.
+  reloads within a session (0.43→0.68 s in run B; run A steps
+  0.51→0.75→0.84→0.82 s) and the p95 tail widens with it — published
+  as observed; the per-reload progression is in the raw CSV lines.
+  Completion holds at 1.5–2.2 s p50 / ≤2.9 s worst across all 8
+  reloads.
 - **BIRD**: completion p50 ~80 s means the median member waits over a
   minute for its new-policy table, with multi-second delivery gaps
   (single observers up to 7.7 s between UPDATEs) while filters
@@ -148,27 +158,58 @@ it measures pure re-delivery fan-out (28,600 prefixes × 650 observers
 
 | Daemon | Run | withdraw p50 | withdraw max | re-announce p50 | re-announce max |
 |---|---|---|---|---|---|
-| rustbgpd | A | **0.26–0.42 s** | 0.42 s | 9.64–9.79 s | 9.82 s |
-| rustbgpd | B | **0.31–0.38 s** | 0.41 s | 9.48–9.61 s | 9.64 s |
-| BIRD 3.3.1 | A | 0.45–0.56 s | 0.72 s | **3.28–3.84 s** | 4.47 s |
-| BIRD 3.3.1 | B | 0.52–0.61 s | 0.70 s | **2.84–4.22 s** | 4.68 s |
+| rustbgpd | A | **0.38–0.48 s** | 0.49 s | **0.46–0.49 s** | 0.53 s |
+| rustbgpd | B | **0.28–0.36 s** | 0.39 s | **0.48–0.49 s** | 0.52 s |
+| BIRD 3.3.1 | A | 0.45–0.56 s | 0.72 s | 3.28–3.84 s | 4.47 s |
+| BIRD 3.3.1 | B | 0.52–0.61 s | 0.70 s | 2.84–4.22 s | 4.68 s |
 | OpenBGPD 9.1 | A | 12.18–12.43 s | 12.43 s | 21.20–21.61 s | 21.63 s |
 | OpenBGPD 9.1 | B | 10.84–10.87 s | 10.87 s | 21.30–21.67 s | 21.69 s |
 
 - **Withdraw**: rustbgpd propagates 50 simultaneous member failures to
-  all survivors fastest (p50 0.26–0.42 s vs BIRD's 0.45–0.61 s).
+  all survivors fastest (p50 0.28–0.48 s vs BIRD's 0.45–0.61 s).
   OpenBGPD takes 11–12 s — a member's routes stay advertised to the
   fleet for that long after its session drops.
-- **Re-announce: a plain rustbgpd loss.** BIRD re-delivers the 50
-  returning members' routes in ~3–4 s; rustbgpd takes ~9.5–9.8 s, ~2.5×
-  slower, in every round of both runs. The distribution is extremely
-  tight (p50 ≈ max within ~0.2 s), so all 650 observers finish together
-  — the cost is in the ingest/emission path for 50 concurrent per-peer
-  re-announcements, not per-observer delivery jitter. Recorded here as
-  a known gap; the same-instant batch profile makes it a bounded,
-  reproducible target.
+- **Re-announce**: rustbgpd re-delivers the 50 returning members'
+  routes to all 650 survivors in under half a second (p50 0.46–0.49 s,
+  worst observer 0.53 s, every round of both runs), vs BIRD's
+  2.8–4.2 s and OpenBGPD's 21–22 s. The first re-announced prefix
+  reaches survivors at p50 0.20–0.23 s after the last flapped session
+  re-establishes (the harness's `first_reann_s` instrument, added for
+  this refresh), so roughly half the completion window is
+  delivery-start latency and half is fan-out. This cell was a loss in
+  the first publication of this receipt — see the note below.
 - No session flaps among survivors and zero decode errors in any round,
   for any daemon.
+
+### Post-publication fix: the re-announce plateau
+
+As first published, the re-announce column was a plain rustbgpd loss:
+a flat 9.5–9.8 s p50 in every round of both runs, ~2.5× slower than
+BIRD. The receipt's own tables exposed the shape of the problem — the
+distribution was implausibly tight (p50 ≈ max within ~0.2 s) and
+insensitive to round and run, meaning all 650 observers were waiting on
+one shared completion event, not accumulating delivery jitter.
+
+The mechanism, proven before fixing: a reconnecting peer's `PeerUp`
+registration performed its initial full-table Adj-RIB-Out dump inline
+on the RIB actor loop, so the 50 returning members' dumps serialized
+**ahead of** the survivor-facing re-announce fan-out already queued
+behind the burst — head-of-line blocking, not a timer. The evidence:
+the plateau scaled with flap count × table size, survivors' first
+re-announce arrivals clustered after the final dump finished, and the
+daemon log timeline showed the dump sequence occupying the actor for
+the width of the plateau.
+
+The fix (`576c6c9b`, #978, same day): when the actor has queued work
+and the table is at or above 10k routes, a registration (and its dump)
+defers behind the queued imports, completing one per loop iteration
+strictly after each queued mutation batch drains; a quiet actor or a
+small table still registers inline, and graceful-restart semantics are
+untouched. All four rustbgpd cells were rerun at the fixed head:
+re-announce p50 went **9.5–9.8 s → 0.46–0.49 s (~20×)**, withdraw and
+the S1/S2/RSS cells moved only within run-to-run spread. The pre-fix
+raw artifacts remain preserved in the campaign working state alongside
+the published cells.
 
 ## Memory
 
@@ -179,7 +220,7 @@ build, as shipped).
 
 | Daemon | S2 settled (A / B) | S2 peak (A / B) | S3 settled (A / B) | S3 peak (A / B) |
 |---|---|---|---|---|
-| rustbgpd | 765 / 763 MiB | 886 / 847 MiB | 734 / 737 MiB | 935 / 943 MiB |
+| rustbgpd | 768 / 763 MiB | 1028 / 906 MiB | 856 / 753 MiB | 856 / 830 MiB |
 | BIRD 3.3.1 | **408 / 416 MiB** | 408 / 416 MiB | **325 / 314 MiB** | 351 / 314 MiB |
 | OpenBGPD 9.1 | 769 / 767 MiB | 974 / 975 MiB | 812 / 827 MiB | 975 / 975 MiB |
 
@@ -187,9 +228,15 @@ build, as shipped).
   consistent with its reputation. Its S2 sessions end at their peak
   (RSS never came back down within the sampled window), but the
   absolute number is still the lowest.
-- rustbgpd and OpenBGPD settle within ~1% of each other at this shape;
-  OpenBGPD's peak (~975 MiB, during initial convergence) is the highest
-  in the matrix, rustbgpd's transient reload peaks sit in between. The
+- rustbgpd and OpenBGPD settle within a few percent of each other at
+  this shape. The highest single sample in the matrix is now a
+  transient rustbgpd reload peak (~1.03 GiB, run A S2, one 5 s sample);
+  OpenBGPD peaks at ~975 MiB during initial convergence. rustbgpd's S3
+  tail reads higher than in the first publication (856/753 vs 734/737
+  MiB settled) because the fixed re-announce finishes in ~0.5 s instead
+  of ~9.8 s — the leg now ends seconds after the last churn burst, so
+  the final sample lands mid-oscillation (the S3 tail swings 736–877
+  MiB at 5 s cadence) rather than after a long quiet drain. The
   jemalloc default matters: the same rustbgpd scenario on a stock-glibc
   build previously ratcheted to ~1.3 GiB across reload cycles.
 
@@ -202,10 +249,10 @@ harness and protocol; rung values are p50, single run):
 |---|---|---|---|---|
 | stall p50 | 20 × 20k | 40 ms | 102–132 ms | **26–32 ms** |
 | | 200 × 115k | 109–128 ms | 984 ms (max 2.46 s) | **36–61 ms** |
-| | 700 × 400,400 | 0.45–0.81 s | 1.61–2.29 s | **0.25–0.29 s** |
+| | 700 × 400,400 | 0.43–0.84 s | 1.61–2.29 s | **0.25–0.29 s** |
 | completion p50 | 20 × 20k | **0.06 s** | 0.17–0.18 s | 0.26 s |
 | | 200 × 115k | **0.29–0.31 s** | 7.5–7.7 s | 15.2 s |
-| | 700 × 400,400 | **1.5–1.8 s** | 77–86 s | 249–253 s |
+| | 700 × 400,400 | **1.5–2.2 s** | 77–86 s | 249–253 s |
 | daemon RSS (tree) | 200 × 115k | ~432 MB | **~103 MB** | ~284 MB |
 
 The shape of each curve is the story: OpenBGPD's stall stays near its
@@ -265,20 +312,25 @@ Generated configs for every cell are committed alongside the raw logs
 - **Scheduler contention**: the harness's 700 stub tasks and the
   measured daemon share one host. The load gate and cool-downs bound
   cross-cell interference, and the run-to-run spread (A vs B) is
-  published, but sub-100 ms differences should be read loosely — see
-  also the ~3.5× swing in rustbgpd's churn-only control gap between
-  runs (20 vs 71 ms) with identical configs.
+  published, but sub-100 ms differences should be read loosely — the
+  original campaign saw a ~3.5× swing in rustbgpd's churn-only control
+  gap between runs (20 vs 71 ms) with identical configs (the refreshed
+  cells measured 19 ms in both runs).
 - **The stall metric counts any UPDATE delivery** (churn, resync
   announces, withdraws); completion counts only unique base-table
   prefixes carrying the expected generation community. Churn prefixes
   live in a disjoint range and are excluded from completion by prefix.
 - **rustbgpd's stall drifts upward across consecutive reloads** within
-  a session (run B: 0.45→0.81 s p50 over 4 reloads) — visible in the
+  a session (run B: 0.43→0.68 s p50 over 4 reloads) — visible in the
   raw per-reload lines and published rather than averaged away.
-- **The flapstorm re-announce loss is real**: BIRD re-delivers
-  returning members ~2.5× faster. The metric excludes reconnect pacing
-  by construction (clock starts after re-Established), so this is
-  rustbgpd's re-ingest/re-emission cost, not a session-timer artifact.
+- **The rustbgpd cells are one fix newer than the incumbents' cells.**
+  The re-announce plateau in the first publication was a real loss,
+  root-caused and fixed after publishing (see the
+  [post-publication fix note](#post-publication-fix-the-re-announce-plateau));
+  only the rustbgpd cells were rerun, at `576c6c9b`. The BIRD and
+  OpenBGPD numbers stand from `40fd0a0c` — the intervening commits
+  touch nothing those cells execute — and the pre-fix rustbgpd numbers
+  stay quoted in the note.
 
 ### Anomaly (a): the matrix caught a fleet-scale regression
 
@@ -292,7 +344,8 @@ route server into 700 independent full-table Adj-RIB-Out builds. That
 is exactly the fleet shape this campaign exists to exercise and the
 regression never surfaced in unit or interop tests. The default was
 flipped to opt-in the same night (#976), and all rustbgpd cells in this
-receipt ran at the fixed head `40fd0a0c`. The aborted first attempts
+receipt include that fix (`40fd0a0c`, later refreshed at `576c6c9b`
+per the post-publication note). The aborted first attempts
 are preserved as `rustbgpd-fail-rscontrol-oom/` siblings in the
 campaign working state. This is the matrix doing its job: a
 pre-release, fleet-scale regression caught by the receipt harness
