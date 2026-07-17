@@ -717,6 +717,44 @@ impl PeerManager {
                                 .expect("cohort peer existed after import restore")
                                 .import_policy
                                 .clone_from(&prior.policy.import_policy);
+                            // The session ran the NEW import chain from the
+                            // setup hot-apply until this reassert, so routes
+                            // accepted in that window sit in Adj-RIB-In/LocRib
+                            // evaluated under the wrong chain. Reconcile it the
+                            // way the deferred-refresh phase does: fire the
+                            // refresh now when Established, otherwise arm
+                            // `pending_refresh` for the retry pipeline.
+                            let refresh_commands = self
+                                .peers
+                                .get(peer_key)
+                                .expect("cohort peer existed after import restore")
+                                .handle
+                                .commands_sender();
+                            let established = self
+                                .await_with_readiness(
+                                    rustbgpd_transport::PeerHandle::query_state_with(
+                                        refresh_commands,
+                                        PEER_QUERY_TIMEOUT,
+                                    ),
+                                )
+                                .await
+                                .is_some_and(|state| state.fsm_state == SessionState::Established);
+                            self.drain_readiness_queries().await;
+                            let refreshed = established
+                                && match self.soft_reset_in(peer_key.clone(), Vec::new()).await {
+                                    Ok(()) => true,
+                                    Err(refresh_error) => {
+                                        warn!(
+                                            peer = %peer_key,
+                                            error = %refresh_error,
+                                            "post-reassert route refresh failed after cohort export apply failure; arming pending refresh"
+                                        );
+                                        false
+                                    }
+                                };
+                            if !refreshed && let Some(managed) = self.peers.get_mut(peer_key) {
+                                managed.pending_refresh = true;
+                            }
                             Ok(())
                         }
                         Err(restore_error) => {
@@ -852,9 +890,15 @@ impl PeerManager {
                     // Mirror the authoritative path's fatal refresh handling:
                     // arm `pending_refresh` for the retry pipeline, then
                     // unwind the snapshot. `forward_completed` stays false for
-                    // this member and the ones after it — their Adj-RIB-In
-                    // never moved, so the restore correctly picks the
-                    // no-refresh-back rollback branch for them.
+                    // this member and the ones after it — their sessions have
+                    // been running the new import chain since the setup
+                    // hot-apply, and the restore fires their refresh-back
+                    // through the ordinary `import_changed` path when it
+                    // reasserts the prior chain; the false flag only selects
+                    // the failure-handling restore variant
+                    // (`RefreshFailureHandling::BestEffortRestorePrior` plus
+                    // the prior pending-flag restore) over the
+                    // committed-forward `BestEffortRearm` one.
                     if let Some(managed) = self.peers.get_mut(peer_key) {
                         managed.pending_refresh = true;
                     }

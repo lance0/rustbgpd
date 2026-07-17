@@ -348,6 +348,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cohort commit that resolved a different destination remove that
   recorded group instead of re-deriving one from current attributes
   (which could drift and leak the staged, memberless group).
+- A cohort export hot-apply failure on a member whose import delta was
+  already acknowledged now reconciles the acked-import window after
+  reasserting the member's prior import chain: routes the session
+  accepted under the new chain between setup and the failed export apply
+  get a Route Refresh when the session is Established, or arm
+  `pending_refresh` for the retry pipeline when it is not. Previously a
+  successful inline repair left that window unreconciled — no refresh
+  fired and no retry intent was armed.
+
+- Config parse diagnostics no longer echo secret material past the exact
+  known keywords: a typo'd secret key rejected by unknown-field
+  validation (`md5password`, `tcpao`) is recognized by a normalized
+  key-prefix check and redacted, and an error inside a multi-line string
+  value walks back to the string's opening line so a secret two or more
+  lines below `md5_password = """` is redacted too. Ordinary lines,
+  including non-secret unknown fields, keep the full echoed snippet.
 
 - `TransportAuthSecret` equality is now constant-time. The derived
   `PartialEq` compared secret bytes with an early-out; the manual

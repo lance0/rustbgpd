@@ -120,12 +120,26 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
 /// line mentioning `tcp_ao` or as a bare `key = "..."` line inside a
 /// `tcp_ao` table).
 fn line_mentions_secret(line: &str) -> bool {
-    line.contains("md5_password")
-        || line.contains("tcp_ao")
-        || line
-            .trim_start()
-            .strip_prefix("key")
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    if line.contains("md5_password") || line.contains("tcp_ao") {
+        return true;
+    }
+    // Typo'd or aliased secret keys (`md5password`, `Key`, `tcpao`) fail
+    // deny_unknown_fields and would otherwise be echoed verbatim, secret
+    // value and all. Normalize the key-ish prefix (text before `=`,
+    // separator/quote characters dropped, lowercased) and redact when it
+    // carries a secret marker. Only the key side is inspected, so ordinary
+    // lines (`hold_time = 90`, `holdtime = 90`) keep echoing.
+    let Some((key, _)) = line.split_once('=') else {
+        return false;
+    };
+    let key: String = key
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | '.' | '"' | '\'' | ' ' | '\t'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ["password", "key", "ao"]
+        .iter()
+        .any(|marker| key.contains(marker))
 }
 
 /// Render a source snippet with an underlined span, rustc-style.
@@ -164,7 +178,20 @@ fn render_snippet(
         let prev_start = source[..prev_end].rfind('\n').map_or(0, |i| i + 1);
         &source[prev_start..prev_end]
     };
-    let redact = line_mentions_secret(line_text) || line_mentions_secret(prev_text);
+    // A secret inside a multi-line string (`md5_password = """` with the
+    // value on later lines) puts the error span two or more lines past the
+    // keyword, defeating both checks above. Walk back (bounded) to the
+    // nearest line above that carries a multi-line string delimiter — for an
+    // error inside such a string that is its opening line — and redact when
+    // that opener names a secret.
+    let redact = line_mentions_secret(line_text)
+        || line_mentions_secret(prev_text)
+        || source[..line_start]
+            .lines()
+            .rev()
+            .take(64)
+            .find(|line| line.contains("\"\"\"") || line.contains("'''"))
+            .is_some_and(line_mentions_secret);
 
     let mut out = String::new();
     let _ = writeln!(out, "error: {heading}");
@@ -474,6 +501,93 @@ algorithm = \"hmac(sha256)\"
             rendered.contains("config.toml:10:") || rendered.contains("config.toml:11:"),
             "got: {rendered}"
         );
+    }
+
+    #[test]
+    fn parse_error_snippet_redacts_typod_secret_key() {
+        // `md5password` (no underscore) is an unknown field, not a parse
+        // error at the keyword the heuristic knows — the diagnostic still
+        // must not echo the secret value.
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9179\"
+log_format = \"json\"
+
+[security.grpc]
+enforcement = \"legacy\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+md5password = \"hunter2-typo-secret\"
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(!rendered.contains("hunter2-typo-secret"), "got: {rendered}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
+    }
+
+    #[test]
+    fn parse_error_snippet_redacts_multiline_secret_value() {
+        // The secret sits two lines below the `md5_password = \"\"\"` opener,
+        // past the one-line lookback; the multi-line walk-back must still
+        // redact it.
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+md5_password = \"\"\"
+padding-line
+hunter2-multiline\\qsecret
+\"\"\"
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(!rendered.contains("hunter2-multiline"), "got: {rendered}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
+    }
+
+    #[test]
+    fn unknown_field_snippet_echoes_non_secret_line() {
+        // A typo'd non-secret key must keep the ordinary echoed snippet —
+        // the redaction heuristic only fires on secret-shaped keys.
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9179\"
+log_format = \"json\"
+
+[security.grpc]
+enforcement = \"legacy\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+holdtime = 90
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(rendered.contains("holdtime = 90"), "got: {rendered}");
+        assert!(!rendered.contains("redacted"), "got: {rendered}");
     }
 
     #[test]
