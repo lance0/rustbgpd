@@ -16,6 +16,7 @@ const TOTAL_LEN: usize = HEADER_LEN + BODY_LEN;
 
 /// ROUTE-REFRESH demarcation subtype (RFC 7313).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RouteRefreshSubtype {
     /// Normal route refresh request (subtype 0).
     Normal,

@@ -3924,7 +3924,7 @@ impl RibManager {
             .filter(|event| {
                 route_type.is_none_or(|route_type| event.key.route_type() == route_type)
             })
-            .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == rd))
+            .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == Some(rd)))
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
             .filter(|event| match peer {
                 Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),

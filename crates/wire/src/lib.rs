@@ -22,6 +22,32 @@
 //! - Maximum message size: 4096 bytes (RFC 4271 §4.1)
 //! - No panics on malformed input — all paths return `Result`
 //! - No `unsafe` code
+//!
+//! # Enum exhaustiveness
+//!
+//! The enums that track IANA/RFC registries (message types, path
+//! attributes, capabilities, AFI/SAFI, EVPN route types, `FlowSpec`
+//! components, notification codes, and the error enums) are
+//! `#[non_exhaustive]`: registry growth adds variants without a
+//! semver-major break, so matches outside this crate must carry a
+//! wildcard arm. Closed-by-construction sets (`Origin`, `AsPathSegment`,
+//! `Prefix`, `AddPathMode`, `ErrorDisposition`, `RpkiValidation`, and
+//! the fixed V4/V6 family enums) remain exhaustively matchable.
+//!
+//! ```rust
+//! use rustbgpd_wire::Capability;
+//!
+//! fn label(capability: &Capability) -> &'static str {
+//!     match capability {
+//!         Capability::RouteRefresh => "route-refresh",
+//!         Capability::ExtendedMessage => "extended-message",
+//!         // Registry growth lands here in future releases; per RFC 5492
+//!         // practice, ignore what you do not support.
+//!         _ => "unsupported",
+//!     }
+//! }
+//! assert_eq!(label(&Capability::RouteRefresh), "route-refresh");
+//! ```
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
@@ -154,6 +180,7 @@ impl std::str::FromStr for RpkiValidation {
 
 /// ASPA path verification state per draft-ietf-sidrops-aspa-verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum AspaValidation {
     /// All hops in the `AS_PATH` have authorized provider relationships.
     Valid,

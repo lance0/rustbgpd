@@ -6683,9 +6683,6 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
     let count: u32 = 500;
     let rule = |afi: Afi, i: u32| FlowSpecRule {
         components: vec![FlowSpecComponent::DestinationPrefix(match afi {
-            Afi::Ipv4 => {
-                FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000_u32 + i), 32))
-            }
             Afi::Ipv6 => FlowSpecPrefix::V6(Ipv6PrefixOffset {
                 prefix: Ipv6Prefix::new(
                     Ipv6Addr::from(0x2001_0db8_0002_0000_0000_0000_0000_0000_u128 + u128::from(i)),
@@ -6693,7 +6690,8 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
                 ),
                 offset: 0,
             }),
-            Afi::L2Vpn | Afi::BgpLs => unreachable!(),
+            // The test feeds IPv4 and IPv6 only.
+            _ => FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000_u32 + i), 32)),
         })],
     };
     let routes: Vec<FlowSpecRoute> = [Afi::Ipv4, Afi::Ipv6]

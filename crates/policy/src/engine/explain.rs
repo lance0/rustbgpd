@@ -967,6 +967,9 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 rustbgpd_wire::AspaValidation::Valid => "valid",
                 rustbgpd_wire::AspaValidation::Invalid => "invalid",
                 rustbgpd_wire::AspaValidation::Unknown => "unknown",
+                // `AspaValidation` is non-exhaustive: render future states
+                // without claiming a specific one.
+                _ => "unrecognized",
             }
         ),
         MatchExpr::And(children) => {

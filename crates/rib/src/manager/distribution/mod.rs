@@ -779,6 +779,8 @@ fn family_label(family: (Afi, Safi)) -> String {
         Afi::Ipv6 => "ipv6",
         Afi::L2Vpn => "l2vpn",
         Afi::BgpLs => "bgpls",
+        // Non-exhaustive registry enum: label future AFIs honestly.
+        _ => "unrecognized",
     };
     let safi = match family.1 {
         Safi::Unicast => "unicast",
@@ -790,6 +792,8 @@ fn family_label(family: (Afi, Safi)) -> String {
         Safi::BgpLsVpn => "bgpls_vpn",
         Safi::MplsVpn => "mpls_vpn",
         Safi::RtConstrain => "rtc",
+        // Non-exhaustive registry enum: label future SAFIs honestly.
+        _ => "unrecognized",
     };
     format!("{afi} {safi}")
 }

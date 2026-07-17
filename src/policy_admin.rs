@@ -15,13 +15,17 @@ use crate::config::{
     PolicyStatementConfig, TcpAoConfig, TcpAoKeyringConfig,
 };
 
-const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
+/// `None` for a registry role this build has no config form for
+/// (`BgpRole` is non-exhaustive): the snapshot omits the role rather
+/// than fabricating one.
+const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> Option<BgpRoleConfig> {
     match role {
-        rustbgpd_wire::BgpRole::Provider => BgpRoleConfig::Provider,
-        rustbgpd_wire::BgpRole::RouteServer => BgpRoleConfig::RouteServer,
-        rustbgpd_wire::BgpRole::RouteServerClient => BgpRoleConfig::RouteServerClient,
-        rustbgpd_wire::BgpRole::Customer => BgpRoleConfig::Customer,
-        rustbgpd_wire::BgpRole::Peer => BgpRoleConfig::Peer,
+        rustbgpd_wire::BgpRole::Provider => Some(BgpRoleConfig::Provider),
+        rustbgpd_wire::BgpRole::RouteServer => Some(BgpRoleConfig::RouteServer),
+        rustbgpd_wire::BgpRole::RouteServerClient => Some(BgpRoleConfig::RouteServerClient),
+        rustbgpd_wire::BgpRole::Customer => Some(BgpRoleConfig::Customer),
+        rustbgpd_wire::BgpRole::Peer => Some(BgpRoleConfig::Peer),
+        _ => None,
     }
 }
 
@@ -470,7 +474,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         .then_some(NextHopOwnershipConfig::StrictPeer),
                     interpret_rfc1997: None,
                     rs_control_communities: None,
-                    role: cfg.local_role.map(wire_role_to_config),
+                    role: cfg.local_role.and_then(wire_role_to_config),
                     strict_role: Some(cfg.strict_role),
                     prefix_orf_receive: Some(cfg.prefix_orf_receive),
                     disable_ipv4_unicast: Some(cfg.disable_ipv4_unicast),

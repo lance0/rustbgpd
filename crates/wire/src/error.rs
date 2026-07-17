@@ -5,6 +5,7 @@ use crate::notification::NotificationCode;
 
 /// Errors encountered while decoding a BGP message from bytes.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// Not enough bytes are available to decode the message.
     #[error("incomplete message: need {needed} bytes, have {available}")]
@@ -95,6 +96,7 @@ pub enum DecodeError {
 
 /// Errors encountered while encoding a BGP message to bytes.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncodeError {
     /// Encoded message exceeds the maximum BGP message size.
     #[error("message exceeds maximum size: {size} bytes (max 4096)")]

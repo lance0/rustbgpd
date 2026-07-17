@@ -963,6 +963,12 @@ fn convert_attribute<'a>(
             raw.type_code,
             raw.data.to_vec(),
         )),
+        // `PathAttribute` is non-exhaustive: silently dropping an attribute
+        // this build does not model would corrupt the comparison, so fail
+        // the conversion instead.
+        _ => {
+            return Err("path attribute not modeled by this snapshot converter".to_string());
+        }
     }
     Ok(())
 }

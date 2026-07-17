@@ -24,6 +24,28 @@
 //! assert_eq!(session.state(), SessionState::Connect);
 //! assert!(!actions.is_empty());
 //! ```
+//!
+//! # Enum exhaustiveness
+//!
+//! [`Event`], [`Action`], [`TimerType`], and [`error::FsmError`] are
+//! `#[non_exhaustive]`: new protocol features add variants without a
+//! semver-major break, so matches outside this crate must carry a
+//! wildcard arm. [`SessionState`] stays exhaustively matchable — the six
+//! RFC 4271 §8 states are fixed by the protocol.
+//!
+//! ```rust
+//! use rustbgpd_fsm::Action;
+//!
+//! fn describe(action: &Action) -> &'static str {
+//!     match action {
+//!         Action::SendKeepalive => "send keepalive",
+//!         Action::CloseTcpConnection => "close TCP connection",
+//!         // Future actions land here; ignore what you do not drive.
+//!         _ => "other",
+//!     }
+//! }
+//! assert_eq!(describe(&Action::SendKeepalive), "send keepalive");
+//! ```
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

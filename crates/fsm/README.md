@@ -22,7 +22,11 @@ the peer-advertised and effective family-local limits.
 
 `rustbgpd-fsm 0.3.0` moves with `rustbgpd-wire 0.15.0`: the FSM's public API
 exposes wire types, so the incompatible wire dependency requires the paired
-0.x breaking bump.
+0.x breaking bump. The same cut marks `TimerType` and `error::FsmError`
+`#[non_exhaustive]`, joining `Event`, `Action`, `PeerConfig`, and
+`NegotiatedSession` — match them with a wildcard arm, and future variant
+additions become non-breaking. `SessionState` remains exhaustively
+matchable: the six RFC 4271 §8 states are fixed by the protocol.
 
 ## Key types
 

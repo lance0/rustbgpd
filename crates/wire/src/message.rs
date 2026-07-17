@@ -11,6 +11,7 @@ use crate::update::UpdateMessage;
 
 /// A decoded BGP message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message {
     /// BGP OPEN message.
     Open(OpenMessage),

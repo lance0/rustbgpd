@@ -86,15 +86,20 @@ pub struct EvpnRouteEvent {
 }
 
 /// Return the RD embedded in an EVPN route key.
+///
+/// `None` for a route type this build does not model (`EvpnRouteKey` is
+/// non-exhaustive); callers must treat such keys as filter non-matches
+/// and render an absent RD.
 #[must_use]
-pub const fn evpn_key_rd(key: &EvpnRouteKey) -> rustbgpd_wire::RouteDistinguisher {
+pub const fn evpn_key_rd(key: &EvpnRouteKey) -> Option<rustbgpd_wire::RouteDistinguisher> {
     match key {
         EvpnRouteKey::EadPerEs { rd, .. }
         | EvpnRouteKey::EadPerEvi { rd, .. }
         | EvpnRouteKey::MacIp { rd, .. }
         | EvpnRouteKey::Imet { rd, .. }
         | EvpnRouteKey::Es { rd, .. }
-        | EvpnRouteKey::IpPrefix { rd, .. } => *rd,
+        | EvpnRouteKey::IpPrefix { rd, .. } => Some(*rd),
+        _ => None,
     }
 }
 

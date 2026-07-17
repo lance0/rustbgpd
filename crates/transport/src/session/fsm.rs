@@ -565,6 +565,8 @@ impl PeerSession {
                         rustbgpd_fsm::TimerType::ConnectRetry => "connect_retry",
                         rustbgpd_fsm::TimerType::Hold => "hold",
                         rustbgpd_fsm::TimerType::Keepalive => "keepalive",
+                        // Non-exhaustive: keep the metric label bounded.
+                        _ => "unknown",
                     };
                     warn!(
                         peer = %self.peer_label,
@@ -803,7 +805,8 @@ pub(super) fn hard_reset_notification_in_actions(actions: &[Action]) -> bool {
 /// Bounded label string for `bgp_role_mismatch_total{local_role, remote_role}`.
 ///
 /// Returns a static `&'static str` so the metric cardinality stays bounded
-/// (six values: the five RFC 9234 roles plus `"none"`). An absent role
+/// (seven values: the five RFC 9234 roles, `"none"`, and `"unrecognized"`
+/// for registry values this build does not model). An absent role
 /// (peer did not advertise the Role capability, or we didn't configure one)
 /// is reported as `"none"`.
 const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str {
@@ -813,6 +816,7 @@ const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str
         Some(rustbgpd_wire::BgpRole::RouteServerClient) => "route_server_client",
         Some(rustbgpd_wire::BgpRole::Customer) => "customer",
         Some(rustbgpd_wire::BgpRole::Peer) => "peer",
+        Some(_) => "unrecognized",
         None => "none",
     }
 }

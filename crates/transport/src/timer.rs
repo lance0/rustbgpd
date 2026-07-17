@@ -34,15 +34,18 @@ impl Timers {
         if timer_type == TimerType::Hold {
             self.last_hold_secs = Some(secs);
         }
-        let slot = self.slot_mut(timer_type);
-        *slot = Some(Box::pin(tokio::time::sleep(Duration::from_secs(
-            u64::from(secs),
-        ))));
+        if let Some(slot) = self.slot_mut(timer_type) {
+            *slot = Some(Box::pin(tokio::time::sleep(Duration::from_secs(
+                u64::from(secs),
+            ))));
+        }
     }
 
     /// Stop a running timer.
     pub fn stop(&mut self, timer_type: TimerType) {
-        *self.slot_mut(timer_type) = None;
+        if let Some(slot) = self.slot_mut(timer_type) {
+            *slot = None;
+        }
     }
 
     /// Stop all timers.
@@ -52,11 +55,14 @@ impl Timers {
         self.keepalive = None;
     }
 
-    fn slot_mut(&mut self, timer_type: TimerType) -> &mut Option<Pin<Box<Sleep>>> {
+    /// `None` for a timer kind this build does not run (`TimerType` is
+    /// non-exhaustive): the request is ignored — no slot, no expiry.
+    fn slot_mut(&mut self, timer_type: TimerType) -> Option<&mut Option<Pin<Box<Sleep>>>> {
         match timer_type {
-            TimerType::ConnectRetry => &mut self.connect_retry,
-            TimerType::Hold => &mut self.hold,
-            TimerType::Keepalive => &mut self.keepalive,
+            TimerType::ConnectRetry => Some(&mut self.connect_retry),
+            TimerType::Hold => Some(&mut self.hold),
+            TimerType::Keepalive => Some(&mut self.keepalive),
+            _ => None,
         }
     }
 }

@@ -8,6 +8,7 @@ use thiserror::Error;
 /// a well-defined output.  These errors exist for logging / telemetry when
 /// the FSM encounters protocol violations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FsmError {
     /// Peer's OPEN message failed validation (bad ASN, hold time, etc.).
     #[error("OPEN validation failed: {reason}")]
