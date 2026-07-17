@@ -382,7 +382,7 @@ When an Adj-RIB-Out channel is full, the update is dropped and the peer is marke
 
 ### Prefix limits
 
-Per-peer `max_prefixes` is enforced at Adj-RIB-In insertion. Exceeding the limit produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown. A global `max_total_routes` limit tears down the offending session with NOTIFICATION (Cease, Out of Resources).
+Per-neighbor `max_prefixes` (aggregate) and the independent per-family `max_prefixes_ipv4` / `max_prefixes_ipv6` caps (ADR-0108) are enforced at Adj-RIB-In insertion. Exceeding any cap produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown. There is no global/aggregate route limit across neighbors.
 
 ### Why no locks
 

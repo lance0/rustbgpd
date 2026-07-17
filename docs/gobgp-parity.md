@@ -200,16 +200,21 @@ releases rather than carried forward from older measurements.
 
 ## Summary
 
+Counting rule: a cell counts toward a category's tally only if it is exactly
+"Yes". Partial / Receive / Receive-only / Experimental / N/A / No do not
+count. (Exception: the "gRPC RPCs" row reports the literal RPC counts from
+the gRPC API table's "Total RPCs" row, not a Yes-tally.)
+
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | 15 | 4 | ~27% |
-| Core protocol | 14 | 14 | 100% |
-| Path attributes | 13 | 9 | ~69% |
+| Core protocol | 16 | 16 | 100% |
+| Path attributes | 13 | 11 | ~85% |
 | Policy engine | 18 | 21 | 100%+ (`.rpol` language, live-RIB dry run, per-term hit counters are rustbgpd-only) |
 | gRPC RPCs | ~55 | 98 | 100%+ (94 `rustbgpd.v1` RPCs plus gNMI) |
-| Monitoring | 5 | 6 | 100%+ |
-| Security | 4 | 5 | 100%+ |
-| Best-path steps | 11 | 11 | 100% except AIGP |
+| Monitoring | 5 | 9 | 100%+ |
+| Security | 5 | 6 | 100%+ |
+| Best-path steps | 12 | 12 | 100% (different single gaps: GoBGP lacks Optimal Route Reflection, rustbgpd lacks AIGP) |
 
 ## Weighted Parity Estimates
 
