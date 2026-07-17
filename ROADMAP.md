@@ -159,6 +159,40 @@ Add-Path send (shipped, several ahead of the field — keep ASPA
 conformance-current, it is a moat); AIGP, conditional advertisement, Add-Path
 update-group scaling (ADR-0099), send-side ORF (ROADMAP-tracked / demand-shaped).
 
+### Operator experience (2026-07-17)
+
+A discovery pass over the operator journey — first contact through production —
+found the operator surface largely *built* but *under-discoverable*:
+compiler-grade config diagnostics, `--check`/`config diff` with reload-class
+annotations, commit-confirmed transactions, `rbgp doctor`, the explain
+trilogy, and an importable Grafana dashboard plus a tested alert pack all
+exist, while no incumbent daemon ships native JSON output, a transactional
+config workflow, or span-and-suggestion config errors at all. **The gap is
+not features — it is discoverability, first-30-minutes friction, and
+migration-in.** Three tracks, ranked:
+
+**1. Discoverability of shipped differentiators.** A landing page for the
+explain trilogy plus README positioning (LAN-478); an end-to-end
+arouteserver → rs-config-render → looking-glass tutorial and docs-index
+wiring for `tools/` (LAN-479).
+
+**2. First-30-minutes friction.** A pre-built-binary install path ahead of
+`cargo build` in the bare-metal quickstart (LAN-480); `rbgp doctor`
+first-deploy environment checks — BGP listener bound, RTR/BMP reachability,
+run-context detection, state-dir disk (LAN-482).
+
+**3. Fewer footguns, smoother migration in.** Did-you-mean suggestions for
+unknown config keys, reusing the `.rpol` suggestion machinery (LAN-481);
+config version history + `rollback N`, completing the
+check/compare/confirm/rollback workflow no open-source daemon offers whole
+(LAN-483); a bounded BIRD/FRR/GoBGP config importer — structure only, with a
+fail-stop report of everything left for hand-translation, verified through
+the existing shadow-trial runbook (LAN-484).
+
+Deliberately *not* here: a web UI, Terraform/Ansible providers (maintenance
+surface without demonstrated demand — revisit on operator pull), and
+BIRD-filter-language translation (the importer stops at structure).
+
 ### Immediate: post-v0.50 audit remediation (2026-07-09)
 
 A repository-wide read-only audit at `155b24c2` found the workspace test,
