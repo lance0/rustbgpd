@@ -322,6 +322,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Membership changes during destination pre-staging now discard the
+  partial group table, so joiners always see a fully staged group. A
+  peer whose (attributes, policy) key equaled a mid-walk prestaged
+  destination could join the partially staged group through any
+  ordinary membership seam (session registration, per-peer policy
+  install, membership recompute), replay the partial table as its
+  initial view, and then have the remaining staging slices' deltas
+  discarded — routes recorded as advertised but never emitted, with
+  no later heal. The join now drops the prestage (the held prepare
+  reply resolves as skipped) and rebuilds the group on the ordinary
+  path. Discards are also exact now: the preparation records the
+  group id it actually staged, and both an explicit discard and a
+  cohort commit that resolved a different destination remove that
+  recorded group instead of re-deriving one from current attributes
+  (which could drift and leak the staged, memberless group).
+
 - `TransportAuthSecret` equality is now constant-time. The derived
   `PartialEq` compared secret bytes with an early-out; the manual
   implementation compares in time dependent only on the longer input's
