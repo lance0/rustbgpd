@@ -5091,7 +5091,7 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 38 peer-labeled families; state transitions hold two series.
+        // 39 peer-labeled families; state transitions hold two series.
         assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 39);
 
         m.reap_peer_series("10.0.0.1");
