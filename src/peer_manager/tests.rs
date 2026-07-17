@@ -8854,10 +8854,24 @@ fn import_tolerant_cohort_test_session(
     counters: Arc<CohortSessionCounters>,
     fail_export_on_attempt: Option<usize>,
 ) -> PeerHandle {
+    import_tolerant_cohort_test_session_with_states(addr, counters, fail_export_on_attempt, None)
+}
+
+/// Like `import_tolerant_cohort_test_session`, but the session answers
+/// Established only for the first `established_queries` state queries and
+/// Connect afterwards (`None` = always Established), so tests can model a
+/// session that drops out of Established mid-transaction.
+fn import_tolerant_cohort_test_session_with_states(
+    addr: IpAddr,
+    counters: Arc<CohortSessionCounters>,
+    fail_export_on_attempt: Option<usize>,
+    established_queries: Option<usize>,
+) -> PeerHandle {
     use rustbgpd_transport::PeerCommand;
 
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
     let task = tokio::spawn(async move {
+        let mut state_queries = 0usize;
         while let Some(command) = session_rx.recv().await {
             match command {
                 PeerCommand::UpdateImportPolicy { policy, reply } => {
@@ -8881,7 +8895,13 @@ fn import_tolerant_cohort_test_session(
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::QueryState { reply } => {
-                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                    state_queries += 1;
+                    let state = if established_queries.is_some_and(|limit| state_queries > limit) {
+                        SessionState::Connect
+                    } else {
+                        SessionState::Established
+                    };
+                    let _ = reply.send(policy_test_peer_state(addr, state));
                 }
                 PeerCommand::Shutdown => break,
                 _ => {}
@@ -9233,11 +9253,13 @@ async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
     );
 }
 
-/// LAN-462: an export hot-apply failure on a member whose import delta was
-/// already acknowledged must reassert that member's prior import chain
-/// directly (its bookkeeping had advanced) while the previously captured
-/// members restore through the ordinary rollback — and the failing member
-/// still gets no RIB compensation, matching the export-only discipline.
+/// LAN-462/LAN-464: an export hot-apply failure on a member whose import
+/// delta was already acknowledged must reassert that member's prior import
+/// chain directly (its bookkeeping had advanced) AND fire a Route Refresh to
+/// reconcile routes the session accepted under the new chain during the
+/// window, while the previously captured members restore through the
+/// ordinary rollback — and the failing member still gets no RIB
+/// compensation, matching the export-only discipline.
 #[tokio::test]
 async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -9311,8 +9333,8 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
         "the export failure must surface with a successful rollback: {result:?}"
     );
 
-    // The failing member: forward import install + direct prior reassert, no
-    // forward refresh (it was deferred and never fired), no RIB compensation.
+    // The failing member: forward import install + direct prior reassert, a
+    // post-reassert refresh for the acked-import window, no RIB compensation.
     assert_eq!(failing_counters.import_installs.load(Ordering::SeqCst), 2);
     assert_eq!(
         *failing_counters.live_import.lock().unwrap(),
@@ -9320,7 +9342,11 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
         "the failing member's prior import chain must be reasserted"
     );
     assert_eq!(failing_counters.export_installs.load(Ordering::SeqCst), 2);
-    assert_eq!(failing_counters.refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        failing_counters.refreshes.load(Ordering::SeqCst),
+        1,
+        "the repair must fire a refresh for routes accepted under the new import chain during the window"
+    );
     // The captured member restores through the ordinary rollback: reassert,
     // RIB restore, then the conservative post-reassert refresh.
     assert_eq!(first_counters.import_installs.load(Ordering::SeqCst), 2);
@@ -9339,6 +9365,100 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
         assert!(!peer_state.pending_refresh);
         assert!(!peer_state.pending_export_apply);
     }
+
+    for peer in [first, failing] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// LAN-464 companion: when the failing member is no longer Established at
+/// repair time, the acked-import-window reconciliation cannot refresh
+/// immediately — it must arm `pending_refresh` instead so the retry pipeline
+/// fires it once the session is reachable again.
+#[tokio::test]
+async fn cohort_export_failure_repair_arms_pending_refresh_when_not_established() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 46, 0, 1));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 46, 0, 2));
+    let first_counters = Arc::new(CohortSessionCounters::default());
+    let failing_counters = Arc::new(CohortSessionCounters::default());
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let _rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        first,
+        import_tolerant_cohort_test_session(first, Arc::clone(&first_counters), None),
+        false,
+    );
+    // Established for the cohort-selection state query only: by the time the
+    // repair checks the session again it reports Connect.
+    insert_test_managed_peer(
+        &mut manager,
+        failing,
+        import_tolerant_cohort_test_session_with_states(
+            failing,
+            Arc::clone(&failing_counters),
+            Some(1),
+            Some(1),
+        ),
+        false,
+    );
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, failing]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(changed_import.clone()),
+                    export_policy: Some(shared_export.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains(&format!(
+                "failed to apply resolved policy to {failing}: export:"
+            ))
+        }),
+        "the export failure must surface: {result:?}"
+    );
+
+    // The failing member: prior import chain reasserted, no immediate
+    // refresh (not Established), retry intent armed instead.
+    assert_eq!(failing_counters.import_installs.load(Ordering::SeqCst), 2);
+    assert_eq!(*failing_counters.live_import.lock().unwrap(), None);
+    assert_eq!(failing_counters.refreshes.load(Ordering::SeqCst), 0);
+    let failing_state = manager.peers.get(&key(failing)).unwrap();
+    assert!(
+        failing_state.pending_refresh,
+        "a non-Established failing member must carry the refresh intent as pending_refresh"
+    );
+    // The captured member still restores through the ordinary rollback.
+    assert_eq!(first_counters.refreshes.load(Ordering::SeqCst), 1);
+    assert!(!manager.peers.get(&key(first)).unwrap().pending_refresh);
 
     for peer in [first, failing] {
         manager.delete_peer(key(peer), false).await.unwrap();
