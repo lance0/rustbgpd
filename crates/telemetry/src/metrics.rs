@@ -21,6 +21,14 @@ static NEXT_METRICS_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 /// recreating, from zero) the series like `with_label_values` does.
 static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// Current unix time in whole seconds, saturating at the `i64` gauge
+/// range (0 if the clock reads before the epoch).
+fn unix_now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 /// Bounded label contract for aggregate ORR topology-input diagnostics.
 const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "included_default",
@@ -203,6 +211,10 @@ pub struct BgpMetrics {
     // ── Policy dataset refresh failures (LAN-305) ─────────────
     policy_dataset_refresh_errors: IntCounterVec,
     policy_eval_errors: IntCounterVec,
+
+    // ── Policy artifact freshness (ADR-0110) ──────────────────
+    policy_generation_loaded_timestamp: IntGauge,
+    policy_dataset_loaded_timestamp: IntGaugeVec,
 
     // ── Enhanced Route Refresh ────────────────────────────────
     route_refresh_in_progress: IntGaugeVec,
@@ -1077,6 +1089,28 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let policy_generation_loaded_timestamp = IntGauge::new(
+            "bgp_policy_generation_loaded_timestamp_seconds",
+            "Unix time of the last successful full policy apply (initial load, \
+             SIGHUP reload, or config transaction). A rejected load keeps the \
+             prior generation live and does NOT advance this timestamp, so \
+             `time() - <this>` is the age of the last artifacts the daemon \
+             actually accepted.",
+        )
+        .expect("valid metric definition");
+
+        let policy_dataset_loaded_timestamp = IntGaugeVec::new(
+            Opts::new(
+                "bgp_policy_dataset_loaded_timestamp_seconds",
+                "Unix time the named external policy dataset last swapped in a \
+                 loaded generation (initial load or refresh). A failed refresh \
+                 keeps the prior snapshot serving and does NOT advance this \
+                 timestamp.",
+            ),
+            &["dataset"],
+        )
+        .expect("valid metric definition");
+
         let route_refresh_in_progress = IntGaugeVec::new(
             Opts::new(
                 "bgp_route_refresh_in_progress",
@@ -1779,6 +1813,12 @@ impl BgpMetrics {
             .register(Box::new(policy_eval_errors.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(policy_generation_loaded_timestamp.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(policy_dataset_loaded_timestamp.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(route_refresh_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -2031,6 +2071,8 @@ impl BgpMetrics {
             validation_import_refreshes,
             policy_dataset_refresh_errors,
             policy_eval_errors,
+            policy_generation_loaded_timestamp,
+            policy_dataset_loaded_timestamp,
             route_refresh_in_progress,
             route_refresh_stale_entries,
             evpn_local_originations,
@@ -3046,6 +3088,41 @@ impl BgpMetrics {
         self.policy_dataset_refresh_errors
             .with_label_values(&[dataset])
             .inc();
+    }
+
+    /// Record a successful full policy apply (initial load, SIGHUP
+    /// reload, or config transaction): stamp the current unix time.
+    ///
+    /// Never called on a rejected load — staleness alerting depends on
+    /// the timestamp freezing while the prior generation stays live.
+    pub fn record_policy_generation_loaded(&self) {
+        self.policy_generation_loaded_timestamp
+            .set(unix_now_seconds());
+    }
+
+    /// Record a successful load/swap of the named external policy
+    /// dataset: stamp the current unix time. The label is bounded by
+    /// the config's declared dataset names.
+    ///
+    /// Never called on a failed refresh — the prior snapshot keeps
+    /// serving and the timestamp keeps its last-accepted value.
+    pub fn record_policy_dataset_loaded(&self, dataset: &str) {
+        self.policy_dataset_loaded_timestamp
+            .with_label_values(&[dataset])
+            .set(unix_now_seconds());
+    }
+
+    /// Drop the per-dataset series (loaded-timestamp gauge and
+    /// refresh-failure counter) for a dataset removed from config, so
+    /// the exposition stops advertising freshness for a dataset that
+    /// no longer exists.
+    pub fn reap_policy_dataset_series(&self, dataset: &str) {
+        let _ = self
+            .policy_dataset_loaded_timestamp
+            .remove_label_values(&[dataset]);
+        let _ = self
+            .policy_dataset_refresh_errors
+            .remove_label_values(&[dataset]);
     }
 
     /// Count one route denied by a policy evaluation error (LAN-301,
@@ -4145,6 +4222,38 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_policy_eval_errors_total"));
         assert!(text.contains(r#"kind="overflow""#));
+    }
+
+    /// ADR-0110 freshness gauges: a successful apply stamps a nonzero
+    /// unix time, the dataset series is labeled by dataset name, and
+    /// reaping a removed dataset drops BOTH its series (loaded
+    /// timestamp and refresh-failure counter).
+    #[test]
+    fn policy_freshness_timestamps_stamp_and_reap() {
+        let m = BgpMetrics::new();
+        m.record_policy_generation_loaded();
+        assert!(m.policy_generation_loaded_timestamp.get() > 0);
+
+        m.record_policy_dataset_loaded("customers");
+        m.record_policy_dataset_refresh_error("customers");
+        assert!(
+            m.policy_dataset_loaded_timestamp
+                .with_label_values(&["customers"])
+                .get()
+                > 0
+        );
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_policy_generation_loaded_timestamp_seconds"));
+        assert!(
+            text.contains(r#"bgp_policy_dataset_loaded_timestamp_seconds{dataset="customers"}"#)
+        );
+        assert!(text.contains(r#"bgp_policy_dataset_refresh_errors_total{dataset="customers"}"#));
+
+        m.reap_policy_dataset_series("customers");
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"dataset="customers""#));
+        // The unlabeled generation timestamp is untouched by dataset reaps.
+        assert!(m.policy_generation_loaded_timestamp.get() > 0);
     }
 
     /// Reaping a peer must invalidate the thread-local memoized counter

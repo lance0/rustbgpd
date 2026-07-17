@@ -1501,6 +1501,12 @@ impl PeerManager {
             );
             self.metrics.record_policy_dataset_refresh_error(dataset);
         }
+        // ADR-0110 freshness: each swapped dataset was just accepted —
+        // stamp its loaded timestamp. Failed refreshes above deliberately
+        // keep their last-accepted timestamp so `time() - <gauge>` ages.
+        for dataset in swapped {
+            self.metrics.record_policy_dataset_loaded(dataset);
+        }
         if swapped.is_empty() {
             return Ok(());
         }
@@ -2160,6 +2166,34 @@ impl PeerManager {
             .await
             .map_err(CatalogMutationError::internal)?;
 
+        // ADR-0110 freshness: adopting `next_config` is the accept moment
+        // for this policy generation. Sync the per-dataset series against
+        // the new binding set: a dataset introduced by this apply gets a
+        // loaded timestamp; one removed from config gets its series reaped
+        // (content bumps are stamped on the RefreshDatasetDependents path).
+        // A rejected apply returns above without stamping anything.
+        for handle in next_config.policy.dataset_bindings.handles() {
+            if self
+                .current_config
+                .policy
+                .dataset_bindings
+                .get(handle.name())
+                .is_none()
+            {
+                self.metrics.record_policy_dataset_loaded(handle.name());
+            }
+        }
+        for handle in self.current_config.policy.dataset_bindings.handles() {
+            if next_config
+                .policy
+                .dataset_bindings
+                .get(handle.name())
+                .is_none()
+            {
+                self.metrics.reap_policy_dataset_series(handle.name());
+            }
+        }
+        self.metrics.record_policy_generation_loaded();
         self.current_config = next_config;
         Ok(applied.len())
     }

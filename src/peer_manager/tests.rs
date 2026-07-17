@@ -5258,6 +5258,268 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
     rib_drainer.await.unwrap();
 }
 
+/// Read one policy-freshness metric from the gathered exposition:
+/// the unlabeled family value, or the child whose `dataset` label
+/// matches. `None` when the family/series is absent.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "unix-seconds gauges and small test counters fit i64"
+)]
+fn policy_metric_value(metrics: &BgpMetrics, family: &str, dataset: Option<&str>) -> Option<i64> {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|f| f.name() == family)?
+        .get_metric()
+        .iter()
+        .find(|m| match dataset {
+            Some(dataset) => m
+                .get_label()
+                .iter()
+                .any(|l| l.name() == "dataset" && l.value() == dataset),
+            None => true,
+        })
+        .map(|m| {
+            // Counter families follow the `_total` naming convention;
+            // everything read here otherwise is a gauge.
+            if family.ends_with("_total") {
+                m.get_counter().value() as i64
+            } else {
+                m.get_gauge().value() as i64
+            }
+        })
+}
+
+/// Block until the wall clock has advanced past `after` (unix
+/// seconds), so a subsequent timestamp stamp is distinguishable
+/// from one taken at `after`.
+async fn wait_for_unix_second_after(after: i64) {
+    loop {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs(),
+        )
+        .expect("unix seconds fit i64");
+        if now > after {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// ADR-0110 load-bearing staleness assertion: a rejected rpol sync
+/// keeps the old generation live AND freezes
+/// `bgp_policy_generation_loaded_timestamp_seconds` — the timestamp
+/// must NOT advance on a failed swap, otherwise `time() - <gauge>`
+/// alerting can never see a stuck pipeline. A subsequent successful
+/// sync advances it.
+#[tokio::test]
+async fn rejected_rpol_sync_freezes_policy_generation_timestamp() {
+    use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
+
+    fn registry(name: &str, source: &str) -> RpolPolicySet {
+        let file = std::sync::Arc::new(RpolFile::parse(source).expect("clean rpol"));
+        let mut set = RpolPolicySet::default();
+        set.policies.insert(
+            name.to_string(),
+            RpolPolicyEntry {
+                file,
+                params: 0,
+                path: "policies/core.rpol".to_string(),
+            },
+        );
+        set
+    }
+
+    const FAMILY: &str = "bgp_policy_generation_loaded_timestamp_seconds";
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    // Initial load: constructing the manager stamped the generation.
+    let initial = policy_metric_value(&mgr.metrics, FAMILY, None).expect("stamped at construction");
+    assert!(initial > 0);
+
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        acking_counted_policy_handle(peer, counters.clone()),
+        false,
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["edge-in".to_string()];
+    mgr.current_config.neighbors = vec![neighbor];
+    mgr.current_config.policy.rpol = registry(
+        "edge-in",
+        "policy edge-in { term all { set local-pref 150; accept } }",
+    );
+
+    // Let the wall clock tick so a (buggy) stamp on the failed swap
+    // below would be distinguishable from the construction stamp.
+    wait_for_unix_second_after(initial).await;
+
+    // Candidate registry renames the policy, so the static peer's
+    // chain no longer resolves: the sync is rejected — and the
+    // timestamp must stay frozen at the last ACCEPTED apply.
+    mgr.sync_rpol_policies(
+        vec!["policies/core.rpol".to_string()],
+        registry(
+            "edge-in-renamed",
+            "policy edge-in-renamed { term all { set local-pref 250; accept } }",
+        ),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
+    )
+    .await
+    .expect_err("chain resolution failure must reject the sync");
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, FAMILY, None),
+        Some(initial),
+        "a rejected swap must not advance the loaded timestamp"
+    );
+
+    // A successful sync IS an accept: the timestamp advances.
+    mgr.sync_rpol_policies(
+        vec!["policies/core.rpol".to_string()],
+        registry(
+            "edge-in",
+            "policy edge-in { term all { set local-pref 250; accept } }",
+        ),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
+    )
+    .await
+    .expect("sync succeeds");
+    let advanced = policy_metric_value(&mgr.metrics, FAMILY, None).expect("still present");
+    assert!(
+        advanced > initial,
+        "successful swap must stamp a newer time"
+    );
+
+    drop(mgr);
+    rib_drainer.await.unwrap();
+}
+
+/// ADR-0110: `RefreshDatasetDependents` stamps
+/// `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` for each
+/// swapped dataset, while a failed refresh only increments the
+/// failure counter — it never creates/advances the loaded timestamp.
+#[tokio::test]
+async fn dataset_refresh_stamps_swapped_and_freezes_failed() {
+    const LOADED: &str = "bgp_policy_dataset_loaded_timestamp_seconds";
+    const FAILURES: &str = "bgp_policy_dataset_refresh_errors_total";
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.refresh_dataset_dependents(
+        &["customers".to_string()],
+        &[("bogons".to_string(), "unreadable".to_string())],
+    )
+    .await
+    .expect("refresh fan-out with no peers succeeds");
+
+    let stamped =
+        policy_metric_value(&mgr.metrics, LOADED, Some("customers")).expect("swapped stamped");
+    assert!(stamped > 0);
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, LOADED, Some("bogons")),
+        None,
+        "a failed refresh must not create a loaded-timestamp series"
+    );
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, FAILURES, Some("bogons")),
+        Some(1)
+    );
+}
+
+/// ADR-0110 reap discipline: a dataset removed from config on a
+/// successful rpol sync drops BOTH its per-dataset series (loaded
+/// timestamp and failure counter); a dataset introduced by the sync
+/// gets its initial stamp.
+#[tokio::test]
+async fn rpol_sync_reaps_removed_dataset_series() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolPolicySet;
+    use rustbgpd_policy::sets::AsnSet;
+
+    const LOADED: &str = "bgp_policy_dataset_loaded_timestamp_seconds";
+    const FAILURES: &str = "bgp_policy_dataset_refresh_errors_total";
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    // Sync #1 introduces the dataset: its series appears.
+    let mut bindings = DatasetBindings::default();
+    bindings.insert(std::sync::Arc::new(DatasetHandle::new(
+        "customers",
+        DatasetKind::Asn,
+        DatasetData::Asn(AsnSet::new(std::iter::once(64500))),
+    )));
+    mgr.sync_rpol_policies(Vec::new(), RpolPolicySet::default(), bindings)
+        .await
+        .expect("sync with a new dataset succeeds");
+    assert!(policy_metric_value(&mgr.metrics, LOADED, Some("customers")).is_some());
+    mgr.metrics.record_policy_dataset_refresh_error("customers");
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, FAILURES, Some("customers")),
+        Some(1)
+    );
+
+    // Sync #2 removes it from config: both series are reaped.
+    mgr.sync_rpol_policies(
+        Vec::new(),
+        RpolPolicySet::default(),
+        DatasetBindings::default(),
+    )
+    .await
+    .expect("sync removing the dataset succeeds");
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, LOADED, Some("customers")),
+        None,
+        "removed dataset must not keep advertising freshness"
+    );
+    assert_eq!(
+        policy_metric_value(&mgr.metrics, FAILURES, Some("customers")),
+        None
+    );
+}
+
 /// Like `acking_policy_handle`, but counting `QueryState` and Route Refresh
 /// sends so policy fan-out coverage can be asserted per peer.
 fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounters>) -> PeerHandle {

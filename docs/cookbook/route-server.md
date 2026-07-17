@@ -312,6 +312,7 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 | `bgp_rpki_vrp_total` | non-zero once the RTR cache syncs |
 | `bgp_update_group_fallback_peers` | ≥ your `per_client_best` member count (they never group) |
 | `bgp_rib_outbound_registered_peers` | = established member count |
+| `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`OPERATIONS.md`](../OPERATIONS.md) for the alert expressions |
 
 ## Member support: the filtered-route view
 

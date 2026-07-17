@@ -539,6 +539,45 @@ them on its dedicated lane. It cannot preempt an O(table) general query that
 was already executing when the request arrived; that actor call must return
 before either the transition or readiness probe can advance.
 
+### Policy artifact freshness
+
+For deployments whose policy is rendered by an external pipeline
+(IRR toolchain, config generator, cron + SIGHUP), these metrics answer
+"when did the daemon last *accept* new policy artifacts" — which is the
+staleness signal that matters. File mtimes only say when something was
+written to disk; a render that produces a config the daemon rejects
+leaves the old generation live, and these timestamps deliberately do
+not advance on a rejected load.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_policy_generation_loaded_timestamp_seconds` | Unix time of the last successful full policy apply — initial load, SIGHUP reload (stamped even when the reloaded content is unchanged: the daemon re-accepted it), or config transaction. Frozen across rejected reloads |
+| `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` | Unix time the named `[policy.datasets.<name>]` external dataset last swapped in a loaded generation (initial load, or a refresh whose content changed). A failed refresh keeps the prior snapshot serving and does not advance this. Series reaped when the dataset is removed from config |
+| `bgp_policy_dataset_refresh_errors_total{dataset}` | Failed dataset refresh attempts; the prior snapshot keeps serving. Series reaped when the dataset is removed from config |
+
+**Alerting on pipeline staleness.** Export ages, not the raw
+timestamps, and let Prometheus do the arithmetic. If your pipeline
+refreshes every 6 hours, page when nothing has been accepted for a few
+missed cycles:
+
+```promql
+# Full policy apply older than 3 refresh intervals (here: 3 × 6h).
+time() - bgp_policy_generation_loaded_timestamp_seconds > 3 * 21600
+
+# A dataset whose last accepted swap is stale, or whose refreshes are
+# actively failing.
+time() - bgp_policy_dataset_loaded_timestamp_seconds > 3 * 21600
+increase(bgp_policy_dataset_refresh_errors_total[6h]) > 0
+```
+
+The dataset timestamp advances only when a refresh swaps in *changed*
+content, so pair the dataset-age expression with the refresh-error
+counter: age alone can also mean "the data legitimately hasn't
+changed", while age plus rising errors means the pipeline output is
+being rejected. The full-apply timestamp has no such caveat — it is
+stamped on every successful SIGHUP — so it is the primary "pipeline
+stuck or daemon rejecting everything" pager.
+
 ### Ingress rejection / route-leak detection
 
 Mechanisms that block routes for protocol-correctness reasons: most
