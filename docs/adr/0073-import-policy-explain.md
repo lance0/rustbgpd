@@ -11,7 +11,7 @@ evaluation is `evaluate_export_chain` in
 `crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
 assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
 the RPC surface hangs off the route-explain group at
-`proto/rustbgpd.proto:1189` (`RibService.ExplainAdvertisedRoute`).
+`proto/rustbgpd.proto:1342` (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -19,13 +19,13 @@ There is no equivalent for **import**. The operator question
 - Import policy is evaluated in the transport layer at
   the `evaluate_chain_with_attribution` call sites in
   `crates/transport/src/session/inbound.rs` (for example the IPv4
-  unicast body path around line 1202). A denied route drops at that
+  unicast body path around line 1459). A denied route drops at that
   point and never reaches RIB. Existing tests pin this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
   do to this prefix" but cannot reconstruct what happened to a
   prefix that was *rejected* on arrival.
-- `bgp_policy_import_routes_{permitted,denied}_total{peer}`
+- `bgp_policy_routes_total{peer,policy,direction,action}`
   counters answer "how many," not "which prefix and why."
 - `PolicyEvaluation` (`crates/policy/src/engine.rs:1133`) carries
   the terminal-decision policy + action, which is what an explain
@@ -317,7 +317,7 @@ built in stages but is not split across PRs:
 - Export-explain reference: `evaluate_export_chain` in
   `crates/rib/src/manager/distribution/mod.rs` (assembly in
   `crates/rib/src/manager/distribution/unicast.rs`),
-  RPC at `proto/rustbgpd.proto:1189`
+  RPC at `proto/rustbgpd.proto:1342`
 - Existing import counters: `record_import_policy_eval` at
   `crates/transport/src/session/inbound.rs:21`
 - Authz tier reference: `crates/api/src/authz.rs`

@@ -9,120 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- Corrected the update-group shared-encode safety documentation (module
-  docs and ADR-0109): the mid-stream fallback invariant is per-NLRI
-  attribute identity with the ordinary encode — not byte-identical
-  chunks, since message boundaries and NLRI order differ — with skips
-  still impossible because fallback re-encodes the full envelope.
-  Documented the encoder's no-await liveness requirement at its two
-  tempting yield points, and added four shared-encode regression tests
-  (per-source chunk integrity under interning, next-hop-override
-  alignment across the source sort, concurrent consumer streaming, and
-  wire-equivalence normalization bounds).
-
-- **Shared export-policy transitions now pre-stage their destination
-  update-group before the fence, halving the reload wall during which
-  interleaved churn stalls.** The cohort transaction first sends
-  `PrepareExportPolicyDestination`: the RIB creates the prospective
-  destination group and stages it in budgeted actor slices *without* the
-  transition fence — ordinary churn keeps flowing between slices, and the
-  same all-groups staging pass keeps the prepared table live rather than
-  a stale snapshot. The transition then finds the destination
-  `Maintained` and skips its fenced full-table staging walk. Preparation
-  is best-effort (any failure falls back to the ordinary fenced staging),
-  a superseded or abandoned preparation is discarded so an orphaned
-  staged table cannot keep consuming per-churn staging work, and a
-  partially staged leftover is rejected by the existing table-length
-  validation. Measured at 700 route-server members x 400,400 routes
-  (mixed export-only reload under churn): fenced transition wall
-  0.95 s -> 0.45 s, per-observer max inter-UPDATE gap p50 ~1.0 s ->
-  ~0.53-0.64 s.
-
-- The shared-transition exact-export probe now reuses one exact result
-  per probe shape (prepared-attribute identity, MP framing inputs, and
-  prefix bit-length) within a batch instead of building a single-entry
-  UPDATE message per route, and the strict-cohort ceiling proof consults
-  a maximum computed once at store time instead of rescanning the
-  per-route length vector for every member (quadratic at fleet scale:
-  ~200 ms of fenced actor wall at 700 members x 400k routes). Together
-  the fenced probe phase drops ~40% at the reload-stall receipt shape.
-
-- Every pre-commit phase of a shared policy transition (member
-  classification, destination staging, inventory build, and the
-  exact-export probe) now strides under the same 25 ms wall-clock poll
-  budget as the commit flush, instead of parking after one fixed-size
-  slice per actor poll. The fenced window that excludes interleaved
-  churn during a transition no longer scales with members x table size
-  (400k routes cost ~391 single-slice probe polls — a measured ~1.1 s
-  observer gap at 700 members).
-
-- **Reloads that change import and export policy together now take the
-  batched export cohort instead of the per-peer authoritative path.** The
-  cohort's eligibility check no longer requires an unchanged import chain:
-  a member's changed import chain is hot-applied to its session during
-  cohort setup, and the corresponding inbound Route Refresh is deferred
-  until the batched RIB commit acknowledges (firing once per member;
-  members whose import chain did not change still get no refresh). On
-  cohort failure the rollback restores both chains and re-arms the
-  existing per-peer retry intent. Previously any import-chain content
-  change disqualified every peer, so a routine import+export reload on a
-  large fleet serialized N full-table export restages and Route Refreshes
-  behind one another instead of sharing one batched transition.
-
-- **Grouped policy-reload re-advertisement now encodes each update-group's
-  wire UPDATE stream once instead of once per member** (ADR-0109). The
-  clean export-policy transition hands every member envelope one
-  encode-once cell; the first consuming session task encodes the shared
-  inventory into per-source-peer, per-family chunks at the standard
-  4096-byte ceiling and every other member reuses the bytes after proving
-  its export profile wire-identical to the encoder's. Split horizon
-  composes from whole chunks (a member sends all chunks except its own
-  source's), members that negotiated fewer families skip those chunks, and
-  any anomaly — profile mismatch, preparation failure, OTC hit, oversize
-  single entry — falls back to the unchanged per-session encode. At
-  route-server scale this removes the N× duplicate encode that delayed
-  every observer's first post-reload UPDATE by the full-table encode time.
-  Publication is progressive (ADR-0109 amendment): the encoder publishes
-  each slice's chunks as they are produced and members send them as they
-  arrive, so an observer's longest wire silence tracks per-slice encode
-  latency (single-digit milliseconds) instead of the single-threaded
-  full-table encode; a stream that fails mid-way terminates explicitly
-  (drop-guarded against encoder unwind) and members fall back to the local
-  encode, whose byte-identical re-announcements are idempotent.
-
-- Dirty-peer resync ticks now drain the backlog under the same 25 ms
-  wall-clock poll budget as policy-transition commit flushes, instead of a
-  fixed 8 peers per 10 ms re-arm, and select peers round-robin so a peer
-  whose sends keep failing cannot monopolize successive ticks while
-  drainable peers starve. Recovery throughput under outbound backpressure
-  no longer scales inversely with fleet size; each peer is attempted at
-  most once per tick, and failed peers keep waiting for the ordinary retry
-  interval.
-
-- Shared policy-transition commit polls now flush validated members under a
-  25 ms wall-clock budget instead of parking after a fixed 8 members. The
-  readiness lane keeps its mid-flush seam (bounded at the budget, well under
-  the 200 ms readiness deadline), while emission start no longer scales
-  linearly with update-group size — a fixed-count poll cost ~0.88 s of
-  staggered first emission at 700 members.
-
-- **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP egress
-  by default.** Routes received with either community are suppressed at
-  export staging toward eBGP peers across unicast (incl. RFC 8950 next-hop
-  forms), VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS — the same family set
-  as the existing `NO_ADVERTISE` enforcement. The check is source-route-only:
-  export policy that adds `NO_EXPORT` still delivers the route (the
-  route-server action idiom, also used by the RFC 9494 §4.6 LLGR form), and
-  policy that removes it cannot bypass the suppression. iBGP targets (incl.
-  RR reflection/ORR) are never suppressed. A received route carrying
-  `NO_EXPORT` is now suppressed toward eBGP peers even where RFC 9494 LLGR
-  eligibility previously passed it — RFC 1997 outranks LLGR eligibility.
-  Route-server clients are unchanged (transparent by default, see below).
-  The export-explain ladder gains a stable `no_export` gate rung beside
-  `no_advertise`.
-
 ### Added
 
 - **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
@@ -330,6 +216,299 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SIGHUP can append non-preferred successor MKTs to an unchanged range owner;
   other protected range/key edits remain pinned, and runtime CRUD rejects
   protected ranges and overlaps. (#158)
+
+### Changed
+
+- Corrected the update-group shared-encode safety documentation (module
+  docs and ADR-0109): the mid-stream fallback invariant is per-NLRI
+  attribute identity with the ordinary encode — not byte-identical
+  chunks, since message boundaries and NLRI order differ — with skips
+  still impossible because fallback re-encodes the full envelope.
+  Documented the encoder's no-await liveness requirement at its two
+  tempting yield points, and added four shared-encode regression tests
+  (per-source chunk integrity under interning, next-hop-override
+  alignment across the source sort, concurrent consumer streaming, and
+  wire-equivalence normalization bounds).
+
+- **Shared export-policy transitions now pre-stage their destination
+  update-group before the fence, halving the reload wall during which
+  interleaved churn stalls.** The cohort transaction first sends
+  `PrepareExportPolicyDestination`: the RIB creates the prospective
+  destination group and stages it in budgeted actor slices *without* the
+  transition fence — ordinary churn keeps flowing between slices, and the
+  same all-groups staging pass keeps the prepared table live rather than
+  a stale snapshot. The transition then finds the destination
+  `Maintained` and skips its fenced full-table staging walk. Preparation
+  is best-effort (any failure falls back to the ordinary fenced staging),
+  a superseded or abandoned preparation is discarded so an orphaned
+  staged table cannot keep consuming per-churn staging work, and a
+  partially staged leftover is rejected by the existing table-length
+  validation. Measured at 700 route-server members x 400,400 routes
+  (mixed export-only reload under churn): fenced transition wall
+  0.95 s -> 0.45 s, per-observer max inter-UPDATE gap p50 ~1.0 s ->
+  ~0.53-0.64 s.
+
+- The shared-transition exact-export probe now reuses one exact result
+  per probe shape (prepared-attribute identity, MP framing inputs, and
+  prefix bit-length) within a batch instead of building a single-entry
+  UPDATE message per route, and the strict-cohort ceiling proof consults
+  a maximum computed once at store time instead of rescanning the
+  per-route length vector for every member (quadratic at fleet scale:
+  ~200 ms of fenced actor wall at 700 members x 400k routes). Together
+  the fenced probe phase drops ~40% at the reload-stall receipt shape.
+
+- Every pre-commit phase of a shared policy transition (member
+  classification, destination staging, inventory build, and the
+  exact-export probe) now strides under the same 25 ms wall-clock poll
+  budget as the commit flush, instead of parking after one fixed-size
+  slice per actor poll. The fenced window that excludes interleaved
+  churn during a transition no longer scales with members x table size
+  (400k routes cost ~391 single-slice probe polls — a measured ~1.1 s
+  observer gap at 700 members).
+
+- **Reloads that change import and export policy together now take the
+  batched export cohort instead of the per-peer authoritative path.** The
+  cohort's eligibility check no longer requires an unchanged import chain:
+  a member's changed import chain is hot-applied to its session during
+  cohort setup, and the corresponding inbound Route Refresh is deferred
+  until the batched RIB commit acknowledges (firing once per member;
+  members whose import chain did not change still get no refresh). On
+  cohort failure the rollback restores both chains and re-arms the
+  existing per-peer retry intent. Previously any import-chain content
+  change disqualified every peer, so a routine import+export reload on a
+  large fleet serialized N full-table export restages and Route Refreshes
+  behind one another instead of sharing one batched transition.
+
+- **Grouped policy-reload re-advertisement now encodes each update-group's
+  wire UPDATE stream once instead of once per member** (ADR-0109). The
+  clean export-policy transition hands every member envelope one
+  encode-once cell; the first consuming session task encodes the shared
+  inventory into per-source-peer, per-family chunks at the standard
+  4096-byte ceiling and every other member reuses the bytes after proving
+  its export profile wire-identical to the encoder's. Split horizon
+  composes from whole chunks (a member sends all chunks except its own
+  source's), members that negotiated fewer families skip those chunks, and
+  any anomaly — profile mismatch, preparation failure, OTC hit, oversize
+  single entry — falls back to the unchanged per-session encode. At
+  route-server scale this removes the N× duplicate encode that delayed
+  every observer's first post-reload UPDATE by the full-table encode time.
+  Publication is progressive (ADR-0109 amendment): the encoder publishes
+  each slice's chunks as they are produced and members send them as they
+  arrive, so an observer's longest wire silence tracks per-slice encode
+  latency (single-digit milliseconds) instead of the single-threaded
+  full-table encode; a stream that fails mid-way terminates explicitly
+  (drop-guarded against encoder unwind) and members fall back to the local
+  encode, whose byte-identical re-announcements are idempotent.
+
+- Dirty-peer resync ticks now drain the backlog under the same 25 ms
+  wall-clock poll budget as policy-transition commit flushes, instead of a
+  fixed 8 peers per 10 ms re-arm, and select peers round-robin so a peer
+  whose sends keep failing cannot monopolize successive ticks while
+  drainable peers starve. Recovery throughput under outbound backpressure
+  no longer scales inversely with fleet size; each peer is attempted at
+  most once per tick, and failed peers keep waiting for the ordinary retry
+  interval.
+
+- Shared policy-transition commit polls now flush validated members under a
+  25 ms wall-clock budget instead of parking after a fixed 8 members. The
+  readiness lane keeps its mid-flush seam (bounded at the budget, well under
+  the 200 ms readiness deadline), while emission start no longer scales
+  linearly with update-group size — a fixed-count poll cost ~0.88 s of
+  staggered first emission at 700 members.
+
+- **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP egress
+  by default.** Routes received with either community are suppressed at
+  export staging toward eBGP peers across unicast (incl. RFC 8950 next-hop
+  forms), VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS — the same family set
+  as the existing `NO_ADVERTISE` enforcement. The check is source-route-only:
+  export policy that adds `NO_EXPORT` still delivers the route (the
+  route-server action idiom, also used by the RFC 9494 §4.6 LLGR form), and
+  policy that removes it cannot bypass the suppression. iBGP targets (incl.
+  RR reflection/ORR) are never suppressed. A received route carrying
+  `NO_EXPORT` is now suppressed toward eBGP peers even where RFC 9494 LLGR
+  eligibility previously passed it — RFC 1997 outranks LLGR eligibility.
+  Route-server clients are unchanged (transparent by default, see below).
+  The export-explain ladder gains a stable `no_export` gate rung beside
+  `no_advertise`.
+
+- **Durable event-history conversion and encoding moved off the RIB actor.**
+  With `[event_history]` enabled, `RibManager::publish_route_event` /
+  `publish_evpn_route_event` now hand the owned event snapshot (plus the
+  producer-captured `timestamp_ns` and already-assigned `event_id`) to a
+  bounded FIFO channel; proto conversion, prost encoding, and envelope
+  construction run in a dedicated conversion stage in front of the event
+  outbox instead of on the RIB actor. Payload bytes, publish order,
+  EHM-assigned cursor contiguity, producer timestamps, queue-full/closed
+  drop counters, degraded-state semantics, and the legacy ring/broadcast
+  surfaces are unchanged; overload now sheds work before conversion instead
+  of after. The stage drains snapshots accepted before shutdown so they
+  still commit. Manager-side publish cost with durable history enabled
+  drops by roughly an order of magnitude (see
+  `docs/perf/event-history-producer-2026-07.md`). (LAN-393)
+
+- **Grouped export-policy transitions commit in bounded member batches.** The
+  transition's former single finalization poll — one synchronous actor poll
+  containing the whole per-peer commit/flush loop — is now a `Validate` poll
+  (the last that can fall back) followed by `CommitMembers` polls that flush
+  at most eight members each, yielding to the dedicated readiness lane
+  between batches. At internet scale (1M routes / 500 peers / 300 changed)
+  the old loop blocked the actor 1.6–2.4 s and depooled `/readyz`; the stall
+  is peer-fleet-driven and volume-flat, so the bound is keyed on members, not
+  routes. The commit reply position, terminal retry pass, fallback-implies-
+  nothing-emitted contract, and 30-second stalled verdict are unchanged. The
+  poll histogram gains a `commit` poll kind for re-measurement. (LAN-447)
+
+- **Dirty-peer resync is bounded per timer tick.** A resync-timer tick used
+  to hand every dirty peer to one synchronous `distribute_changes` pass at
+  O(table) each; it now processes at most eight dirty peers per tick and
+  re-arms the timer at a short 10 ms interval while a withheld backlog
+  remains. Partial passes are safe because per-peer resync is idempotent:
+  Adj-RIB-Out state and the dirty flag are committed only after a successful
+  send, and withheld peers are untouched. (LAN-447)
+
+- **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
+  exhaustive public `Capability` enum gains the experimental
+  `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived
+  draft-04 wire format using IANA-assigned capability code 76. Downstream
+  exhaustive matches must add an arm. `EvpnRouteKey` also gains the additive
+  `Ord` / `PartialOrd` implementations for deterministic keyed collections.
+
+- **`rustbgpd-fsm` 0.2.0 → 0.3.0 (breaking, prepared for publish).** The FSM's
+  public API now negotiates experimental family-local Paths-Limit state and
+  exports `graceful_restart_preserves_family`. Its new fields are additive
+  behind `#[non_exhaustive]`, but the public surface exposes wire types and now
+  depends on incompatible `rustbgpd-wire ^0.15.0`, requiring the 0.x breaking
+  bump. Wire must be published before the FSM package can be fully verified or
+  published against crates.io.
+
+- **Policy rollback has one aggregate RIB wait budget.** Authoritative
+  self-heal and a subsequent cohort unwind now share one lazy absolute
+  five-second deadline instead of waiting up to five seconds per peer. Every
+  reverse-order RIB restore is registered before rollback Route Refresh or
+  later lifecycle work; timeout and caller cancellation retain the same pinned
+  late repairs while conservative pending flags preserve explicit retry intent.
+  The bound covers cumulative rollback RIB send/reply waiting, not sequential
+  session commands, Route Refresh acknowledgements, or late RIB repair.
+
+- **Mixed policy reloads batch their eligible export-only cohort.** Snapshot
+  application now selects the first equivalent Established export-only cohort
+  in configuration order, commits it through one shared RIB transition, then
+  preserves the original order for the authoritative remainder. Duplicate
+  targets disable partitioning wholesale. Cohort and remainder failures attempt
+  newest-first rollback and surface composed rollback failures. A successful
+  shared transition performs the same global dirty-resync opportunity as the
+  authoritative seam before replying. The reload-stall harness can
+  independently gate changed-observer completion while retaining full-fleet
+  delivery-gap and session checks. In the corrected 700-session / 400,400-route
+  mixed campaign (600 changed, 100 stable), median completion p50 improves
+  116.185x and median completion maximum improves 149.261x across four reloads,
+  with 700/700 sessions, 100/100 fresh stable markers, and zero parser errors in
+  every row. This is not an unconditional stall win: median full-fleet gap p50
+  regresses 2.070x to 2022.590 ms and median full-fleet maximum regresses 2.899x
+  to 2906.551 ms, so chunked member resync remains required. The exact raw
+  receipt and reproduction are retained under
+  `docs/perf/artifacts/policy-reload-cohort-partition-2026-07/`.
+
+- **IXP route-server clients share exact-export work across remote ASNs.** The
+  immutable session export profile now retains the wire-relevant eBGP/iBGP
+  classification instead of negotiated remote-AS identity; every other wire
+  input still participates in full profile equality, and each target still
+  rechecks its own message ceiling and generation. Byte-level tests prove that
+  distinct eBGP ASNs encode identically while eBGP and iBGP remain
+  incompatible, including when dynamic peers negotiate away from a configured
+  ASN wildcard. In the pinned route-server fixture, 4,096-route policy
+  transitions across 700 distinct-ASN clients collapse from 2,867,200 to 4,096
+  full exact probes and improve from 510.332 ms to 7.604 ms; 64-route
+  first-advertise fanout improves 47%..65% at 8..256 clients with no
+  homogeneous first-advertise regression. The 64-client homogeneous transition
+  cell has no detected change while its distinct-ASN counterpart improves
+  93.00%.
+
+- **Changed-policy update groups share transition work without hiding live
+  export-policy counters.** Eligible grouped-to-grouped unicast reloads build
+  and exact-probe one destination inventory per wire cohort, then reuse its
+  immutable payload across members. Every grouped membership path—optimized
+  commit, authoritative fallback/recompute, and rollback—now installs the
+  exact destination-group policy-chain counter instance for every member, so
+  `rbgp policy stats` exposes the same staged evaluations for the whole group
+  and continues to advance as later routes arrive.
+
+- **Large uniform export-policy transitions stay observable while they
+  converge.** Clean grouped-to-grouped unicast cohorts reuse one immutable
+  transition inventory and exact-probe plan. Their post-snapshot staging,
+  inventory, and probe bodies process at most 1,024 route identities per poll;
+  the preceding Loc-RIB prefix snapshot and destination-key inventory snapshot
+  remain two explicit, measured O(table) actor polls with no extrapolated hard
+  bound. Live readiness uses dedicated type-narrow PeerManager and RIB lanes;
+  general RIB queries now remain queued with ordinary mutations behind the
+  transaction instead of extending its fence. The process-global
+  `bgp_rib_policy_transition_in_progress` and retained terminal-duration gauges,
+  a production actor-poll histogram split across bounded work, complete table
+  snapshots, and finalization, a five-second warning, and a shipped one-minute
+  alert make unexpectedly slow transitions visible. Readiness stays healthy
+  during legitimate bounded progress but fails closed when ownership reaches
+  30 seconds, recovering immediately at a terminal actor seam. Later readiness
+  can overtake queued general queries, although an
+  already-running O(table) query remains non-preemptible. Meanwhile,
+  membership and reserved writer sends still commit as one synchronous
+  section. A successfully enqueued cohort RIB reply remains transaction-owned
+  past the ordinary five-second per-peer timeout, preventing a forward/rollback
+  race while readiness continues to be served. Pinned 65,536-route/64-peer and
+  4,096-route/700-peer receipts record 4.927 ms as the largest production
+  actor poll and 2.001 ms for the 700-member atomic finalization, both below
+  the 50 ms engineering budget. Paused-clock regressions complete in-flight
+  readiness probes with zero 200 ms timeouts, including while one session
+  policy command is independently stalled.
+
+- **Authoritative export-policy fallbacks no longer multiply one RIB actor
+  stall by peer count.** An ineligible or invalidated clean transition now
+  returns a typed, fail-closed handoff after releasing writer permits and
+  removing every uncommitted destination. PeerManager applies one ordinary RIB
+  replacement at a time, keeps readiness live while awaiting each existing
+  five-second reply, and preserves newest-first session/RIB rollback without a
+  second session hot-apply. A 65,536-route stop-gate receipt records 104.25 ms
+  for one peer; a 64-peer lower-level reference retains roughly 4.29 seconds of
+  total RIB work while splitting it into individual operations whose first
+  warm-up maximum was 108.819 ms.
+
+- **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
+  Ordinary grouped members whose exact probes all succeed no longer rebuild
+  candidate keys or walk and allocate the group's prior advertised set; that
+  work is deferred to the rejection/overlay fallback that actually needs it.
+  Per-target wire ceiling and generation checks remain mandatory, and resync,
+  regroup, VPN/mixed-family, malformed, rejected, and non-shared paths retain
+  the full reconciliation path. A pinned two-attempt Criterion matrix improves
+  64/256-peer fanout by 32%..36% with no one-peer regression, while the sealed
+  16-cell manager flood/churn matrix improves 197%..649%. Exact inputs,
+  counterbalancing, preflights, confidence gates, and checksummed artifacts are
+  retained in the performance receipt. (LAN-395)
+
+- **Update-group correctness now has a parameterized fixed-scenario
+  differential corpus.** The grouped manager path and forced-per-peer oracle
+  are compared with explicit exact-stream or normalized semantic-effect plus
+  folded-state semantics across bounded channel
+  saturation and virtual-time retry, repeated policy regroup while dirty, stale
+  session generations, and RT-Constrain membership churn. Every path must emit
+  non-empty traffic, deliver a terminal sentinel, finish its manager task, and
+  clear dirty/force/regroup/residue state. A hard-capped 24-seed extension runs
+  weekly and by manual dispatch on GitHub-hosted runners. Seeds vary fixture
+  identities, not schedule order or length; validated seed-start, seed-count,
+  and max-operation controls replay an individual failure without allowing an
+  unbounded run. (LAN-357)
+
+- **Reload UPDATE-stall receipt re-run against the 2026-07-16 campaign,
+  covering both reload shapes.** `docs/perf/reload-stall-2026-07.md` now
+  measures the 700-client × 400,400-route scenario in both the historical
+  import+export swap and the export-only change route-server operators
+  perform routinely, on the outbound size-chunking fix above. The corrected
+  harness (unique re-advertised prefixes carrying the new policy community,
+  no duplicate over-count) reports UPDATE stall p50 494–652 ms across both
+  shapes and full new-policy re-advertisement completion (p50/max) of
+  1.54–2.89 s — down from the earlier, since-superseded 0.76 s stall /
+  155 s completion headline. Every one of the 700 clients verifiably
+  received the full re-advertised table under the new policy in every run.
+  The daemon-side scenario generator is committed at
+  `bench/scale/reloadstall/gen-scenario.py`.
 
 ### Fixed
 
@@ -733,185 +912,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in release. Names are now seeded at most once in both passes so the Kahn
   counts stay consistent. Regression tests cover both the fn and policy passes;
   found by the nightly `rpol_compile` fuzz target.
-
-### Changed
-
-- **Durable event-history conversion and encoding moved off the RIB actor.**
-  With `[event_history]` enabled, `RibManager::publish_route_event` /
-  `publish_evpn_route_event` now hand the owned event snapshot (plus the
-  producer-captured `timestamp_ns` and already-assigned `event_id`) to a
-  bounded FIFO channel; proto conversion, prost encoding, and envelope
-  construction run in a dedicated conversion stage in front of the event
-  outbox instead of on the RIB actor. Payload bytes, publish order,
-  EHM-assigned cursor contiguity, producer timestamps, queue-full/closed
-  drop counters, degraded-state semantics, and the legacy ring/broadcast
-  surfaces are unchanged; overload now sheds work before conversion instead
-  of after. The stage drains snapshots accepted before shutdown so they
-  still commit. Manager-side publish cost with durable history enabled
-  drops by roughly an order of magnitude (see
-  `docs/perf/event-history-producer-2026-07.md`). (LAN-393)
-
-- **Grouped export-policy transitions commit in bounded member batches.** The
-  transition's former single finalization poll — one synchronous actor poll
-  containing the whole per-peer commit/flush loop — is now a `Validate` poll
-  (the last that can fall back) followed by `CommitMembers` polls that flush
-  at most eight members each, yielding to the dedicated readiness lane
-  between batches. At internet scale (1M routes / 500 peers / 300 changed)
-  the old loop blocked the actor 1.6–2.4 s and depooled `/readyz`; the stall
-  is peer-fleet-driven and volume-flat, so the bound is keyed on members, not
-  routes. The commit reply position, terminal retry pass, fallback-implies-
-  nothing-emitted contract, and 30-second stalled verdict are unchanged. The
-  poll histogram gains a `commit` poll kind for re-measurement. (LAN-447)
-
-- **Dirty-peer resync is bounded per timer tick.** A resync-timer tick used
-  to hand every dirty peer to one synchronous `distribute_changes` pass at
-  O(table) each; it now processes at most eight dirty peers per tick and
-  re-arms the timer at a short 10 ms interval while a withheld backlog
-  remains. Partial passes are safe because per-peer resync is idempotent:
-  Adj-RIB-Out state and the dirty flag are committed only after a successful
-  send, and withheld peers are untouched. (LAN-447)
-
-- **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
-  exhaustive public `Capability` enum gains the experimental
-  `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived
-  draft-04 wire format using IANA-assigned capability code 76. Downstream
-  exhaustive matches must add an arm. `EvpnRouteKey` also gains the additive
-  `Ord` / `PartialOrd` implementations for deterministic keyed collections.
-
-- **`rustbgpd-fsm` 0.2.0 → 0.3.0 (breaking, prepared for publish).** The FSM's
-  public API now negotiates experimental family-local Paths-Limit state and
-  exports `graceful_restart_preserves_family`. Its new fields are additive
-  behind `#[non_exhaustive]`, but the public surface exposes wire types and now
-  depends on incompatible `rustbgpd-wire ^0.15.0`, requiring the 0.x breaking
-  bump. Wire must be published before the FSM package can be fully verified or
-  published against crates.io.
-
-- **Policy rollback has one aggregate RIB wait budget.** Authoritative
-  self-heal and a subsequent cohort unwind now share one lazy absolute
-  five-second deadline instead of waiting up to five seconds per peer. Every
-  reverse-order RIB restore is registered before rollback Route Refresh or
-  later lifecycle work; timeout and caller cancellation retain the same pinned
-  late repairs while conservative pending flags preserve explicit retry intent.
-  The bound covers cumulative rollback RIB send/reply waiting, not sequential
-  session commands, Route Refresh acknowledgements, or late RIB repair.
-
-- **Mixed policy reloads batch their eligible export-only cohort.** Snapshot
-  application now selects the first equivalent Established export-only cohort
-  in configuration order, commits it through one shared RIB transition, then
-  preserves the original order for the authoritative remainder. Duplicate
-  targets disable partitioning wholesale. Cohort and remainder failures attempt
-  newest-first rollback and surface composed rollback failures. A successful
-  shared transition performs the same global dirty-resync opportunity as the
-  authoritative seam before replying. The reload-stall harness can
-  independently gate changed-observer completion while retaining full-fleet
-  delivery-gap and session checks. In the corrected 700-session / 400,400-route
-  mixed campaign (600 changed, 100 stable), median completion p50 improves
-  116.185x and median completion maximum improves 149.261x across four reloads,
-  with 700/700 sessions, 100/100 fresh stable markers, and zero parser errors in
-  every row. This is not an unconditional stall win: median full-fleet gap p50
-  regresses 2.070x to 2022.590 ms and median full-fleet maximum regresses 2.899x
-  to 2906.551 ms, so chunked member resync remains required. The exact raw
-  receipt and reproduction are retained under
-  `docs/perf/artifacts/policy-reload-cohort-partition-2026-07/`.
-
-- **IXP route-server clients share exact-export work across remote ASNs.** The
-  immutable session export profile now retains the wire-relevant eBGP/iBGP
-  classification instead of negotiated remote-AS identity; every other wire
-  input still participates in full profile equality, and each target still
-  rechecks its own message ceiling and generation. Byte-level tests prove that
-  distinct eBGP ASNs encode identically while eBGP and iBGP remain
-  incompatible, including when dynamic peers negotiate away from a configured
-  ASN wildcard. In the pinned route-server fixture, 4,096-route policy
-  transitions across 700 distinct-ASN clients collapse from 2,867,200 to 4,096
-  full exact probes and improve from 510.332 ms to 7.604 ms; 64-route
-  first-advertise fanout improves 47%..65% at 8..256 clients with no
-  homogeneous first-advertise regression. The 64-client homogeneous transition
-  cell has no detected change while its distinct-ASN counterpart improves
-  93.00%.
-
-- **Changed-policy update groups share transition work without hiding live
-  export-policy counters.** Eligible grouped-to-grouped unicast reloads build
-  and exact-probe one destination inventory per wire cohort, then reuse its
-  immutable payload across members. Every grouped membership path—optimized
-  commit, authoritative fallback/recompute, and rollback—now installs the
-  exact destination-group policy-chain counter instance for every member, so
-  `rbgp policy stats` exposes the same staged evaluations for the whole group
-  and continues to advance as later routes arrive.
-
-- **Large uniform export-policy transitions stay observable while they
-  converge.** Clean grouped-to-grouped unicast cohorts reuse one immutable
-  transition inventory and exact-probe plan. Their post-snapshot staging,
-  inventory, and probe bodies process at most 1,024 route identities per poll;
-  the preceding Loc-RIB prefix snapshot and destination-key inventory snapshot
-  remain two explicit, measured O(table) actor polls with no extrapolated hard
-  bound. Live readiness uses dedicated type-narrow PeerManager and RIB lanes;
-  general RIB queries now remain queued with ordinary mutations behind the
-  transaction instead of extending its fence. The process-global
-  `bgp_rib_policy_transition_in_progress` and retained terminal-duration gauges,
-  a production actor-poll histogram split across bounded work, complete table
-  snapshots, and finalization, a five-second warning, and a shipped one-minute
-  alert make unexpectedly slow transitions visible. Readiness stays healthy
-  during legitimate bounded progress but fails closed when ownership reaches
-  30 seconds, recovering immediately at a terminal actor seam. Later readiness
-  can overtake queued general queries, although an
-  already-running O(table) query remains non-preemptible. Meanwhile,
-  membership and reserved writer sends still commit as one synchronous
-  section. A successfully enqueued cohort RIB reply remains transaction-owned
-  past the ordinary five-second per-peer timeout, preventing a forward/rollback
-  race while readiness continues to be served. Pinned 65,536-route/64-peer and
-  4,096-route/700-peer receipts record 4.927 ms as the largest production
-  actor poll and 2.001 ms for the 700-member atomic finalization, both below
-  the 50 ms engineering budget. Paused-clock regressions complete in-flight
-  readiness probes with zero 200 ms timeouts, including while one session
-  policy command is independently stalled.
-
-- **Authoritative export-policy fallbacks no longer multiply one RIB actor
-  stall by peer count.** An ineligible or invalidated clean transition now
-  returns a typed, fail-closed handoff after releasing writer permits and
-  removing every uncommitted destination. PeerManager applies one ordinary RIB
-  replacement at a time, keeps readiness live while awaiting each existing
-  five-second reply, and preserves newest-first session/RIB rollback without a
-  second session hot-apply. A 65,536-route stop-gate receipt records 104.25 ms
-  for one peer; a 64-peer lower-level reference retains roughly 4.29 seconds of
-  total RIB work while splitting it into individual operations whose first
-  warm-up maximum was 108.819 ms.
-
-- **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
-  Ordinary grouped members whose exact probes all succeed no longer rebuild
-  candidate keys or walk and allocate the group's prior advertised set; that
-  work is deferred to the rejection/overlay fallback that actually needs it.
-  Per-target wire ceiling and generation checks remain mandatory, and resync,
-  regroup, VPN/mixed-family, malformed, rejected, and non-shared paths retain
-  the full reconciliation path. A pinned two-attempt Criterion matrix improves
-  64/256-peer fanout by 32%..36% with no one-peer regression, while the sealed
-  16-cell manager flood/churn matrix improves 197%..649%. Exact inputs,
-  counterbalancing, preflights, confidence gates, and checksummed artifacts are
-  retained in the performance receipt. (LAN-395)
-
-- **Update-group correctness now has a parameterized fixed-scenario
-  differential corpus.** The grouped manager path and forced-per-peer oracle
-  are compared with explicit exact-stream or normalized semantic-effect plus
-  folded-state semantics across bounded channel
-  saturation and virtual-time retry, repeated policy regroup while dirty, stale
-  session generations, and RT-Constrain membership churn. Every path must emit
-  non-empty traffic, deliver a terminal sentinel, finish its manager task, and
-  clear dirty/force/regroup/residue state. A hard-capped 24-seed extension runs
-  weekly and by manual dispatch on GitHub-hosted runners. Seeds vary fixture
-  identities, not schedule order or length; validated seed-start, seed-count,
-  and max-operation controls replay an individual failure without allowing an
-  unbounded run. (LAN-357)
-
-- **Reload UPDATE-stall receipt re-run and re-validated.**
-  `docs/perf/reload-stall-2026-07.md` replaces the July run that was withdrawn
-  as not-acceptance evidence. The corrected harness counts unique re-advertised
-  prefixes carrying the new policy community (no duplicate over-count), and the
-  run is on the outbound size-chunking fix above. The numbers land where the
-  withdrawn run did — stall p50 0.76 s (0.82 s worst case), full
-  re-advertisement ~155 s p50 / ~308 s wall (~0.44 s/peer) at 700 clients ×
-  400,400 routes — but are now trustworthy: every one of the 700 clients
-  verifiably received the full re-advertised table under the new policy. The
-  daemon-side scenario generator is committed at
-  `bench/scale/reloadstall/gen-scenario.py`.
 
 ## [0.51.0] — 2026-07-11
 

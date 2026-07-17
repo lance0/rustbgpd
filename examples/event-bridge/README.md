@@ -65,12 +65,15 @@ Each line of stdout is one JSON object:
   reconnect SLA, monitor `bgp_event_outbox_cursor_gap_total`, and
   reconnect promptly after a sink outage.
 
-- **Dataplane events not in the durable outbox in v1**: this release wires
-  route + EVPN + session-lifecycle + session-notification + policy
-  + BFD through EHM. Dataplane events stay live-only. Empty
-  categories on `SubscribeFromEvent` selects all **retained**
-  categories — dataplane is silently absent. See ADR-0072
-  "What v1 does not cover".
+- **Dataplane events are in the durable outbox.** Alongside
+  route + EVPN + session-lifecycle + session-notification + policy + BFD,
+  the `spawn_dataplane_poller` summary producer and the
+  `spawn_fib_dataplane_event_bridge` per-route producer enqueue into EHM
+  under `EVENT_CATEGORY_DATAPLANE` (`DATAPLANE_STATUS_CHANGED` for
+  summaries; `DATAPLANE_ROUTE_INSTALLED` / `_WITHDRAWN` / `_FAILED` for the
+  per-route stream), so empty `categories` on `SubscribeFromEvent` returns
+  dataplane events too. See ADR-0072 "What v1 does not cover" (resolved by
+  PR #291).
 
 ## Plugging in a real sink
 

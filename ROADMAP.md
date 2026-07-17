@@ -233,12 +233,18 @@ new AFI/SAFI and EVPN dataplane expansion.
   the reload `/readyz` peak at the 500-client × 1M shape fell from 1.6–2.4 s
   to ~360 ms
   ([the reload-flush envelope receipt](docs/perf/reload-flush-envelope-2026-07.md)).
-  Remaining: rerun the corrected uniform-fleet receipt (unblocked by the flush
-  fix and the harness completion-detection fix), bound the transport-side
-  encode wake storm, then gate repeated heterogeneous reloads on completion
-  time, control-query latency, session continuity, and folded
-  advertised-state equivalence. The withdrawn historical `< 1 s` claim remains
-  superseded by the corrected raw receipt, not revived.
+  Done: the corrected uniform-fleet receipt reran across both reload shapes
+  (the 2026-07-16 campaign) with UPDATE stall p50 494–652 ms and full
+  re-advertisement completion 1.54–2.89 s
+  ([reload-stall-2026-07.md](docs/perf/reload-stall-2026-07.md)); the
+  transport-side encode wake storm is bound by ADR-0109's progressive
+  chunk-publication amendment, so an observer's longest wire silence now
+  tracks per-slice encode latency instead of the single-threaded full-table
+  encode. Remaining: gate repeated heterogeneous reloads on completion time,
+  control-query latency, session continuity, and folded advertised-state
+  equivalence. The withdrawn historical `< 1 s` claim is now superseded on
+  every axis by the 2026-07-16 receipt (see its honesty notes for the
+  single-observer worst-case tail).
 - **Expose groupability before apply.** Config transaction planning now projects
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded
@@ -1849,5 +1855,5 @@ If you need these features, combine rustbgpd with purpose-built tools.
 GitHub Actions CI (fmt / clippy / test on every push/PR), nightly wire-decoder
 fuzz CI, a multi-stage Docker image, containerlab interop topologies, automated
 M-series interop scripts, cross-compiled linux-amd64/arm64 binary releases, and
-crates.io publishing for `rustbgpd-wire` (other crates remain internal). Open
-infrastructure item: a Homebrew formula.
+crates.io publishing for `rustbgpd-wire` and `rustbgpd-fsm` (other crates
+remain internal). Open infrastructure item: a Homebrew formula.

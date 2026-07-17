@@ -558,7 +558,7 @@ on. Foreign stamps are always refused.
 
 The `RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY=1` escape hatch that
 restored stamp-or-legacy acceptance for a skip-version upgrade's
-first boot was **removed in [Unreleased]**: the daemon now refuses
+first boot was **removed in v0.50.0**: the daemon now refuses
 to start if the variable is set (to any value), so stale automation
 fails loudly instead of silently changing adoption behavior. If you
 still have pre-stamp kernel rows, step through a v0.38.0–v0.45.0
