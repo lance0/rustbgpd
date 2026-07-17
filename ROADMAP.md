@@ -1154,6 +1154,23 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   route history / why-changed timeline;
   looking-glass integration for explain; `rustbgpd --diff` output formatted by
   reload class (cross-reference each diff line against `docs/reload-matrix.md`).
+- **Allocator packaging decision (from the 2026-07-17 reload-RSS
+  attribution probe).** The non-plateau RSS growth across policy-reload
+  cycles seen in the reload-stall receipts is glibc-malloc retention of
+  reload transients, not daemon code: across 8 reload cycles at 200×115k
+  the attribute-intern gauge stayed flat and live bytes
+  (`jemalloc_allocated`) oscillated in a ~15 MiB band, while stock-glibc
+  RSS climbed 301→555 and 295→639 MiB (two runs) and never returned
+  memory — an empty post-teardown daemon held ~500 MiB. The same workload
+  on the existing `jemalloc` cargo feature oscillated 270–330 MiB and
+  ended at 229 (background decay returns memory mid-run). Two options on
+  the table, both packaging decisions — not RIB work:
+  - make `jemalloc` the default release/container build (also adds the
+    `jemalloc_*` allocated/active/resident gauges to `/metrics` for free);
+  - or keep stock glibc and document `MALLOC_ARENA_MAX=2` for
+    RSS-sensitive deployments (cheap A/B on a receipt cell first).
+  Either way, the published receipts' RSS honesty notes can then cite the
+  allocator attribution instead of an open question.
 - **Performance — remaining items.** The scale & memory sprint shipped
   (inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index, FxHash route maps,
   coalesced multi-chunk initial-load distribution; #306/#308/#309), as did the
