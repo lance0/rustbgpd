@@ -4525,6 +4525,39 @@ fn build_transport_config_threads_policy_explain_settings() {
 }
 
 #[test]
+fn build_transport_config_threads_reject_retention_settings() {
+    // LAN-472: both [policy.reject_retention] knobs must propagate from
+    // the daemon config snapshot into the per-session TransportConfig —
+    // same threading hazard as the [policy.explain] siblings above.
+    let (_, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    mgr.current_config.policy.reject_retention.enabled = false;
+    mgr.current_config.policy.reject_retention.capacity = 64;
+
+    let config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    let transport = mgr.build_transport_config(&config);
+    assert!(
+        !transport.reject_retention_enabled,
+        "enabled must propagate"
+    );
+    assert_eq!(
+        transport.reject_retention_capacity, 64,
+        "capacity must propagate"
+    );
+}
+
+#[test]
 fn build_transport_config_preserves_route_server_client() {
     let (_, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -10275,6 +10308,8 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
         .send(PeerManagerCommand::SyncExplainConfig {
             enabled: false,
             cache_size: 17,
+            reject_retention_enabled: true,
+            reject_retention_capacity: 1024,
             reply: mutation_reply,
         })
         .await

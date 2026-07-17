@@ -3,7 +3,9 @@
 use std::net::IpAddr;
 use std::time::{Duration, UNIX_EPOCH};
 
-use rustbgpd_transport::{CachedOutcome, ImportExplainReply, LookupResult, ResolvedMatch};
+use rustbgpd_transport::{
+    CachedOutcome, ImportExplainReply, LookupResult, RejectedRoutesReply, ResolvedMatch,
+};
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -1399,6 +1401,85 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }))
     }
 
+    async fn list_rejected_routes(
+        &self,
+        request: Request<proto::ListRejectedRoutesRequest>,
+    ) -> Result<Response<proto::ListRejectedRoutesResponse>, Status> {
+        let req = request.into_inner();
+        let address: IpAddr = req
+            .peer_address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::ListRejectedRoutes {
+                address,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let reply: Option<RejectedRoutesReply> = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+
+        // LAN-472: no live session means the session-local retention
+        // store is gone — honestly distinct from "nothing rejected",
+        // so it is an error, not an empty listing.
+        let Some(reply) = reply else {
+            return Err(Status::not_found(format!(
+                "no live session for peer {address}"
+            )));
+        };
+
+        let routes = reply
+            .entries
+            .into_iter()
+            .map(|(key, entry)| {
+                let (prefix, prefix_length) = match key.prefix {
+                    Prefix::V4(p) => (p.addr.to_string(), u32::from(p.len)),
+                    Prefix::V6(p) => (p.addr.to_string(), u32::from(p.len)),
+                };
+                let afi_safi = match (key.afi, key.safi) {
+                    (Afi::Ipv4, Safi::Unicast) => proto::AddressFamily::Ipv4Unicast,
+                    (Afi::Ipv6, Safi::Unicast) => proto::AddressFamily::Ipv6Unicast,
+                    _ => proto::AddressFamily::Unspecified,
+                } as i32;
+                proto::RejectedRoute {
+                    prefix,
+                    prefix_length,
+                    path_id: key.path_id,
+                    afi_safi,
+                    reason: entry.reason.as_str().to_string(),
+                    reason_detail: entry.detail.unwrap_or_default(),
+                    next_hop: entry.next_hop.map(|nh| nh.to_string()).unwrap_or_default(),
+                    as_path: entry.as_path,
+                    communities: entry.communities,
+                    large_communities: entry
+                        .large_communities
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    rpki_validation: entry.rpki.to_string(),
+                    aspa_validation: entry.aspa.to_string(),
+                    rejected_at_unix_ns: entry
+                        .rejected_at
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .and_then(|dur| i64::try_from(dur.as_nanos()).ok())
+                        .unwrap_or(0),
+                }
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListRejectedRoutesResponse {
+            peer_address: req.peer_address,
+            retention_enabled: reply.enabled,
+            capacity: u32::try_from(reply.capacity).unwrap_or(u32::MAX),
+            routes,
+        }))
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "linear request-validate, compile, snapshot, evaluate pipeline; splitting would scatter the dry-run contract"
@@ -2016,6 +2097,91 @@ mod tests {
             .into_inner();
         assert_eq!(resp.matches.len(), 1, "one synthetic match expected");
         resp.matches[0].outcome
+    }
+
+    /// Drive `ListRejectedRoutes` against a fake peer manager that
+    /// answers with `reply` (LAN-472).
+    async fn list_rejected_routes_response(
+        reply: Option<RejectedRoutesReply>,
+    ) -> Result<proto::ListRejectedRoutesResponse, Status> {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::ListRejectedRoutes { reply: tx, .. } => {
+                        let _ = tx.send(reply.clone());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let req = proto::ListRejectedRoutesRequest {
+            peer_address: "10.0.0.2".to_string(),
+        };
+        PolicyServiceRpc::list_rejected_routes(&svc, Request::new(req))
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    /// LAN-472: no live session is NOT an empty listing — the
+    /// session-local store is gone, so the RPC reports `NOT_FOUND`.
+    #[tokio::test]
+    async fn list_rejected_routes_no_session_is_not_found() {
+        let err = list_rejected_routes_response(None)
+            .await
+            .expect_err("no session must be an error");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    /// LAN-472: entries come back with the canonical reason token, the
+    /// detail, the rendered prefix/next-hop, and the enabled/capacity
+    /// facts the CLI renders.
+    #[tokio::test]
+    async fn list_rejected_routes_maps_entries_to_proto() {
+        use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+        use rustbgpd_transport::{ImportDecisionKey, RejectedRouteEntry};
+        let key = ImportDecisionKey {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(Ipv4Prefix::new(
+                std::net::Ipv4Addr::new(198, 51, 100, 0),
+                24,
+            )),
+            path_id: 0,
+        };
+        let entry = RejectedRouteEntry {
+            reason: ImportRejectReason::PolicyReject,
+            detail: Some("member-import".to_string()),
+            next_hop: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))),
+            as_path: "65002 65010".to_string(),
+            communities: vec![999],
+            large_communities: Vec::new(),
+            rpki: rustbgpd_wire::RpkiValidation::Invalid,
+            aspa: rustbgpd_wire::AspaValidation::Unknown,
+            rejected_at: std::time::UNIX_EPOCH + Duration::from_secs(1),
+        };
+        let resp = list_rejected_routes_response(Some(RejectedRoutesReply {
+            enabled: true,
+            capacity: 1024,
+            entries: vec![(key, entry)],
+        }))
+        .await
+        .expect("listing succeeds");
+        assert!(resp.retention_enabled);
+        assert_eq!(resp.capacity, 1024);
+        assert_eq!(resp.routes.len(), 1);
+        let r = &resp.routes[0];
+        assert_eq!(r.prefix, "198.51.100.0");
+        assert_eq!(r.prefix_length, 24);
+        assert_eq!(r.afi_safi, proto::AddressFamily::Ipv4Unicast as i32);
+        assert_eq!(r.reason, "policy_reject");
+        assert_eq!(r.reason_detail, "member-import");
+        assert_eq!(r.next_hop, "10.0.0.2");
+        assert_eq!(r.as_path, "65002 65010");
+        assert_eq!(r.communities, vec![999]);
+        assert_eq!(r.rpki_validation, "invalid");
+        assert_eq!(r.rejected_at_unix_ns, 1_000_000_000);
     }
 
     /// LAN-320: no live session must NOT read as `not_seen` — during an

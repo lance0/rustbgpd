@@ -1076,7 +1076,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // tracks neighbors / policy chains / peer-groups, not this
     // diagnostic-retention knob, so detect it explicitly rather than
     // letting an explain-only reload report "no changes detected".
-    let explain_changed = current.policy.explain != new_config.policy.explain;
+    let explain_changed = current.policy.explain != new_config.policy.explain
+        || current.policy.reject_retention != new_config.policy.reject_retention;
     let fib_tables_changed = new_config.fib_tables != current.fib_tables;
     let dynamic_neighbors_changed = new_config.dynamic_neighbors != current.dynamic_neighbors;
     if !policy_diff.has_changes()
@@ -1170,6 +1171,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // explain-only reload already returns `new_config` directly above.
     if explain_changed {
         working_config.policy.explain = new_config.policy.explain.clone();
+        working_config.policy.reject_retention = new_config.policy.reject_retention.clone();
 
         // Push the new explain snapshot to the peer manager *before* any
         // reconcile step below constructs a session. `build_transport_config`
@@ -1186,6 +1188,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
             .send(PeerManagerCommand::SyncExplainConfig {
                 enabled: new_config.policy.explain.enabled,
                 cache_size: new_config.policy.explain.cache_size,
+                reject_retention_enabled: new_config.policy.reject_retention.enabled,
+                reject_retention_capacity: new_config.policy.reject_retention.capacity,
                 reply: ack_tx,
             })
             .await

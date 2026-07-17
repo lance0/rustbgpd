@@ -416,6 +416,15 @@ pub struct TransportConfig {
     /// for `PolicyService.ExplainImportPolicy`. Operator knob:
     /// `[policy.explain] cache_size`.
     pub explain_cache_size: usize,
+    /// Whether rejected inbound routes are retained with their reject
+    /// reason for the looking-glass filtered-route surface (LAN-472).
+    /// Operator knob: `[policy.reject_retention] enabled`.
+    pub reject_retention_enabled: bool,
+    /// Per-session rejected-route retention capacity (LAN-472). Bounds
+    /// the number of `(AFI, SAFI, prefix, path_id)` rejections retained
+    /// for `PolicyService.ListRejectedRoutes`. Operator knob:
+    /// `[policy.reject_retention] capacity`.
+    pub reject_retention_capacity: usize,
     /// Emit RFC 8671 post-policy Adj-RIB-Out BMP route monitoring for
     /// every outbound UPDATE. Set when at least one BMP collector
     /// monitors `rib_out_post`; kept off otherwise so the lossy BMP
@@ -482,6 +491,9 @@ impl TransportConfig {
             cluster_id: None,
             explain_enabled: true,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
+            reject_retention_enabled: true,
+            reject_retention_capacity:
+                crate::session::rejected_routes::DEFAULT_REJECT_RETENTION_CAPACITY,
             bmp_rib_out: false,
             slow_peer_threshold_pct: DEFAULT_SLOW_PEER_THRESHOLD_PCT,
             slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,

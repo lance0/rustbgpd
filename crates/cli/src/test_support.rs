@@ -1714,6 +1714,19 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         ))
     }
 
+    async fn list_rejected_routes(
+        &self,
+        request: Request<server_proto::ListRejectedRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRejectedRoutesResponse>, Status> {
+        let req = request.into_inner();
+        Ok(Response::new(server_proto::ListRejectedRoutesResponse {
+            peer_address: req.peer_address,
+            retention_enabled: true,
+            capacity: 1024,
+            routes: Vec::new(),
+        }))
+    }
+
     async fn explain_import_policy(
         &self,
         request: Request<server_proto::ExplainImportPolicyRequest>,

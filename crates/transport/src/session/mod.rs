@@ -6,6 +6,7 @@ pub(crate) mod inbound;
 mod io;
 mod outbound;
 mod refresh_accounting;
+pub mod rejected_routes;
 mod shared_group;
 mod writer;
 
@@ -350,6 +351,15 @@ pub(crate) struct PeerSession {
     /// the per-session import counters (see `fsm.rs`). A daemon restart
     /// drops it with the process.
     import_decision_cache: import_decision_cache::ImportDecisionCache,
+    /// Whether rejected inbound routes are retained (LAN-472
+    /// `[policy.reject_retention].enabled`). Read on the inbound UPDATE
+    /// path to skip retention entirely when disabled.
+    reject_retention_enabled: bool,
+    /// Bounded per-session store of rejected inbound routes with their
+    /// reject reason (LAN-472) — the looking-glass filtered-route
+    /// surface behind `PolicyService.ListRejectedRoutes`. Cleared on
+    /// session reset alongside the import-decision cache (`fsm.rs`).
+    rejected_routes: rejected_routes::RejectedRouteStore,
     /// Session-local import-policy generation. Bumped whenever the
     /// effective import chain is hot-applied
     /// ([`PeerCommand::UpdateImportPolicy`]). Cache entries stamp the
@@ -798,6 +808,7 @@ impl PeerSession {
 
     #[expect(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "session constructor owns the transport dependency boundary explicitly"
     )]
     pub(crate) fn new_at_tcp_ao_generation(
@@ -822,6 +833,8 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let reject_retention_enabled = config.reject_retention_enabled;
+        let reject_retention_capacity = config.reject_retention_capacity;
         let tcp_ao_protected = config.tcp_ao.is_some();
         let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None);
         let import_needs_as_path_string =
@@ -914,6 +927,10 @@ impl PeerSession {
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
             ),
+            reject_retention_enabled,
+            rejected_routes: rejected_routes::RejectedRouteStore::with_capacity(
+                reject_retention_capacity,
+            ),
             import_policy_generation: 0,
         }
     }
@@ -947,6 +964,8 @@ impl PeerSession {
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
         let explain_cache_size = config.explain_cache_size;
+        let reject_retention_enabled = config.reject_retention_enabled;
+        let reject_retention_capacity = config.reject_retention_capacity;
         let tcp_ao_protected = config.tcp_ao.is_some() || tcp_ao_info.is_some();
         let tcp_ao_stream_was_accepted = tcp_ao_info.is_some();
         let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, tcp_ao_info.as_ref());
@@ -1051,6 +1070,10 @@ impl PeerSession {
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
+            ),
+            reject_retention_enabled,
+            rejected_routes: rejected_routes::RejectedRouteStore::with_capacity(
+                reject_retention_capacity,
             ),
             import_policy_generation: 0,
         }

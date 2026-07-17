@@ -23,6 +23,7 @@ use crate::error::TransportError;
 use crate::event_sink::TransportEventSink;
 use crate::session::PeerSession;
 use crate::session::import_decision_cache::ImportExplainReply;
+use crate::session::rejected_routes::RejectedRoutesReply;
 
 /// Error returned by a peer-session command round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +379,14 @@ pub enum PeerCommand {
         /// Reply channel carrying the resolved matches plus this
         /// session's current import-policy generation.
         reply: oneshot::Sender<ImportExplainReply>,
+    },
+    /// LAN-472: list this session's retained rejected routes with their
+    /// reject reasons — the looking-glass filtered-route surface.
+    /// Read-only — must not mutate session state or counters.
+    ListRejectedRoutes {
+        /// Reply channel carrying the retention snapshot plus whether
+        /// retention is enabled at all on this session.
+        reply: oneshot::Sender<RejectedRoutesReply>,
     },
     /// Snapshot this session's live import-chain per-term hit counters
     /// (ADR-0096 Decision 3.3, the import-side read surface). Read-only
@@ -1424,6 +1433,29 @@ impl PeerHandle {
                     path_id,
                     reply: reply_tx,
                 })
+                .await
+                .ok()?;
+            reply_rx.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// LAN-472: bounded snapshot of this session's retained rejected
+    /// routes. Same timeout contract as
+    /// [`Self::explain_import_policy_timeout`]: `None` on timeout, full
+    /// command channel, or exited session task — the caller renders
+    /// that as "no live session".
+    pub async fn list_rejected_routes_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Option<RejectedRoutesReply> {
+        let commands = self.commands.clone();
+        tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::ListRejectedRoutes { reply: reply_tx })
                 .await
                 .ok()?;
             reply_rx.await.ok()

@@ -620,6 +620,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -635,6 +636,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \

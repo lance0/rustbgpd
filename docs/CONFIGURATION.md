@@ -372,7 +372,8 @@ The daemon's durable API is gRPC + `rbgp`; its four status, peer, and
 accepted-route endpoints (`/status`, `/protocols/bgp`,
 `/routes/protocol/{id}`, `/routes/peer/{peer}`) now live in the maintained
 external `examples/birdwatcher-adapter`. This is not yet a complete Alice-LG
-backend: filtered/noexport views and structured reject reasons are absent. A
+backend: the adapter's filtered/noexport views are absent (the structured
+reject reasons behind them are served by `PolicyService.ListRejectedRoutes`). A
 config that still sets `[global.telemetry.looking_glass]` fails to load with a
 migration error. See the adapter README for the endpoint→gRPC mapping.
 
@@ -1913,6 +1914,38 @@ reset and is **not durable across restart** (for durable history use the
 event-history outbox, ADR-0072). Both fields are **restart-required
 per-peer** on reload; see [`reload-matrix.md`](reload-matrix.md) and the
 "Explain an import decision" runbook in [`OPERATIONS.md`](OPERATIONS.md).
+
+### Rejected-route retention (`[policy.reject_retention]`)
+
+Optional. Controls the per-session rejected-route retention store that
+backs `rbgp rib received <peer> --rejected` and
+`PolicyService.ListRejectedRoutes` — the looking-glass filtered-route
+surface. Every rejected inbound unicast announcement — policy deny
+(including RPKI/ASPA-driven denies), RFC 9234 OTC route-leak drop,
+strict-peer next-hop ownership, AS_PATH/reflection loop, and RFC 7606
+treat-as-withdraw — is retained with its canonical reason token, so a
+member's "why isn't my route accepted?" is answerable without knowing
+the prefix in advance. An identity that is later accepted or explicitly
+withdrawn drops out of the store.
+
+```toml
+[policy.reject_retention]
+enabled = true
+capacity = 1024
+```
+
+| Field      | Type    | Required | Default | Description |
+|------------|---------|----------|---------|-------------|
+| `enabled`  | bool    | no       | `true`  | Gates retention entirely. When `false`, the reject paths skip entry construction (one boolean check per gate) and the query surface reports the disabled state as a configuration fact rather than an empty answer. |
+| `capacity` | integer | no       | `1024`  | Per-peer retention cap, LRU on rejection recency — a reject storm converges on the most recent `capacity` rejections. Each entry is one rejected `(AFI, SAFI, prefix, path_id)` with its reason and a compact attribute summary, ≤ ~512 bytes realistic worst case ⇒ ~0.5 MiB bound per peer at the default. Raise it toward the expected member announcement count for full coverage on route-server fleets. |
+
+Like `[policy.explain]`, this is **diagnostic state only** — it never
+affects which routes are accepted. Scope is IPv4 / IPv6 unicast
+(max-prefix violations tear the session down, so there is no per-route
+rejection to retain). The store resets on peer session reset. Both
+fields are **restart-required per-peer** on reload; see
+[`reload-matrix.md`](reload-matrix.md) and the "Answer a member's 'why
+is my route filtered?'" runbook in [`OPERATIONS.md`](OPERATIONS.md).
 
 ---
 

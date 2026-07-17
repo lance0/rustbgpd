@@ -621,6 +621,17 @@ impl PeerSession {
                 });
                 ControlFlow::Continue(())
             }
+            PeerCommand::ListRejectedRoutes { reply } => {
+                // LAN-472: read-only retention snapshot. Bounded by the
+                // configured cap, so the clone stays diagnostic-sized;
+                // the inbound UPDATE hot path is untouched.
+                let _ = reply.send(super::rejected_routes::RejectedRoutesReply {
+                    enabled: self.reject_retention_enabled,
+                    capacity: self.rejected_routes.capacity(),
+                    entries: self.rejected_routes.snapshot(),
+                });
+                ControlFlow::Continue(())
+            }
             PeerCommand::QueryImportPolicyTermHits { reply } => {
                 // Read-only snapshot of the live counters (ADR-0096
                 // Decision 3.3). No counter moves; a session without an

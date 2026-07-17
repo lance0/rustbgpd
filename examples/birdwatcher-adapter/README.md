@@ -49,9 +49,13 @@ the `Route.received_at_epoch_seconds` proto field (RIB receive time), the same
 source the in-daemon server used.
 
 The scope is status, peer, and accepted-route views only. Alice-LG's
-filtered/noexport views are not implemented, and the public API does not yet
-provide the structured per-route reject reasons needed to implement them
-honestly.
+filtered/noexport views are not implemented in this adapter yet. The
+structured per-route reject reasons they need are now available from
+`PolicyService.ListRejectedRoutes` (per-peer retained rejects with
+canonical reason tokens; see `[policy.reject_retention]` in
+`docs/CONFIGURATION.md`), so a real `routes.filtered` count and a
+filtered view are implementable — wiring them into this adapter is
+future work.
 
 ### Field-level gaps
 

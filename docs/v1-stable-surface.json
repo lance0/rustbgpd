@@ -61,7 +61,7 @@
   ],
   "config": {
     "stable_fields": [
-      {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "4832ea48a84f88e269c116375d32e95a68f3bd32cba1cda710bd9304af6bf9c1"},
+      {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "41a05262948c181c6278a6735710714da374fd5d65bd79cc78a36b75c367f9f9"},
       {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry", "worker_threads"], "schema_sha256": "89760ebeef12ffad5357ae56cee8b3e2ff950b957102168aed59f7517b0899b0"},
       {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "95ed5115adecb2c4fda72873482c6fee1d8b7df7a0844712a5408f04505e793d"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},
@@ -146,7 +146,7 @@
       {"service": "RibService", "methods": ["ListBgpLsRoutes", "ListVpnRoutes", "ListLabeledRoutes", "ListRtcRoutes", "ListTopologyNodes", "ListTopologyLinks", "ListOrrStatus"], "signature_sha256": "6e4fc15d26b9de73655759d98c31cf68e25b0e5fca712e676d59c01c710fe290", "message_graph_sha256": "53e84ecef4708a9f117f839732bd564c07b6c37905173d36583ec203cc92de4d"}
     ],
     "explicitly_unstable_message_fields": ["BgpEvent.bfd", "BgpEvent.dataplane", "BgpEvent.dataplane_route", "BgpEvent.evpn", "ConfigTransactionApplyResponse.update_group_impact", "ConfigTransactionPlanResponse.update_group_impact", "DeleteNeighborRequest.interface", "GetNeighborStateRequest.interface", "NeighborConfig.interface", "NeighborConfig.paths_limit_receive_max", "NeighborState.paths_limits", "NeighborState.slow_peer", "PathsLimitState.*", "PeerGroupDefinition.paths_limit_receive_max", "UpdateGroupFamilyImpact.*", "UpdateGroupImpactPlan.*", "UpdateGroupImpactRollup.*"],
-    "explicitly_outside_v1": ["gnmi.gNMI", "BfdService", "EvpnService", "InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.ListFlowSpecRoutes", "EventService.ListEvpnEvents"]
+    "explicitly_outside_v1": ["gnmi.gNMI", "BfdService", "EvpnService", "InjectionService.AddFlowSpec", "InjectionService.DeleteFlowSpec", "InjectionService.AddEvpnRoute", "InjectionService.DeleteEvpnRoute", "RibService.ListBlackholeDiscards", "RibService.ListEvpnRoutes", "RibService.ListFibRoutes", "RibService.ListFibTables", "RibService.SetFibTable", "RibService.DeleteFibTable", "RibService.ListFlowSpecRoutes", "EventService.ListEvpnEvents", "PolicyService.ListRejectedRoutes"]
   },
   "cli": {
     "stability_scope": "command_path_and_name_only",

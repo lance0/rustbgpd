@@ -7,8 +7,8 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
-    ImportExplainReply, ImportPolicyTermHits, RemovePrivateAs, TcpAoInfoSnapshot, TcpAoKeyring,
-    TransportAuthSecret,
+    ImportExplainReply, ImportPolicyTermHits, RejectedRoutesReply, RemovePrivateAs,
+    TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1002,6 +1002,11 @@ pub enum PeerManagerCommand {
         enabled: bool,
         /// New `[policy.explain].cache_size`.
         cache_size: usize,
+        /// New `[policy.reject_retention].enabled` (LAN-472; same
+        /// read-at-construction contract as the explain knobs).
+        reject_retention_enabled: bool,
+        /// New `[policy.reject_retention].capacity`.
+        reject_retention_capacity: usize,
         /// Reply channel acknowledging the snapshot update.
         reply: oneshot::Sender<()>,
     },
@@ -1068,6 +1073,16 @@ pub enum PeerManagerCommand {
         path_id: Option<u32>,
         /// Reply channel; `None` = no live session for `address`.
         reply: oneshot::Sender<Option<ImportExplainReply>>,
+    },
+    /// LAN-472: list a peer's retained rejected routes with their
+    /// reject reasons (the looking-glass filtered-route surface).
+    /// Side-effect-free. `reply` carries `None` when the peer has no
+    /// live session (its session-local retention store is gone).
+    ListRejectedRoutes {
+        /// Peer whose retention store to consult.
+        address: IpAddr,
+        /// Reply channel; `None` = no live session for `address`.
+        reply: oneshot::Sender<Option<RejectedRoutesReply>>,
     },
     /// Snapshot the live import-chain per-term hit counters of peer
     /// sessions (ADR-0096 Decision 3.3, import direction). Read-only —

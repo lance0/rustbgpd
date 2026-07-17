@@ -68,6 +68,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Looking-glass filtered-route surface: rejected inbound routes are
+  retained with their reject reason (LAN-472).** Every rejected unicast
+  announcement — import-policy deny (including RPKI/ASPA-driven denies),
+  RFC 9234 OTC route-leak drop, ADR-0107 next-hop ownership, AS_PATH /
+  RFC 4456 reflection loop, and RFC 7606 treat-as-withdraw — is kept in
+  a bounded per-session store tagged with a canonical snake_case reason
+  token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`,
+  `as_path_loop`, `rr_loop`, `treat_as_withdraw`) plus detail, next-hop,
+  AS path, communities, and RPKI/ASPA states at rejection time. New
+  `PolicyService.ListRejectedRoutes` RPC (pre-v1, outside the v1-stable
+  surface) and `rbgp rib received <peer> --rejected` CLI answer the IXP
+  member-support question "why isn't my route accepted?" without
+  knowing the prefix in advance — the structured reject-reason source an
+  Alice-LG-style looking glass needs for its filtered view. Entries
+  self-clean when an identity is later accepted or explicitly withdrawn
+  and on session reset; the store is LRU-bounded per peer via the new
+  `[policy.reject_retention]` config (`enabled` default true, `capacity`
+  default 1024 ≈ 0.5 MiB/peer worst case; restart-required per peer),
+  and a `bgp_rejected_routes_retained{peer}` gauge (peer-reaped) tracks
+  occupancy. Docs: OPERATIONS.md runbook, route-server cookbook
+  member-support section, CONFIGURATION.md.
+
 - **IXP route-server receipt matrix** (`docs/perf/ixp-matrix-2026-07.md`):
   rustbgpd vs BIRD 3.3.1 vs OpenBGPD 9.1 at 700 peers × 400,400
   prefixes through the shared reload-stall harness — reload stall +

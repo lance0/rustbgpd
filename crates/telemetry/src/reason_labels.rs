@@ -179,6 +179,78 @@ impl std::fmt::Display for RrLoopReason {
     }
 }
 
+/// Import reject-reason vocabulary for the looking-glass filtered-route
+/// retention surface (LAN-472).
+///
+/// One token per inbound rejection *mechanism*, mirroring the reject
+/// classes the import path actually implements. Sub-mechanism detail
+/// (which OTC rule, which ownership violation, which policy) travels in
+/// a separate free-form detail field sourced from the sibling enums in
+/// this module or the matched policy name — the token itself stays
+/// low-cardinality and stable.
+///
+/// Surfaces sharing this vocabulary:
+///
+/// - the `reason` field of `PolicyService.ListRejectedRoutes` /
+///   `rbgp rib received <peer> --rejected`;
+/// - the retention-store log lines.
+///
+/// Max-prefix is deliberately absent: exceeding the limit tears the
+/// session down (ADR-0108), so there is no per-route rejection to
+/// retain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImportRejectReason {
+    /// The import policy chain denied the route (including RPKI/ASPA
+    /// driven denies — the entry's validation states carry that
+    /// context; the deciding policy travels in the detail field).
+    PolicyReject,
+    /// RFC 9234 Only-to-Customer route-leak protection dropped the
+    /// announcement ([`OtcBlockReason`] detail).
+    OtcRouteLeak,
+    /// ADR-0107 strict-peer `NEXT_HOP` ownership gate
+    /// ([`NextHopOwnershipBlockReason`] detail).
+    NextHopOwnership,
+    /// RFC 4271 §9.1.2 `AS_PATH` loop — our ASN in the received path.
+    AsPathLoop,
+    /// RFC 4456 §8 route-reflection loop ([`RrLoopReason`] detail).
+    RrLoop,
+    /// RFC 7606 treat-as-withdraw: a malformed attribute forced every
+    /// route in the UPDATE to be handled as withdrawn.
+    TreatAsWithdraw,
+}
+
+impl ImportRejectReason {
+    /// Every canonical import reject reason, for vocabulary walks in
+    /// tests and docs.
+    pub const ALL: [Self; 6] = [
+        Self::PolicyReject,
+        Self::OtcRouteLeak,
+        Self::NextHopOwnership,
+        Self::AsPathLoop,
+        Self::RrLoop,
+        Self::TreatAsWithdraw,
+    ];
+
+    /// The canonical reason string shared by every surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyReject => "policy_reject",
+            Self::OtcRouteLeak => "otc_route_leak",
+            Self::NextHopOwnership => "next_hop_ownership",
+            Self::AsPathLoop => "as_path_loop",
+            Self::RrLoop => "rr_loop",
+            Self::TreatAsWithdraw => "treat_as_withdraw",
+        }
+    }
+}
+
+impl std::fmt::Display for ImportRejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Exact outbound encoder rejection reasons shared by metrics and RIB logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExactExportReason {
@@ -215,7 +287,10 @@ impl std::fmt::Display for ExactExportReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExactExportReason, NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};
+    use super::{
+        ExactExportReason, ImportRejectReason, NextHopOwnershipBlockReason, OtcBlockReason,
+        RrLoopReason,
+    };
 
     fn assert_snake_case(label: &str) {
         assert!(!label.is_empty(), "reason label must not be empty");
@@ -253,6 +328,15 @@ mod tests {
     fn rr_loop_reasons_are_snake_case_and_distinct() {
         let mut seen = std::collections::HashSet::new();
         for reason in RrLoopReason::ALL {
+            assert_snake_case(reason.as_str());
+            assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn import_reject_reasons_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for reason in ImportRejectReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
         }
@@ -298,6 +382,18 @@ mod tests {
         );
         let rr: Vec<&str> = RrLoopReason::ALL.iter().map(|r| r.as_str()).collect();
         assert_eq!(rr, ["originator_id", "cluster_list"]);
+        let import_reject: Vec<&str> = ImportRejectReason::ALL.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            import_reject,
+            [
+                "policy_reject",
+                "otc_route_leak",
+                "next_hop_ownership",
+                "as_path_loop",
+                "rr_loop",
+                "treat_as_withdraw",
+            ]
+        );
         let exact: Vec<&str> = ExactExportReason::ALL.iter().map(|r| r.as_str()).collect();
         assert_eq!(
             exact,

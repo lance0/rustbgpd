@@ -358,6 +358,15 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         "/rustbgpd.v1.PolicyService/ExplainImportPolicy",
         AuthTier::SensitiveRead,
     ),
+    // LAN-472: same tier as ExplainImportPolicy — it reads the same
+    // per-session import diagnostic state, enumerated instead of by
+    // point lookup.
+    method(
+        "rustbgpd.v1.PolicyService",
+        "ListRejectedRoutes",
+        "/rustbgpd.v1.PolicyService/ListRejectedRoutes",
+        AuthTier::SensitiveRead,
+    ),
     method(
         "rustbgpd.v1.PolicyService",
         "TestPolicy",
@@ -841,7 +850,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 98);
+        assert_eq!(METHODS.len(), 99);
     }
 
     #[test]
@@ -882,7 +891,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 57);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 58);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
     }

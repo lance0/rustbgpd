@@ -5,14 +5,16 @@ use crate::output::{
     JsonOrrExplainCandidate,
 };
 use crate::proto::injection_service_client::InjectionServiceClient;
+use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, AddressFamily, BgpLsRouteEntry, BlackholeDiscardState, DeletePathRequest,
     ExplainAdvertisedRouteRequest, ExplainBestPathRequest, ExplainBestPathResponse,
     ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
     ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse,
-    ListLabeledRoutesRequest, ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, Route,
-    RtcRouteEntry, VpnRouteEntry,
+    ListLabeledRoutesRequest, ListRejectedRoutesRequest, ListRejectedRoutesResponse,
+    ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, Route, RtcRouteEntry,
+    VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -1658,6 +1660,129 @@ pub async fn received(
     )
     .await?;
     print_routes(&routes, json)
+}
+
+/// LAN-472: list the retained rejected routes for a peer with their
+/// reject reasons — `rbgp rib received <peer> --rejected`. Served by
+/// `PolicyService.ListRejectedRoutes` (the retention store lives on the
+/// peer's session, not in the RIB).
+pub async fn rejected(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
+    let mut client =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_rejected_routes(ListRejectedRoutesRequest {
+            peer_address: address.to_string(),
+        })
+        .await?
+        .into_inner();
+    print_rejected_routes(&resp, json)
+}
+
+#[derive(Serialize)]
+struct JsonRejectedRoute<'a> {
+    prefix: String,
+    path_id: u32,
+    reason: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    reason_detail: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    next_hop: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    as_path: &'a str,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    communities: &'a [u32],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    large_communities: &'a [String],
+    #[serde(skip_serializing_if = "str::is_empty")]
+    rpki_validation: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    aspa_validation: &'a str,
+    rejected_at_unix_ns: i64,
+}
+
+#[derive(Serialize)]
+struct JsonRejectedRoutes<'a> {
+    peer_address: &'a str,
+    retention_enabled: bool,
+    capacity: u32,
+    rejected_routes: Vec<JsonRejectedRoute<'a>>,
+}
+
+fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Result<(), CliError> {
+    if json {
+        let rejected_routes = resp
+            .routes
+            .iter()
+            .map(|r| JsonRejectedRoute {
+                prefix: format!("{}/{}", r.prefix, r.prefix_length),
+                path_id: r.path_id,
+                reason: &r.reason,
+                reason_detail: &r.reason_detail,
+                next_hop: &r.next_hop,
+                as_path: &r.as_path,
+                communities: &r.communities,
+                large_communities: &r.large_communities,
+                rpki_validation: &r.rpki_validation,
+                aspa_validation: &r.aspa_validation,
+                rejected_at_unix_ns: r.rejected_at_unix_ns,
+            })
+            .collect();
+        return output::print_json_pretty(&JsonRejectedRoutes {
+            peer_address: &resp.peer_address,
+            retention_enabled: resp.retention_enabled,
+            capacity: resp.capacity,
+            rejected_routes,
+        });
+    }
+    if !resp.retention_enabled {
+        println!(
+            "Rejected-route retention is disabled for {} ([policy.reject_retention] enabled = false)",
+            resp.peer_address
+        );
+        return Ok(());
+    }
+    if resp.routes.is_empty() {
+        println!("No rejected routes retained for {}", resp.peer_address);
+        return Ok(());
+    }
+    println!(
+        "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} AS Path",
+        "Prefix", "PathId", "Reason", "Detail", "Next Hop", "RPKI"
+    );
+    println!("{}", "-".repeat(120));
+    for r in &resp.routes {
+        println!(
+            "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} {}",
+            format!("{}/{}", r.prefix, r.prefix_length),
+            r.path_id,
+            r.reason,
+            if r.reason_detail.is_empty() {
+                "-"
+            } else {
+                &r.reason_detail
+            },
+            if r.next_hop.is_empty() {
+                "-"
+            } else {
+                &r.next_hop
+            },
+            if r.rpki_validation.is_empty() {
+                "-"
+            } else {
+                &r.rpki_validation
+            },
+            r.as_path,
+        );
+    }
+    let shown = resp.routes.len();
+    if u32::try_from(shown).unwrap_or(u32::MAX) >= resp.capacity {
+        println!(
+            "(store at capacity {} — showing the most recent rejections; \
+             raise [policy.reject_retention] capacity for full coverage)",
+            resp.capacity
+        );
+    }
+    Ok(())
 }
 
 pub async fn advertised(
