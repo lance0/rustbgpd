@@ -43,22 +43,55 @@ non-self base prefixes carrying the new policy-generation community —
 which is what makes this run acceptance evidence where the July
 over-count was not.
 
-## Status at later heads
+## Current numbers — 2026-07-16 campaign
 
-These numbers are pinned to `61efe075` and do not hold at later
-commits. A 2026-07-16 rerun of the identical campaign at `02f1f2a7`
-was rejected: observer stall p50 rose to ~1.03 s (above the gate) with
-a flat per-observer distribution consistent with the paced
-commit/resync sweep introduced by the cooperative policy-transition
-flush, and per-observer completion rose from ~155 s to ~273 s p50
-(LAN-458); post-campaign TERM shutdown also wedged in a dirty-resync
-loop against closed peer channels until SIGKILL (LAN-459). The rerun's
-readiness plane was strictly better than this receipt's (health
-queries bounded at ~225 ms worst by the response-deadline fix, vs
-232 ms here, and degraded only inside re-advertisement windows). This
-receipt remains valid for its commit; a replacement receipt lands only
-after LAN-458/LAN-459 close and a rerun passes acceptance (tracked in
-LAN-350).
+**Commit measured:** `a25ad76b`. The section below replaces the
+`61efe075` headline as the current receipt; the historical numbers and
+the interim regression are kept further down for the record.
+
+The same 700-client x 400,400-route campaign now runs in BOTH reload
+shapes — the historical full import+export swap, and the export-only
+change that route-server operators perform routinely (both ride the
+same batched cohort path since the import-tolerant cohort change). Four
+SIGHUP reloads per mode, 30 s control window, live churn throughout, on
+an otherwise idle host.
+
+| Metric (700 route-server clients x 400,400 IPv4 routes, churn running) | import+export | export-only |
+|---|---|---|
+| **UPDATE stall** (worst per-observer gap, p50 across 700 observers; range over 4 reloads) | **494-618 ms** | **497-652 ms** |
+| UPDATE stall, p95 / worst single observer | 670-1,181 ms / 1.30 s | 749-1,251 ms / 1.45 s |
+| Expected inter-UPDATE gap from churn alone (control, p50 / max) | 19 ms / 42 ms | 18 ms / 42 ms |
+| Full new-policy re-advertisement, per-observer completion (p50 / max) | **1.54-1.67 s / 2.08 s** | **1.59-1.78 s / 2.89 s** |
+| Session flaps / NOTIFICATIONs / decode errors across all reloads | 0 / 0 / 0 | 0 / 0 / 0 |
+| Concurrent `rbgp health` probes over the 200 ms deadline (50 ms loop) | **0** of 2,012 (max 122 ms) | **0** of 2,045 (max 124 ms) |
+| Daemon RSS (converged -> after 4 reload cycles) | 820 -> 1,075 MiB | 814 -> 1,050 MiB |
+| SIGTERM to clean exit after the campaign | 4 s | 3 s |
+
+**Verdict: the < 1 s stall gate holds with margin in both reload
+shapes, and full repropagation of the new policy went from minutes to
+under two seconds** — the July receipt's own headline (0.76 s stall /
+155 s completion) is superseded on every axis except single-observer
+worst case (1.45 s here vs 0.82 s; see honesty notes). The changes
+between the two receipts: batched export-cohort application with
+deferred per-member route refresh (so import-affecting reloads take the
+same path), one shared progressive wire encode per update group
+instead of 700 identical per-session encodes, wall-clock poll budgets
+on every paced actor phase, unfenced destination-group pre-staging,
+and a bounded dirty-resync with fair rotation.
+
+Honesty notes for this campaign:
+- The per-observer stall tail is wider than the July receipt's (p95 up
+  to ~1.25 s, one observer at 1.45 s, vs 0.82 s worst then): the
+  remaining fenced inventory+probe pass and the encoder-follow spread
+  of the shared stream concentrate in the tail rather than the median.
+  The follow-up boundary is recorded in the pre-staging change.
+- At small table sizes the measured floor (~0.34 s at 70k routes) is
+  dominated by the harness's own receive-side decode backlog, proven
+  by socket-queue sampling — receiver-side numbers at bulk scale are
+  the daemon's, but sub-100 ms claims would need a faster instrument.
+- RSS still grows across cycles without a clean plateau at this scale
+  (+255 MiB over 4 cycles); an 8-cycle allocation profile at a smaller
+  shape showed decelerating, bounded retention rather than a leak.
 
 ## Why this supersedes the earlier run
 

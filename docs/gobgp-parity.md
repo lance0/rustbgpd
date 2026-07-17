@@ -168,7 +168,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | Config formats | TOML/YAML/JSON/HCL | TOML | |
-| Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart |
+| Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart. Measured at route-server scale: sub-second UPDATE stall and ~1.6 s full re-advertisement at 700 clients x 400k routes (docs/perf/reload-stall-2026-07.md) |
 | Config persistence | No | Yes | gRPC mutations atomically persisted to TOML |
 | Prefix limits | Yes | Yes | Cease/1 enforcement |
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
