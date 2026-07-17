@@ -199,18 +199,21 @@ Informational large communities under the RS ASN with other function
 values pass through.
 
 Enforcement is per-neighbor via `rs_control_communities` — **default
-on for `route_server_client` sessions**, off for everyone else, and
-inheritable from a peer group. Set `rs_control_communities = false` on
-an RS client to restore full pass-through (control communities then
-reach that member verbatim). Suppression shows up in
+off (opt-in)**, inheritable from a peer group. Enable it for the
+members that actually steer with control communities; on sessions left
+off, control communities reach that member verbatim (full
+pass-through). Suppression shows up in
 `rbgp neighbor <ip> explain <prefix>` as the `rs_control` gate rung.
 
-Cost note: an enabled session's export outcome depends on the target
-ASN per route, so it rides the ungrouped per-peer path (update-group
-snapshot reason `rs_control_communities`) — exactly like
-`per_client_best`. Members that don't need steering keep sharing
-update groups; only the sessions with the knob on pay the per-peer
-fan-out.
+Cost note (why the default is off): an enabled session's export
+outcome depends on the target ASN per route, so the whole session
+rides the ungrouped per-peer path (update-group snapshot reason
+`rs_control_communities`) — exactly like `per_client_best`. That is
+per-peer Adj-RIB-Out plus per-peer encode for every enabled session:
+enabling it fleet-wide on a 700-client full-table route server took
+daemon RSS from ~1.3 GiB to over 100 GiB. Enable it only for members
+that use steering; a route-granular emit-time filter (ADR-0101
+Decision 3) is the planned path to making this safe to default on.
 
 ## Verify
 

@@ -57,8 +57,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   implemented (draft-ietf-grow-ixp-ext-comms). Matched control
   communities are scrubbed from the outbound announcement toward
   enabled sessions; everyone else keeps byte-level transparency.
-  Per-neighbor / per-group knob `rs_control_communities`, default on
-  for `route_server_client` sessions and off otherwise. Enforcement is
+  Per-neighbor / per-group knob `rs_control_communities`, default off
+  (opt-in): enabling a session excludes it from update-group sharing,
+  which at large fanout is per-peer Adj-RIB-Out + encode. Enforcement is
   a per-target export-staging decision (suppression sits beside the
   RFC 1997 gates with its own `rs_control` explain rung; Add-Path and
   per-client-best exclude suppressed candidates before ranking), so

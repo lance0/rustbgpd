@@ -1,0 +1,3 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=0
+established 700 at 111.5s
+FAIL: base-table convergence stalled for 120s: expected >= 399828 base prefixes per observer, 700 of 700 observers below; first stalled (observer, observed): [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0)]

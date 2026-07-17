@@ -397,8 +397,9 @@ pub struct TransportConfig {
     /// (`0:PEER`/`RS:PEER`/`0:RS` and the RFC 8195 large forms
     /// `RS:{0,1,101,102,103}:PEER`) at export staging toward this peer
     /// — per-target announce suppression, prepend, and outbound scrub.
-    /// Resolved in config with default `route_server_client`. Enabled
-    /// sessions are disqualified from update-group sharing.
+    /// Resolved in config with default `false` (opt-in). Enabled
+    /// sessions are disqualified from update-group sharing — at large
+    /// fanout that is per-peer Adj-RIB-Out + encode for the session.
     pub rs_control_communities: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
