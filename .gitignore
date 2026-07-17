@@ -47,3 +47,4 @@ tests/chaos/runs/
 tests/interop/configs/m44-certs/
 tests/interop/configs/m54-certs/
 .last_review_sha
+bench/scale/matrix/artifacts-run*/
