@@ -464,6 +464,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,

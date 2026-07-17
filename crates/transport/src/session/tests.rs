@@ -14428,3 +14428,318 @@ async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
         "Add-Path send changes NLRI bytes and must break the proof"
     );
 }
+
+/// ADR-0107 strict-peer `NEXT_HOP` ownership, classic IPv4 body NLRI: a
+/// conforming next-hop (the session's own address) is accepted; a foreign
+/// next-hop is rejected pre-policy — withdrawals from the same UPDATE
+/// still flow, a previously accepted identity is retired treat-as-withdraw
+/// style, and a first-seen rejection stays silent. The spoofed UPDATE
+/// carries RFC 7999 BLACKHOLE, pinning ADR-0107 §5: a community is never
+/// an ownership bypass.
+#[tokio::test]
+async fn strict_peer_next_hop_rejects_foreign_ipv4_body_and_withdraws_replacement() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.next_hop_ownership_strict_peer = true;
+    session.negotiated = Some(negotiated_session(65002, false));
+    let accepted = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let first_seen = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let attrs = |next_hop: Ipv4Addr, blackhole: bool| {
+        let mut attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(next_hop),
+        ];
+        if blackhole {
+            // RFC 7999 BLACKHOLE (65535:666).
+            attrs.push(PathAttribute::Communities(vec![0xFFFF_029A]));
+        }
+        attrs
+    };
+    // Conforming: the wire next-hop is the advertising session's address.
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: accepted,
+            }],
+            &[],
+            &attrs(Ipv4Addr::new(10, 0, 0, 2), false),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(
+        announced.len(),
+        1,
+        "conforming next-hop must be accepted under strict_peer"
+    );
+    // Foreign next-hop (another member's address) + BLACKHOLE: rejected
+    // pre-policy; the accepted identity is withdrawn, the first-seen one
+    // stays silent, and the explicit withdrawal is preserved.
+    session
+        .process_update(UpdateMessage::build(
+            &[
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: accepted,
+                },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: first_seen,
+                },
+            ],
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: withdrawn_prefix,
+            }],
+            &attrs(Ipv4Addr::new(10, 0, 0, 9), true),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(
+        announced.is_empty(),
+        "foreign next-hop must be rejected even with BLACKHOLE attached"
+    );
+    assert_eq!(withdrawn.len(), 2);
+    assert!(withdrawn.contains(&(Prefix::V4(withdrawn_prefix), 0)));
+    assert!(
+        withdrawn.contains(&(Prefix::V4(accepted), 0)),
+        "rejected replacement must retire the exact prior identity"
+    );
+    assert!(
+        !withdrawn.contains(&(Prefix::V4(first_seen), 0)),
+        "first-seen rejections must stay silent"
+    );
+    assert_eq!(session.known_prefix_count(), 0);
+}
+
+/// ADR-0107 strict-peer over MP IPv6 unicast: a conforming global
+/// next-hop is accepted; a foreign one is rejected with exact replacement
+/// withdrawal and explain tombstones (mirrors the OTC sibling test).
+#[expect(
+    clippy::too_many_lines,
+    reason = "pins conforming acceptance, foreign rejection, replacement withdrawal, first-seen gating, and explain tombstones in one flow"
+)]
+#[tokio::test]
+async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement() {
+    use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.next_hop_ownership_strict_peer = true;
+    session.import_explain_enabled = true;
+    session.peer_ip = "2001:db8::2".parse().unwrap();
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let accepted = Prefix::V6(Ipv6Prefix::new("2001:db8:473:1::".parse().unwrap(), 64));
+    let first_seen = Prefix::V6(Ipv6Prefix::new("2001:db8:473:2::".parse().unwrap(), 64));
+    let attrs = |next_hop: &str, announced: Vec<NlriEntry>| {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: next_hop.parse().unwrap(),
+                link_local_next_hop: None,
+                announced,
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            }),
+        ]
+    };
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs(
+                "2001:db8::2",
+                vec![NlriEntry {
+                    path_id: 0,
+                    prefix: accepted,
+                }],
+            ),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected conforming MP route accepted");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs(
+                "2001:db8::99",
+                vec![
+                    NlriEntry {
+                        path_id: 0,
+                        prefix: accepted,
+                    },
+                    NlriEntry {
+                        path_id: 0,
+                        prefix: first_seen,
+                    },
+                ],
+            ),
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("accepted replacement must become a withdrawal")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(accepted, 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "first-seen rejects must stay silent"
+    );
+    let key = |prefix| ImportDecisionKey {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        prefix,
+        path_id: 0,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&key(accepted), session.import_policy_generation)
+    {
+        LookupResult::Hit(decision) => {
+            assert_eq!(decision.outcome, CachedOutcome::Withdrawn);
+        }
+        other => panic!("expected ownership-withdrawn {accepted}, got {other:?}"),
+    }
+    assert!(matches!(
+        session
+            .import_decision_cache
+            .lookup(&key(first_seen), session.import_policy_generation),
+        LookupResult::NotSeen
+    ));
+}
+
+/// ADR-0107 §2: a global + link-local next-hop pair always fails closed
+/// under the strict pilot — the companion cannot be mapped to the single
+/// session address even when the global component matches, and it is
+/// never silently ignored.
+#[tokio::test]
+async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.next_hop_ownership_strict_peer = true;
+    session.peer_ip = "2001:db8::2".parse().unwrap();
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            // Global component matches the session; the link-local
+            // companion is still unverifiable under strict_peer.
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: Some("fe80::2".parse().unwrap()),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:473:3::".parse().unwrap(), 64)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "a paired link-local companion must fail closed under strict_peer"
+    );
+}
+
+/// The ownership gate is opt-in: without `next_hop_ownership =
+/// "strict_peer"` a third-party next-hop keeps flowing (RFC 7947
+/// transparency), pinning that ADR-0107 changes nothing by default.
+#[tokio::test]
+async fn next_hop_ownership_disabled_by_default_accepts_foreign_next_hop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 9)),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(
+        announced.len(),
+        1,
+        "default (unset) must preserve transparent behavior"
+    );
+}

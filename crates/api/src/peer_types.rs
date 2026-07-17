@@ -1606,6 +1606,10 @@ pub struct PeerManagerNeighborConfig {
     /// for route-server clients without Add-Path). Requires
     /// `route_server_client`.
     pub per_client_best: bool,
+    /// ADR-0107 strict-peer `NEXT_HOP` ownership enforcement for a
+    /// route-server client (resolved from `next_hop_ownership =
+    /// "strict_peer"`). Requires `route_server_client`.
+    pub next_hop_ownership_strict_peer: bool,
     /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement
     /// (resolved; config default `!route_server_client`).
     pub interpret_rfc1997: bool,

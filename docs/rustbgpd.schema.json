@@ -1738,6 +1738,17 @@
             "null"
           ]
         },
+        "next_hop_ownership": {
+          "description": "Pre-policy `NEXT_HOP` ownership enforcement for this route-server\nclient (ADR-0107, RFC 7948 §4.8). `\"strict_peer\"` accepts a\nunicast announcement only when every address component of its\ndecoded wire next-hop identity is the advertising session's own\naddress; non-conforming announcements are rejected before import\npolicy runs, fail-closed and treat-as-withdraw for previously\naccepted identities. Requires `route_server_client = true`.\nUnset = no ownership enforcement (RFC 7947 transparency only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextHopOwnershipConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "orr_vantage": {
           "description": "Optimal Route Reflection vantage point (RFC 9107): an IP address\nidentifying this client's IGP location as a BGP-LS topology node\n(a link interface/neighbor address, or an address covered by a\nPrefix NLRI). Requires `route_reflector_client = true` (iBGP).",
           "type": [
@@ -1877,6 +1888,16 @@
         }
       },
       "additionalProperties": false
+    },
+    "NextHopOwnershipConfig": {
+      "description": "ADR-0107 route-server `NEXT_HOP` ownership enforcement modes\n(RFC 7948 §4.8).\n\nOnly the strict pilot ships today. The broader `same_as` and\n`explicit_authorized` relationships RFC 7948 permits are deferred\nuntil a generation-consistent authoritative fleet inventory exists\n(ADR-0107 §1).",
+      "oneOf": [
+        {
+          "description": "Accept a unicast announcement only when its complete wire\nnext-hop identity is the advertising session's own address.",
+          "type": "string",
+          "const": "strict_peer"
+        }
+      ]
     },
     "OverlayIndexModeConfig": {
       "description": "Serde form of [`rustbgpd_evpn::OverlayIndexMode`] (ADR-0087).",
@@ -2068,6 +2089,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "next_hop_ownership": {
+          "description": "ADR-0107 `NEXT_HOP` ownership enforcement inherited by neighbors in\nthis group. See the neighbor-level `next_hop_ownership`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextHopOwnershipConfig"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "orr_vantage": {

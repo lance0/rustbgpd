@@ -665,6 +665,10 @@ impl PeerManager {
         // registers single-best (caught by M83; the RIB/CLI unit
         // layers are wired above this seam and never saw it).
         transport.per_client_best = config.per_client_best;
+        // ADR-0107: same threading class as per_client_best — without
+        // this line the knob parses, validates, and reloads while every
+        // session imports unguarded (pinned by the field-threading test).
+        transport.next_hop_ownership_strict_peer = config.next_hop_ownership_strict_peer;
         // RFC 1997: resolved in config (default !route_server_client);
         // pinned by the build_transport_config field-threading test.
         transport.interpret_rfc1997 = config.interpret_rfc1997;

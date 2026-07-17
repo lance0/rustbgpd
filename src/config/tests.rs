@@ -3265,6 +3265,154 @@ peer_group = "ixp-members"
 }
 
 #[test]
+fn next_hop_ownership_requires_route_server_client() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+next_hop_ownership = "strict_peer"
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRouteServerConfig { .. }));
+}
+
+#[test]
+fn next_hop_ownership_strict_peer_parses_and_reaches_transport() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+next_hop_ownership = "strict_peer"
+"#;
+    let config = parse(toml_str).unwrap();
+    assert_eq!(
+        config.neighbors[0].next_hop_ownership,
+        Some(NextHopOwnershipConfig::StrictPeer)
+    );
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.next_hop_ownership_strict_peer);
+}
+
+/// ADR-0107 default: unset means no ownership enforcement — a plain
+/// route-server client stays transparent-but-unchecked.
+#[test]
+fn next_hop_ownership_defaults_off_for_route_server_clients() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+"#;
+    let config = parse(toml_str).unwrap();
+    assert_eq!(config.neighbors[0].next_hop_ownership, None);
+    let peers = config.to_peer_configs().unwrap();
+    assert!(!peers[0].0.next_hop_ownership_strict_peer);
+}
+
+#[test]
+fn next_hop_ownership_inherits_from_peer_group() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+route_server_client = true
+next_hop_ownership = "strict_peer"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert!(peers[0].0.route_server_client);
+    assert!(peers[0].0.next_hop_ownership_strict_peer);
+}
+
+#[test]
+fn next_hop_ownership_from_group_without_route_server_client_rejected() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+next_hop_ownership = "strict_peer"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRouteServerConfig { .. }));
+}
+
+/// The deferred ADR-0107 modes (`same_as`, `explicit_authorized`) are
+/// not valid configuration until the fleet-inventory prerequisite ships;
+/// the enum is closed so an unknown mode fails at parse.
+#[test]
+fn next_hop_ownership_rejects_unshipped_modes() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+next_hop_ownership = "same_as"
+"#;
+    assert!(parse(toml_str).is_err());
+}
+
+#[test]
 fn interpret_rfc1997_defaults_true_for_plain_peers_false_for_rs_clients() {
     let toml_str = r#"
 [global]
@@ -4939,6 +5087,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         orr_vantage: None,
         route_server_client: Some(false),
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,
@@ -5627,6 +5776,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             orr_vantage: None,
             route_server_client: None,
             per_client_best: None,
+            next_hop_ownership: None,
             interpret_rfc1997: None,
             role: None,
             strict_role: None,
@@ -5676,6 +5826,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,
@@ -5714,6 +5865,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,
@@ -5781,6 +5933,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,

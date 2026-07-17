@@ -60,6 +60,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         orr_vantage: None,
         route_server_client: false,
         per_client_best: false,
+        next_hop_ownership_strict_peer: false,
         interpret_rfc1997: true,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         add_path_receive: false,
@@ -1853,6 +1854,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         orr_vantage: None,
         route_server_client: None,
         per_client_best: None,
+        next_hop_ownership: None,
         interpret_rfc1997: None,
         role: None,
         strict_role: None,
@@ -4669,6 +4671,7 @@ fn build_transport_config_reflects_every_transport_field() {
         orr_vantage: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
         route_server_client: true,
         per_client_best: true,
+        next_hop_ownership_strict_peer: true,
         interpret_rfc1997: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::All,
         add_path_receive: true,
@@ -4710,6 +4713,7 @@ fn build_transport_config_reflects_every_transport_field() {
         orr_vantage,
         route_server_client,
         per_client_best,
+        next_hop_ownership_strict_peer,
         interpret_rfc1997,
         remove_private_as,
         add_path_receive,
@@ -4781,6 +4785,13 @@ fn build_transport_config_reflects_every_transport_field() {
     // The #702 field: this is the exact assertion the class of tests exists
     // to make impossible to lose again.
     assert_eq!(t.per_client_best, *per_client_best, "per_client_best");
+    // ADR-0107: same #702 threading class — the fixture value (true)
+    // differs from the TransportConfig::new default (false), so a
+    // dropped assignment fails here rather than shipping silently.
+    assert_eq!(
+        t.next_hop_ownership_strict_peer, *next_hop_ownership_strict_peer,
+        "next_hop_ownership_strict_peer"
+    );
     // Same class of pin for the RFC 1997 egress knob: the fixture value
     // (false) differs from the TransportConfig::new default (true), so a
     // dropped assignment fails here rather than shipping silently.

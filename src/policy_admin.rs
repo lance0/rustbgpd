@@ -11,8 +11,8 @@ use rustbgpd_api::peer_types::{
 
 use crate::config::{
     AddPathConfig, AsPathPrependConfig, BgpRoleConfig, Config, ConfigError, FibTableConfig,
-    NamedPolicyConfig, Neighbor, NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig,
-    TcpAoConfig, TcpAoKeyringConfig,
+    NamedPolicyConfig, Neighbor, NeighborSetConfig, NextHopOwnershipConfig, PeerGroupConfig,
+    PolicyStatementConfig, TcpAoConfig, TcpAoKeyringConfig,
 };
 
 const fn wire_role_to_config(role: rustbgpd_wire::BgpRole) -> BgpRoleConfig {
@@ -198,6 +198,9 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         orr_vantage: definition.orr_vantage,
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
+        // Not exposed on the peer-group gRPC definition: absent means
+        // no ADR-0107 ownership enforcement; configure via TOML.
+        next_hop_ownership: None,
         // Not exposed on the peer-group gRPC definition: absent means the
         // config-derived default (!route_server_client) applies at resolve.
         interpret_rfc1997: None,
@@ -450,6 +453,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     orr_vantage: cfg.orr_vantage,
                     route_server_client: Some(cfg.route_server_client),
                     per_client_best: Some(cfg.per_client_best),
+                    next_hop_ownership: cfg
+                        .next_hop_ownership_strict_peer
+                        .then_some(NextHopOwnershipConfig::StrictPeer),
                     interpret_rfc1997: None,
                     role: cfg.local_role.map(wire_role_to_config),
                     strict_role: Some(cfg.strict_role),
@@ -890,6 +896,7 @@ remote_asn = 65002
                     orr_vantage: None,
                     route_server_client: false,
                     per_client_best: false,
+                    next_hop_ownership_strict_peer: false,
                     interpret_rfc1997: true,
                     remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
                     add_path_receive: false,

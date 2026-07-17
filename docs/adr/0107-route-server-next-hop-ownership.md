@@ -1,7 +1,14 @@
 # ADR-0107: Route-server NEXT_HOP ownership
 
-**Status:** Proposed
-**Date:** 2026-07-15
+**Status:** Accepted — the strict-peer pilot shipped as the opt-in
+`next_hop_ownership = "strict_peer"` neighbor / peer-group knob
+(requires `route_server_client = true`), enforced pre-policy on the
+decoded wire identity with exact-identity replacement withdrawal; the
+implementation-gate invariants below are pinned by unit, session, and
+config tests. A real IXP pilot transcript remains the outstanding gate
+item before the deferred `same-AS` / `explicit-authorized` modes are
+considered.
+**Date:** 2026-07-15 (accepted 2026-07-17)
 
 ## Context
 

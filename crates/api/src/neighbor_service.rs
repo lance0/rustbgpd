@@ -778,6 +778,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             route_server_client: config.route_server_client,
             per_client_best: config.per_client_best,
             // Not exposed on the runtime neighbor-add gRPC surface
+            // (ADR-0039 precedent): enable ADR-0107 ownership
+            // enforcement via the static TOML `next_hop_ownership` knob.
+            next_hop_ownership_strict_peer: false,
+            // Not exposed on the runtime neighbor-add gRPC surface
             // (ADR-0039 precedent): dynamic peers take the config-derived
             // default. Configure exceptions via the static TOML
             // `interpret_rfc1997` knob.
@@ -1338,6 +1342,7 @@ mod tests {
             orr_vantage: None,
             route_server_client: false,
             per_client_best: false,
+            next_hop_ownership_strict_peer: false,
             interpret_rfc1997: true,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,

@@ -140,6 +140,11 @@ hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true     # transparent: no AS prepend, NEXT_HOP preserved
 role = "route_server"          # RFC 9234: attach OTC on egress
+# RFC 7948 §4.8 / ADR-0107: reject announcements whose NEXT_HOP is not the
+# member's own session address (pre-policy, fail-closed). Leave unset for
+# members that legitimately announce another connection's next hop in the
+# same AS — the broader ownership modes are not shipped yet.
+next_hop_ownership = "strict_peer"
 max_prefixes = 50000
 
 [neighbors.add_path]
@@ -294,3 +299,12 @@ role guards this: with `role = "route_server"` the route server attaches
 OTC on egress and a conforming member drops OTC-marked routes it would
 otherwise re-advertise. A member that ignores roles still needs its own
 outbound filter — roles are defense in depth, not a substitute for it.
+
+**A member's routes vanish after enabling `next_hop_ownership`.** The
+strict-peer gate (ADR-0107) rejected them pre-policy: the announced
+NEXT_HOP is not that member's session address. Each rejection logs at
+`warn` with the peer, prefixes, offending next-hop tuple, and a `reason`
+token (`foreign_next_hop`, `unverified_link_local_companion`,
+`unscoped_link_local`). If the member legitimately points at another of
+its own connections (same AS, different port), unset the knob for that
+member — the strict pilot only authorizes the session's own address.
