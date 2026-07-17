@@ -1808,14 +1808,16 @@ loser would survive the equal-cost multipath cut.
 
 ### Looking glass (Birdwatcher-shaped REST subset)
 
-For status, peer, and accepted-route views in external looking glass
-frontends, run the external `examples/birdwatcher-adapter` binary. It serves the
-Birdwatcher-shaped endpoints (`/status`, `/protocols/bgp`,
-`/routes/protocol/{id}`, `/routes/peer/{peer}`) from the daemon's gRPC API.
-Alice-LG consumes these shapes, but this is not a usable complete backend:
-Alice-LG also fetches filtered and noexport route views that the adapter does
-not expose yet (the structured reject reasons behind them are available from
-`PolicyService.ListRejectedRoutes`). The
+For status, peer, accepted-route, and filtered-route views in external
+looking glass frontends, run the external `examples/birdwatcher-adapter`
+binary. It serves the Birdwatcher-shaped endpoints (`/status`,
+`/protocols/bgp` with real per-neighbor filtered counts,
+`/routes/protocol/{id}`, `/routes/peer/{peer}`, `/routes/filtered/{id}`)
+from the daemon's gRPC API. The filtered view surfaces the
+`PolicyService.ListRejectedRoutes` reject-retention store with a
+synthesized reject-reason large community per route (mapping table and
+Alice-LG rejection config in the adapter's README). Alice-LG's noexport
+view is not exposed (no NO_EXPORT-excluded route set is retained). The
 in-daemon `[global.telemetry.looking_glass]` server has been removed.
 
 ### EVPN Route Reflector + Bidirectional VTEP

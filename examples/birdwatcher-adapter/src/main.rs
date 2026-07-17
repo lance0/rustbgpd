@@ -1,18 +1,20 @@
 //! Birdwatcher-shaped REST looking glass adapter for rustbgpd.
 //!
-//! Standalone HTTP server that serves the status, peer, and accepted-route
-//! subset consumed by Alice-LG and similar looking glass frontends, sourcing
-//! all data from a running rustbgpd over gRPC. This replaces the removed
-//! in-daemon `[global.telemetry.looking_glass]` server's four endpoints. It is
-//! not a complete Alice-LG backend: filtered/noexport views are not wired up
-//! here yet (the structured reject reasons they need are available from
-//! `PolicyService.ListRejectedRoutes`).
+//! Standalone HTTP server that serves the status, peer, accepted-route, and
+//! filtered-route subset consumed by Alice-LG and similar looking glass
+//! frontends, sourcing all data from a running rustbgpd over gRPC. This
+//! replaces the removed in-daemon `[global.telemetry.looking_glass]` server's
+//! four endpoints and adds the filtered view on top. It is not a complete
+//! Alice-LG backend: noexport views are not wired up.
 //!
 //! **Supported endpoints** (single-table mode):
 //! - `GET /status` — daemon status
-//! - `GET /protocols/bgp` — BGP neighbor list
+//! - `GET /protocols/bgp` — BGP neighbor list (with real filtered counts)
 //! - `GET /routes/protocol/{id}` — received routes by neighbor address
 //! - `GET /routes/peer/{peer}` — received routes by peer IP
+//! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
+//!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
+//!   reject-reason large community (see the README mapping table)
 //!
 //! Response shapes use Birdwatcher field names so Alice-LG can parse this
 //! subset without adapter code. Fields that have no rustbgpd equivalent are
@@ -32,7 +34,7 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[command(
     name = "birdwatcher-adapter",
-    about = "Birdwatcher-shaped status, peer, and accepted-route REST subset, served from rustbgpd's gRPC API"
+    about = "Birdwatcher-shaped status, peer, accepted-route, and filtered-route REST subset, served from rustbgpd's gRPC API"
 )]
 struct Args {
     /// rustbgpd gRPC endpoint, e.g. `http://127.0.0.1:50051`.
@@ -78,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/protocols/bgp", get(protocols_bgp))
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/peer/{peer}", get(routes_peer))
+        .route("/routes/filtered/{id}", get(routes_filtered))
         .with_state(state);
 
     info!(addr = %args.listen, "starting Birdwatcher-shaped looking glass subset");
@@ -157,10 +160,25 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
     // Birdwatcher returns protocols as a map keyed by protocol name.
     // Alice-LG iterates this map and reads fields like `neighbor_address`,
     // `neighbor_as`, `state`, `description`, `routes`, `state_changed`.
+    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.channel.clone());
     let mut protocols = serde_json::Map::new();
     for n in &resp.neighbors {
         let cfg = n.config.clone().unwrap_or_default();
         let protocol_id = format!("bgp_{}", cfg.address).replace(':', "_");
+        // Real filtered count from the session's reject-retention store.
+        // NOT_FOUND = no live session = no store, honestly zero. The store
+        // is bounded ([policy.reject_retention] capacity, default 1024), so
+        // one unpaged call returns everything.
+        let filtered = match policy
+            .list_rejected_routes(proto::ListRejectedRoutesRequest {
+                peer_address: cfg.address.clone(),
+            })
+            .await
+        {
+            Ok(r) => r.into_inner().routes.len(),
+            Err(s) if s.code() == tonic::Code::NotFound => 0,
+            Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
+        };
         protocols.insert(
             protocol_id,
             serde_json::json!({
@@ -175,7 +193,7 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
                     // Same sources the in-daemon server used: current
                     // Adj-RIB-In count and current advertised count.
                     "imported": n.prefixes_received,
-                    "filtered": 0,
+                    "filtered": filtered,
                     "exported": n.prefixes_sent,
                     "preferred": 0
                 }
@@ -242,6 +260,164 @@ async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Va
         "api": api_block(),
         "routes": routes,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /routes/filtered/{id}  — Alice-LG filtered-route view
+//                            →  PolicyService.ListRejectedRoutes
+// ---------------------------------------------------------------------------
+
+async fn routes_filtered(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    // Accepts both the "bgp_<addr>" protocol id and a bare peer IP.
+    let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
+    let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut client = proto::policy_service_client::PolicyServiceClient::new(state.channel.clone());
+    let resp = match client
+        .list_rejected_routes(proto::ListRejectedRoutesRequest {
+            peer_address: peer_addr.to_string(),
+        })
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        // No live session: the session-local retention store is gone.
+        // An empty filtered view is the correct answer, not an error.
+        Err(s) if s.code() == tonic::Code::NotFound => {
+            info!(peer = %peer_addr, "no live session; serving empty filtered view");
+            return Ok(Json(serde_json::json!({
+                "api": api_block(),
+                "routes": [],
+            })));
+        }
+        Err(e) => return Err(bad_gateway("ListRejectedRoutes", &e)),
+    };
+    Ok(Json(filtered_routes_body(&resp, peer_addr)))
+}
+
+/// Build the filtered-view response body from a `ListRejectedRoutes`
+/// reply. The store is bounded (`[policy.reject_retention]` capacity,
+/// default 1024) and the RPC is unpaged — one call returns everything.
+fn filtered_routes_body(resp: &proto::ListRejectedRoutesResponse, peer: IpAddr) -> Value {
+    if !resp.retention_enabled {
+        info!(
+            peer = %peer,
+            "reject retention disabled ([policy.reject_retention]); \
+             serving empty filtered view"
+        );
+    }
+    let routes: Vec<Value> = resp
+        .routes
+        .iter()
+        .map(|r| rejected_route_to_birdwatcher(r, peer))
+        .collect();
+    serde_json::json!({
+        "api": api_block(),
+        "routes": routes,
+    })
+}
+
+/// Synthesized reject-reason large community, `64496:65520:<reason id>`.
+///
+/// Alice-LG identifies why a route was filtered by matching communities
+/// against its `[rejection]`/`[rejection_reasons]` config (the BIRD /
+/// arouteserver convention — reject reasons ride on a large community).
+/// rustbgpd deliberately retains structured reason tokens instead of
+/// polluting the RIB with tag communities, so this adapter synthesizes
+/// the community representation at the edge:
+///
+/// - global administrator `64496`: RFC 5398 documentation ASN — can
+///   never collide with a community a route actually carried;
+/// - function `65520`: the arouteserver reject-reason function value;
+/// - value: a stable id per canonical reason token (`0` = token not
+///   recognized by this adapter build, still marked rejected).
+///
+/// The token vocabulary is release-stable; ids here are append-only.
+fn reject_reason_community(reason: &str) -> [u64; 3] {
+    let id = match reason {
+        "policy_reject" => 1,
+        "otc_route_leak" => 2,
+        "next_hop_ownership" => 3,
+        "as_path_loop" => 4,
+        "rr_loop" => 5,
+        "treat_as_withdraw" => 6,
+        _ => 0,
+    };
+    [64496, 65520, id]
+}
+
+/// Convert a retained rejection to the birdwatcher route JSON shape.
+///
+/// Same shape as `route_to_birdwatcher`, with the reject reason surfaced
+/// twice: as the synthesized large community (what Alice-LG matches) and
+/// as human-readable `reject_reason` / `reject_reason_detail` fields
+/// (extra keys, ignored by parsers that don't know them). Attribute
+/// fields are best-effort — the pre-policy safety gates retain what was
+/// decodable — so absent attributes render as the usual empty sentinels.
+fn rejected_route_to_birdwatcher(route: &proto::RejectedRoute, peer: IpAddr) -> Value {
+    let communities: Vec<Vec<u32>> = route
+        .communities
+        .iter()
+        .map(|c| vec![(*c >> 16) & 0xffff, *c & 0xffff])
+        .collect();
+
+    // Wire large communities the route carried, then the synthesized
+    // reason triplet appended last.
+    let mut large_communities: Vec<Vec<u64>> = route
+        .large_communities
+        .iter()
+        .filter_map(|lc| {
+            let parts: Vec<u64> = lc.split(':').filter_map(|p| p.parse().ok()).collect();
+            (parts.len() == 3).then_some(parts)
+        })
+        .collect();
+    large_communities.push(reject_reason_community(&route.reason).to_vec());
+
+    // The retained AS_PATH is a lossless display string ("65001 {65002
+    // 65003}"); birdwatcher wants an ASN array, so flatten it (AS_SET
+    // members included) best-effort.
+    let as_path: Vec<u32> = route
+        .as_path
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    let from_protocol = format!("bgp_{peer}").replace(':', "_");
+    let age = if route.rejected_at_unix_ns > 0 {
+        format_epoch_secs(u64::try_from(route.rejected_at_unix_ns).unwrap_or(0) / 1_000_000_000)
+    } else {
+        String::new()
+    };
+
+    serde_json::json!({
+        "network": format!("{}/{}", route.prefix, route.prefix_length),
+        "gateway": route.next_hop,
+        "from_protocol": from_protocol,
+        "interface": "",
+        "metric": 0,
+        "age": age,
+        "type": ["BGP", "unicast", "univ"],
+        "primary": false,
+        "learnt_from": peer.to_string(),
+        "reject_reason": route.reason,
+        "reject_reason_detail": route.reason_detail,
+        "rpki_validation": route.rpki_validation,
+        "aspa_validation": route.aspa_validation,
+        "bgp": {
+            // ORIGIN is not retained for rejected routes; empty parses
+            // as unknown in Alice-LG.
+            "origin": "",
+            "as_path": as_path,
+            "next_hop": route.next_hop,
+            "local_pref": 0,
+            "med": 0,
+            "communities": communities,
+            "large_communities": large_communities,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +606,116 @@ mod tests {
         assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
         assert_eq!(json["learnt_from"], "2001:db8::1");
         assert_eq!(json["bgp"]["origin"], "IGP");
+    }
+
+    /// Every canonical reason token maps to its pinned triplet, and an
+    /// unknown (future) token degrades to the generic id 0. The ids are
+    /// part of the adapter's documented Alice-LG contract — changing one
+    /// silently breaks deployed `[rejection_reasons]` configs.
+    #[test]
+    fn reject_reason_community_mapping_is_stable() {
+        for (token, id) in [
+            ("policy_reject", 1),
+            ("otc_route_leak", 2),
+            ("next_hop_ownership", 3),
+            ("as_path_loop", 4),
+            ("rr_loop", 5),
+            ("treat_as_withdraw", 6),
+            ("some_future_token", 0),
+        ] {
+            assert_eq!(
+                reject_reason_community(token),
+                [64496, 65520, id],
+                "token {token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_route_conversion_matches_birdwatcher_shape() {
+        let route = proto::RejectedRoute {
+            prefix: "10.66.0.0".to_string(),
+            prefix_length: 24,
+            reason: "policy_reject".to_string(),
+            reason_detail: "customer-in".to_string(),
+            next_hop: "192.0.2.99".to_string(),
+            // Lossless display form incl. an AS_SET — must flatten.
+            as_path: "65020 {65030 65031}".to_string(),
+            communities: vec![(65001 << 16) | 666],
+            large_communities: vec!["65001:1000:1".to_string()],
+            rpki_validation: "not_found".to_string(),
+            aspa_validation: "unverified".to_string(),
+            // 2026-01-02 03:04:05 UTC
+            rejected_at_unix_ns: 1_767_323_045_000_000_000,
+            ..Default::default()
+        };
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let json = rejected_route_to_birdwatcher(&route, peer);
+
+        assert_eq!(json["network"], "10.66.0.0/24");
+        assert_eq!(json["gateway"], "192.0.2.99");
+        assert_eq!(json["from_protocol"], "bgp_192.0.2.1");
+        assert_eq!(json["learnt_from"], "192.0.2.1");
+        assert_eq!(json["age"], "2026-01-02 03:04:05");
+        assert_eq!(json["reject_reason"], "policy_reject");
+        assert_eq!(json["reject_reason_detail"], "customer-in");
+        assert_eq!(json["rpki_validation"], "not_found");
+        assert_eq!(json["aspa_validation"], "unverified");
+        assert_eq!(
+            json["bgp"]["as_path"],
+            serde_json::json!([65020, 65030, 65031])
+        );
+        assert_eq!(
+            json["bgp"]["communities"],
+            serde_json::json!([[65001, 666]])
+        );
+        // Wire large communities first, synthesized reason triplet last.
+        assert_eq!(
+            json["bgp"]["large_communities"],
+            serde_json::json!([[65001, 1000, 1], [64496, 65520, 1]])
+        );
+    }
+
+    /// Sparse retention entries (pre-policy safety gates keep only what
+    /// was decodable) render with empty sentinels, and the reason
+    /// community is still present.
+    #[test]
+    fn rejected_route_conversion_handles_sparse_entry() {
+        let route = proto::RejectedRoute {
+            prefix: "2001:db8:bad::".to_string(),
+            prefix_length: 48,
+            reason: "treat_as_withdraw".to_string(),
+            ..Default::default()
+        };
+        let peer: IpAddr = "2001:db8::1".parse().unwrap();
+        let json = rejected_route_to_birdwatcher(&route, peer);
+        assert_eq!(json["network"], "2001:db8:bad::/48");
+        assert_eq!(json["from_protocol"], "bgp_2001_db8__1");
+        assert_eq!(json["age"], "");
+        assert_eq!(json["bgp"]["as_path"], serde_json::json!([]));
+        assert_eq!(
+            json["bgp"]["large_communities"],
+            serde_json::json!([[64496, 65520, 6]])
+        );
+    }
+
+    /// Retention disabled and enabled-but-empty both produce the full
+    /// envelope with an empty routes array — configuration facts, not
+    /// errors.
+    #[test]
+    fn filtered_body_empty_and_disabled_cases() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        for enabled in [false, true] {
+            let resp = proto::ListRejectedRoutesResponse {
+                peer_address: peer.to_string(),
+                retention_enabled: enabled,
+                capacity: 1024,
+                routes: vec![],
+            };
+            let body = filtered_routes_body(&resp, peer);
+            assert!(body["api"].is_object(), "{body}");
+            assert_eq!(body["routes"], serde_json::json!([]), "{body}");
+        }
     }
 
     #[test]

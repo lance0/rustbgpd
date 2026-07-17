@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **birdwatcher-adapter: filtered-route views.** The external looking
+  glass adapter now serves `GET /routes/filtered/{id}` from
+  `PolicyService.ListRejectedRoutes` and a real per-neighbor
+  `routes.filtered` count on `GET /protocols/bgp` (previously a `0`
+  sentinel). Each filtered route carries a synthesized reject-reason
+  large community `64496:65520:<id>` — one stable id per canonical
+  reason token, matchable by Alice-LG's `[rejection]` /
+  `[rejection_reasons]` config — plus human-readable `reject_reason` /
+  `reject_reason_detail` fields. Retention disabled and no-live-session
+  both serve an empty view (configuration facts, not errors). The
+  mapping table and an Alice-LG config snippet are in the adapter
+  README.
+
 ### Fixed
 
 - **Post-flap re-announce latency: initial table dumps no longer
