@@ -82,6 +82,6 @@ jobs:
       # and runs the four checks against deny.toml. Pinned to a
       # release tag for reproducibility, matching the audit job.
       - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           command: check advisories bans licenses sources

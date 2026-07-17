@@ -1602,9 +1602,18 @@ fn build_warm_checkpoint_plan(
 }
 
 fn effective_config_sha256(effective_redacted_toml: &str) -> String {
+    use std::fmt::Write as _;
     let mut digest = Sha256::new();
     digest.update(effective_redacted_toml.as_bytes());
-    format!("{:x}", digest.finalize())
+    // sha2 0.11 (digest 0.11) dropped LowerHex on the output array;
+    // render the hex pairwise. Cold path (config-hash computation).
+    digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 async fn publish_warm_checkpoint(

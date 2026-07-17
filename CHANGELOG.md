@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
+  effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
+  zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
+  cargo-deny-action 2.1.1 in the audit workflow. `cargo audit` clean.
+
 ### Added
 
 - **birdwatcher-adapter: filtered-route views.** The external looking
