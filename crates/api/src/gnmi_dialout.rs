@@ -11,8 +11,8 @@
 //! the exact `SubscribeResponse` sequence a dial-in STREAM subscription
 //! would have produced (initial snapshot, `sync_response`, then updates).
 //! No update-generation code is duplicated:
-//! [`GnmiService::spawn_stream_subscription`] drives the same
-//! `SAMPLE` / `ON_CHANGE` tasks the Subscribe server uses.
+//! `GnmiService::spawn_stream_subscription` (crate-internal) drives the
+//! same `SAMPLE` / `ON_CHANGE` tasks the Subscribe server uses.
 //!
 //! Robustness contract: a collector being down never affects the daemon.
 //! Each target runs an independent reconnect loop with capped exponential
