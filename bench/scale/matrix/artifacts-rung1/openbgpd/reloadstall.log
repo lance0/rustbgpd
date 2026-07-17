@@ -1,0 +1,29 @@
+# reloadstall peers=20 changed_peers=20 stable_peers=0 prefixes=20000 per_peer=1000 pid=0
+established 20 at 1.3s
+converged (>= 19000/observer) at 1.7s rss_mib=0
+control_maxgap_ms: p50=37.56 p95=46.16 max=49.89 (n=20)
+control_rss_mib 0
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1784252248938281 policy=/tmp/ixp-openbgpd/gen-b.conf
+reload request sent.
+request processed
+reload 1 completion_s: p50=0.26 p95=0.26 max=0.26 (n=20)
+reload 1 maxgap_ms: p50=31.90 p95=38.05 max=41.73 (n=20)
+reload 1 all_observer_maxgap_ms: p50=31.90 p95=38.05 max=41.73 (n=20)
+reload 1 first_update_ms: p50=0.62 p95=0.66 max=12.29 (n=20)
+reload 1 rss_mib before=0 after=0 comms_sample=[4292610000]
+reload 1 sessions_up 20/20
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,20,20,0,20000,0.255897,0.255929,0.255940,31.902,38.049,41.726,31.902,38.049,41.726,0.623,0.658,12.288,0,0,0,20,0
+reload 2 reload_cmd wall_us=1784252269292939 policy=/tmp/ixp-openbgpd/gen-a.conf
+reload request sent.
+request processed
+reload 2 completion_s: p50=0.26 p95=0.26 max=0.26 (n=20)
+reload 2 maxgap_ms: p50=26.18 p95=26.50 max=36.69 (n=20)
+reload 2 all_observer_maxgap_ms: p50=26.18 p95=26.50 max=36.69 (n=20)
+reload 2 first_update_ms: p50=26.18 p95=26.24 max=26.50 (n=20)
+reload 2 rss_mib before=0 after=0 comms_sample=[4292609000]
+reload 2 sessions_up 20/20
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,20,20,0,20000,0.257154,0.257183,0.257186,26.184,26.503,36.691,26.184,26.503,36.691,26.184,26.237,26.503,0,0,0,20,0
+done rss_mib=0

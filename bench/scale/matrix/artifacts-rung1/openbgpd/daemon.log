@@ -1,0 +1,302 @@
+bgplgd: sock_user: haproxy
+startup
+PF_KEY not available, disabling ipsec
+ktable_new: rdomain_0 with rtableid 0 rdomain 0
+rtr engine ready
+session engine ready
+rib_new: Adj-RIB-In -> 0
+route decision engine ready
+rib_new: Loc-RIB -> 1
+listening on (unknown)
+SE reconfigured
+neighbor 127.1.0.1 (stub0): state change None -> Idle, reason: None
+neighbor 127.1.0.2 (stub1): state change None -> Idle, reason: None
+neighbor 127.1.0.3 (stub2): state change None -> Idle, reason: None
+neighbor 127.1.0.4 (stub3): state change None -> Idle, reason: None
+neighbor 127.1.0.5 (stub4): state change None -> Idle, reason: None
+neighbor 127.1.0.6 (stub5): state change None -> Idle, reason: None
+neighbor 127.1.0.7 (stub6): state change None -> Idle, reason: None
+neighbor 127.1.0.8 (stub7): state change None -> Idle, reason: None
+neighbor 127.1.0.9 (stub8): state change None -> Idle, reason: None
+neighbor 127.1.0.10 (stub9): state change None -> Idle, reason: None
+neighbor 127.1.0.11 (stub10): state change None -> Idle, reason: None
+neighbor 127.1.0.12 (stub11): state change None -> Idle, reason: None
+neighbor 127.1.0.13 (stub12): state change None -> Idle, reason: None
+neighbor 127.1.0.14 (stub13): state change None -> Idle, reason: None
+neighbor 127.1.0.15 (stub14): state change None -> Idle, reason: None
+neighbor 127.1.0.16 (stub15): state change None -> Idle, reason: None
+neighbor 127.1.0.17 (stub16): state change None -> Idle, reason: None
+neighbor 127.1.0.18 (stub17): state change None -> Idle, reason: None
+neighbor 127.1.0.19 (stub18): state change None -> Idle, reason: None
+neighbor 127.1.0.20 (stub19): state change None -> Idle, reason: None
+out filter change: reloading peer neighbor 10.0.0.1 (LOCAL)
+RDE reconfigured
+RTR engine reconfigured
+running softreconfig in
+softreconfig in done
+starting softreconfig out for rib Loc-RIB
+softreconfig out done for Loc-RIB
+RDE soft reconfiguration done
+bgplgd: socket: /var/lib/haproxy/run/bgplgd.sock
+bgplgd: cgi_user: bgplgd
+neighbor 127.1.0.1 (stub0): state change Idle -> Active, reason: Start
+neighbor 127.1.0.1 (stub0): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.2 (stub1): state change Idle -> Active, reason: Start
+neighbor 127.1.0.2 (stub1): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.1 (stub0): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.5 (stub4): state change Idle -> Active, reason: Start
+neighbor 127.1.0.5 (stub4): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.2 (stub1): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.4 (stub3): state change Idle -> Active, reason: Start
+neighbor 127.1.0.4 (stub3): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.1 (stub0): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.2 (stub1): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.5 (stub4): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.7 (stub6): state change Idle -> Active, reason: Start
+neighbor 127.1.0.7 (stub6): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.4 (stub3): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.5 (stub4): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.3 (stub2): state change Idle -> Active, reason: Start
+neighbor 127.1.0.3 (stub2): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.4 (stub3): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.7 (stub6): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.13 (stub12): state change Idle -> Active, reason: Start
+neighbor 127.1.0.13 (stub12): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.3 (stub2): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.7 (stub6): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.12 (stub11): state change Idle -> Active, reason: Start
+neighbor 127.1.0.12 (stub11): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.3 (stub2): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.13 (stub12): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.12 (stub11): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.13 (stub12): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.12 (stub11): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.15 (stub14): state change Idle -> Active, reason: Start
+neighbor 127.1.0.15 (stub14): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.10 (stub9): state change Idle -> Active, reason: Start
+neighbor 127.1.0.10 (stub9): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.15 (stub14): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.6 (stub5): state change Idle -> Active, reason: Start
+neighbor 127.1.0.6 (stub5): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.10 (stub9): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.6 (stub5): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.10 (stub9): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.15 (stub14): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.6 (stub5): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.17 (stub16): state change Idle -> Active, reason: Start
+neighbor 127.1.0.17 (stub16): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.16 (stub15): state change Idle -> Active, reason: Start
+neighbor 127.1.0.16 (stub15): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.17 (stub16): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.14 (stub13): state change Idle -> Active, reason: Start
+neighbor 127.1.0.14 (stub13): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.16 (stub15): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.18 (stub17): state change Idle -> Active, reason: Start
+neighbor 127.1.0.18 (stub17): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.14 (stub13): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.17 (stub16): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.8 (stub7): state change Idle -> Active, reason: Start
+neighbor 127.1.0.8 (stub7): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.14 (stub13): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.16 (stub15): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.18 (stub17): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.20 (stub19): state change Idle -> Active, reason: Start
+neighbor 127.1.0.20 (stub19): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.8 (stub7): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.18 (stub17): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.19 (stub18): state change Idle -> Active, reason: Start
+neighbor 127.1.0.19 (stub18): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.8 (stub7): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.20 (stub19): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.19 (stub18): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.20 (stub19): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.19 (stub18): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.11 (stub10): state change Idle -> Active, reason: Start
+neighbor 127.1.0.11 (stub10): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.9 (stub8): state change Idle -> Active, reason: Start
+neighbor 127.1.0.9 (stub8): state change Active -> OpenSent, reason: Connection opened
+neighbor 127.1.0.11 (stub10): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.9 (stub8): state change OpenSent -> OpenConfirm, reason: OPEN message received
+neighbor 127.1.0.11 (stub10): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+neighbor 127.1.0.9 (stub8): state change OpenConfirm -> Established, reason: KEEPALIVE message received
+nexthop 10.9.0.1 now valid: via 192.168.4.1
+nexthop 10.9.0.2 now valid: via 192.168.4.1
+nexthop 10.9.0.3 now valid: via 192.168.4.1
+nexthop 10.9.0.4 now valid: via 192.168.4.1
+nexthop 10.9.0.5 now valid: via 192.168.4.1
+nexthop 10.9.0.6 now valid: via 192.168.4.1
+nexthop 10.9.0.7 now valid: via 192.168.4.1
+nexthop 10.9.0.8 now valid: via 192.168.4.1
+nexthop 10.9.0.9 now valid: via 192.168.4.1
+nexthop 10.9.0.10 now valid: via 192.168.4.1
+nexthop 10.9.0.11 now valid: via 192.168.4.1
+nexthop 10.9.0.12 now valid: via 192.168.4.1
+nexthop 10.9.0.13 now valid: via 192.168.4.1
+nexthop 10.9.0.14 now valid: via 192.168.4.1
+nexthop 10.9.0.15 now valid: via 192.168.4.1
+nexthop 10.9.0.16 now valid: via 192.168.4.1
+nexthop 10.9.0.1 update starting
+nexthop 10.9.0.2 update starting
+nexthop 10.9.0.3 update starting
+nexthop 10.9.0.4 update starting
+nexthop 10.9.0.5 update starting
+nexthop 10.9.0.6 update starting
+nexthop 10.9.0.7 update starting
+nexthop 10.9.0.8 update starting
+nexthop 10.9.0.9 update starting
+nexthop 10.9.0.10 update starting
+nexthop 10.9.0.11 update starting
+nexthop 10.9.0.12 update starting
+nexthop 10.9.0.13 update starting
+nexthop 10.9.0.14 update starting
+nexthop 10.9.0.15 update starting
+nexthop 10.9.0.17 now valid: via 192.168.4.1
+nexthop 10.9.0.16 update starting
+nexthop 10.9.0.18 now valid: via 192.168.4.1
+nexthop 10.9.0.19 now valid: via 192.168.4.1
+nexthop 10.9.0.20 now valid: via 192.168.4.1
+nexthop 10.9.0.17 update starting
+nexthop 10.9.0.18 update starting
+nexthop 10.9.0.19 update starting
+nexthop 10.9.0.20 update starting
+nexthop 127.0.0.1 now valid: via 192.168.4.1
+nexthop 10.9.0.16 update finished
+nexthop 10.9.0.20 update finished
+nexthop 10.9.0.19 update finished
+nexthop 10.9.0.18 update finished
+nexthop 10.9.0.17 update finished
+nexthop 10.9.0.15 update finished
+nexthop 10.9.0.14 update finished
+nexthop 10.9.0.13 update finished
+nexthop 10.9.0.12 update finished
+nexthop 10.9.0.11 update finished
+nexthop 10.9.0.10 update finished
+nexthop 10.9.0.9 update finished
+nexthop 10.9.0.8 update finished
+nexthop 10.9.0.7 update finished
+nexthop 10.9.0.6 update finished
+nexthop 10.9.0.5 update finished
+nexthop 10.9.0.4 update finished
+nexthop 10.9.0.3 update finished
+nexthop 10.9.0.2 update finished
+nexthop 10.9.0.1 update finished
+rereading config
+SE reconfigured
+out filter change: reloading peer neighbor 10.0.0.1 (LOCAL)
+out filter change: reloading peer neighbor 127.1.0.1 (stub0)
+RTR engine reconfigured
+out filter change: reloading peer neighbor 127.1.0.2 (stub1)
+out filter change: reloading peer neighbor 127.1.0.3 (stub2)
+out filter change: reloading peer neighbor 127.1.0.4 (stub3)
+out filter change: reloading peer neighbor 127.1.0.5 (stub4)
+out filter change: reloading peer neighbor 127.1.0.6 (stub5)
+out filter change: reloading peer neighbor 127.1.0.7 (stub6)
+out filter change: reloading peer neighbor 127.1.0.8 (stub7)
+out filter change: reloading peer neighbor 127.1.0.9 (stub8)
+out filter change: reloading peer neighbor 127.1.0.10 (stub9)
+out filter change: reloading peer neighbor 127.1.0.11 (stub10)
+out filter change: reloading peer neighbor 127.1.0.12 (stub11)
+out filter change: reloading peer neighbor 127.1.0.13 (stub12)
+out filter change: reloading peer neighbor 127.1.0.14 (stub13)
+out filter change: reloading peer neighbor 127.1.0.15 (stub14)
+out filter change: reloading peer neighbor 127.1.0.16 (stub15)
+out filter change: reloading peer neighbor 127.1.0.17 (stub16)
+out filter change: reloading peer neighbor 127.1.0.18 (stub17)
+out filter change: reloading peer neighbor 127.1.0.19 (stub18)
+out filter change: reloading peer neighbor 127.1.0.20 (stub19)
+filter change: reloading RIB Loc-RIB
+RDE reconfigured
+running softreconfig in
+softreconfig in done
+starting softreconfig out for rib Loc-RIB
+softreconfig out done for Loc-RIB
+RDE soft reconfiguration done
+rereading config
+SE reconfigured
+out filter change: reloading peer neighbor 10.0.0.1 (LOCAL)
+RTR engine reconfigured
+out filter change: reloading peer neighbor 127.1.0.1 (stub0)
+out filter change: reloading peer neighbor 127.1.0.2 (stub1)
+out filter change: reloading peer neighbor 127.1.0.3 (stub2)
+out filter change: reloading peer neighbor 127.1.0.4 (stub3)
+out filter change: reloading peer neighbor 127.1.0.5 (stub4)
+out filter change: reloading peer neighbor 127.1.0.6 (stub5)
+out filter change: reloading peer neighbor 127.1.0.7 (stub6)
+out filter change: reloading peer neighbor 127.1.0.8 (stub7)
+out filter change: reloading peer neighbor 127.1.0.9 (stub8)
+out filter change: reloading peer neighbor 127.1.0.10 (stub9)
+out filter change: reloading peer neighbor 127.1.0.11 (stub10)
+out filter change: reloading peer neighbor 127.1.0.12 (stub11)
+out filter change: reloading peer neighbor 127.1.0.13 (stub12)
+out filter change: reloading peer neighbor 127.1.0.14 (stub13)
+out filter change: reloading peer neighbor 127.1.0.15 (stub14)
+out filter change: reloading peer neighbor 127.1.0.16 (stub15)
+out filter change: reloading peer neighbor 127.1.0.17 (stub16)
+out filter change: reloading peer neighbor 127.1.0.18 (stub17)
+out filter change: reloading peer neighbor 127.1.0.19 (stub18)
+out filter change: reloading peer neighbor 127.1.0.20 (stub19)
+filter change: reloading RIB Loc-RIB
+RDE reconfigured
+running softreconfig in
+softreconfig in done
+starting softreconfig out for rib Loc-RIB
+softreconfig out done for Loc-RIB
+RDE soft reconfiguration done
+neighbor 127.1.0.20 (stub19): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.14 (stub13): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.17 (stub16): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.18 (stub17): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.19 (stub18): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.4 (stub3): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.5 (stub4): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.6 (stub5): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.7 (stub6): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.8 (stub7): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.9 (stub8): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.10 (stub9): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.11 (stub10): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.12 (stub11): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.13 (stub12): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.15 (stub14): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.16 (stub15): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.1 (stub0): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.2 (stub1): state change Established -> Idle, reason: Connection closed
+neighbor 127.1.0.3 (stub2): state change Established -> Idle, reason: Connection closed
+peer closed imsg connection
+peer closed imsg connection
+peer closed imsg connection
+RTR: Lost connection to RDE
+main: Lost connection to RDE
+SE: Lost connection to RDE
+peer closed imsg connection
+ktable_destroy: freeing ktable Loc-RIB rtableid 0
+peer closed imsg connection
+SE: Lost connection to RDE control
+RTR: Lost connection to parent
+peer closed imsg connection
+rtr engine exiting
+SE: Lost connection to parent
+neighbor 127.1.0.1 (stub0): session stop: Cease, administratively down
+neighbor 127.1.0.2 (stub1): session stop: Cease, administratively down
+neighbor 127.1.0.3 (stub2): session stop: Cease, administratively down
+neighbor 127.1.0.4 (stub3): session stop: Cease, administratively down
+neighbor 127.1.0.5 (stub4): session stop: Cease, administratively down
+neighbor 127.1.0.6 (stub5): session stop: Cease, administratively down
+neighbor 127.1.0.7 (stub6): session stop: Cease, administratively down
+neighbor 127.1.0.8 (stub7): session stop: Cease, administratively down
+neighbor 127.1.0.9 (stub8): session stop: Cease, administratively down
+neighbor 127.1.0.10 (stub9): session stop: Cease, administratively down
+neighbor 127.1.0.11 (stub10): session stop: Cease, administratively down
+neighbor 127.1.0.12 (stub11): session stop: Cease, administratively down
+neighbor 127.1.0.13 (stub12): session stop: Cease, administratively down
+neighbor 127.1.0.14 (stub13): session stop: Cease, administratively down
+neighbor 127.1.0.15 (stub14): session stop: Cease, administratively down
+neighbor 127.1.0.16 (stub15): session stop: Cease, administratively down
+neighbor 127.1.0.17 (stub16): session stop: Cease, administratively down
+neighbor 127.1.0.18 (stub17): session stop: Cease, administratively down
+neighbor 127.1.0.19 (stub18): session stop: Cease, administratively down
+neighbor 127.1.0.20 (stub19): session stop: Cease, administratively down
+session engine exiting
+waiting for children to terminate
+route decision engine terminated; signal 11
+terminating

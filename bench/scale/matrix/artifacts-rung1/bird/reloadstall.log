@@ -1,0 +1,31 @@
+# reloadstall peers=20 changed_peers=20 stable_peers=0 prefixes=20000 per_peer=1000 pid=0
+established 20 at 1.1s
+converged (>= 19000/observer) at 1.3s rss_mib=0
+control_maxgap_ms: p50=23.21 p95=42.71 max=43.35 (n=20)
+control_rss_mib 0
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1784251870160092 policy=/tmp/ixp-bird/gen-b.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 1 completion_s: p50=0.17 p95=0.31 max=0.32 (n=20)
+reload 1 maxgap_ms: p50=131.78 p95=239.51 max=251.86 (n=20)
+reload 1 all_observer_maxgap_ms: p50=135.86 p95=239.51 max=251.86 (n=20)
+reload 1 first_update_ms: p50=8.26 p95=27.60 max=27.88 (n=20)
+reload 1 rss_mib before=0 after=0 comms_sample=[4292610000]
+reload 1 sessions_up 20/20
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,20,20,0,20000,0.172633,0.308629,0.320643,131.776,239.511,251.857,135.856,239.511,251.857,8.264,27.597,27.880,0,0,0,20,0
+reload 2 reload_cmd wall_us=1784251890515641 policy=/tmp/ixp-bird/gen-a.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 2 completion_s: p50=0.18 p95=0.28 max=0.31 (n=20)
+reload 2 maxgap_ms: p50=101.91 p95=210.86 max=235.50 (n=20)
+reload 2 all_observer_maxgap_ms: p50=139.84 p95=210.86 max=235.50 (n=20)
+reload 2 first_update_ms: p50=31.09 p95=31.13 max=31.26 (n=20)
+reload 2 rss_mib before=0 after=0 comms_sample=[4292609000]
+reload 2 sessions_up 20/20
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,20,20,0,20000,0.175546,0.284045,0.309240,101.909,210.863,235.496,139.838,210.863,235.496,31.087,31.131,31.264,0,0,0,20,0
+done rss_mib=0

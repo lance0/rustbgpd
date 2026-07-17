@@ -1,0 +1,126 @@
+bird: 2026-07-17 01:30:32.883 [0000] <WARN> nh_glue.ipv4: Ignoring bogus route 127.1.0.0/16 
+bird: 2026-07-17 01:30:32.883 [0000] <INFO> Started
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reconfiguring
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer0.ipv4 for import
+bird: 2026-07-17 01:31:10.206 [0000] <DBG> peer0.ipv4: reloading
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer0.ipv4 for export
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer1.ipv4 for import
+bird: 2026-07-17 01:31:10.206 [0000] <DBG> peer1.ipv4: reloading
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer1.ipv4 for export
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer2.ipv4 for import
+bird: 2026-07-17 01:31:10.206 [0000] <DBG> peer2.ipv4: reloading
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer2.ipv4 for export
+bird: 2026-07-17 01:31:10.206 [0000] <INFO> Reloading channel peer3.ipv4 for import
+bird: 2026-07-17 01:31:10.206 [0000] <DBG> peer3.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer3.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer4.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer4.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer4.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer5.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer5.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer5.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer6.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer6.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer6.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer7.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer7.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer7.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer8.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer8.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer8.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer9.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer9.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer9.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer10.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer10.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer10.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer11.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer11.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer11.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer12.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer12.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer12.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer13.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer13.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer13.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer14.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer14.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer14.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer15.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer15.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer15.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer16.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer16.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer16.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer17.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer17.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer17.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer18.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer18.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer18.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer19.ipv4 for import
+bird: 2026-07-17 01:31:10.207 [0000] <DBG> peer19.ipv4: reloading
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reloading channel peer19.ipv4 for export
+bird: 2026-07-17 01:31:10.207 [0000] <INFO> Reconfigured
+bird: 2026-07-17 01:31:30.567 [0000] <INFO> Reconfiguring
+bird: 2026-07-17 01:31:30.567 [0000] <INFO> Reloading channel peer0.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer0.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer0.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer1.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer1.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer1.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer2.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer2.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer2.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer3.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer3.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer3.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer4.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer4.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer4.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer5.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer5.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer5.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer6.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer6.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer6.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer7.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer7.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer7.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer8.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer8.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer8.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer9.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer9.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer9.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer10.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer10.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer10.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer11.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer11.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer11.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer12.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer12.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer12.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer13.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer13.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer13.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer14.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer14.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer14.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer15.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer15.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer15.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer16.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer16.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer16.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer17.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer17.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer17.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer18.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer18.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer18.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer19.ipv4 for import
+bird: 2026-07-17 01:31:30.568 [0000] <DBG> peer19.ipv4: reloading
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reloading channel peer19.ipv4 for export
+bird: 2026-07-17 01:31:30.568 [0000] <INFO> Reconfigured
