@@ -118,25 +118,35 @@ adds PE/MPLS/dataplane breadth. Three tracks:
 **1. Route-server adoption pipeline.** What keeps IXPs on BIRD+arouteserver is
 the data-driven filtering/tooling wrapper, not the daemon.
 - IRR/PeeringDB-driven prefix filtering — MANRS Action 1, the #1 adoption
-  blocker. Lazy-leverage: become a native arouteserver *output target* rather
-  than rebuild IRR/PeeringDB/RPKI ingestion (LAN-467).
-- RFC 7947/8195 community-based announcement control (announce / prepend /
-  no-export per target peer) — table-stakes at every major IX (LAN-466).
+  blocker. **Direction decided (ADR-0110, 2026-07-17):** hybrid — an external
+  renderer consuming `arouteserver template-context` output feeds the existing
+  parse-then-swap reload seam (inherits the whole industry ingest pipeline, no
+  upstream gate); native ingestion demand-gated. Phase 1 = the renderer + the
+  `route.origin-as` rpol accessor + a differential BIRD/rustbgpd interop lab
+  (LAN-467, umbrella).
+- ~~RFC 7947/8195 community-based announcement control~~ **Shipped (#968):**
+  per-target announce / announce-only / announce-to-none / prepend via
+  standard + large control communities, egress scrub, rs-client-default knob
+  (LAN-466).
 - Reject-reason retention → Alice-LG looking glass — the member-support
   surface; the reasons are already computed by the explain ladder (LAN-472).
-- Ship ADR-0107 NEXT_HOP self-consistency (`strict_peer`) — the RFC 7948 §4.8
-  next-hop-hijack guard, already designed (LAN-473).
+- ~~Ship ADR-0107 NEXT_HOP self-consistency~~ **Shipped (#964):**
+  `next_hop_ownership = "strict_peer"` fail-closed ingress gate; ADR-0107
+  Accepted; same-AS mode stays deferred behind the fleet inventory (LAN-473).
 
 **2. Route-reflector robustness + fanout observability.**
-- General RFC 7606 treat-as-withdraw — the top RR gap and a robustness
-  *defect*: one malformed attribute resets a whole session today, a reset-storm
-  amplifier at fanout scale; the treat-as-withdraw primitive already exists
-  (LAN-465). **First move once v0.52 ships** — in-niche, bounded, and the one
-  thing every competitor already has that we don't.
-- Fanout-observability trio — per-update-group / queue-depth metrics →
-  slow-peer detection → gNMI dial-out (LAN-469 / LAN-470 / LAN-471). Turns the
-  existing observability lead into large-network operability the incumbents
-  don't provide ("which client is slow, and why did convergence stall").
+- ~~General RFC 7606 treat-as-withdraw~~ **Shipped (#965):** malformed
+  attributes now treat-as-withdraw / attribute-discard per §7 across all
+  families with the session staying Established; session reset only where the
+  NLRI is untrustworthy. Adversarially reviewed pre-merge (LAN-465).
+  Follow-ups: per-disposition counters, interop-lab malformed-attr proof.
+- Fanout-observability trio: ~~per-update-group / queue-depth metrics~~
+  **Shipped (#962)** (`bgp_peer_outbound_queue_depth`, `bgp_peer_update_group`)
+  → ~~slow-peer detection~~ **Shipped (#967)** (threshold+duration detector,
+  `bgp_peer_slow`, neighbor-state flag, opt-in own-group isolation via a
+  `SlowPeer` membership) → gNMI dial-out still open (LAN-471). The operator
+  triage chain "which client is slow, which group is it in, is it isolated"
+  now exists end-to-end; dial-out streams it to a collector.
 
 **3. Release hygiene (timing-critical).** Absorb `#[non_exhaustive]` onto the
 growing wire/fsm protocol enums into the in-flight 0.15.0 breaking cut, rather
