@@ -107,14 +107,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   implemented (draft-ietf-grow-ixp-ext-comms). Matched control
   communities are scrubbed from the outbound announcement toward
   enabled sessions; everyone else keeps byte-level transparency.
-  Per-neighbor / per-group knob `rs_control_communities`, default off
-  (opt-in): enabling a session excludes it from update-group sharing,
-  which at large fanout is per-peer Adj-RIB-Out + encode. Enforcement is
-  a per-target export-staging decision (suppression sits beside the
-  RFC 1997 gates with its own `rs_control` explain rung; Add-Path and
-  per-client-best exclude suppressed candidates before ranking), so
-  enabled sessions ride the ungrouped per-peer path — the new
-  `rs_control_communities` update-group disqualifier reason.
+  Per-neighbor / per-group knob `rs_control_communities`, default on
+  for `route_server_client` sessions and off otherwise. Enforcement is
+  a per-target decision (suppression sits beside the RFC 1997 gates
+  with its own `rs_control` explain rung; Add-Path and per-client-best
+  exclude suppressed candidates before ranking). The filter is
+  route-granular at emit (ADR-0101 Decision 3): enabled sessions stay
+  in shared update-groups, untagged routes — the overwhelming
+  majority — ride the shared staged emission byte-identically, and
+  only routes carrying a control-form community diverge per target
+  (suppression/prepend/scrub against each target's ASN) at the group
+  emit seams: the source-flip matrix walk, dirty/regroup resync, and
+  the initial-dump and route-refresh replays. This is what makes the
+  rs-client default safe: a session-level update-group exclusion
+  would cost per-peer Adj-RIB-Out + per-peer encode for every enabled
+  session (~1.3 GiB → >100 GiB RSS on a 700-client full-table route
+  server when tried fleet-wide).
 
 - **Per-peer fanout observability gauges.**
   `bgp_peer_outbound_queue_depth{peer}` reports the coalesced update

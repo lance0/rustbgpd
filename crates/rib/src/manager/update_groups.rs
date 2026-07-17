@@ -131,10 +131,6 @@ pub(super) enum GroupMembership {
     /// per-target (the member sourcing the Loc-RIB best gets the
     /// runner-up), so no shared staged winner exists.
     PerClientBest,
-    /// RFC 7947 §2.3.2 route-server control communities interpreted:
-    /// announce/prepend/scrub outcomes are keyed on the TARGET peer's
-    /// ASN per route, so no shared staged winner exists.
-    RsControlCommunities,
     /// ORR vantage bound: per-vantage winners are per-target
     /// (ADR-0095 Decision 5).
     OrrVantage,
@@ -156,7 +152,6 @@ impl GroupMembership {
             Self::PolicyPeerContext => "policy_peer_context".to_string(),
             Self::AddPathSend => "add_path_send".to_string(),
             Self::PerClientBest => "per_client_best".to_string(),
-            Self::RsControlCommunities => "rs_control_communities".to_string(),
             Self::OrrVantage => "orr_vantage".to_string(),
             Self::OrfInstalled => "orf_installed".to_string(),
             Self::SlowPeer => "slow_peer".to_string(),
@@ -324,6 +319,24 @@ impl GroupStageOutput {
         !self.exceptions.contains(&member)
     }
 
+    /// Whether any announce delta of this pass carries a control-form
+    /// community for `rs_asn` (LAN-474). A pass with none — the
+    /// overwhelming majority — lets `rs_control_communities` members
+    /// ride the shared emission untouched; a tagged pass drops them to
+    /// the per-member matrix walk where suppression/prepend/scrub
+    /// diverge per target. Callers memoize per (group, `rs_asn`).
+    pub(in crate::manager) fn has_tagged_route(&self, rs_asn: u32) -> bool {
+        self.deltas.iter().any(|delta| {
+            delta.new.as_ref().is_some_and(|(route, _)| {
+                super::distribution::rs_control::rs_control_route_tagged(
+                    route.communities(),
+                    route.large_communities(),
+                    rs_asn,
+                )
+            })
+        })
+    }
+
     /// Member-scoped withdraw keys of this pass that [`Self::withdrawn_keys`]
     /// (the tombstone feed) never records: the source-flip arm — the
     /// member is the delta's NEW source and the displaced entry was
@@ -432,13 +445,23 @@ impl GroupEvalAccumulator {
 /// `nh_override_flags` stays aligned with `announce` by pushing in the
 /// same arm. A free function so the risk-2 unit matrix can drive it
 /// directly.
+///
+/// `rs_control` is `(rs_asn, member_asn)` for an
+/// `rs_control_communities` member (LAN-474): a tagged route the
+/// control communities suppress toward this member emits a withdraw of
+/// whatever other-sourced entry the member may hold (over-withdraw is
+/// the safe direction), and an announced tagged route is rewritten
+/// (prepend + scrub) per target. `None` — or an untagged route — is
+/// byte-identical to the shared emission.
 pub(in crate::manager) fn emit_group_deltas_for_member(
     deltas: &[GroupDelta],
     member: IpAddr,
+    rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
     nh_override_flags: &mut Vec<Option<NextHopAction>>,
 ) {
+    use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_route_suppressed};
     for delta in deltas {
         match &delta.new {
             Some((route, nh)) => {
@@ -453,9 +476,18 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                     if delta.old_source.is_some_and(|source| source != member) {
                         withdraw.push((delta.prefix, delta.path_id));
                     }
+                } else if rs_control_route_suppressed(route, rs_control) {
+                    // RFC 7947 §2.3.2 per-target suppression: same
+                    // matrix shape as the split-horizon arm — displace
+                    // whatever other-sourced entry the member may hold.
+                    if delta.old_source.is_some_and(|source| source != member) {
+                        withdraw.push((delta.prefix, delta.path_id));
+                    }
                 } else {
+                    let mut route = route.clone();
+                    rs_control_route_rewrite(&mut route, rs_control);
                     nh_override_flags.push(nh.clone());
-                    announce.push(route.clone());
+                    announce.push(route);
                 }
             }
             None => {
@@ -979,15 +1011,27 @@ impl GroupRibOut {
     fn member_view_snapshot(
         &self,
         member: IpAddr,
+        rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FxHashMap<(Prefix, u32), Route> {
+        use super::distribution::rs_control::{
+            rs_control_route_rewrite, rs_control_route_suppressed,
+        };
         self.table
             .iter()
             .filter(|route| {
                 route.peer != member
                     && !rejected.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                    // LAN-474: a key suppressed toward the member was
+                    // never on its wire — the snapshot records true
+                    // wire state, not the shared table.
+                    && !rs_control_route_suppressed(route, rs_control)
             })
-            .map(|route| ((route.prefix, route.path_id), route.clone()))
+            .map(|route| {
+                let mut route = route.clone();
+                rs_control_route_rewrite(&mut route, rs_control);
+                ((route.prefix, route.path_id), route)
+            })
             .collect()
     }
 
@@ -1377,9 +1421,11 @@ impl RibManager {
                     &mut target,
                     group.is_ebgp,
                     group.interpret_rfc1997,
-                    // Control-community sessions are classifier-disqualified
-                    // from grouping (`RsControlCommunities`), so a group
-                    // member never interprets them.
+                    // Group staging is rs-control-agnostic: control
+                    // communities diverge per TARGET, so they are
+                    // enforced at the member-emit seams (LAN-474 —
+                    // matrix walk, resync, join/refresh replay), never
+                    // against the shared staged winner.
                     None,
                     group.is_rr_client,
                     self.cluster_id,
@@ -1621,6 +1667,15 @@ impl RibManager {
     ///   member no longer retains;
     /// - force-only (RFC 8326 `GShut` refresh): re-announce everything,
     ///   bypassing the equality diff, withdraw nothing.
+    ///
+    /// `rs_control` is `(rs_asn, member_asn)` for an
+    /// `rs_control_communities` member (LAN-474): table entries the
+    /// control communities suppress toward this member are skipped —
+    /// and withdrawn when the member may have them on the wire (plain
+    /// dirty, or a baseline that records the key) — and announced
+    /// entries are rewritten (prepend + scrub) per target. Baselines
+    /// snapshot through the same filter ([`GroupRibOut::member_view_snapshot`]),
+    /// so the regroup one-shot diff compares wire state to wire state.
     #[expect(
         clippy::too_many_arguments,
         reason = "the resync assembly takes the member's full pending-withdraw context"
@@ -1628,6 +1683,7 @@ impl RibManager {
     pub(in crate::manager) fn assemble_group_resync(
         group: &GroupRibOut,
         member: IpAddr,
+        rs_control: Option<(u32, u32)>,
         is_dirty: bool,
         is_force: bool,
         baseline: Option<&FxHashMap<(Prefix, u32), Route>>,
@@ -1636,30 +1692,47 @@ impl RibManager {
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
     ) {
+        use super::distribution::rs_control::{
+            rs_control_route_rewrite, rs_control_route_suppressed,
+        };
+        let mut suppressed_withdraws: HashSet<(Prefix, u32)> = HashSet::new();
         for route in group.table.iter() {
             if route.peer == member {
                 continue;
             }
             let key = (route.prefix, route.path_id);
+            if rs_control_route_suppressed(route, rs_control) {
+                // Not on this member's wire going forward. Withdraw when
+                // it may be there now: always on a plain dirty resync
+                // (missed sends are unknown — over-withdraw is the safe
+                // direction), on a regroup diff only when the baseline
+                // proves the key was sent. Force-only re-announces and
+                // never withdraws.
+                if !is_force && (is_dirty || baseline.is_some_and(|base| base.contains_key(&key))) {
+                    suppressed_withdraws.insert(key);
+                }
+                continue;
+            }
+            let mut route = route.clone();
+            rs_control_route_rewrite(&mut route, rs_control);
             if !is_force
                 && let Some(base) = baseline
-                && base.get(&key).is_some_and(|old| routes_equal(old, route))
+                && base.get(&key).is_some_and(|old| routes_equal(old, &route))
             {
                 continue;
             }
             nh_override_flags.push(group.nh_override(key));
-            announce.push(route.clone());
+            announce.push(route);
         }
-        // A key the member still retains (staged, not own-sourced) must
-        // not be withdrawn — everything else in the candidate sets is a
-        // safe (possibly spurious) withdraw.
+        // A key the member still retains (staged, not own-sourced, not
+        // suppressed toward it) must not be withdrawn — everything else
+        // in the candidate sets is a safe (possibly spurious) withdraw.
         let member_retains = |key: &(Prefix, u32)| {
-            group
-                .table
-                .get(&key.0, key.1)
-                .is_some_and(|route| route.peer != member)
+            group.table.get(&key.0, key.1).is_some_and(|route| {
+                route.peer != member && !rs_control_route_suppressed(route, rs_control)
+            })
         };
-        let mut keys: HashSet<(Prefix, u32)> = HashSet::new();
+        let mut keys: HashSet<(Prefix, u32)> = suppressed_withdraws;
         if let Some(base) = baseline {
             keys.extend(base.keys().filter(|key| !member_retains(key)));
         }
@@ -2209,11 +2282,16 @@ impl RibManager {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default();
+            let rs_control = self
+                .peer_rs_control
+                .get(&peer)
+                .copied()
+                .zip(self.peer_asn.get(&peer).copied());
             let baseline: Option<RegroupBaseline> = match prev_gid {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
                     let base = group.map(|g| RegroupBaseline {
-                        unicast: g.member_view_snapshot(peer, &rejected),
+                        unicast: g.member_view_snapshot(peer, rs_control, &rejected),
                         vpn: g.member_vpn_view_snapshot(peer, rt_filter.as_ref(), &rejected),
                     });
                     // A member that leaves while dirty may have missed
@@ -2547,9 +2625,6 @@ impl RibManager {
             }
             UpdateGroupClassification::AddPathSend => return GroupMembership::AddPathSend,
             UpdateGroupClassification::PerClientBest => return GroupMembership::PerClientBest,
-            UpdateGroupClassification::RsControlCommunities => {
-                return GroupMembership::RsControlCommunities;
-            }
             UpdateGroupClassification::OrrVantage => return GroupMembership::OrrVantage,
             UpdateGroupClassification::OrfInstalled => return GroupMembership::OrfInstalled,
             UpdateGroupClassification::Groupable(fingerprint) => fingerprint,
@@ -2736,7 +2811,6 @@ impl RibManager {
             // of GroupKey before this disqualifier is relaxed.
             add_path_send: self.peer_has_any_add_path_send(peer),
             per_client_best: self.peer_per_client_best.contains(&peer),
-            rs_control_communities: self.peer_rs_control.contains_key(&peer),
             orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
             orf_installed,
         }
@@ -3100,6 +3174,7 @@ mod tests {
                 emit_group_deltas_for_member(
                     std::slice::from_ref(&delta),
                     MEMBER,
+                    None,
                     &mut announce,
                     &mut withdraw,
                     &mut nh_flags,
@@ -3152,6 +3227,7 @@ mod tests {
         RibManager::assemble_group_resync(
             &group,
             MEMBER,
+            None,
             true,
             false,
             None,
@@ -3193,6 +3269,7 @@ mod tests {
         RibManager::assemble_group_resync(
             &group,
             MEMBER,
+            None,
             true,
             false,
             Some(&baseline),
@@ -3213,6 +3290,7 @@ mod tests {
         RibManager::assemble_group_resync(
             &group,
             MEMBER,
+            None,
             false,
             true,
             Some(&baseline),
@@ -3298,6 +3376,7 @@ mod tests {
         RibManager::assemble_group_resync(
             &group,
             MEMBER,
+            None,
             true,
             false,
             None,
@@ -3768,7 +3847,7 @@ mod tests {
             group.family_counts_for(MEMBER),
             vec![((Afi::Ipv4, Safi::Unicast), 1)]
         );
-        let view = group.member_view_snapshot(MEMBER, &HashSet::new());
+        let view = group.member_view_snapshot(MEMBER, None, &HashSet::new());
         assert_eq!(view.len(), 1);
         assert!(view.contains_key(&(k1, 0)));
 

@@ -13,7 +13,7 @@ exactly the harness's contract: copy gen-a.conf/gen-b.conf over gen.conf,
 then `birdc configure` (the harness reload_cmd). Like gen-scenario.py's
 historical mode, the import filter carries a content-real but output-neutral
 reject term (an out-of-table prefix that changes between generations) and
-the export filter tags the generation community 65500:1000 / 65500:2000.
+the export filter tags the generation community 65400:1000 / 65400:2000.
 
 NEXT_HOP glue (the classic bgperf BIRD gotcha): 10.9.x.y exists nowhere, so
 without help BIRD marks every route unreachable and exports nothing. The
@@ -59,8 +59,8 @@ def stub_asn(i: int) -> int:
 # the announced 20.0.0.0-26.x base table, so the import change is
 # content-real but output-neutral.
 GENERATIONS = [
-    ("gen-a.conf", "192.0.2.0/24", "(65500, 1000)"),
-    ("gen-b.conf", "198.51.100.0/24", "(65500, 2000)"),
+    ("gen-a.conf", "192.0.2.0/24", "(65400, 1000)"),
+    ("gen-b.conf", "198.51.100.0/24", "(65400, 2000)"),
 ]
 
 for fname, reject_prefix, community in GENERATIONS:

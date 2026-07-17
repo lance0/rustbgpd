@@ -40,7 +40,8 @@ mod evpn;
 mod export_memo;
 mod flowspec;
 mod labeled;
-mod rs_control;
+// Emit-seam helpers are shared with `update_groups` (LAN-474).
+pub(in crate::manager) mod rs_control;
 mod rtc;
 mod unicast;
 mod vpn;
@@ -1201,6 +1202,13 @@ impl RibManager {
             && !self.peer_unexportable.contains_key(&peer)
             && !self.peer_orf_pending.contains_key(&peer)
             && !self.peer_orf_filters.contains_key(&peer)
+            // LAN-474: the strict transition's shared inventory /
+            // shared encode is one payload for the whole cohort, but an
+            // rs-control member's emission can diverge per target on
+            // tagged routes. Rare event, tiny cohort cost: these
+            // members take the ordinary regroup baseline diff, which
+            // applies the emit-time filter.
+            && !self.peer_rs_control.contains_key(&peer)
     }
 
     /// Advance one bounded production step of the actor-owned transition.
@@ -3325,6 +3333,12 @@ impl RibManager {
         // exactly as before.
         let group_stage = self.stage_update_groups(&best_changed, &mut export_memo);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
+        // LAN-474 emit-time filter: whether a group's pass carries any
+        // control-tagged announce delta, memoized per (group, rs_asn) —
+        // one delta scan per group per pass, not per member. Untagged
+        // passes (the overwhelming majority) keep every
+        // `rs_control_communities` member on the shared Arc emission.
+        let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
         for peer in peers {
             let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
@@ -3635,11 +3649,21 @@ impl RibManager {
                 // a Φ change, which is why the membership-delta path
                 // defers to this (design §2.4).
                 let member_filter = self.member_rt_filter(peer);
+                // The member's rs-control context (LAN-474): per-target
+                // divergence for tagged routes applies at every grouped
+                // emit seam below; untagged routes emit exactly the
+                // shared shape.
+                let rs_control = self
+                    .peer_rs_control
+                    .get(&peer)
+                    .copied()
+                    .zip(self.peer_asn.get(&peer).copied());
                 if let Some(group) = self.group_ribs.get(&gid) {
                     if resync {
                         Self::assemble_group_resync(
                             group,
                             peer,
+                            rs_control,
                             is_dirty,
                             is_force,
                             self.pending_regroup_baseline
@@ -3674,7 +3698,17 @@ impl RibManager {
                             );
                         }
                     } else if let Some(stage) = group_stage.get(&gid) {
-                        if stage.shared_applies_to(peer) {
+                        // An rs-control member shares the pre-built
+                        // emission unless this pass staged a tagged
+                        // route (memoized scan) — then its
+                        // announce/withdraw set can diverge per target
+                        // and it walks the matrix itself.
+                        let rs_diverges = rs_control.is_some_and(|(rs_asn, _)| {
+                            *rs_tagged_pass
+                                .entry((gid, rs_asn))
+                                .or_insert_with(|| stage.has_tagged_route(rs_asn))
+                        });
+                        if stage.shared_applies_to(peer) && !rs_diverges {
                             // Common case: this member's matrix output IS
                             // the shared emission — enqueue Arc clones.
                             shared_unicast =
@@ -3684,6 +3718,7 @@ impl RibManager {
                             super::update_groups::emit_group_deltas_for_member(
                                 &stage.deltas,
                                 peer,
+                                rs_control,
                                 &mut announce,
                                 &mut withdraw,
                                 &mut nh_override_flags,

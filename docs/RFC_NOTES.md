@@ -104,9 +104,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   deliberately not implemented (draft-ietf-grow-ixp-ext-comms). Full matrix
   and evaluation ladder: the [route-server cookbook](cookbook/route-server.md).
 - Enforcement is gated per session by `rs_control_communities` (default
-  off/opt-in — an enabled session leaves update-group sharing, which at
-  large fanout costs per-peer staging), evaluated pre-policy on the source
-  route like the
+  `route_server_client`), evaluated pre-policy on the source route like the
   RFC 1997 gates (its own `rs_control` explain rung), and covers the unicast
   export shapes: single-best, Add-Path, and per-client-best (suppressed
   candidates are removed before ranking). Non-unicast families are out of
@@ -114,8 +112,10 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 - Acted-on control communities are scrubbed from the wire-bound attribute set
   toward enabled sessions (standard admin `0`/`RS` outside the `0xFFFF____`
   well-known space; large `RS:{0,1,101,102,103}:*`); disabled sessions keep
-  RFC 7947 §2.2 byte-level transparency. Enabled sessions are excluded from
-  update-group sharing (`rs_control_communities` disqualifier reason).
+  RFC 7947 §2.2 byte-level transparency. Enabled sessions stay in shared
+  update-groups: the filter is route-granular at emit (ADR-0101 Decision 3),
+  so only routes carrying a control-form community pay per-target divergence
+  while untagged routes share staging and encoding fleet-wide.
 
 ---
 

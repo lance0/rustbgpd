@@ -1,12 +1,14 @@
 //! RFC 7947 §2.3.2 / RFC 8195 route-server control communities.
 //!
 //! Per-target announce suppression / announce-only / prepend keyed on
-//! the TARGET peer's ASN, enforced at export staging for sessions with
+//! the TARGET peer's ASN, enforced for sessions with
 //! `rs_control_communities` (staged via `SetPeerRsControl` before
 //! `PeerUp`), with the matched control communities scrubbed from the
 //! outbound announcement. Sessions without the knob keep full
-//! transparency, and enabled sessions are disqualified from
-//! update-group sharing. Predicate-level pins live in
+//! transparency. Enabled sessions stay in shared update-groups
+//! (LAN-474): untagged routes ride the shared staged emission, and
+//! only routes carrying a control-form community diverge per target at
+//! the emit seams. Predicate-level pins live in
 //! `distribution::rs_control`; these tests drive the full
 //! message-in/announcement-out path.
 
@@ -126,9 +128,9 @@ fn sequence_asns(route: &Route) -> Vec<u32> {
 /// toward A only (with the `rs_control` explain rung), B receives the
 /// route with the control communities scrubbed and unrelated
 /// communities kept, and a session without the knob receives the
-/// control communities untouched (RFC 7947 transparency). Enabled
-/// sessions are classifier-disqualified from update groups; the
-/// disabled session stays grouped.
+/// control communities untouched (RFC 7947 transparency). All three
+/// sessions share ONE update group (LAN-474): the divergence is
+/// route-granular at emit, not a session-level disqualifier.
 #[tokio::test]
 async fn control_communities_steer_per_target_announcement_and_scrub() {
     let (tx, rx) = mpsc::channel(64);
@@ -142,20 +144,17 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
     let mut t_rx = rs_peer_up(&tx, transparent, 65100, None).await;
 
-    // Update-group posture: enabled sessions are ungrouped with the
-    // dedicated reason; the disabled session groups normally.
+    // Update-group posture (LAN-474): the knob no longer disqualifies —
+    // enabled and disabled sessions with the same staging fingerprint
+    // share one group.
+    let group_a = query_update_group_label(&tx, client_a).await;
+    let group_b = query_update_group_label(&tx, client_b).await;
+    let group_t = query_update_group_label(&tx, transparent).await;
+    assert!(group_a.starts_with("group:"), "{group_a}");
+    assert_eq!(group_a, group_b, "enabled sessions share the group");
     assert_eq!(
-        query_update_group_label(&tx, client_a).await,
-        "rs_control_communities"
-    );
-    assert_eq!(
-        query_update_group_label(&tx, client_b).await,
-        "rs_control_communities"
-    );
-    let transparent_group = query_update_group_label(&tx, transparent).await;
-    assert!(
-        transparent_group.starts_with("group:"),
-        "{transparent_group}"
+        group_a, group_t,
+        "the emit filter is route-granular — the knob is not a group key dimension"
     );
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
@@ -212,6 +211,139 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     let advertised = &update.announce[0];
     assert_eq!(advertised.communities(), [unrelated]);
     assert_eq!(advertised.large_communities(), [large(0, 65001)]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The LAN-474 shared/divergent split in one table: an untagged route
+/// flows through the SHARED group emission to enabled rs-clients
+/// (grouping stays shared before and after the pass) while a tagged
+/// route announced in the same pass diverges per target — suppressed
+/// toward the named ASN, scrubbed toward the other enabled member,
+/// verbatim toward the transparent session. A member joining late
+/// gets the same filtered view from the group-table replay.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario pins the shared path, both divergence shapes, and the join replay end to end"
+)]
+#[tokio::test]
+async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let client_a: IpAddr = "192.0.2.231".parse().unwrap();
+    let client_b: IpAddr = "192.0.2.232".parse().unwrap();
+    let transparent: IpAddr = "192.0.2.233".parse().unwrap();
+
+    let mut a_rx = rs_peer_up(&tx, client_a, 65001, Some(RS_AS)).await;
+    let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
+    let mut t_rx = rs_peer_up(&tx, transparent, 65100, None).await;
+
+    let group_before = query_update_group_label(&tx, client_a).await;
+    assert!(group_before.starts_with("group:"), "{group_before}");
+    assert_eq!(group_before, query_update_group_label(&tx, client_b).await);
+    assert_eq!(
+        group_before,
+        query_update_group_label(&tx, transparent).await
+    );
+
+    let plain_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
+    let tagged_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 123, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 43));
+    let unrelated = std_c(64999, 42);
+    let plain = make_route_with_as_path(plain_prefix, Ipv4Addr::new(198, 51, 100, 43), vec![65010]);
+    let steered = tagged(
+        make_route_with_as_path(tagged_prefix, Ipv4Addr::new(198, 51, 100, 43), vec![65010]),
+        vec![unrelated],
+        vec![large(0, 65001)], // do not announce to 65001
+    );
+    announce_unicast(&tx, source, vec![plain, steered]).await;
+    let _ = query_best_routes(&tx).await;
+
+    // A (the steered-away target): only the untagged route, no
+    // withdraw residue for a route it never held.
+    let update = a_rx.try_recv().expect("shared route still announced");
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<Vec<_>>(),
+        vec![Prefix::V4(plain_prefix)]
+    );
+    assert!(update.withdraw.is_empty());
+
+    // B: both routes, the tagged one scrubbed (unrelated kept).
+    let update = b_rx.try_recv().expect("other enabled client gets both");
+    assert_eq!(update.announce.len(), 2);
+    let advertised = update
+        .announce
+        .iter()
+        .find(|route| route.prefix == Prefix::V4(tagged_prefix))
+        .expect("tagged route announced to B");
+    assert_eq!(advertised.communities(), [unrelated]);
+    assert!(advertised.large_communities().is_empty());
+
+    // Transparent session: both routes, control community verbatim.
+    let update = t_rx.try_recv().expect("transparent session gets both");
+    assert_eq!(update.announce.len(), 2);
+    let advertised = update
+        .announce
+        .iter()
+        .find(|route| route.prefix == Prefix::V4(tagged_prefix))
+        .expect("tagged route announced to T");
+    assert_eq!(advertised.communities(), [unrelated]);
+    assert_eq!(advertised.large_communities(), [large(0, 65001)]);
+
+    // Grouping is untouched by the divergent pass.
+    assert_eq!(query_update_group_label(&tx, client_a).await, group_before);
+    assert_eq!(query_update_group_label(&tx, client_b).await, group_before);
+
+    // Late join with the steered-away ASN: the group-table replay
+    // (initial dump) applies the same filter — only the untagged route.
+    let late: IpAddr = "192.0.2.234".parse().unwrap();
+    tx.send(RibUpdate::SetPeerRsControl {
+        peer: late,
+        session_id: 0,
+        rs_control_asn: Some(RS_AS),
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut late_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        peer: late,
+        session_id: 0,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let mut dumped: Vec<Prefix> = Vec::new();
+    let mut saw_eor = false;
+    while let Ok(update) = late_rx.try_recv() {
+        dumped.extend(update.announce.iter().map(|route| route.prefix));
+        saw_eor |= !update.end_of_rib.is_empty();
+    }
+    assert!(saw_eor, "initial dump must end with EoR");
+    assert_eq!(
+        dumped,
+        vec![Prefix::V4(plain_prefix)],
+        "join replay must suppress the tagged route toward the steered-away ASN"
+    );
 
     drop(tx);
     handle.await.unwrap();

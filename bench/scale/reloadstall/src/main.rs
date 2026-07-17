@@ -57,9 +57,14 @@ const CHURN_BLOCK: u32 = 16;
 const CHURN_MS: u64 = 125;
 const NLRI_PER_MSG: usize = 900;
 const HOLD_TIME: u16 = 180;
-const COMMUNITY_GEN_A: u32 = (65_500 << 16) | 1_000;
-const COMMUNITY_GEN_B: u32 = (65_500 << 16) | 2_000;
-const COMMUNITY_STABLE: u32 = (65_500 << 16) | 9_000;
+// Marker admin 65400 — deliberately NOT the route server's ASN (65500):
+// rs_control_communities defaults on for rs-clients, and RS-administered
+// standard communities are RFC 7947 control forms scrubbed from the wire,
+// which would hide these markers from the observers. Must match
+// gen-scenario.py's GENERATIONS / stable-out.
+const COMMUNITY_GEN_A: u32 = (65_400 << 16) | 1_000;
+const COMMUNITY_GEN_B: u32 = (65_400 << 16) | 2_000;
+const COMMUNITY_STABLE: u32 = (65_400 << 16) | 9_000;
 const STALL_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
