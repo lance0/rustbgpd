@@ -31,23 +31,30 @@ with mechanism, pre-committed shapes. The final receipt lands at
   pre-committed 300 × 200k fallback stays unused unless run A's first
   OpenBGPD cell says otherwise.
 
+## Threads decision (done)
+
+BIRD sweep at 200 × 115k, 2 reloads: `threads 32` completes ~15%
+faster (6.3–6.7 s vs 7.5–7.7 s p50) but stalls ~55% worse
+(1.49–1.60 s vs 0.98 s p50). **Campaign runs use `threads 8`** — the
+better configuration on the headline stall KPI (the
+generous-to-competitor choice) and consistent with upstream guidance
+to cap threads. Both raw runs preserved (`artifacts-rung2/bird`,
+`artifacts-bird-threads32/`); the trade goes in the receipt's
+config-disclosure section.
+
 ## Remaining (in order)
 
-1. **BIRD threads spot-check** (~30 min): one 200 × 115k BIRD cell
-   with `threads` uncapped vs the default 8 in
-   `gen-bird-scenario.py`; keep whichever is faster and record the
-   choice in the receipt's config-disclosure section.
-2. **Campaign run A** (overnight, box exclusively quiet): for each
+1. **Campaign run A** (overnight, box exclusively quiet): for each
    daemon × scenario S1/S2/S3 —
    `N_PEERS=700 TOTAL_PREFIXES=400400 RELOADS=4 bash bench/scale/matrix/run-matrix.sh`
    (S1 = convergence phase of the same runs; S3 = harness
    `--flapstorm 50` mode; delete per-cell `status` files between
    distinct scenarios or point `ARTIFACTS` elsewhere per scenario).
-3. **Campaign run B**: independent repetition, fresh daemon starts,
+2. **Campaign run B**: independent repetition, fresh daemon starts,
    same order — run-to-run spread goes in the receipt.
-4. **S4 stretch** (export-only 600/700 split) for whichever incumbents
+3. **S4 stretch** (export-only 600/700 split) for whichever incumbents
    survive per-peer filter generation without config explosion.
-5. **Receipt write-up**: `docs/perf/ixp-matrix-2026-07.md` — one table
+4. **Receipt write-up**: `docs/perf/ixp-matrix-2026-07.md` — one table
    per scenario with all three columns published (including losses),
    honesty-notes checklist (single host, loopback, config disclosure,
    daemon-side clocks advisory-only, per-daemon reload-semantic

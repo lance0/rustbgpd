@@ -1,0 +1,31 @@
+# reloadstall peers=200 changed_peers=200 stable_peers=0 prefixes=115000 per_peer=575 pid=0
+established 200 at 5.3s
+converged (>= 114425/observer) at 9.4s rss_mib=0
+control_maxgap_ms: p50=60.37 p95=61.14 max=61.97 (n=200)
+control_rss_mib 0
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1784254730922967 policy=/tmp/ixp-bird/gen-b.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 1 completion_s: p50=6.66 p95=8.37 max=8.59 (n=200)
+reload 1 maxgap_ms: p50=1597.53 p95=2034.12 max=2387.38 (n=200)
+reload 1 all_observer_maxgap_ms: p50=1825.54 p95=2677.82 max=4110.40 (n=200)
+reload 1 first_update_ms: p50=50.01 p95=50.50 max=50.80 (n=200)
+reload 1 rss_mib before=0 after=0 comms_sample=[4292610000]
+reload 1 sessions_up 200/200
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,200,200,0,115000,6.658500,8.374537,8.594975,1597.526,2034.124,2387.384,1825.535,2677.818,4110.403,50.010,50.504,50.805,0,0,0,200,0
+reload 2 reload_cmd wall_us=1784254759579515 policy=/tmp/ixp-bird/gen-a.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 2 completion_s: p50=6.28 p95=7.63 max=7.91 (n=200)
+reload 2 maxgap_ms: p50=1487.61 p95=2005.69 max=2420.95 (n=200)
+reload 2 all_observer_maxgap_ms: p50=1518.04 p95=2098.48 max=2420.95 (n=200)
+reload 2 first_update_ms: p50=30.33 p95=30.87 max=31.20 (n=200)
+reload 2 rss_mib before=0 after=0 comms_sample=[4292609000]
+reload 2 sessions_up 200/200
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,200,200,0,115000,6.276329,7.631454,7.908081,1487.608,2005.689,2420.947,1518.037,2098.478,2420.947,30.330,30.866,31.197,0,0,0,200,0
+done rss_mib=0
