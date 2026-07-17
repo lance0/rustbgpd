@@ -118,6 +118,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Proposed | 2026-07-15 |
 | [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 |
 | [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 |
+| [0110](0110-irr-peeringdb-filtering-pipeline.md) | IRR/PeeringDB-driven filtering pipeline — ride arouteserver, defer native ingestion | Proposed | 2026-07-17 |
 
 ## Template
 
