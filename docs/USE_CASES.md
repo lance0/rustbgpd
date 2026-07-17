@@ -408,10 +408,10 @@ IX peer C  ──┘
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
 - **Birdwatcher-shaped REST subset** — the external
   [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) serves
-  accepted-route, peer, and status views from the gRPC API; structured
-  reject reasons are available (`PolicyService.ListRejectedRoutes`), and the
-  adapter's filtered/noexport views remain before it is a complete Alice-LG
-  backend
+  accepted-route, filtered-route (with reject-reason communities synthesized
+  from `PolicyService.ListRejectedRoutes` structured reasons), peer (with
+  real filtered counts), and status views from the gRPC API; only the
+  noexport view remains before it is a complete Alice-LG backend
 - **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 

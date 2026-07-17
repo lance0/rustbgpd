@@ -10,9 +10,13 @@
 //! response shapes.
 //!
 //! A second neighbor (127.0.0.1) is driven by a minimal in-test BGP
-//! speaker that establishes a real session and announces one route, so
-//! the per-route `age` field is exercised end-to-end: the adapter must
-//! render a non-empty receive timestamp for the announced route.
+//! speaker that establishes a real session and announces two routes: a
+//! clean one (exercises the per-route `age` receive timestamp) and one
+//! carrying the daemon's own AS in its AS_PATH, which the loop check
+//! rejects and the reject-retention store keeps — exercising the
+//! `/routes/filtered/{id}` view (reason token + synthesized reason
+//! community) and the real `routes.filtered` neighbor-summary count
+//! end-to-end.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -166,10 +170,12 @@ description = "live peer"
 
 /// Minimal BGP speaker: connect to the daemon's listen port, complete
 /// the OPEN/KEEPALIVE handshake as legacy AS 65020 (no capabilities —
-/// implicit IPv4 unicast), and announce one route. The returned stream
-/// must stay alive for the session to survive; the daemon's own
-/// messages are left unread (a handful of bytes, well within the
-/// socket buffer for the test's lifetime).
+/// implicit IPv4 unicast), and announce two routes: 10.99.0.0/24 with a
+/// clean path (accepted) and 10.98.0.0/24 with the daemon's own AS in
+/// the path (rejected as an AS_PATH loop, lands in reject retention).
+/// The returned stream must stay alive for the session to survive; the
+/// daemon's own messages are left unread (a handful of bytes, well
+/// within the socket buffer for the test's lifetime).
 fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
     use rustbgpd_wire::attribute::{AsPath, AsPathSegment, Origin, PathAttribute};
     use rustbgpd_wire::message::{Message, encode_message};
@@ -184,29 +190,34 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
         bgp_identifier: "10.0.0.2".parse().unwrap(),
         capabilities: Vec::new(),
     });
-    let mut attrs = Vec::new();
-    rustbgpd_wire::attribute::encode_path_attributes(
-        &[
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65020])],
-            }),
-            // Non-loopback: the daemon's UPDATE validation rejects a
-            // loopback NEXT_HOP (subcode 8).
-            PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
-        ],
-        &mut attrs,
-        false,
-        false,
-    )
-    .expect("encode path attributes");
-    let update = Message::Update(UpdateMessage {
-        withdrawn_routes: bytes::Bytes::new(),
-        path_attributes: attrs.into(),
-        // 10.99.0.0/24
-        nlri: bytes::Bytes::from_static(&[24, 10, 99, 0]),
-    });
-    for msg in [&open, &Message::Keepalive, &update] {
+    let encode_update = |as_sequence: Vec<u32>, nlri: &'static [u8]| {
+        let mut attrs = Vec::new();
+        rustbgpd_wire::attribute::encode_path_attributes(
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(as_sequence)],
+                }),
+                // Non-loopback: the daemon's UPDATE validation rejects a
+                // loopback NEXT_HOP (subcode 8).
+                PathAttribute::NextHop("192.0.2.99".parse().unwrap()),
+            ],
+            &mut attrs,
+            false,
+            false,
+        )
+        .expect("encode path attributes");
+        Message::Update(UpdateMessage {
+            withdrawn_routes: bytes::Bytes::new(),
+            path_attributes: attrs.into(),
+            nlri: bytes::Bytes::from_static(nlri),
+        })
+    };
+    // 10.99.0.0/24, clean path → accepted.
+    let accepted = encode_update(vec![65020], &[24, 10, 99, 0]);
+    // 10.98.0.0/24, daemon's own AS 65001 in path → as_path_loop reject.
+    let looped = encode_update(vec![65020, 65001], &[24, 10, 98, 0]);
+    for msg in [&open, &Message::Keepalive, &accepted, &looped] {
         let encoded = encode_message(msg).expect("encode BGP message");
         stream.write_all(&encoded).expect("write BGP message");
     }
@@ -235,7 +246,7 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 }
 
 #[test]
-fn adapter_serves_birdwatcher_shaped_status_peer_and_accepted_route_subset() {
+fn adapter_serves_birdwatcher_shaped_status_peer_accepted_and_filtered_route_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let grpc_port = free_port();
     let adapter_port = free_port();
@@ -348,4 +359,44 @@ fn adapter_serves_birdwatcher_shaped_status_peer_and_accepted_route_subset() {
     // The receive timestamp must parse and sit in the recent past.
     let age_epoch = epoch_from_timestamp(age);
     assert!(age_epoch > 0, "age must be a parseable timestamp: {age:?}");
+
+    // /routes/filtered/{id} — the looped announcement was rejected and
+    // retained; the adapter must serve it with the reason token and the
+    // synthesized reject-reason large community.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let filtered = loop {
+        let filtered = get_json(adapter_port, "/routes/filtered/bgp_127.0.0.1", "adapter");
+        if filtered["routes"].as_array().is_some_and(|r| r.len() == 1) {
+            break filtered;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rejected route did not appear on the filtered view\nadapter: {filtered}\ndaemon stderr:\n{}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
+    let reject = &filtered["routes"][0];
+    assert_eq!(reject["network"], "10.98.0.0/24", "{filtered}");
+    assert_eq!(reject["reject_reason"], "as_path_loop", "{filtered}");
+    let large_communities = &reject["bgp"]["large_communities"];
+    assert!(
+        large_communities
+            .as_array()
+            .is_some_and(|lcs| lcs.contains(&serde_json::json!([64496, 65520, 4]))),
+        "filtered route must carry the synthesized as_path_loop community: {filtered}"
+    );
+
+    // /protocols/bgp — the neighbor summary serves the real filtered
+    // count from the same retention store.
+    let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
+    assert_eq!(
+        protocols["protocols"]["bgp_127.0.0.1"]["routes"]["filtered"], 1,
+        "{protocols}"
+    );
+
+    // A configured peer with no live session has no retention store —
+    // the filtered view is empty, not an error.
+    let down = get_json(adapter_port, "/routes/filtered/bgp_192.0.2.10", "adapter");
+    assert_eq!(down["routes"], serde_json::json!([]), "{down}");
 }
