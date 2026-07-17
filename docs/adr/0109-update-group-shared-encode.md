@@ -123,9 +123,15 @@ The terminal marker is `Complete` or `Failed`. Any encoder anomaly — the
 same enumerated cases as before, at any slice — terminates the stream as
 `Failed`, published by a drop guard even if the encoder unwinds, and every
 member falls back to the ordinary per-session encode. Mid-stream fallback is
-safe by construction: everything a member already sent is byte-identical to
-what its local re-encode produces (exactly what the wire-equivalence proof
-establishes for an announce-only envelope), so the receiver sees idempotent
-re-announcements and no route can be skipped. An encoder whose own writer
+safe by construction. The invariant is per-NLRI attribute identity, not
+byte-identical chunks: an extended-message member's local re-encode chunks at
+its negotiated ceiling rather than 4096, and the shared stream's
+source-sorted walk yields different NLRI order and UPDATE boundaries than the
+table-order local encode. What the wire-equivalence proof establishes per
+route is that every prefix a member already sent maps to exactly the
+attributes its local re-encode attaches to it, so the receiver sees
+idempotent re-announcements at the BGP semantic level regardless of message
+framing, and no route can be skipped: the fallback re-encodes the full
+envelope from index 0. An encoder whose own writer
 saturates keeps publishing for the group; its own teardown policy has
 already run inside the failed enqueue.

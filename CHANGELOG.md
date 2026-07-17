@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Corrected the update-group shared-encode safety documentation (module
+  docs and ADR-0109): the mid-stream fallback invariant is per-NLRI
+  attribute identity with the ordinary encode — not byte-identical
+  chunks, since message boundaries and NLRI order differ — with skips
+  still impossible because fallback re-encodes the full envelope.
+  Documented the encoder's no-await liveness requirement at its two
+  tempting yield points, and added four shared-encode regression tests
+  (per-source chunk integrity under interning, next-hop-override
+  alignment across the source sort, concurrent consumer streaming, and
+  wire-equivalence normalization bounds).
+
 - **Shared export-policy transitions now pre-stage their destination
   update-group before the fence, halving the reload wall during which
   interleaved churn stalls.** The cohort transaction first sends

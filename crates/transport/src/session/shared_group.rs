@@ -25,10 +25,17 @@
 //! stream as `Failed` — published by a drop guard even if the encoder
 //! unwinds — and every member falls back to the ordinary per-session
 //! encode, which owns the established diagnostics and teardown semantics
-//! for each case. Mid-stream fallback is safe by construction: the chunks a
-//! member already sent are byte-identical to what its local encode re-sends
-//! (that is exactly what the wire-equivalence proof establishes), so the
-//! receiver sees idempotent re-announcements and no route can be skipped.
+//! for each case. Mid-stream fallback is safe by construction — the
+//! invariant is per-NLRI attribute identity, not byte-identical chunks (an
+//! extended-message member's local re-encode chunks at its negotiated
+//! ceiling, and the shared stream's source-sorted walk yields different
+//! NLRI order and UPDATE boundaries than the table-order local encode).
+//! Every prefix a member already sent carries exactly the attributes the
+//! local re-encode attaches to it — the per-route consequence of the
+//! wire-equivalence proof — so the receiver sees idempotent
+//! re-announcements at the BGP semantic level regardless of message
+//! framing, and no route can be skipped: the fallback re-encodes the full
+//! envelope from index 0.
 //!
 //! Chunks never mix source peers even when global attribute interning gives
 //! two sources pointer-identical attribute sets: keeping the source in the
@@ -54,6 +61,17 @@ use std::sync::{Arc, Mutex};
 /// floor between their UPDATEs) tracks one slice's encode latency — single-
 /// digit milliseconds at reload-stall route shapes — instead of the full
 /// table. Sources spanning a slice boundary cost one extra UPDATE each.
+///
+/// INVARIANT — do NOT "fix" the long full-table encode (~1 s at 400k
+/// routes) by adding a yield or await to the slice loop in
+/// `encode_and_send_shared_group`. Consumers await the stream's `Notify`
+/// with no timeout, and the liveness proof (an initialized cell always
+/// reaches a terminal) relies on the encoder being fully synchronous after
+/// election: task abort cannot preempt sync code, so the drop guard is
+/// guaranteed to run. An await point plus cancellation at that await would
+/// strand every consumer forever. Any yield here requires first giving
+/// consumers a cancellation-safe wake (watchdog timeout or a drop-guard
+/// rework that survives encoder cancellation).
 const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 
 /// One pre-encoded wire UPDATE carrying routes from exactly one source peer
@@ -417,8 +435,11 @@ impl PeerSession {
     /// policy already ran — re-encoding locally would duplicate the stream).
     /// `false` = fall back to the ordinary path, which re-runs the snapshot
     /// trust checks and owns their teardown. Mid-stream `false` (truncated
-    /// stream) is safe: everything sent so far is byte-identical to what the
-    /// local re-encode sends, so the fallback can only repeat, never skip.
+    /// stream) is safe: every prefix sent so far carries exactly the
+    /// attributes the local re-encode attaches to it (message boundaries
+    /// and NLRI order may differ), and the fallback re-encodes the full
+    /// envelope from index 0, so it can only repeat idempotently, never
+    /// skip.
     async fn try_send_shared_group(
         &mut self,
         shared: &SharedGroupEncode,
@@ -458,6 +479,16 @@ impl PeerSession {
     /// slice's chunks for the group and sending its own filtered copy along
     /// the way. Scoped-link-local peers and any slice failure terminate the
     /// stream as `Failed` (via the guard) and fall back locally.
+    ///
+    /// INVARIANT — this function must stay fully synchronous (no `.await`,
+    /// no yield) between the `OnceLock` election and `finish`/guard drop.
+    /// Consumers await the stream's `Notify` with no timeout; the liveness
+    /// proof that an initialized cell always has a live encoder (or its
+    /// guard's terminal) depends on task abort being unable to preempt sync
+    /// code. Introducing an await point here means a cancelled encoder task
+    /// strands every consumer forever. Do not make this `async` — any yield
+    /// requires first giving consumers a cancellation-safe wake (watchdog
+    /// timeout or a drop-guard rework that survives encoder cancellation).
     fn encode_and_send_shared_group(
         &mut self,
         encode: &ProgressiveUnicastEncode,
@@ -572,9 +603,11 @@ impl PeerSession {
                 }
                 Some(StreamTerminal::Failed) => {
                     // Truncated stream: fall back to the full local encode.
-                    // Chunks already sent are byte-identical to the local
-                    // path's output, so the receiver sees idempotent
-                    // re-announcements; nothing can be skipped.
+                    // Prefixes already sent carry exactly the attributes
+                    // the local path re-sends (message framing may differ),
+                    // so the receiver sees idempotent re-announcements;
+                    // nothing can be skipped — the fallback re-encodes the
+                    // full envelope from index 0.
                     return false;
                 }
                 None => notified.await,
