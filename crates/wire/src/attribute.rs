@@ -961,13 +961,21 @@ pub fn decode_path_attributes_revised(
         }
         // RFC 7606 §7.6/§7.7 length checks. The legacy decoder stores both
         // types opaquely as Unknown(RawAttribute) with no length validation,
-        // so these checks live only on the revised path.
+        // so these checks live only on the revised path. The attribute-discard
+        // shortcut applies only when the flags are correct: a flag conflict
+        // must fall through to decode_attribute_value, whose flags error is
+        // classified treat-as-withdraw below (§3 (c) — the stronger action
+        // wins per §3 (h)).
+        let flags_ok = expected_flags(type_code).is_none_or(|expected| {
+            (flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE)) == expected
+        });
         let expected_aggregator_len = if four_octet_as { 8 } else { 6 };
-        let bad_aggregate_len = match type_code {
-            attr_type::ATOMIC_AGGREGATE => !value.is_empty(),
-            attr_type::AGGREGATOR => value.len() != expected_aggregator_len,
-            _ => false,
-        };
+        let bad_aggregate_len = flags_ok
+            && match type_code {
+                attr_type::ATOMIC_AGGREGATE => !value.is_empty(),
+                attr_type::AGGREGATOR => value.len() != expected_aggregator_len,
+                _ => false,
+            };
         if bad_aggregate_len {
             malformed.push(MalformedAttribute {
                 type_code,
@@ -990,7 +998,20 @@ pub fn decode_path_attributes_revised(
         ) {
             Ok(attr) => attrs.push(attr),
             Err(error) => {
-                let disposition = malformed_attr_disposition(type_code, is_ibgp);
+                // RFC 7606 §3 (c): an Optional/Transitive flag conflict is
+                // treat-as-withdraw for every attribute — the §7.6/§7.7
+                // attribute-discard covers length malformations only. max()
+                // keeps MP_REACH/MP_UNREACH at session-reset (§5.3 lists
+                // inconsistent flags among what makes the MP attribute
+                // itself incorrect).
+                let mut disposition = malformed_attr_disposition(type_code, is_ibgp);
+                if matches!(
+                    &error,
+                    DecodeError::UpdateAttributeError { subcode, .. }
+                        if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
+                ) {
+                    disposition = disposition.max(ErrorDisposition::TreatAsWithdraw);
+                }
                 if disposition == ErrorDisposition::SessionReset {
                     return Err(error);
                 }
@@ -1099,11 +1120,15 @@ fn decode_attribute_value(
             Ok(PathAttribute::LocalPref(lp))
         }
         attr_type::COMMUNITIES => {
-            if !value.len().is_multiple_of(4) {
+            // RFC 7606 §7.8: the length must be a NON-ZERO multiple of 4.
+            if value.is_empty() || !value.len().is_multiple_of(4) {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
-                    detail: format!("COMMUNITIES length {} not a multiple of 4", value.len()),
+                    detail: format!(
+                        "COMMUNITIES length {} not a non-zero multiple of 4",
+                        value.len()
+                    ),
                 });
             }
             let communities = value
@@ -1113,12 +1138,13 @@ fn decode_attribute_value(
             Ok(PathAttribute::Communities(communities))
         }
         attr_type::EXTENDED_COMMUNITIES => {
-            if !value.len().is_multiple_of(8) {
+            // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
+            if value.is_empty() || !value.len().is_multiple_of(8) {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
                     detail: format!(
-                        "EXTENDED_COMMUNITIES length {} not a multiple of 8",
+                        "EXTENDED_COMMUNITIES length {} not a non-zero multiple of 8",
                         value.len()
                     ),
                 });
@@ -3719,11 +3745,12 @@ mod tests {
         assert_eq!(attrs[0], PathAttribute::Communities(vec![c1, c2]));
     }
     #[test]
-    fn decode_communities_empty() {
-        // flags=0xC0, type=8, len=0
+    fn decode_communities_empty_rejected() {
+        // flags=0xC0, type=8, len=0 — RFC 7606 §7.8: the length must be a
+        // NON-ZERO multiple of 4, so a vacuous Communities attribute is
+        // malformed (treat-as-withdraw on the revised path).
         let buf = [0xC0, 0x08, 0x00];
-        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert_eq!(attrs[0], PathAttribute::Communities(vec![]));
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
     #[test]
     fn decode_communities_odd_length_rejected() {
@@ -3774,10 +3801,10 @@ mod tests {
         assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec1, ec2]));
     }
     #[test]
-    fn decode_extended_communities_empty() {
+    fn decode_extended_communities_empty_rejected() {
+        // RFC 7606 §7.14: the length must be a NON-ZERO multiple of 8.
         let buf = [0xC0, 0x10, 0x00];
-        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![]));
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
     #[test]
     fn decode_extended_communities_bad_length() {
@@ -5297,6 +5324,59 @@ mod tests {
             decoded.malformed[0].disposition,
             ErrorDisposition::AttributeDiscard
         );
+    }
+    #[test]
+    fn revised_flag_conflict_on_aggregator_is_treat_as_withdraw() {
+        // RFC 7606 §3 (c): a flag conflict is treat-as-withdraw for every
+        // attribute — §7.6/§7.7 attribute-discard covers length
+        // malformations only. AGGREGATOR expects Optional|Transitive; send
+        // Transitive only, with a CORRECT length.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD, 0xE9, 10, 0, 0, 1],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::AGGREGATOR);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        // Flag conflict AND bad length: §3 (h) — the stronger action
+        // (treat-as-withdraw) still wins over the length discard.
+        let buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD],
+        ));
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+    #[test]
+    fn revised_zero_length_communities_are_treat_as_withdraw() {
+        // RFC 7606 §7.8 / §7.14: the length must be a NON-ZERO multiple of
+        // 4 (Communities) / 8 (Extended Communities).
+        for type_code in [attr_type::COMMUNITIES, attr_type::EXTENDED_COMMUNITIES] {
+            let buf = valid_attrs_plus(&attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                type_code,
+                &[],
+            ));
+            // Legacy decoder now rejects the vacuous attribute outright.
+            assert!(decode_path_attributes(&buf, true, &[]).is_err());
+            let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+            assert_eq!(decoded.attributes.len(), 3);
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].type_code, type_code);
+            assert_eq!(
+                decoded.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw
+            );
+        }
     }
     #[test]
     fn revised_local_pref_disposition_depends_on_session_type() {

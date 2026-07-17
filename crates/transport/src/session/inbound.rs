@@ -562,7 +562,9 @@ impl PeerSession {
             .map(|e| (Prefix::V4(e.prefix), e.path_id))
             .collect();
         let mut loop_fs_withdrawn: Vec<FlowSpecKey> = Vec::new();
+        let mut loop_fs_rejected: Vec<FlowSpecKey> = Vec::new();
         let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+        let mut loop_evpn_rejected: Vec<EvpnRouteKey> = Vec::new();
         let mut loop_bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
         let mut loop_bgpls_rejected: Vec<BgpLsRouteKey> = Vec::new();
         let mut loop_l3vpn_withdrawn: Vec<VpnRibRouteKey> = Vec::new();
@@ -659,6 +661,23 @@ impl PeerSession {
                     path_id: 0,
                 }));
             }
+            // FlowSpec and EVPN announcements get the same rejected→withdraw
+            // conversion as the other MP families: RFC 7606 §2 requires the
+            // UPDATE's routes to be treated as withdrawn, so a previously
+            // accepted route re-announced here must leave the RIB. The
+            // family-specific announced vectors are only populated for their
+            // own SAFI, so the negotiated-family check is the only guard.
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && self.negotiated_families.contains(&(mp.afi, mp.safi))
+            {
+                loop_fs_rejected.extend(
+                    mp.flowspec_announced
+                        .iter()
+                        .cloned()
+                        .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
+                );
+                loop_evpn_rejected.extend(mp.evpn_announced.iter().map(EvpnRoute::key));
+            }
         }
         for &(prefix, path_id) in &loop_withdrawn {
             self.forget_known_path(prefix, path_id);
@@ -686,8 +705,18 @@ impl PeerSession {
         for rule in &loop_fs_withdrawn {
             self.known_flowspec.remove(rule);
         }
+        for rule in loop_fs_rejected {
+            if self.known_flowspec.remove(&rule) {
+                loop_fs_withdrawn.push(rule);
+            }
+        }
         for key in &loop_evpn_withdrawn {
             self.known_evpn.remove(key);
+        }
+        for key in loop_evpn_rejected {
+            if self.known_evpn.remove(&key) {
+                loop_evpn_withdrawn.push(key);
+            }
         }
         for key in &loop_bgpls_withdrawn {
             self.known_bgpls.remove(key);

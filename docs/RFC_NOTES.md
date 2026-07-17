@@ -376,10 +376,13 @@ Interpretation decisions:
   flag conflicts on *recognized* attributes, but resetting the session for a
   tunneled unknown attribute is exactly the amplification §1 warns about;
   FRR makes the same call.
-- Dispositions are keyed by attribute type code, not by which specific check
-  failed — a flag conflict on AGGREGATOR is attribute-discard, not
-  treat-as-withdraw. Discard is the weaker action and AGGREGATOR never
-  affects route selection here.
+- Flag conflicts (§3 (c)) are treat-as-withdraw for every attribute,
+  including ATOMIC_AGGREGATE and AGGREGATOR — their §7.6/§7.7
+  attribute-discard covers length malformations only. On MP_REACH_NLRI /
+  MP_UNREACH_NLRI a flag conflict stays session-reset (§5.3 lists
+  inconsistent flags among what makes the MP attribute itself incorrect).
+- Zero-length Communities / Extended Communities are malformed (§7.8 /
+  §7.14 require a non-zero multiple of 4 / 8) — treat-as-withdraw.
 - An UPDATE whose only attributes were discarded as malformed is not
   mistaken for an End-of-RIB marker (RFC 4724 §2 detection requires a clean
   decode).
