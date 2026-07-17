@@ -7923,7 +7923,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__received)
-            opts="-a -s -j -h --family --addr --token-file --json --no-color --help"
+            opts="-a -s -j -h --family --rejected --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

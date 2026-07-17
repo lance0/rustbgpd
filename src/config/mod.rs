@@ -1290,6 +1290,10 @@ impl Config {
         // of `[policy.explain]`.
         transport.explain_enabled = self.policy.explain.enabled;
         transport.explain_cache_size = self.policy.explain.cache_size;
+        // LAN-472: same threading hazard for the rejected-route
+        // retention knobs — both construction paths must see them.
+        transport.reject_retention_enabled = self.policy.reject_retention.enabled;
+        transport.reject_retention_capacity = self.policy.reject_retention.capacity;
 
         let (import_policy, export_policy) = self.effective_policy_chains_for_neighbor(neighbor)?;
 
@@ -2553,6 +2557,11 @@ pub struct ConfigDiff {
     /// peer only on its next session establishment). Diagnostic
     /// retention only; never affects which routes are accepted.
     pub policy_explain_changed: bool,
+    /// `[policy.reject_retention]` (`enabled` / `capacity`, LAN-472)
+    /// changed. Same restart-required-per-peer contract as
+    /// `[policy.explain]`: read at session construction, diagnostic
+    /// retention only.
+    pub policy_reject_retention_changed: bool,
     /// Shape-aware ADR-0063 / ADR-0085 classification for EVPN runtime
     /// table changes. The raw `evpn_*_changed` booleans above still say
     /// which TOML tables moved; this field says whether SIGHUP can route
@@ -2747,6 +2756,7 @@ impl ConfigDiff {
             || self.dynamic_neighbor_tcp_ao_changed
             || self.bfd_changed
             || self.policy_explain_changed
+            || self.policy_reject_retention_changed
             || self.fib_tables_requires_restart
             || self.managed_netdevs_changed
             || self.security_grpc_changed
@@ -3367,6 +3377,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[policy.explain]".to_string());
     }
+    if diff.policy_reject_retention_changed {
+        class
+            .restart_required_sections
+            .push("[policy.reject_retention]".to_string());
+    }
     class
 }
 
@@ -3504,6 +3519,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "dynamic_neighbor_tcp_ao_changed": diff.dynamic_neighbor_tcp_ao_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
+            "policy_reject_retention_changed": diff.policy_reject_retention_changed,
         },
         "informational": serde_json::Value::Object(serde_json::Map::new()),
     })
@@ -3762,6 +3778,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.policy_explain_changed {
         restart_sections.push("[policy.explain] (per-peer; applies on next session)");
     }
+    if diff.policy_reject_retention_changed {
+        restart_sections.push("[policy.reject_retention] (per-peer; applies on next session)");
+    }
     if !restart_sections.is_empty() {
         let _ = writeln!(out, "{}", style.restart_header);
         for section in &restart_sections {
@@ -3779,6 +3798,10 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
 }
 
 /// Compare two full configurations and return a structured diff.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flag computation per config section, kept together with the struct literal"
+)]
 pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let neighbor_tcp_ao_changed = neighbor_tcp_ao_restart_required_changed(old, new);
     let dynamic_neighbor_tcp_ao_changed =
@@ -3886,6 +3909,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         neighbor_tcp_ao_changed,
         bfd_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
+        policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
         evpn_runtime_change_class,
     }
 }

@@ -142,6 +142,10 @@
         "export_chain": [],
         "import_chain": [],
         "neighbor_sets": {},
+        "reject_retention": {
+          "capacity": 1024,
+          "enabled": true
+        },
         "rpol_files": [],
         "rpol_roots": []
       }
@@ -2299,6 +2303,14 @@
           },
           "default": {}
         },
+        "reject_retention": {
+          "description": "Rejected-route retention tuning for the looking-glass\nfiltered-route surface (LAN-472). Diagnostic retention only —\ndoes not affect which routes are accepted.",
+          "$ref": "#/$defs/PolicyRejectRetentionConfig",
+          "default": {
+            "capacity": 1024,
+            "enabled": true
+          }
+        },
         "rpol_files": {
           "description": "`.rpol` policy-language files (ADR-0096) compiled at config\nload. Relative paths resolve against the config file's\ndirectory and are rewritten to absolute paths after load (so\nruntime config snapshots and transaction candidates stay\nloadable regardless of the daemon's working directory).\nCompile diagnostics are config load errors. The policies they\ndefine share one namespace with `[policy.definitions]`; chains\nreference them by name, parameterized policies by call-form\n(`\"customer-in(200)\"`).",
           "type": "array",
@@ -2331,6 +2343,25 @@
         },
         "enabled": {
           "description": "Whether the per-session import-decision cache is populated.\nDefault `true`. This is the performance control: when `false`\nthe inbound UPDATE path skips building and storing any decision\nsnapshot — a single boolean check, no per-NLRI attribute /\nmodification clone. Turn it off on hot full-table peers where\nthe explain surface isn't worth the write-path cost.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyRejectRetentionConfig": {
+      "description": "Tuning for the per-session rejected-route retention store that backs\n`rbgp rib received <peer> --rejected` /\n`PolicyService.ListRejectedRoutes` (LAN-472) — the looking-glass\nfiltered-route surface.\n\nLike `[policy.explain]`, this is **diagnostic retention**, not\npolicy evaluation behaviour: shrinking or disabling the store\nchanges only what the reject surface can answer, never which routes\nthe import path admits.",
+      "type": "object",
+      "properties": {
+        "capacity": {
+          "description": "Per-peer retention capacity (entries). Each entry is one\nrejected `(AFI, SAFI, prefix, path_id)` identity with its reason\nand a compact attribute summary (≤ ~512 bytes realistic worst\ncase, dominated by the AS-path string and community sets).\nDefault 1024 ⇒ ~0.5 MiB bound per peer under a full reject\nstorm; the store is LRU on rejection recency, so a storm\nconverges on the most recent rejections. Raise it toward the\nexpected member announcement count for reliable full coverage on\nroute-server fleets and own the memory.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1024,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Whether rejected inbound routes are retained with their reject\nreason. Default `true`. When `false` the inbound UPDATE path\nskips retention entirely — a single boolean check per gate, no\nentry construction.",
           "type": "boolean",
           "default": true
         }

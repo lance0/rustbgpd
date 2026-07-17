@@ -683,6 +683,24 @@ service PolicyService {
   // any policy counter, does not log a new policy decision.
   rpc ExplainImportPolicy(ExplainImportPolicyRequest) returns (ExplainImportPolicyResponse);
 
+  // ListRejectedRoutes — the looking-glass filtered-route surface
+  // (LAN-472): every rejected inbound route the peer's session has
+  // retained, tagged with its canonical reject-reason token. The
+  // enumeration complement to ExplainImportPolicy's point lookup —
+  // "show me everything of mine you filtered, and why" without
+  // knowing a prefix in advance. Backs `rbgp rib received <peer>
+  // --rejected` and Alice-LG-style member-support views.
+  //
+  // Retention is bounded per peer ([policy.reject_retention]
+  // capacity, LRU on rejection recency) and covers unicast only,
+  // matching the v1 ExplainImportPolicy scope. Returns NOT_FOUND
+  // when the peer has no live session (the session-local store is
+  // gone, honestly distinct from "nothing rejected").
+  //
+  // Side-effect free read. Does not touch RIB, does not increment
+  // any policy counter, does not log a new policy decision.
+  rpc ListRejectedRoutes(ListRejectedRoutesRequest) returns (ListRejectedRoutesResponse);
+
   // TestPolicy — dry-run a candidate .rpol policy against a snapshot
   // of the live RIB (ADR-0096 Decision 6). The daemon compiles the
   // submitted source server-side (compile diagnostics are returned in
@@ -1186,6 +1204,74 @@ message ExplainImportPolicyResponse {
   // when it does not, every matching path_id appears (Add-Path
   // disambiguation).
   repeated ImportExplainMatch matches = 6;
+}
+
+message ListRejectedRoutesRequest {
+  // IPv4 or IPv6 literal of the peer whose retention store should be
+  // consulted. Required.
+  string peer_address = 1;
+}
+
+// One retained rejection (LAN-472). Attribute fields are best-effort:
+// the policy-deny path fills them all; the pre-policy safety gates
+// fill what was decodable. The reason token is always present.
+message RejectedRoute {
+  string prefix          = 1;
+  uint32 prefix_length   = 2;
+  uint32 path_id         = 3;
+  AddressFamily afi_safi = 4;
+
+  // Canonical snake_case reject-reason token, from the release-stable
+  // reason-label vocabulary: policy_reject, otc_route_leak,
+  // next_hop_ownership, as_path_loop, rr_loop, treat_as_withdraw.
+  string reason = 5;
+
+  // Sub-mechanism detail: the matched policy name for policy_reject,
+  // the canonical sub-reason token for the OTC / ownership / RR-loop
+  // gates (e.g. ingress_peer_mismatch, foreign_next_hop,
+  // cluster_list). Empty when the mechanism has no finer grain.
+  string reason_detail = 6;
+
+  // Wire next-hop the rejected announcement carried; empty when it
+  // was not decodable or not meaningful for the gate.
+  string next_hop = 7;
+
+  // Lossless AS_PATH rendering (AS_SET / confed segments survive);
+  // empty when the UPDATE carried none.
+  string as_path = 8;
+
+  repeated uint32 communities = 9;
+  // Large communities as "asn:local1:local2" strings.
+  repeated string large_communities = 10;
+
+  // RPKI origin-validation state at rejection time, as a stable
+  // snake_case string: "valid", "invalid", "not_found", "unknown".
+  string rpki_validation = 11;
+  // ASPA path-verification state at rejection time, as a stable
+  // snake_case string: "valid", "invalid", "unknown", "unverified".
+  string aspa_validation = 12;
+
+  // Rejection wall-clock time as Unix nanoseconds (the durable event
+  // outbox's timestamp_ns convention).
+  int64 rejected_at_unix_ns = 13;
+}
+
+message ListRejectedRoutesResponse {
+  // Echo of the request scope.
+  string peer_address = 1;
+
+  // Whether the session retains rejected routes at all
+  // ([policy.reject_retention] enabled). false means an empty listing
+  // is a configuration fact, not "nothing was rejected".
+  bool retention_enabled = 2;
+
+  // The session's retention cap. When routes.len() == capacity the
+  // listing shows the most recent `capacity` rejections, not
+  // necessarily all of them.
+  uint32 capacity = 3;
+
+  // Every retained rejection, sorted by (afi, safi, prefix, path_id).
+  repeated RejectedRoute routes = 4;
 }
 
 message TestPolicyRequest {

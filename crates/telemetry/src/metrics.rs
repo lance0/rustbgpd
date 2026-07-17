@@ -100,6 +100,7 @@ pub struct BgpMetrics {
     // ── Outbound queue (per-peer writer back-pressure) ─────────────
     peer_outbound_queue_depth: IntGaugeVec,
     peer_slow: IntGaugeVec,
+    rejected_routes_retained: IntGaugeVec,
 
     // ── RIB ──────────────────────────────────────────────────────
     rib_prefixes: IntGaugeVec,
@@ -423,6 +424,18 @@ impl BgpMetrics {
                  persistently not draining its outbound queue (backlog above \
                  the configured threshold for the configured duration). \
                  Cleared on drain and on session teardown.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rejected_routes_retained = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rejected_routes_retained",
+                "Rejected inbound routes currently retained for the \
+                 looking-glass filtered-route surface (LAN-472), per peer. \
+                 Bounded by [policy.reject_retention] capacity; refreshed on \
+                 every retention mutation and reset on session reset.",
             ),
             &["peer"],
         )
@@ -1539,6 +1552,9 @@ impl BgpMetrics {
             .register(Box::new(peer_slow.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rejected_routes_retained.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
@@ -1926,6 +1942,7 @@ impl BgpMetrics {
             messages_received,
             peer_outbound_queue_depth,
             peer_slow,
+            rejected_routes_retained,
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
@@ -2092,6 +2109,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.peer_outbound_queue_depth, peer);
         Self::reap_peer_series_from_vec(&self.peer_slow, peer);
+        Self::reap_peer_series_from_vec(&self.rejected_routes_retained, peer);
         Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
@@ -2324,6 +2342,26 @@ impl BgpMetrics {
     #[must_use]
     pub fn peer_slow(&self, peer: &str) -> i64 {
         self.peer_slow.with_label_values(&[peer]).get()
+    }
+
+    /// Set a peer's retained rejected-route count
+    /// (`bgp_rejected_routes_retained`, LAN-472). Refreshed on every
+    /// retention-store mutation — inserts, accept/withdraw removals,
+    /// and the session-reset clear — so the gauge tracks the store in
+    /// both directions and can never stay latched.
+    pub fn set_rejected_routes_retained(&self, peer: &str, count: usize) {
+        self.rejected_routes_retained
+            .with_label_values(&[peer])
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    /// Read a peer's retained rejected-route gauge. Test/diagnostic
+    /// helper.
+    #[must_use]
+    pub fn rejected_routes_retained(&self, peer: &str) -> i64 {
+        self.rejected_routes_retained
+            .with_label_values(&[peer])
+            .get()
     }
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
@@ -4959,6 +4997,7 @@ mod tests {
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
         m.set_peer_slow(peer, true);
+        m.set_rejected_routes_retained(peer, 4);
         m.set_peer_update_group(peer, 1);
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
@@ -5020,8 +5059,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 37 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 38);
+        // 38 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 39);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5031,7 +5070,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 38);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 39);
     }
 
     #[test]

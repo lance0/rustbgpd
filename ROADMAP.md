@@ -423,8 +423,9 @@ Details in the "Recently shipped" section below and ADR-0097.
   engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
   are also shipped. Remaining demand-shaped work: a real shadow/canary receipt,
   completion of the Alice-LG contract beyond the current Birdwatcher-shaped
-  status/peer/accepted-route subset (filtered/noexport views and structured
-  reject reasons remain), a 1000+-peer route-server scale receipt, and an
+  status/peer/accepted-route subset (structured reject reasons now ship via
+  `PolicyService.ListRejectedRoutes`; the adapter's filtered/noexport views
+  remain), a 1000+-peer route-server scale receipt, and an
   ARouteServer target.
 - **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
   RFC, no open-source implementation found, drops onto the existing
@@ -437,8 +438,10 @@ Details in the "Recently shipped" section below and ADR-0097.
 adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 `per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
 multi-stack BIRD/GoBGP/FRR/StayRTR proof. Next useful slices are an Alice-LG
-contract completion for filtered/noexport views plus structured reject
-reasons, a 1000+-peer route-server scale receipt, shadow/canary RIB-diff
+contract completion for the adapter's filtered/noexport views (the structured
+reject reasons behind them now ship via `PolicyService.ListRejectedRoutes` and
+`rbgp rib received <peer> --rejected`), a 1000+-peer route-server scale
+receipt, shadow/canary RIB-diff
 tooling (`rbgp diff` against an incumbent's MRT/BMP feed), and an ARouteServer
 target once the pilot surface is stable. The current external adapter already
 serves the Birdwatcher-shaped status, peer, and accepted-route subset.

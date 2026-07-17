@@ -5390,6 +5390,50 @@ fn resolve_neighbor_threads_policy_explain_settings() {
 }
 
 #[test]
+fn resolve_neighbor_threads_reject_retention_settings() {
+    // LAN-472: the resolved-neighbor transport path must thread the
+    // [policy.reject_retention] knobs, mirroring the [policy.explain]
+    // threading above.
+    let mut config = parse(valid_toml()).unwrap();
+    config.policy.reject_retention.enabled = false;
+    config.policy.reject_retention.capacity = 64;
+    let resolved = config.resolve_neighbor(&config.neighbors[0]).unwrap();
+    assert!(
+        !resolved.transport_config.reject_retention_enabled,
+        "enabled must propagate through resolve_neighbor"
+    );
+    assert_eq!(resolved.transport_config.reject_retention_capacity, 64);
+}
+
+#[test]
+fn diff_config_flags_reject_retention_as_restart_required() {
+    // LAN-472: a [policy.reject_retention] edit is restart-required-per-
+    // peer and must be visible in `--diff` (JSON + text), matching the
+    // [policy.explain] contract.
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.policy.reject_retention.enabled = false;
+    new.policy.reject_retention.capacity = 128;
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.policy_reject_retention_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "a reject-retention-only edit does not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["restart_required"]["policy_reject_retention_changed"],
+        true
+    );
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[policy.reject_retention]"), "{text}");
+}
+
+#[test]
 fn diff_config_flags_policy_explain_as_restart_required() {
     // ADR-0073: a [policy.explain] edit is restart-required-per-peer and
     // must be visible in `--diff` (JSON + text), not silently dropped.

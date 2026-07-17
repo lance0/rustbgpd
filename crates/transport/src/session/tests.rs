@@ -11392,6 +11392,21 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         }
         _ => panic!("expected RoutesReceived"),
     }
+    // LAN-472: the RPKI-driven deny is retained for the looking-glass
+    // surface with the policy_reject reason and the Invalid validation
+    // state the member-support answer hinges on.
+    {
+        use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+        let entries = session.rejected_routes.snapshot();
+        assert_eq!(entries.len(), 1, "the RPKI-invalid deny is retained");
+        let (key, entry) = &entries[0];
+        assert_eq!(
+            key.prefix,
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24))
+        );
+        assert_eq!(entry.reason, ImportRejectReason::PolicyReject);
+        assert_eq!(entry.rpki, rustbgpd_wire::RpkiValidation::Invalid);
+    }
 }
 /// Verify that import policy `match_aspa_validation = "invalid"` + `action = "deny"`
 /// drops ASPA-invalid routes when a `ValidationSnapshot` with an ASPA table is provided.
@@ -15160,4 +15175,404 @@ async fn slow_peer_detection_disabled_by_zero_duration() {
     assert!(!session.slow_peer);
     assert!(session.slow_peer_backlog_since.is_none());
     assert!(session.slow_peer_timer.is_none());
+}
+
+// ───────────────── LAN-472: rejected-route retention ─────────────────
+
+/// Longhand `PolicyStatement` builder for the retention tests below —
+/// only the fields under test vary.
+use super::import_decision_cache::ImportDecisionKey as RetentionKey;
+
+fn retention_statement(prefix: Option<Prefix>, action: PolicyAction) -> PolicyStatement {
+    PolicyStatement {
+        prefix,
+        ge: None,
+        le: None,
+        action,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    }
+}
+
+fn retention_session_with_chain(
+    chain: Option<PolicyChain>,
+    mutate_config: impl FnOnce(&mut TransportConfig),
+) -> (PeerSession, BgpMetrics) {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    mutate_config(&mut config);
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut session = PeerSession::new(
+        config,
+        metrics.clone(),
+        cmd_rx,
+        rib_tx,
+        chain,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    (session, metrics)
+}
+
+fn retention_update(announce: &[Ipv4Prefix], withdraw: &[Ipv4Prefix]) -> UpdateMessage {
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let announced: Vec<Ipv4NlriEntry> = announce
+        .iter()
+        .map(|&prefix| Ipv4NlriEntry { path_id: 0, prefix })
+        .collect();
+    let withdrawn: Vec<Ipv4NlriEntry> = withdraw
+        .iter()
+        .map(|&prefix| Ipv4NlriEntry { path_id: 0, prefix })
+        .collect();
+    UpdateMessage::build(
+        &announced,
+        &withdrawn,
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+}
+
+fn retention_key(prefix: Ipv4Prefix) -> RetentionKey {
+    RetentionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    }
+}
+
+/// LAN-472 pin: a policy deny retains the route with reason
+/// `policy_reject` and the attribute summary the member-support surface
+/// renders; a permitted sibling in the same UPDATE is not retained. The
+/// gauge tracks the store, and a subsequent explicit withdrawal clears
+/// both.
+#[tokio::test]
+async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let permitted = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![retention_statement(
+            Some(Prefix::V4(denied)),
+            PolicyAction::Deny,
+        )],
+        default_action: PolicyAction::Permit,
+    }]);
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |_| {});
+    session
+        .process_update(retention_update(&[denied, permitted], &[]))
+        .await;
+
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1, "only the denied prefix is retained");
+    let (key, entry) = &entries[0];
+    assert_eq!(*key, retention_key(denied));
+    assert_eq!(entry.reason, ImportRejectReason::PolicyReject);
+    assert_eq!(entry.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    assert_eq!(entry.as_path, "65002");
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+
+    // Explicit withdrawal clears the retained reject — the question
+    // "why isn't my route accepted?" is moot once the peer stops
+    // announcing it. The gauge follows in both directions.
+    session
+        .process_update(retention_update(&[], &[denied]))
+        .await;
+    assert!(
+        session.rejected_routes.is_empty(),
+        "withdrawal clears the retained reject"
+    );
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+}
+
+/// LAN-472 pin: when a previously rejected identity is later accepted
+/// (policy outcome changes with the announcement contents), the stale
+/// reject entry is cleared — the surface never claims a live route is
+/// filtered.
+#[tokio::test]
+async fn reject_retention_clears_when_route_is_later_accepted() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    // Deny when community 999 is attached; permit otherwise.
+    let mut deny_communities = retention_statement(None, PolicyAction::Deny);
+    deny_communities.match_community =
+        vec![rustbgpd_policy::CommunityMatch::Standard { value: 999 }];
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![deny_communities],
+        default_action: PolicyAction::Permit,
+    }]);
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |_| {});
+
+    let tagged = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![999]),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(tagged).await;
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].1.communities,
+        vec![999],
+        "the rejected UPDATE's communities are retained for the surface"
+    );
+
+    // Re-announce without the community — accepted, entry cleared.
+    session
+        .process_update(retention_update(&[prefix], &[]))
+        .await;
+    assert!(
+        session.rejected_routes.is_empty(),
+        "acceptance clears the stale reject entry"
+    );
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+}
+
+/// LAN-472 pin: the store is bounded by the configured capacity — a
+/// reject storm converges on the most recent rejections instead of
+/// growing without bound (this repo's reload-stall week was exactly
+/// this class of bug).
+#[tokio::test]
+async fn reject_retention_cap_evicts_oldest_reject() {
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |config| {
+        config.reject_retention_capacity = 2;
+    });
+    let first = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let third = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    session
+        .process_update(retention_update(&[first, second, third], &[]))
+        .await;
+    let keys: Vec<RetentionKey> = session
+        .rejected_routes
+        .snapshot()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(keys.len(), 2, "bounded at the configured capacity");
+    assert!(
+        !keys.contains(&retention_key(first)),
+        "oldest reject evicted under the cap"
+    );
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 2);
+}
+
+/// LAN-472 pin: `[policy.reject_retention] enabled = false` records
+/// nothing, and the command surface reports the disabled state as a
+/// configuration fact rather than an empty answer.
+#[tokio::test]
+async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |config| {
+        config.reject_retention_enabled = false;
+    });
+    session
+        .process_update(retention_update(&[denied], &[]))
+        .await;
+    assert!(session.rejected_routes.is_empty());
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ListRejectedRoutes { reply: reply_tx })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    let reply = reply_rx.await.expect("session replied");
+    assert!(!reply.enabled, "disabled state is a configuration fact");
+    assert!(reply.entries.is_empty());
+}
+
+/// LAN-472 pin: an AS_PATH-loop rejection (which funnels through the
+/// shared RFC 7606 treat-as-withdraw primitive, like the RR-loop and
+/// malformed-attribute paths) retains the announced identities under
+/// the loop reason.
+#[tokio::test]
+async fn reject_retention_records_as_path_loop_reason() {
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+    let looped = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (mut session, metrics) = retention_session_with_chain(None, |_| {});
+    // AS_PATH contains our own ASN (65001) → RFC 4271 §9.1.2 loop.
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: looped,
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002, 65001])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, retention_key(looped));
+    assert_eq!(entries[0].1.reason, ImportRejectReason::AsPathLoop);
+    assert_eq!(entries[0].1.as_path, "65002 65001");
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+}
+
+/// LAN-472 pin: an RFC 9234 OTC ingress drop (a pre-policy hygiene
+/// gate) retains the announced identity with the OTC reason token and
+/// the canonical sub-reason detail.
+#[tokio::test]
+async fn reject_retention_records_otc_ingress_drop_with_detail() {
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+    let dropped = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (mut session, metrics) = retention_session_with_chain(None, |_| {});
+    session.config.peer.local_role = Some(BgpRole::RouteServer);
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: dropped,
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::OnlyToCustomer(65002),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, retention_key(dropped));
+    assert_eq!(entries[0].1.reason, ImportRejectReason::OtcRouteLeak);
+    assert_eq!(
+        entries[0].1.detail.as_deref(),
+        Some("ingress_from_customer_rsclient"),
+        "the canonical OTC sub-reason token rides in the detail field"
+    );
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+}
+
+/// LAN-472 pin: the retention store is per-session diagnostic state —
+/// `Action::SessionDown` flushes it and zeroes the gauge, mirroring the
+/// ADR-0073 import-decision-cache contract.
+#[tokio::test]
+async fn session_down_flushes_reject_retention_and_gauge() {
+    let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, metrics) = retention_session_with_chain(Some(chain), |_| {});
+    session
+        .process_update(retention_update(&[denied], &[]))
+        .await;
+    assert_eq!(session.rejected_routes.len(), 1);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+    assert!(
+        session.rejected_routes.is_empty(),
+        "reject retention must be flushed on SessionDown"
+    );
+    assert_eq!(
+        metrics.rejected_routes_retained("10.0.0.2:179"),
+        0,
+        "the gauge follows the flush"
+    );
+}
+
+/// LAN-472 pin: the `ListRejectedRoutes` session command returns the
+/// retained entries (sorted by key) with the enabled flag and the
+/// configured capacity, and is a read — it must not move the
+/// permit/deny counters or the store.
+#[tokio::test]
+async fn list_rejected_routes_command_returns_sorted_snapshot() {
+    let a = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let b = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, _metrics) = retention_session_with_chain(Some(chain), |_| {});
+    session.process_update(retention_update(&[a, b], &[])).await;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ListRejectedRoutes { reply: reply_tx })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    let reply = reply_rx.await.expect("session replied");
+    assert!(reply.enabled);
+    assert_eq!(
+        reply.capacity,
+        super::rejected_routes::DEFAULT_REJECT_RETENTION_CAPACITY
+    );
+    let keys: Vec<RetentionKey> = reply.entries.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![retention_key(b), retention_key(a)],
+        "entries are sorted by key for stable output"
+    );
+    assert_eq!(
+        session.rejected_routes.len(),
+        2,
+        "the query is a read — the store is untouched"
+    );
 }

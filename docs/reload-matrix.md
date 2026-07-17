@@ -259,6 +259,8 @@ chains all add/change/remove cleanly via reload.
 | `export_chain` (named) | live | Reorder, add, or remove named exports. |
 | `[policy.explain] enabled` (ADR-0073) | restart-required (per peer) | Read by `build_transport_config` when a session is constructed, so the new value is adopted into the config snapshot (sessions established *after* the reload honour it) but live sessions keep their current import-explain write behaviour until they re-establish. Logged as `WARN` during reload when changed. Diagnostic retention only — never affects which routes are accepted. |
 | `[policy.explain] cache_size` (ADR-0073) | restart-required (per peer) | Same — the per-session LRU is sized at session construction. A live session's cache is not resized in place; the new capacity applies on its next establishment. |
+| `[policy.reject_retention] enabled` (LAN-472) | restart-required (per peer) | Same contract as `[policy.explain]`: read by `build_transport_config` at session construction. Live sessions keep their current rejected-route retention behaviour until they re-establish. Diagnostic retention only — never affects which routes are accepted. |
+| `[policy.reject_retention] capacity` (LAN-472) | restart-required (per peer) | Same — the per-session rejected-route store is sized at session construction; the new capacity applies on the peer's next establishment. |
 
 ## `[rpki]`, `[bmp]`, `[mrt]`
 

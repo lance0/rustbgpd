@@ -1296,6 +1296,11 @@ pub struct PolicyConfig {
     /// retention only — does not affect which routes are accepted.
     #[serde(default)]
     pub explain: PolicyExplainConfig,
+    /// Rejected-route retention tuning for the looking-glass
+    /// filtered-route surface (LAN-472). Diagnostic retention only —
+    /// does not affect which routes are accepted.
+    #[serde(default)]
+    pub reject_retention: PolicyRejectRetentionConfig,
     /// `.rpol` policy-language files (ADR-0096) compiled at config
     /// load. Relative paths resolve against the config file's
     /// directory and are rewritten to absolute paths after load (so
@@ -1425,6 +1430,54 @@ impl Default for PolicyExplainConfig {
         Self {
             enabled: default_explain_enabled(),
             cache_size: default_explain_cache_size(),
+        }
+    }
+}
+
+/// Tuning for the per-session rejected-route retention store that backs
+/// `rbgp rib received <peer> --rejected` /
+/// `PolicyService.ListRejectedRoutes` (LAN-472) — the looking-glass
+/// filtered-route surface.
+///
+/// Like `[policy.explain]`, this is **diagnostic retention**, not
+/// policy evaluation behaviour: shrinking or disabling the store
+/// changes only what the reject surface can answer, never which routes
+/// the import path admits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRejectRetentionConfig {
+    /// Whether rejected inbound routes are retained with their reject
+    /// reason. Default `true`. When `false` the inbound UPDATE path
+    /// skips retention entirely — a single boolean check per gate, no
+    /// entry construction.
+    #[serde(default = "default_reject_retention_enabled")]
+    pub enabled: bool,
+    /// Per-peer retention capacity (entries). Each entry is one
+    /// rejected `(AFI, SAFI, prefix, path_id)` identity with its reason
+    /// and a compact attribute summary (≤ ~512 bytes realistic worst
+    /// case, dominated by the AS-path string and community sets).
+    /// Default 1024 ⇒ ~0.5 MiB bound per peer under a full reject
+    /// storm; the store is LRU on rejection recency, so a storm
+    /// converges on the most recent rejections. Raise it toward the
+    /// expected member announcement count for reliable full coverage on
+    /// route-server fleets and own the memory.
+    #[serde(default = "default_reject_retention_capacity")]
+    pub capacity: usize,
+}
+
+fn default_reject_retention_enabled() -> bool {
+    true
+}
+
+fn default_reject_retention_capacity() -> usize {
+    1024
+}
+
+impl Default for PolicyRejectRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reject_retention_enabled(),
+            capacity: default_reject_retention_capacity(),
         }
     }
 }

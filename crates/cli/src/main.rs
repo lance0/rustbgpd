@@ -1028,6 +1028,11 @@ enum RibAction {
         /// Address family filter
         #[arg(short = 'a', long)]
         family: Option<String>,
+        /// Show the retained rejected routes with their reject reasons
+        /// instead of the accepted Adj-RIB-In (the looking-glass
+        /// filtered-route view; [policy.reject_retention])
+        #[arg(long)]
+        rejected: bool,
     },
     /// Show advertised routes to a neighbor
     #[command(visible_alias = "sent")]
@@ -2190,11 +2195,15 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 Some(RibAction::Received {
                     address,
                     family: fam,
+                    rejected,
                 }) => {
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
                         ));
+                    }
+                    if rejected {
+                        return commands::rib::rejected(connection, &address, json).await;
                     }
                     let f = resolve_family(&fam.or(family))?;
                     commands::rib::received(connection, &address, f, &filters, json).await
@@ -3198,6 +3207,24 @@ mod tests {
         } = cli.command
         {
             assert_eq!(address, "10.0.0.1");
+        } else {
+            panic!("expected Rib Received command");
+        }
+    }
+
+    #[test]
+    fn test_parse_rib_received_rejected() {
+        let cli =
+            Cli::try_parse_from(["rbgp", "rib", "received", "10.0.0.1", "--rejected"]).unwrap();
+        if let Command::Rib {
+            action: Some(RibAction::Received {
+                address, rejected, ..
+            }),
+            ..
+        } = cli.command
+        {
+            assert_eq!(address, "10.0.0.1");
+            assert!(rejected);
         } else {
             panic!("expected Rib Received command");
         }

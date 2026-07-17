@@ -1256,6 +1256,47 @@ never affects which routes are accepted):
   reliable full-table explain, raise it toward the peer's
   expected retained-prefix count and budget the memory.
 
+### Answer a member's "why is my route filtered?" (LAN-472)
+
+The enumeration complement to `policy explain`: when a route-server
+member calls asking why their prefix isn't in the RS — and neither of
+you knows exactly which announcement is at fault — list everything of
+theirs the import path rejected, tagged with the reason:
+
+```bash
+rbgp rib received 10.0.0.2 --rejected
+rbgp rib received 10.0.0.2 --rejected --json   # Alice-LG-style tooling feed
+```
+
+Each row carries the rejected prefix (with Add-Path `path_id`), the
+canonical reason token, a detail field, the wire next-hop, the AS path,
+and RPKI/ASPA validation states at rejection time:
+
+| Reason | Meaning / detail field |
+|---|---|
+| `policy_reject` | The import chain denied it (detail: the matched policy name; the row's RPKI/ASPA columns show whether a validation state drove the deny). Follow up with `rbgp policy explain` on the prefix for the statement-level trace. |
+| `otc_route_leak` | RFC 9234 Only-to-Customer ingress drop (detail: the canonical OTC sub-reason, e.g. `ingress_from_customer_rsclient`). |
+| `next_hop_ownership` | Strict-peer next-hop ownership gate, RFC 7948 §4.8 / ADR-0107 (detail: e.g. `foreign_next_hop`; the next-hop column shows the violating value). |
+| `as_path_loop` | Our ASN in the received AS_PATH (RFC 4271 §9.1.2). |
+| `rr_loop` | Reflection loop, RFC 4456 §8 (detail: `originator_id` or `cluster_list`). |
+| `treat_as_withdraw` | RFC 7606: a malformed attribute forced the whole UPDATE's routes to be handled as withdrawn. |
+
+Retention is per-session and self-maintaining: an identity that is
+later **accepted** or **explicitly withdrawn** drops out (the listing
+never claims a live route is filtered), and the store resets on session
+flap. It is bounded per peer (`[policy.reject_retention] capacity`,
+default 1024, LRU on rejection recency) — when the listing reports the
+store at capacity, it shows the most recent rejections and the CLI says
+so. Max-prefix violations don't appear here: exceeding the limit tears
+the session down (Cease/1), which is its own, louder signal.
+
+`bgp_rejected_routes_retained{peer}` gauges the store per peer — a
+sustained high value on a member session is the "their filters are
+rejecting a lot" signal worth proactive outreach before the support
+call. `[policy.reject_retention] enabled = false` disables retention
+entirely (the CLI then reports the disabled state, never an empty
+answer); both knobs are restart-required per peer.
+
 ### Enable / disable a peer
 
 ```bash
@@ -1752,8 +1793,9 @@ frontends, run the external `examples/birdwatcher-adapter` binary. It serves the
 Birdwatcher-shaped endpoints (`/status`, `/protocols/bgp`,
 `/routes/protocol/{id}`, `/routes/peer/{peer}`) from the daemon's gRPC API.
 Alice-LG consumes these shapes, but this is not a usable complete backend:
-Alice-LG also fetches filtered and noexport route views that are not exposed,
-and the public API does not yet provide structured reject reasons. The
+Alice-LG also fetches filtered and noexport route views that the adapter does
+not expose yet (the structured reject reasons behind them are available from
+`PolicyService.ListRejectedRoutes`). The
 in-daemon `[global.telemetry.looking_glass]` server has been removed.
 
 ### EVPN Route Reflector + Bidirectional VTEP

@@ -4,8 +4,9 @@
 //! subset consumed by Alice-LG and similar looking glass frontends, sourcing
 //! all data from a running rustbgpd over gRPC. This replaces the removed
 //! in-daemon `[global.telemetry.looking_glass]` server's four endpoints. It is
-//! not a complete Alice-LG backend: filtered/noexport views and structured
-//! reject reasons are not exposed.
+//! not a complete Alice-LG backend: filtered/noexport views are not wired up
+//! here yet (the structured reject reasons they need are available from
+//! `PolicyService.ListRejectedRoutes`).
 //!
 //! **Supported endpoints** (single-table mode):
 //! - `GET /status` — daemon status

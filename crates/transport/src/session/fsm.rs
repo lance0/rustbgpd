@@ -684,6 +684,13 @@ impl PeerSession {
                     // re-advertised yet. (import_policy_generation is NOT reset:
                     // it tracks policy reloads, which outlive a session flap.)
                     self.import_decision_cache.clear();
+                    // Same per-session contract for the rejected-route
+                    // retention store (LAN-472): a reject recorded on the
+                    // dying session must not answer a filtered-route query
+                    // on the reconnected one. The gauge follows the store.
+                    self.rejected_routes.clear();
+                    self.metrics
+                        .set_rejected_routes_retained(&self.peer_label, 0);
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf

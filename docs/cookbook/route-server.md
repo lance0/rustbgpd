@@ -313,19 +313,49 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 | `bgp_update_group_fallback_peers` | ≥ your `per_client_best` member count (they never group) |
 | `bgp_rib_outbound_registered_peers` | = established member count |
 
+## Member support: the filtered-route view
+
+The de-facto IXP member-support flow (what Alice-LG renders from
+arouteserver's `reject_reason` tagging on BIRD) is "show the member
+their *filtered* routes, tagged with why". rustbgpd retains rejected
+inbound routes per member session with a canonical reason token —
+`policy_reject`, `otc_route_leak`, `next_hop_ownership`,
+`as_path_loop`, `rr_loop`, `treat_as_withdraw` — queryable without
+knowing the prefix in advance:
+
+```console
+$ rbgp rib received 198.51.100.2 --rejected
+Prefix                 PathId   Reason             Detail                       Next Hop           RPKI       AS Path
+------------------------------------------------------------------------------------------------------------------------
+203.0.113.0/24         0        policy_reject      member-import                198.51.100.2       invalid    64500 64501
+```
+
+`--json` emits the same rows for a looking-glass or portal backend
+(`PolicyService.ListRejectedRoutes` is the underlying RPC — the
+structured reject-reason source an Alice-LG-style adapter needs for its
+filtered view). Retention is bounded per member
+(`[policy.reject_retention] capacity`, default 1024, LRU on recency),
+self-cleans when a rejected identity is later accepted or withdrawn,
+and `bgp_rejected_routes_retained{peer}` gauges it for proactive "your
+filters are eating this member's routes" alerting. For the
+statement-level *why* on a specific prefix, follow up with
+`rbgp policy explain`. See the runbook in
+[`OPERATIONS.md`](../OPERATIONS.md).
+
 ## Failure modes
 
 **A member's routes never appear (`rbgp rib received <addr>` is empty
-but the session is Established).** Import hygiene dropped them. Run the
-import decision cache explain:
+but the session is Established).** Import hygiene dropped them. List
+the retained rejections, then drill into the deciding term:
 
 ```console
+$ rbgp rib received 198.51.100.2 --rejected
 $ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 ```
 
-It names the deciding term — typically `reject-rpki-invalid` (fix the
-member's ROA or your RTR feed) or an `ixp-hygiene` rule (AS_SET or
-ASPA-invalid in the announcement).
+The explain names the deciding term — typically `reject-rpki-invalid`
+(fix the member's ROA or your RTR feed) or an `ixp-hygiene` rule
+(AS_SET or ASPA-invalid in the announcement).
 
 **A prefix is hidden from one member but present in the Loc-RIB.** That
 member's own export policy denies the single best path. In `single-best`

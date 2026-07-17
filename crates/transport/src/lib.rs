@@ -50,7 +50,10 @@ pub use listener::{
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::import_decision_cache::{
-    CachedDecision, CachedOutcome, CachedPolicyContext, ImportExplainReply, LookupResult,
-    ResolvedMatch,
+    CachedDecision, CachedOutcome, CachedPolicyContext, ImportDecisionKey, ImportExplainReply,
+    LookupResult, ResolvedMatch,
 };
+// LAN-472: rejected-route retention types crossing into the api +
+// binary layers (PeerManagerCommand reply, PolicyService mapping).
+pub use session::rejected_routes::{RejectedRouteEntry, RejectedRoutesReply};
 pub use socket_opts::{TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support};

@@ -690,6 +690,10 @@ impl PeerManager {
         // write-path gate at its `true` default regardless of config.
         transport.explain_enabled = self.current_config.policy.explain.enabled;
         transport.explain_cache_size = self.current_config.policy.explain.cache_size;
+        // LAN-472: rejected-route retention wiring — same threading
+        // hazard as the explain knobs above.
+        transport.reject_retention_enabled = self.current_config.policy.reject_retention.enabled;
+        transport.reject_retention_capacity = self.current_config.policy.reject_retention.capacity;
         // RFC 8671: tap outbound UPDATEs for BMP only when some collector
         // actually monitors the post-policy Adj-RIB-Out stream ([bmp]
         // changes require a restart, so read-at-construction is
@@ -978,13 +982,23 @@ impl PeerManager {
                             let result = self.hot_update_peer(config).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::SyncExplainConfig { enabled, cache_size, reply } => {
-                            // ADR-0073: make the explain snapshot fresh before
-                            // any subsequent reconcile/peer-group command on
-                            // this FIFO channel constructs a session via
-                            // build_transport_config.
+                        PeerManagerCommand::SyncExplainConfig {
+                            enabled,
+                            cache_size,
+                            reject_retention_enabled,
+                            reject_retention_capacity,
+                            reply,
+                        } => {
+                            // ADR-0073 / LAN-472: make the diagnostic-retention
+                            // snapshot fresh before any subsequent
+                            // reconcile/peer-group command on this FIFO channel
+                            // constructs a session via build_transport_config.
                             self.current_config.policy.explain.enabled = enabled;
                             self.current_config.policy.explain.cache_size = cache_size;
+                            self.current_config.policy.reject_retention.enabled =
+                                reject_retention_enabled;
+                            self.current_config.policy.reject_retention.capacity =
+                                reject_retention_capacity;
                             let _ = reply.send(());
                         }
                         PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, dataset_bindings, reply } => {
@@ -1039,6 +1053,25 @@ impl PeerManager {
                                         .explain_import_policy_timeout(
                                             afi, safi, prefix, path_id, EXPLAIN_QUERY_TIMEOUT,
                                         )
+                                        .await
+                                }
+                                None => None,
+                            };
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ListRejectedRoutes { address, reply } => {
+                            // LAN-472: same resolution + bounded-forward
+                            // shape as ExplainImportPolicy — no live
+                            // session folds to None, rendered by the RPC
+                            // layer as NOT_FOUND.
+                            let result = match self
+                                .unique_peer_key_for_address(address)
+                                .and_then(|key| self.peers.get(&key))
+                            {
+                                Some(managed) => {
+                                    managed
+                                        .handle
+                                        .list_rejected_routes_timeout(EXPLAIN_QUERY_TIMEOUT)
                                         .await
                                 }
                                 None => None,

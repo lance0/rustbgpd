@@ -1,4 +1,5 @@
 use super::import_decision_cache::{CachedDecision, CachedPolicyContext, ImportDecisionKey};
+use super::rejected_routes::RejectedRouteEntry;
 use super::{
     Afi, AsPath, BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, BgpRole, Event, EvpnRibRoute,
     EvpnRoute, EvpnRouteKey, FlowSpecKey, FlowSpecRoute, Instant, IpAddr, Ipv4Addr,
@@ -11,7 +12,7 @@ use rustbgpd_policy::{
     RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{
-    NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
+    ImportRejectReason, NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
 };
 use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
@@ -459,6 +460,68 @@ impl PeerSession {
         None
     }
 
+    /// LAN-472: retain one rejected unicast identity in the bounded
+    /// per-session store. AFI derives from the prefix; SAFI is unicast —
+    /// retention covers the unicast member-support surface only,
+    /// matching the v1 `ExplainImportPolicy` scope.
+    fn retain_rejected_route(&mut self, prefix: Prefix, path_id: u32, entry: RejectedRouteEntry) {
+        let afi = match prefix {
+            Prefix::V4(_) => Afi::Ipv4,
+            Prefix::V6(_) => Afi::Ipv6,
+        };
+        self.rejected_routes.insert(
+            ImportDecisionKey {
+                afi,
+                safi: Safi::Unicast,
+                prefix,
+                path_id,
+            },
+            entry,
+        );
+    }
+
+    /// Build a retention entry for a pre-policy gate rejection from the
+    /// parsed UPDATE's attributes (LAN-472). Called only after a reject
+    /// actually occurred, so the AS-path string build and community
+    /// clones cost nothing on the clean hot path. Validation states are
+    /// left at their defaults: the gate fired before (and independently
+    /// of) RPKI/ASPA evaluation.
+    fn gate_reject_entry(
+        parsed: &ParsedUpdate,
+        reason: ImportRejectReason,
+        detail: Option<&str>,
+        next_hop: Option<IpAddr>,
+    ) -> RejectedRouteEntry {
+        let mut as_path = String::new();
+        let mut communities: Vec<u32> = Vec::new();
+        let mut large_communities: Vec<rustbgpd_wire::LargeCommunity> = Vec::new();
+        for attr in &parsed.attributes {
+            match attr {
+                PathAttribute::AsPath(p) if as_path.is_empty() => {
+                    as_path = p.to_aspath_string();
+                }
+                PathAttribute::Communities(c) if communities.is_empty() => {
+                    communities.clone_from(c);
+                }
+                PathAttribute::LargeCommunities(c) if large_communities.is_empty() => {
+                    large_communities.clone_from(c);
+                }
+                _ => {}
+            }
+        }
+        RejectedRouteEntry {
+            reason,
+            detail: detail.map(str::to_owned),
+            next_hop,
+            as_path,
+            communities,
+            large_communities,
+            rpki: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa: rustbgpd_wire::AspaValidation::Unknown,
+            rejected_at: SystemTime::now(),
+        }
+    }
+
     /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
     /// drop (ADR-0078). The fast path is a `try_send`; when the channel
     /// is full the saturation counter increments and the session task
@@ -554,7 +617,12 @@ impl PeerSession {
         clippy::too_many_lines,
         reason = "one withdraw-conversion pass per address family over the same sequence"
     )]
-    async fn treat_update_as_withdraw(&mut self, parsed: &ParsedUpdate) {
+    async fn treat_update_as_withdraw(
+        &mut self,
+        parsed: &ParsedUpdate,
+        reject_reason: ImportRejectReason,
+        reject_detail: Option<&str>,
+    ) {
         let rejected_unicast = self.eligible_unicast_announcements(parsed);
         let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
             .withdrawn
@@ -682,7 +750,7 @@ impl PeerSession {
         for &(prefix, path_id) in &loop_withdrawn {
             self.forget_known_path(prefix, path_id);
         }
-        for (prefix, path_id) in rejected_unicast {
+        for &(prefix, path_id) in &rejected_unicast {
             if self.forget_known_path(prefix, path_id) {
                 loop_withdrawn.push((prefix, path_id));
             }
@@ -701,6 +769,35 @@ impl PeerSession {
                         path_id,
                     });
             }
+        }
+        // LAN-472: the retention store follows the same conversion.
+        // Explicit withdrawals (and replaced identities) clear any
+        // retained reject first, then every unicast announcement this
+        // UPDATE carried is retained under the shared gate reason —
+        // same-identity overlap nets to the reject, the current truth.
+        if self.reject_retention_enabled {
+            if !self.rejected_routes.is_empty() {
+                for &(prefix, path_id) in &loop_withdrawn {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.rejected_routes.remove(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix,
+                        path_id,
+                    });
+                }
+            }
+            if !rejected_unicast.is_empty() {
+                let entry = Self::gate_reject_entry(parsed, reject_reason, reject_detail, None);
+                for &(prefix, path_id) in &rejected_unicast {
+                    self.retain_rejected_route(prefix, path_id, entry.clone());
+                }
+            }
+            self.metrics
+                .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for rule in &loop_fs_withdrawn {
             self.known_flowspec.remove(rule);
@@ -1000,7 +1097,8 @@ impl PeerSession {
                 announced = parsed.announced.len(),
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
-            self.treat_update_as_withdraw(&parsed).await;
+            self.treat_update_as_withdraw(&parsed, ImportRejectReason::TreatAsWithdraw, None)
+                .await;
             return;
         }
         // 3. End-of-RIB detection (RFC 4724 §2). An UPDATE that only became
@@ -1236,7 +1334,8 @@ impl PeerSession {
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the AS_PATH-loop branch must
             // not silently drop withdrawals for any family, or stale non-unicast state
             // accumulates downstream until the next session reset / refresh.
-            self.treat_update_as_withdraw(&parsed).await;
+            self.treat_update_as_withdraw(&parsed, ImportRejectReason::AsPathLoop, None)
+                .await;
             return;
         }
         // Route reflector loop detection (RFC 4456 §8):
@@ -1271,7 +1370,12 @@ impl PeerSession {
             // Covers unicast, FlowSpec, EVPN, and BGP-LS — the reflected-loop
             // detection must not silently drop withdrawals for any family,
             // or stale state accumulates downstream.
-            self.treat_update_as_withdraw(&parsed).await;
+            self.treat_update_as_withdraw(
+                &parsed,
+                ImportRejectReason::RrLoop,
+                Some(reason.as_str()),
+            )
+            .await;
             return;
         }
         // Normalize the attributes that policy and the RIB are allowed to
@@ -1372,6 +1476,14 @@ impl PeerSession {
         // per-route context / modification clone never happens
         // (ADR-0073 write-path cost control).
         let mut import_decisions: Vec<(ImportDecisionKey, CachedDecision)> = Vec::new();
+        // LAN-472: policy denies retained for the looking-glass reject
+        // surface, accumulated here (body-NLRI closure borrows `self`
+        // immutably) and drained into the bounded store after the
+        // explicit-withdrawal removal pass below. Entry construction
+        // happens only on an actual deny, so the clean permit path pays
+        // nothing.
+        let retention_enabled = self.reject_retention_enabled;
+        let mut rejected_retained: Vec<(Prefix, u32, RejectedRouteEntry)> = Vec::new();
         // A denied announcement replaces any prior accepted path under the
         // same wire identity; retire it after explicit withdrawals below.
         let mut denied_unicast: Vec<(Prefix, u32)> = Vec::new();
@@ -1453,6 +1565,25 @@ impl PeerSession {
                         ));
                     }
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
+                        if retention_enabled {
+                            rejected_retained.push((
+                                prefix,
+                                entry.path_id,
+                                RejectedRouteEntry {
+                                    reason: ImportRejectReason::PolicyReject,
+                                    detail: evaluation.matched_policy.clone(),
+                                    next_hop: Some(body_next_hop),
+                                    as_path: parsed_as_path
+                                        .map(AsPath::to_aspath_string)
+                                        .unwrap_or_default(),
+                                    communities: update_communities.to_vec(),
+                                    large_communities: update_large_communities.to_vec(),
+                                    rpki: rpki_state,
+                                    aspa: body_aspa_state,
+                                    rejected_at: SystemTime::now(),
+                                },
+                            ));
+                        }
                         denied_unicast.push((prefix, entry.path_id));
                         return None;
                     }
@@ -2079,6 +2210,25 @@ impl PeerSession {
                                 aspa_context,
                             });
                         } else {
+                            if retention_enabled {
+                                rejected_retained.push((
+                                    entry.prefix,
+                                    entry.path_id,
+                                    RejectedRouteEntry {
+                                        reason: ImportRejectReason::PolicyReject,
+                                        detail: evaluation.matched_policy.clone(),
+                                        next_hop: Some(mp.next_hop),
+                                        as_path: parsed_as_path
+                                            .map(AsPath::to_aspath_string)
+                                            .unwrap_or_default(),
+                                        communities: update_communities.to_vec(),
+                                        large_communities: update_large_communities.to_vec(),
+                                        rpki: mp_rpki_state,
+                                        aspa: mp_aspa_state,
+                                        rejected_at: SystemTime::now(),
+                                    },
+                                ));
+                            }
                             denied_unicast.push((entry.prefix, entry.path_id));
                         }
                     }
@@ -2166,6 +2316,72 @@ impl PeerSession {
         for &(prefix, path_id) in &withdrawn {
             self.forget_known_path(prefix, path_id);
         }
+        // LAN-472: an explicit withdrawal clears any retained reject for
+        // the identity — the peer no longer announces it, so "why isn't
+        // it accepted?" is moot. Runs before the reject inserts below,
+        // so a same-UPDATE withdraw+reject nets to the reject (the
+        // current truth). `withdrawn` holds only explicit withdrawals at
+        // this point; the rejected identities are appended after.
+        if self.reject_retention_enabled && !self.rejected_routes.is_empty() {
+            for &(prefix, path_id) in &withdrawn {
+                let afi = match prefix {
+                    Prefix::V4(_) => Afi::Ipv4,
+                    Prefix::V6(_) => Afi::Ipv6,
+                };
+                self.rejected_routes.remove(&ImportDecisionKey {
+                    afi,
+                    safi: Safi::Unicast,
+                    prefix,
+                    path_id,
+                });
+            }
+        }
+        // LAN-472: retain the pre-policy safety rejections under their
+        // gate reason. One shared entry per gate — the per-UPDATE
+        // attribute summary is identical across the rejected identities,
+        // and the AS-path string is built only here, on the reject path.
+        if self.reject_retention_enabled {
+            if let OtcIngressAction::DropUnicastAnnouncements(otc_reason) = otc_action
+                && !otc_rejected_unicast.is_empty()
+            {
+                let entry = RejectedRouteEntry {
+                    reason: ImportRejectReason::OtcRouteLeak,
+                    detail: Some(otc_reason.as_str().to_owned()),
+                    next_hop: None,
+                    as_path: parsed_as_path
+                        .map(AsPath::to_aspath_string)
+                        .unwrap_or_default(),
+                    communities: update_communities.to_vec(),
+                    large_communities: update_large_communities.to_vec(),
+                    rpki: rustbgpd_wire::RpkiValidation::NotFound,
+                    aspa: rustbgpd_wire::AspaValidation::Unknown,
+                    rejected_at: SystemTime::now(),
+                };
+                for &(prefix, path_id) in &otc_rejected_unicast {
+                    self.retain_rejected_route(prefix, path_id, entry.clone());
+                }
+            }
+            if let Some((ownership_reason, violating_next_hop, _)) = next_hop_ownership_rejection
+                && !ownership_rejected_unicast.is_empty()
+            {
+                let entry = RejectedRouteEntry {
+                    reason: ImportRejectReason::NextHopOwnership,
+                    detail: Some(ownership_reason.as_str().to_owned()),
+                    next_hop: Some(violating_next_hop),
+                    as_path: parsed_as_path
+                        .map(AsPath::to_aspath_string)
+                        .unwrap_or_default(),
+                    communities: update_communities.to_vec(),
+                    large_communities: update_large_communities.to_vec(),
+                    rpki: rustbgpd_wire::RpkiValidation::NotFound,
+                    aspa: rustbgpd_wire::AspaValidation::Unknown,
+                    rejected_at: SystemTime::now(),
+                };
+                for &(prefix, path_id) in &ownership_rejected_unicast {
+                    self.retain_rejected_route(prefix, path_id, entry.clone());
+                }
+            }
+        }
         // A pre-policy safety rejection replaces any prior accepted route
         // under the same wire identity. Explicit withdrawals above win on
         // overlap; first-seen rejected announcements remain silent.
@@ -2219,6 +2435,30 @@ impl PeerSession {
         }
         for route in &announced {
             self.remember_known_path(route.prefix, route.path_id);
+        }
+        // LAN-472: retain the policy denies (body + MP unicast), clear
+        // any stale reject for identities accepted this UPDATE, then
+        // refresh the gauge once. Empty when retention is disabled.
+        for (prefix, path_id, entry) in rejected_retained {
+            self.retain_rejected_route(prefix, path_id, entry);
+        }
+        if self.reject_retention_enabled {
+            if !self.rejected_routes.is_empty() {
+                for route in &announced {
+                    let afi = match route.prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.rejected_routes.remove(&ImportDecisionKey {
+                        afi,
+                        safi: Safi::Unicast,
+                        prefix: route.prefix,
+                        path_id: route.path_id,
+                    });
+                }
+            }
+            self.metrics
+                .set_rejected_routes_retained(&self.peer_label, self.rejected_routes.len());
         }
         for key in &flowspec_withdrawn {
             self.known_flowspec.remove(key);

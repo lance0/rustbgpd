@@ -425,8 +425,9 @@ JSON-lines event bridge, the minimal Shape-A skeleton) and
 `examples/birdwatcher-adapter/` (a Birdwatcher-shaped status, peer, and
 accepted-route REST subset sourced entirely from the public gRPC API,
 including per-route `age` from `received_at_epoch_seconds`). It is not a
-complete Alice-LG backend: filtered/noexport views and structured reject
-reasons still need public API support. The adapter is the honest template: if
+complete Alice-LG backend: the structured reject reasons are now served by
+`PolicyService.ListRejectedRoutes` (LAN-472), but the adapter's
+filtered/noexport views still need wiring. The adapter is the honest template: if
 the public API is missing a field an external tool needs, the fix is an
 additive proto field, not a daemon-internal shortcut — that is how
 `received_at_epoch_seconds` landed.
