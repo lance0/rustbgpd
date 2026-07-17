@@ -99,6 +99,7 @@ pub struct BgpMetrics {
 
     // ── Outbound queue (per-peer writer back-pressure) ─────────────
     peer_outbound_queue_depth: IntGaugeVec,
+    peer_slow: IntGaugeVec,
 
     // ── RIB ──────────────────────────────────────────────────────
     rib_prefixes: IntGaugeVec,
@@ -410,6 +411,18 @@ impl BgpMetrics {
                  drain (shrink); a value pinned near the writer's bulk-buffer \
                  capacity marks a slow or stuck client that is not draining our \
                  output during convergence.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_slow = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_slow",
+                "1 while a peer is flagged slow: Established and alive but \
+                 persistently not draining its outbound queue (backlog above \
+                 the configured threshold for the configured duration). \
+                 Cleared on drain and on session teardown.",
             ),
             &["peer"],
         )
@@ -1523,6 +1536,9 @@ impl BgpMetrics {
             .register(Box::new(peer_outbound_queue_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_slow.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
@@ -1909,6 +1925,7 @@ impl BgpMetrics {
             messages_sent,
             messages_received,
             peer_outbound_queue_depth,
+            peer_slow,
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
@@ -2074,6 +2091,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.messages_sent, peer);
         Self::reap_peer_series_from_vec(&self.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.peer_outbound_queue_depth, peer);
+        Self::reap_peer_series_from_vec(&self.peer_slow, peer);
         Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
@@ -2290,6 +2308,22 @@ impl BgpMetrics {
         self.peer_outbound_queue_depth
             .with_label_values(&[peer])
             .get()
+    }
+
+    /// Set a peer's slow-peer flag gauge (`bgp_peer_slow`): 1 while the
+    /// peer is flagged slow, 0 otherwise. Refreshed on BOTH transitions
+    /// (into slow and out of slow) and on session teardown, so the flag
+    /// can never stay latched for a peer that recovered.
+    pub fn set_peer_slow(&self, peer: &str, slow: bool) {
+        self.peer_slow
+            .with_label_values(&[peer])
+            .set(i64::from(slow));
+    }
+
+    /// Read a peer's slow-peer flag gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn peer_slow(&self, peer: &str) -> i64 {
+        self.peer_slow.with_label_values(&[peer]).get()
     }
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
@@ -4924,6 +4958,7 @@ mod tests {
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
+        m.set_peer_slow(peer, true);
         m.set_peer_update_group(peer, 1);
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
@@ -4985,8 +5020,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 36 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 37);
+        // 37 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 38);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -4996,7 +5031,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 37);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 38);
     }
 
     #[test]

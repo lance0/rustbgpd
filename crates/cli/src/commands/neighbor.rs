@@ -90,6 +90,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
             state: output::format_state_with_stale(n.state, n.stale).to_string(),
             stale: n.stale,
+            slow_peer: n.slow_peer,
             uptime_seconds: n.uptime_seconds,
             prefixes_received: n.prefixes_received,
             prefixes_sent: n.prefixes_sent,
@@ -280,6 +281,9 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "State:                 {}",
             output::colored_state_with_stale(n.state, n.stale)
         );
+        if n.slow_peer {
+            println!("Slow Peer:             true (outbound queue persistently backlogged)");
+        }
         println!(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)

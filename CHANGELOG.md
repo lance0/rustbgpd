@@ -27,6 +27,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Slow-peer detection + optional update-group isolation (LAN-470).**
+  A peer that is Established and alive but persistently fails to drain
+  its outbound queue — backlog at or above `slow_peer_threshold_pct`
+  (default 50%) of the writer buffer for `slow_peer_duration` seconds
+  (default 30; 0 disables) — is flagged slow: a `slow_peer` bool on the
+  neighbor status surface (`rbgp neighbor <ip>`, `NeighborState` proto
+  field 36), a warn log on both transitions, and a `bgp_peer_slow{peer}`
+  0/1 gauge (reaped on peer delete). Detection is evaluated at batch
+  granularity on the existing queue-depth sampling seams plus a 1s
+  re-check timer armed only during a backlog episode — zero
+  steady-state cost. With the new per-neighbor / peer-group knob
+  `slow_peer_isolation = true` (default off), a flagged peer is moved
+  onto its own per-peer update path (ungrouped reason `slow_peer`) so
+  it stops holding back its update-group's shared encode, and regroups
+  automatically through the ordinary regroup baseline diff when it
+  recovers or its session restarts. Complements RFC 9687 send-hold
+  (which only tears down a fully wedged socket); modeled on IOS-XR
+  BGP Slow Peer Detection/Handling.
+
 - **Per-peer fanout observability gauges.**
   `bgp_peer_outbound_queue_depth{peer}` reports the coalesced update
   frames buffered for a peer's outbound writer — the "which clients are

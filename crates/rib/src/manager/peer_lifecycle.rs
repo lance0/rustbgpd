@@ -477,6 +477,10 @@ impl RibManager {
         // `negotiated_orf_recv`.
         self.peer_orf_filters.remove(&peer);
         self.peer_orf_pending.remove(&peer);
+        // Slow-peer isolation is per-session too (LAN-470): the flag is
+        // a property of the departed session's wedged writer, and the
+        // transport's detector starts fresh on the replacement session.
+        self.slow_isolated_peers.remove(&peer);
         // RT-Constrain membership is per-session too (RFC 4684 filters
         // derive from the session's Adj-RIB-In): `handle_peer_up` re-creates
         // it when the new session negotiates the family — empty-strict

@@ -104,6 +104,9 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         explain_enabled: true,
         explain_cache_size: 4096,
         bmp_rib_out: false,
+        slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+        slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+        slow_peer_isolation: false,
     }
 }
 

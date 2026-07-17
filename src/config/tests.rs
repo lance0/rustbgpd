@@ -976,6 +976,106 @@ remote_asn = 65002
 }
 
 #[test]
+fn slow_peer_knobs_parse_and_resolve() {
+    let toml_str = valid_toml().replace(
+        "remote_asn = 65002",
+        "remote_asn = 65002\nslow_peer_threshold_pct = 25\nslow_peer_duration = 10\nslow_peer_isolation = true",
+    );
+    let config = parse(&toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(peers[0].0.slow_peer_threshold_pct, 25);
+    assert_eq!(peers[0].0.slow_peer_duration, 10);
+    assert!(peers[0].0.slow_peer_isolation);
+}
+
+#[test]
+fn slow_peer_defaults_applied() {
+    let config = parse(valid_toml()).unwrap();
+    assert_eq!(config.neighbors[0].slow_peer_threshold_pct, None);
+    assert_eq!(config.neighbors[0].slow_peer_duration, None);
+    assert_eq!(config.neighbors[0].slow_peer_isolation, None);
+
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.slow_peer_threshold_pct,
+        rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT
+    );
+    assert_eq!(
+        peers[0].0.slow_peer_duration,
+        rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS
+    );
+    assert!(!peers[0].0.slow_peer_isolation);
+}
+
+#[test]
+fn slow_peer_threshold_zero_rejected() {
+    let toml_str = valid_toml().replace(
+        "remote_asn = 65002",
+        "remote_asn = 65002\nslow_peer_threshold_pct = 0",
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidSlowPeerThreshold { value: 0 }
+    ));
+}
+
+#[test]
+fn slow_peer_threshold_over_100_rejected() {
+    let toml_str = valid_toml().replace(
+        "remote_asn = 65002",
+        "remote_asn = 65002\nslow_peer_threshold_pct = 101",
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::InvalidSlowPeerThreshold { value: 101 }
+    ));
+}
+
+#[test]
+fn slow_peer_knobs_inherited_from_peer_group() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.clients]
+slow_peer_threshold_pct = 30
+slow_peer_duration = 15
+slow_peer_isolation = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "clients"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "clients"
+slow_peer_threshold_pct = 60
+slow_peer_duration = 0
+slow_peer_isolation = false
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    // First neighbor inherits the group values.
+    assert_eq!(peers[0].0.slow_peer_threshold_pct, 30);
+    assert_eq!(peers[0].0.slow_peer_duration, 15);
+    assert!(peers[0].0.slow_peer_isolation);
+    // Second neighbor overrides all three (0 = detection disabled).
+    assert_eq!(peers[1].0.slow_peer_threshold_pct, 60);
+    assert_eq!(peers[1].0.slow_peer_duration, 0);
+    assert!(!peers[1].0.slow_peer_isolation);
+}
+
+#[test]
 fn to_peer_configs_maps_correctly() {
     let config = parse(valid_toml()).unwrap();
     let peers = config.to_peer_configs().unwrap();
@@ -5070,6 +5170,9 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         peer_group: None,
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -5760,6 +5863,9 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         PeerGroupConfig {
             hold_time: Some(60),
             send_hold_time: None,
+            slow_peer_threshold_pct: None,
+            slow_peer_duration: None,
+            slow_peer_isolation: None,
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
@@ -5799,6 +5905,9 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         peer_group: Some("new-group".into()),
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -5848,6 +5957,9 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         peer_group: Some("new-group".into()),
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -5906,6 +6018,9 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         peer_group: None,
         hold_time: None,
         send_hold_time: None,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -12558,6 +12673,9 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "description",
     "peer_group",
     "hold_time",
+    "slow_peer_threshold_pct",
+    "slow_peer_duration",
+    "slow_peer_isolation",
     "max_prefixes",
     "md5_password",
     "tcp_ao",
@@ -12589,6 +12707,9 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
 /// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "hold_time",
+    "slow_peer_threshold_pct",
+    "slow_peer_duration",
+    "slow_peer_isolation",
     "max_prefixes",
     "md5_password",
     "bfd",

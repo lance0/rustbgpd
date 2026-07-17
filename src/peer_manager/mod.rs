@@ -669,6 +669,11 @@ impl PeerManager {
         // this line the knob parses, validates, and reloads while every
         // session imports unguarded (pinned by the field-threading test).
         transport.next_hop_ownership_strict_peer = config.next_hop_ownership_strict_peer;
+        // Slow-peer knobs are resolved values; both transport-construction
+        // paths must thread them (ADR-0073 note in config/mod.rs).
+        transport.slow_peer_threshold_pct = config.slow_peer_threshold_pct;
+        transport.slow_peer_duration = config.slow_peer_duration;
+        transport.slow_peer_isolation = config.slow_peer_isolation;
         // RFC 1997: resolved in config (default !route_server_client);
         // pinned by the build_transport_config field-threading test.
         transport.interpret_rfc1997 = config.interpret_rfc1997;

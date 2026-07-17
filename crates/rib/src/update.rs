@@ -1335,6 +1335,21 @@ pub enum RibUpdate {
         /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Peer session's slow-peer flag changed (LAN-470). Sent only when
+    /// `slow_peer_isolation` is configured for the peer: `slow = true`
+    /// moves the peer onto the per-peer (ungrouped) update path so it
+    /// stops holding back its update-group's shared encode; `false`
+    /// regroups it through the ordinary regroup baseline-diff seam.
+    PeerSlowState {
+        /// The peer whose slow flag changed.
+        peer: IpAddr,
+        /// Transport session identity of the emitting session — a stale
+        /// signal from a superseded session must not (de)isolate the
+        /// replacement session (see `RoutesReceived::session_id`).
+        session_id: u64,
+        /// The new slow-flag value.
+        slow: bool,
+    },
     /// Update per-peer policy identity metadata used during export policy evaluation.
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.

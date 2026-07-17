@@ -229,6 +229,26 @@ pub(crate) struct PeerSession {
     /// Last session-down cause for BMP Peer Down reason classification.
     /// Set by `SendNotification` (local) or inbound Notification (remote).
     last_down_reason: Option<PeerDownReason>,
+    /// Slow-peer detector (LAN-470): when the outbound bulk backlog
+    /// first crossed the configured threshold fraction of the writer
+    /// buffer. `None` = below threshold at the last evaluation.
+    slow_peer_backlog_since: Option<std::time::Instant>,
+    /// Whether this peer is currently flagged slow: Established and
+    /// alive but persistently not draining its outbound queue.
+    /// Surfaced in `PeerSessionState`, `bgp_peer_slow`, and a warn log
+    /// on both transitions.
+    slow_peer: bool,
+    /// Last slow-state value successfully delivered to the RIB manager
+    /// for update-group isolation. Only meaningful when
+    /// `slow_peer_isolation` is configured; lets a `try_send` that hit
+    /// RIB backpressure be retried from the re-check timer instead of
+    /// silently desynchronizing isolation from the flag.
+    slow_peer_isolation_sent: bool,
+    /// Re-evaluation timer for the slow-peer detector. Armed only
+    /// while a backlog episode is in progress (or an isolation signal
+    /// is pending), so the detector both fires and clears even when no
+    /// new outbound envelopes arrive — and costs nothing when healthy.
+    slow_peer_timer: Option<Pin<Box<Sleep>>>,
     /// Accepted plain (non-Add-Path receive) unicast prefixes.
     ///
     /// The negotiated receive direction, not the wire `path_id` value, selects
@@ -854,6 +874,10 @@ impl PeerSession {
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,
+            slow_peer_backlog_since: None,
+            slow_peer: false,
+            slow_peer_isolation_sent: false,
+            slow_peer_timer: None,
             known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
@@ -988,6 +1012,10 @@ impl PeerSession {
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,
+            slow_peer_backlog_since: None,
+            slow_peer: false,
+            slow_peer_isolation_sent: false,
+            slow_peer_timer: None,
             known_plain_prefixes: HashSet::new(),
             known_paths: HashSet::new(),
             known_prefix_refcounts: HashMap::new(),
@@ -1397,6 +1425,7 @@ impl PeerSession {
                 writer_join,
                 bmp_repair_timer,
                 refresh_accounting_timer,
+                slow_peer_timer,
                 ..
             } = self;
 
@@ -1471,6 +1500,16 @@ impl PeerSession {
                 () = poll_timer(refresh_accounting_timer) => {
                     self.refresh_accounting_timer = None;
                     let _ = self.expire_refresh_accounting_windows().await;
+                }
+
+                // Slow-peer detector re-check (LAN-470): armed only
+                // while a backlog episode is in progress, so the flag
+                // fires after the configured duration and clears after
+                // a drain even when no new outbound envelopes arrive
+                // to drive the enqueue-side evaluation.
+                () = poll_timer(slow_peer_timer) => {
+                    self.slow_peer_timer = None;
+                    self.evaluate_slow_peer();
                 }
 
                 // In-flight outbound TCP connect completion

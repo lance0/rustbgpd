@@ -691,6 +691,22 @@ pub struct Neighbor {
     /// (RFC 9687 §4.4). Default: the greater of 480s (8 minutes) or 2×
     /// the effective `hold_time` (RFC 9687 §6).
     pub send_hold_time: Option<u32>,
+    /// Slow-peer detection: backlog threshold as a percentage (1-100)
+    /// of the outbound writer buffer. The peer is a slow-peer candidate
+    /// while its buffered outbound frames stay at or above this
+    /// fraction. Default: 50.
+    pub slow_peer_threshold_pct: Option<u8>,
+    /// Slow-peer detection: how long (seconds) the backlog must stay
+    /// above `slow_peer_threshold_pct` before the peer is flagged slow
+    /// (status flag, warn log, `bgp_peer_slow` metric). 0 disables
+    /// detection. Default: 30.
+    pub slow_peer_duration: Option<u32>,
+    /// Move a flagged-slow peer onto the per-peer (ungrouped) update
+    /// path so it stops holding back its update-group's shared encode;
+    /// it regroups when the flag clears. Requires detection
+    /// (`slow_peer_duration` > 0). Default: false (detection alone is
+    /// purely observational).
+    pub slow_peer_isolation: Option<bool>,
     /// Maximum prefixes accepted from this peer before the session is
     /// torn down. Unset = unlimited.
     pub max_prefixes: Option<u32>,
@@ -826,6 +842,9 @@ impl fmt::Debug for Neighbor {
             .field("peer_group", &self.peer_group)
             .field("hold_time", &self.hold_time)
             .field("send_hold_time", &self.send_hold_time)
+            .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
+            .field("slow_peer_duration", &self.slow_peer_duration)
+            .field("slow_peer_isolation", &self.slow_peer_isolation)
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
@@ -992,6 +1011,15 @@ pub struct PeerGroupConfig {
     /// Send hold time in seconds (RFC 9687) inherited by neighbors in
     /// this group. See the neighbor-level `send_hold_time`.
     pub send_hold_time: Option<u32>,
+    /// Slow-peer backlog threshold inherited by neighbors in this
+    /// group. See the neighbor-level `slow_peer_threshold_pct`.
+    pub slow_peer_threshold_pct: Option<u8>,
+    /// Slow-peer persistence duration inherited by neighbors in this
+    /// group. See the neighbor-level `slow_peer_duration`.
+    pub slow_peer_duration: Option<u32>,
+    /// Slow-peer isolation inherited by neighbors in this group. See
+    /// the neighbor-level `slow_peer_isolation`.
+    pub slow_peer_isolation: Option<bool>,
     /// Prefix limit inherited by neighbors in this group. See the
     /// neighbor-level `max_prefixes`.
     pub max_prefixes: Option<u32>,
@@ -1081,6 +1109,9 @@ impl fmt::Debug for PeerGroupConfig {
         f.debug_struct("PeerGroupConfig")
             .field("hold_time", &self.hold_time)
             .field("send_hold_time", &self.send_hold_time)
+            .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
+            .field("slow_peer_duration", &self.slow_peer_duration)
+            .field("slow_peer_isolation", &self.slow_peer_isolation)
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
@@ -2054,6 +2085,11 @@ pub enum ConfigError {
          {hold_time} (RFC 9687 §4.4)"
     )]
     InvalidSendHoldTime { value: u32, hold_time: u16 },
+    #[error(
+        "invalid slow_peer_threshold_pct {value}: must be between 1 and 100 \
+         (percent of the outbound writer buffer)"
+    )]
+    InvalidSlowPeerThreshold { value: u8 },
     #[error("invalid policy entry: {reason}")]
     InvalidPolicyEntry { reason: String },
     #[error("invalid local_ipv6_nexthop {value:?}: {reason}")]

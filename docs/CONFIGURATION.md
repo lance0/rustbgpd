@@ -583,6 +583,9 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6 |
+| `slow_peer_threshold_pct` | u8    | no       | 50      | Slow-peer detection: backlog threshold as a percentage (1--100) of the outbound writer buffer. The peer is a slow-peer candidate while its buffered outbound updates stay at or above this fraction |
+| `slow_peer_duration`   | u32      | no       | 30      | How long (seconds) the backlog must persist above the threshold before the peer is flagged slow (neighbor status flag, warn log, `bgp_peer_slow` metric). 0 disables detection. Purely observational unless `slow_peer_isolation` is set |
+| `slow_peer_isolation`  | bool     | no       | false   | Move a flagged-slow peer onto its own per-peer update path so it stops holding back its update-group's shared encode; it regroups automatically when the flag clears. Requires detection (`slow_peer_duration > 0`) |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `max_prefixes_ipv4`    | u32      | no       | --      | Maximum unique IPv4-unicast prefixes accepted before session teardown (Cease/1 with RFC 4486 AFI/SAFI/bound data). Enforced independently of `max_prefixes` — each configured bound applies to its own count, the aggregate stays a global backstop (ADR-0108) |
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
@@ -932,8 +935,9 @@ Peer-group fields mirror inheritable neighbor settings: timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`),
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, private-AS handling, MD5/GTSM,
-`local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
-chains. TCP-AO is intentionally not inherited through peer groups; static
+`local_ipv6_nexthop`, `log_level`, slow-peer detection
+(`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
+and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
 
 ```toml

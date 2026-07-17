@@ -100,6 +100,9 @@ reload).
 | `peer_group` | live (session reset) | A reassignment changes the peer's effective inherited config, so SIGHUP reconcile (and the transaction session-reshape executor) rebuild the session. Group *field* edits on an unchanged membership hot-apply per the `[peer_groups.<name>]` table below. |
 | `hold_time` | live (effective next session) | Negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately, so the new value is negotiated right away. |
 | `send_hold_time` | live (effective next session) | RFC 9687 send hold timer. The per-peer writer task captures the value when its TCP connection is established, so a new value (including 0 = disable) guards the next session; the existing session keeps the old timer. |
+| `slow_peer_threshold_pct` | live (effective next session) | Slow-peer detection backlog threshold (LAN-470), percent of the outbound writer buffer. Captured into the session's transport config; the reconciler rebuilds the session on change. |
+| `slow_peer_duration` | live (effective next session) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture semantics as the threshold. |
+| `slow_peer_isolation` | live (effective next session) | Move a flagged-slow peer to the per-peer update path. Same capture semantics as the threshold. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
 | `tcp_ao` | live (add-only generation) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs when owner identity, existing key order/material, and selection are unchanged. The listener and managed protected sessions are preflighted, verified, and generation-fenced. Selection, deprecation, deletion, edits/reordering, or owner changes remain pinned and are logged at `ERROR`. Runtime config transactions and their field-only impact report remain conservatively restart-required because they do not run the SIGHUP generation coordinator. |
@@ -139,6 +142,9 @@ configure their keyring directly.
 |---|---|---|
 | `hold_time` | live (effective next session) | Same as neighbor. |
 | `send_hold_time` | live (effective next session) | Same as neighbor. |
+| `slow_peer_threshold_pct` | live (effective next session) | Same as neighbor. |
+| `slow_peer_duration` | live (effective next session) | Same as neighbor. |
+| `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
 | `bfd` | restart-required | Pinned. |

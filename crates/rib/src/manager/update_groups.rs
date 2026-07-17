@@ -35,7 +35,7 @@ use std::net::IpAddr;
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation};
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use rustc_hash::FxHashMap;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
@@ -137,6 +137,11 @@ pub(super) enum GroupMembership {
     /// ORF-receive negotiated: the peer can push arbitrary per-peer
     /// prefix filters (RFC 5291).
     OrfInstalled,
+    /// Transport flagged the peer slow and `slow_peer_isolation` is
+    /// configured (LAN-470): kept on the per-peer path so its wedged
+    /// writer cannot hold back a shared group's staging pass. Rejoins
+    /// through the ordinary regroup baseline diff when the flag clears.
+    SlowPeer,
 }
 
 impl GroupMembership {
@@ -149,6 +154,7 @@ impl GroupMembership {
             Self::PerClientBest => "per_client_best".to_string(),
             Self::OrrVantage => "orr_vantage".to_string(),
             Self::OrfInstalled => "orf_installed".to_string(),
+            Self::SlowPeer => "slow_peer".to_string(),
         }
     }
 }
@@ -2451,6 +2457,38 @@ impl RibManager {
         }
     }
 
+    /// Apply a transport slow-peer flag change (LAN-470,
+    /// `slow_peer_isolation`): track the peer in
+    /// `slow_isolated_peers` and re-run the membership lifecycle so a
+    /// grouped slow peer moves to the per-peer fallback path (and a
+    /// recovered one regroups through the ordinary baseline diff).
+    /// Same recipe as the export-policy replacement seam: recompute,
+    /// mark dirty unless key-stable, distribute.
+    pub(super) fn handle_peer_slow_state(&mut self, peer: IpAddr, slow: bool) {
+        let changed = if slow {
+            self.slow_isolated_peers.insert(peer)
+        } else {
+            self.slow_isolated_peers.remove(&peer)
+        };
+        if !changed || !self.update_groups.members.contains_key(&peer) {
+            // Duplicate signal, or no outbound registration yet — the
+            // set alone steers the eventual registration's classify.
+            return;
+        }
+        info!(
+            %peer,
+            slow,
+            "slow-peer isolation: recomputing update-group membership"
+        );
+        let before = self.grouped_member_of(peer);
+        self.recompute_update_group(peer);
+        let key_stable = before.is_some() && before == self.grouped_member_of(peer);
+        if !key_stable {
+            self.mark_outbound_dirty(peer);
+        }
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+    }
+
     /// The fingerprint itself: disqualifiers first (design §1), then
     /// the group key from RIB-staging inputs.
     fn compute_update_group_membership(&mut self, peer: IpAddr) -> GroupMembership {
@@ -2472,6 +2510,13 @@ impl RibManager {
         #[cfg(test)]
         if self.test_force_ungrouped {
             return GroupMembership::PolicyPeerContext;
+        }
+        // Slow-peer isolation (LAN-470): a transport-flagged slow peer
+        // stays on the per-peer path so its backlog cannot drag the
+        // shared staging pass. Checked before the classifier — it
+        // overrides an otherwise-groupable fingerprint.
+        if self.slow_isolated_peers.contains(&peer) {
+            return GroupMembership::SlowPeer;
         }
         // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
         // 5291 §6 gate never meets grouping). Read from the live

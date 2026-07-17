@@ -1825,6 +1825,32 @@
           "format": "uint32",
           "minimum": 0
         },
+        "slow_peer_duration": {
+          "description": "Slow-peer detection: how long (seconds) the backlog must stay\nabove `slow_peer_threshold_pct` before the peer is flagged slow\n(status flag, warn log, `bgp_peer_slow` metric). 0 disables\ndetection. Default: 30.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "slow_peer_isolation": {
+          "description": "Move a flagged-slow peer onto the per-peer (ungrouped) update\npath so it stops holding back its update-group's shared encode;\nit regroups when the flag clears. Requires detection\n(`slow_peer_duration` > 0). Default: false (detection alone is\npurely observational).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "slow_peer_threshold_pct": {
+          "description": "Slow-peer detection: backlog threshold as a percentage (1-100)\nof the outbound writer buffer. The peer is a slow-peer candidate\nwhile its buffered outbound frames stay at or above this\nfraction. Default: 50.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
         "strict_role": {
           "description": "Require the peer to advertise a compatible BGP Role capability.",
           "type": [
@@ -2163,6 +2189,32 @@
             "null"
           ],
           "format": "uint32",
+          "minimum": 0
+        },
+        "slow_peer_duration": {
+          "description": "Slow-peer persistence duration inherited by neighbors in this\ngroup. See the neighbor-level `slow_peer_duration`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "slow_peer_isolation": {
+          "description": "Slow-peer isolation inherited by neighbors in this group. See\nthe neighbor-level `slow_peer_isolation`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "slow_peer_threshold_pct": {
+          "description": "Slow-peer backlog threshold inherited by neighbors in this\ngroup. See the neighbor-level `slow_peer_threshold_pct`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
           "minimum": 0
         },
         "strict_role": {
