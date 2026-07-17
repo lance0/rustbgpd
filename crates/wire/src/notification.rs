@@ -3,6 +3,7 @@
 /// Known codes (1–6) have named variants. Unknown codes from the wire are
 /// preserved via `Unknown(u8)` so the original byte is never lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum NotificationCode {
     /// Error in the message header (code 1).
     MessageHeader,

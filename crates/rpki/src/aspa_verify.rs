@@ -38,10 +38,10 @@ enum VerificationDirection {
 fn direction_for_role(role: Option<BgpRole>) -> VerificationDirection {
     match role {
         Some(BgpRole::Customer) => VerificationDirection::Downstream,
-        Some(
-            BgpRole::Provider | BgpRole::RouteServer | BgpRole::RouteServerClient | BgpRole::Peer,
-        )
-        | None => VerificationDirection::Upstream,
+        // Provider / RouteServer / RouteServerClient / Peer — and any role
+        // added to the registry later — get the upstream procedure, the
+        // same conservative behavior as an unconfigured role.
+        _ => VerificationDirection::Upstream,
     }
 }
 

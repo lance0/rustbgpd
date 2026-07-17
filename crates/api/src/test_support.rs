@@ -192,7 +192,9 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
                             route_type.is_none_or(|route_type| event.key.route_type() == route_type)
                         })
                         .filter(|event| {
-                            rd.is_none_or(|rd| rustbgpd_rib::event::evpn_key_rd(&event.key) == rd)
+                            rd.is_none_or(|rd| {
+                                rustbgpd_rib::event::evpn_key_rd(&event.key) == Some(rd)
+                            })
                         })
                         .filter(|event| {
                             event_types.is_empty() || event_types.contains(&event.event_type)

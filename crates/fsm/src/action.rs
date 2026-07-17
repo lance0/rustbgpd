@@ -11,6 +11,7 @@ use crate::state::SessionState;
 
 /// Which timer to start or stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TimerType {
     /// TCP connect-retry timer (exponential backoff).
     ConnectRetry,

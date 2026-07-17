@@ -205,13 +205,10 @@ pub(super) fn afi_safi_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ipv4, Safi::Multicast) => "ipv4_multicast",
         (Afi::Ipv6, Safi::Multicast) => "ipv6_multicast",
         (Afi::Ipv4, Safi::RtConstrain) => "rtc",
-        (Afi::Ipv4 | Afi::Ipv6, Safi::Evpn)
-        | (Afi::Ipv4 | Afi::Ipv6 | Afi::L2Vpn, Safi::BgpLs | Safi::BgpLsVpn)
-        | (Afi::L2Vpn, Safi::Unicast | Safi::Multicast | Safi::FlowSpec)
-        | (Afi::BgpLs, Safi::Unicast | Safi::Multicast | Safi::Evpn | Safi::FlowSpec)
-        | (Afi::L2Vpn | Afi::BgpLs, Safi::MplsVpn | Safi::LabeledUnicast)
-        // RT-Constrain is AFI 1 only (RFC 4684 §7).
-        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => "unsupported",
+        // Everything else: invalid AFI/SAFI combinations (e.g. RT-Constrain
+        // is AFI 1 only, RFC 4684 §7) and families from future registry
+        // growth this build does not model.
+        _ => "unsupported",
     }
 }
 

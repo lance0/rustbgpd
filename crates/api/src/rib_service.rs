@@ -1760,6 +1760,8 @@ impl proto::rib_service_server::RibService for RibService {
                         EvpnRoute::Imet(e) => e.rd.to_string(),
                         EvpnRoute::Es(e) => e.rd.to_string(),
                         EvpnRoute::IpPrefix(e) => e.rd.to_string(),
+                        // Unmodeled route types never match an RD filter.
+                        _ => return false,
                     };
                     if entry_rd != rd_filter {
                         return false;
@@ -2157,6 +2159,14 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                     value: format_numeric_ops(ops),
                     offset: 0,
                 },
+                // Non-exhaustive: component types this build does not model
+                // surface as type 0 with empty fields.
+                _ => proto::FlowSpecComponent {
+                    r#type: 0,
+                    prefix: String::new(),
+                    value: String::new(),
+                    offset: 0,
+                },
             }
         })
         .collect();
@@ -2215,7 +2225,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let afi_safi = match route.afi {
         Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
         Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
-        Afi::L2Vpn | Afi::BgpLs => proto::AddressFamily::Unspecified,
+        _ => proto::AddressFamily::Unspecified,
     };
 
     proto::FlowSpecRouteEntry {
@@ -2250,6 +2260,8 @@ fn bgpls_nlri_type_name(nlri_type: BgpLsNlriType) -> String {
         BgpLsNlriType::Ipv4TopologyPrefix => "ipv4_topology_prefix".to_string(),
         BgpLsNlriType::Ipv6TopologyPrefix => "ipv6_topology_prefix".to_string(),
         BgpLsNlriType::Unknown(value) => format!("unknown_{value}"),
+        // Non-exhaustive: NLRI types this build does not model.
+        _ => "unmodeled".to_string(),
     }
 }
 
@@ -2577,6 +2589,19 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
             e.prefix.to_string(),
             e.gateway.to_string(),
             e.label.value(),
+            0,
+        ),
+        // Non-exhaustive: route types this build does not model render with
+        // empty fields; the numeric route type is still reported alongside.
+        _ => (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
             0,
         ),
     };

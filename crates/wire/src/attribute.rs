@@ -670,6 +670,7 @@ impl fmt::Display for LargeCommunity {
 /// Known attributes are decoded into typed variants. Unknown attributes
 /// are preserved as `RawAttribute` for pass-through with the Partial bit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PathAttribute {
     /// `ORIGIN` attribute (type 1).
     Origin(Origin),

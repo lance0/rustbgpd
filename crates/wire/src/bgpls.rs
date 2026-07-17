@@ -25,6 +25,7 @@ const TLV_HEADER_LEN: usize = 4;
 
 /// BGP-LS NLRI type values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum BgpLsNlriType {
     /// Node NLRI (type 1).
     Node,

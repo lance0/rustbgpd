@@ -202,6 +202,7 @@ impl fmt::Display for RouteDistinguisher {
 /// Errors returned by `RouteDistinguisher::from_str` when a textual RD
 /// fails to parse against the RFC 4364 §4.2 encodings.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteDistinguisherParseError {
     /// Input did not contain exactly one `':'` separating administrator and
     /// assigned-number fields.
@@ -475,6 +476,7 @@ pub struct EvpnIpPrefixRoute {
 /// for reflection through a route reflector. For a minimal hashable
 /// identifier suitable as a RIB key, see [`EvpnRouteKey`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EvpnRoute {
     /// Type 1 — EAD per-ES.
     EadPerEs(EvpnEadPerEs),
@@ -548,6 +550,7 @@ impl EvpnRoute {
 /// EAD per-ES and EAD per-EVI share a wire format but get distinct variants
 /// here so the RIB never accidentally collapses them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum EvpnRouteKey {
     /// Type 1 per-ES key.
     EadPerEs {

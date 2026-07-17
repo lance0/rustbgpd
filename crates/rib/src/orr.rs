@@ -235,7 +235,9 @@ fn has_ignored_flex(nlri_type: BgpLsNlriType, attributes: &[BgpLsTlv]) -> bool {
                 _ => false,
             }
         }
-        BgpLsNlriType::Link | BgpLsNlriType::Unknown(_) => false,
+        // Link carries no flex-algo TLVs this check targets; unknown and
+        // future NLRI types are excluded before this point.
+        _ => false,
     })
 }
 
@@ -343,7 +345,13 @@ fn classify_input(
     // Unknown NLRI are retained for reflection, but they are opaque to ORR.
     // Classify that contract here so every caller gets the same uncounted
     // result instead of relying on a separate guard before classification.
-    if matches!(nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
+    if !matches!(
+        nlri.nlri_type,
+        BgpLsNlriType::Node
+            | BgpLsNlriType::Link
+            | BgpLsNlriType::Ipv4TopologyPrefix
+            | BgpLsNlriType::Ipv6TopologyPrefix
+    ) {
         return InputClassification::IgnoredUnknown;
     }
     // Descriptor/topology framing takes precedence over Attribute 29. This
@@ -383,7 +391,9 @@ fn classify_input(
                 descriptor_scope
             }
         }
-        BgpLsNlriType::Unknown(_) => unreachable!("unknown BGP-LS NLRI returned above"),
+        // Unknown and future NLRI types are opaque to ORR; the allow-list
+        // guard above already returned `IgnoredUnknown` for them.
+        _ => return InputClassification::IgnoredUnknown,
     };
     match scope {
         TopologyScope::NonDefault => InputClassification::ExcludedNonDefault,
@@ -532,7 +542,8 @@ impl OrrTopology {
                         metric: prefix_metric(&attributes).unwrap_or(0),
                     }
                 }
-                BgpLsNlriType::Unknown(_) => continue,
+                // Unknown and future NLRI types are not topology elements.
+                _ => continue,
             };
             match seen.get(&route.nlri) {
                 None => {

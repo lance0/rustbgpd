@@ -21,8 +21,11 @@ fn rpki_preference(v: RpkiValidation) -> u8 {
 fn aspa_preference(v: AspaValidation) -> u8 {
     match v {
         AspaValidation::Valid => 2,
-        AspaValidation::Unknown => 1,
         AspaValidation::Invalid => 0,
+        // `Unknown` — and, `AspaValidation` being non-exhaustive, any future
+        // state, which asserts neither validity nor invalidity — ranks in
+        // the middle.
+        _ => 1,
     }
 }
 

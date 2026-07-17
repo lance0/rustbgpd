@@ -595,7 +595,8 @@ impl PeerSession {
                 let slot = match prepared.afi {
                     Afi::Ipv4 => &mut fs_withdrawals[0],
                     Afi::Ipv6 => &mut fs_withdrawals[1],
-                    Afi::L2Vpn | Afi::BgpLs => {
+                    // FlowSpec is defined for IPv4/IPv6 only (RFC 8955/8956).
+                    _ => {
                         warn!(afi = ?prepared.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
                         continue;
                     }
@@ -728,7 +729,8 @@ impl PeerSession {
             groups.sort_by_key(|(afi, _, _, _)| match afi {
                 Afi::Ipv4 => 0,
                 Afi::Ipv6 => 1,
-                Afi::L2Vpn | Afi::BgpLs => 2,
+                // Non-IP families (and future AFIs) keep a stable tail slot.
+                _ => 2,
             });
             for (afi, safi, ipv4_mode, routes) in groups {
                 if !self.send_vpn_unreach_chunked(afi, safi, ipv4_mode, &routes, export, max_len) {
@@ -776,7 +778,8 @@ impl PeerSession {
             groups.sort_by_key(|(afi, _, _, _)| match afi {
                 Afi::Ipv4 => 0,
                 Afi::Ipv6 => 1,
-                Afi::L2Vpn | Afi::BgpLs => 2,
+                // Non-IP families (and future AFIs) keep a stable tail slot.
+                _ => 2,
             });
             for (afi, safi, ipv4_mode, routes) in groups {
                 if !self

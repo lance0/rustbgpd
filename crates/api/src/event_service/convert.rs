@@ -84,7 +84,8 @@ pub fn evpn_event_to_bgp_event(event: rustbgpd_rib::EvpnRouteEvent) -> proto::Bg
     let previous_peer_address = event
         .previous_peer
         .map_or_else(String::new, |peer| peer.to_string());
-    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).to_string();
+    let rd =
+        rustbgpd_rib::event::evpn_key_rd(&event.key).map_or_else(String::new, |rd| rd.to_string());
     let route_type = u32::from(event.key.route_type());
     let route_key = format_evpn_route_key(&event.key);
     let action = match event_type {
@@ -162,6 +163,8 @@ fn format_evpn_route_key(key: &rustbgpd_wire::EvpnRouteKey) -> String {
             ethernet_tag,
             prefix,
         } => format!("ip-prefix rd={rd} ethernet_tag={ethernet_tag} prefix={prefix}"),
+        // Non-exhaustive: name the gap honestly instead of guessing fields.
+        _ => "unmodeled-route-type".to_string(),
     }
 }
 
@@ -363,6 +366,8 @@ fn bgp_role_label(role: rustbgpd_wire::BgpRole) -> String {
         rustbgpd_wire::BgpRole::RouteServerClient => "route_server_client",
         rustbgpd_wire::BgpRole::Customer => "customer",
         rustbgpd_wire::BgpRole::Peer => "peer",
+        // Non-exhaustive registry enum: label future roles honestly.
+        _ => "unrecognized",
     }
     .to_string()
 }

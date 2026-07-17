@@ -237,7 +237,7 @@ fn evpn_event_envelope(event: EvpnRouteEvent, timestamp_ns: i64) -> EventEnvelop
         previous_peer: event.previous_peer,
         target_peer: None,
     };
-    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).to_string();
+    let rd = rustbgpd_rib::event::evpn_key_rd(&event.key).map(|rd| rd.to_string());
     let evpn_route_type = Some(i32::from(event.key.route_type()));
     let proto_event = convert::evpn_event_to_bgp_event(event);
     EventEnvelope {
@@ -247,7 +247,7 @@ fn evpn_event_envelope(event: EvpnRouteEvent, timestamp_ns: i64) -> EventEnvelop
         peers,
         afi_safi: None,
         prefix: None,
-        rd: Some(rd),
+        rd,
         evpn_route_type,
         severity: Severity::Info,
         payload_codec: PayloadCodec::Proto,
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(envelope.peers.target_peer, None);
         assert_eq!(
             envelope.rd,
-            Some(rustbgpd_rib::event::evpn_key_rd(&event.key).to_string())
+            rustbgpd_rib::event::evpn_key_rd(&event.key).map(|rd| rd.to_string())
         );
         assert_eq!(
             envelope.evpn_route_type,

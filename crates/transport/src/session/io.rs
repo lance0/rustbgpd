@@ -66,7 +66,10 @@ impl PeerSession {
                     max_len: 0,
                     prefix: None,
                 }],
-                OrfEntries::Raw(_) => continue,
+                // Raw un-negotiated types — and, `OrfEntries` being
+                // non-exhaustive, entry kinds this build does not model —
+                // are ignored (only type 64 is negotiated above).
+                _ => continue,
             };
             let (reply, rx) = oneshot::channel();
             if self
@@ -780,8 +783,31 @@ impl PeerSession {
                                         "ignoring ROUTE-REFRESH with unknown subtype"
                                     );
                                 }
+                                // Non-exhaustive: subtypes this build does not
+                                // implement are ignored like unrecognized wire
+                                // values above.
+                                _ => {
+                                    warn!(
+                                        peer = %self.peer_label,
+                                        ?afi,
+                                        ?safi,
+                                        "ignoring ROUTE-REFRESH with unsupported subtype"
+                                    );
+                                }
                             }
                             Event::RouteRefreshReceived { afi, safi }
+                        }
+                        // `Message` is non-exhaustive: a message kind this
+                        // build does not handle cannot be silently accepted
+                        // on a live session. Route it through the FSM
+                        // decode-error path (NOTIFICATION + teardown), the
+                        // RFC 4271 §6.1 treatment of an unsupported type.
+                        _ => {
+                            self.metrics
+                                .record_message_received(&self.peer_label, "unknown");
+                            Event::DecodeError(rustbgpd_wire::DecodeError::UnknownMessageType(
+                                raw_pdu.get(18).copied().unwrap_or(0),
+                            ))
                         }
                     };
                     self.drive_fsm(event).await;

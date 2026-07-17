@@ -25,6 +25,7 @@ use crate::nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
 /// ORF-Type (RFC 5291 §5 / RFC 5292). Unknown types are preserved so the
 /// codec round-trips forward-defined types losslessly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OrfType {
     /// Address-Prefix ORF-Type 64 (RFC 5292) — the standard value.
     AddressPrefix,
@@ -206,6 +207,7 @@ pub struct AddressPrefixOrf {
 
 /// Decoded entries of one ORF-Type group inside a ROUTE-REFRESH.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OrfEntries {
     /// Parsed Address-Prefix entries (ORF-Type 64 or 128).
     AddressPrefix(Vec<AddressPrefixOrf>),

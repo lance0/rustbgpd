@@ -43,6 +43,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **BREAKING (library API): registry-tracking wire/fsm enums are now
+  `#[non_exhaustive]`** — absorbed into the in-flight `rustbgpd-wire`
+  0.15.0 / `rustbgpd-fsm` 0.3.0 breaking cut. 22 wire enums
+  (`Capability`, `PathAttribute`, `Afi`, `Safi`, `Message`,
+  `MessageType`, `NotificationCode`, `RouteRefreshSubtype`, `EvpnRoute`,
+  `EvpnRouteKey`, `RouteDistinguisherParseError`, `BgpLsNlriType`,
+  `FlowSpecComponent`, `FlowSpecAction`, `OrfType`, `OrfEntries`,
+  `PmsiTunnelType`, `PmsiTunnelIdentifier`, `BgpRole`, `AspaValidation`,
+  `DecodeError`, `EncodeError`) and 2 fsm enums (`TimerType`,
+  `error::FsmError`) now require a wildcard arm in downstream exhaustive
+  matches. This breaks such matches once, in this release; every future
+  registry addition (the recurring `Capability::PathsLimit` shape from
+  0.14.x) then lands as a non-breaking minor instead of another major.
+  Closed-by-construction enums deliberately remain exhaustively
+  matchable: `Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`,
+  `OrfAction`, `OrfMatch`, `OrfSendReceive`, `WhenToRefresh`,
+  `Ipv4UnicastMode`, `ErrorDisposition`, `RpkiValidation`,
+  `EvpnIpPrefixValue`, `FlowSpecPrefix`, `VpnAddressFamily`,
+  `VpnPrefix`, `LabeledAddressFamily`, and fsm `SessionState`. In-tree
+  daemon fallout: every new wildcard arm fails safe (unknown message
+  kind → NOTIFICATION via the FSM decode-error path; unsupported
+  ROUTE-REFRESH subtype → ignored with a warning; unmodeled EVPN
+  withdrawal → export error, never silently dropped; unknown timer kind
+  → no slot, no expiry; unknown BGP Role → conservative upstream ASPA
+  procedure and omitted from config snapshots; display surfaces render
+  `unrecognized`/`unmodeled` labels).
+
 - **IXP route-server receipt matrix refreshed with post-fix flapstorm
   numbers** (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd
   cells rerun at the deferred-PeerUp-dump fix head — S3 re-announce

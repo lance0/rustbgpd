@@ -6,6 +6,7 @@ use crate::error::{DecodeError, EncodeError};
 /// Address Family Identifier (IANA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum Afi {
     /// IPv4 (AFI 1).
     Ipv4 = 1,
@@ -34,6 +35,7 @@ impl Afi {
 /// Subsequent Address Family Identifier (IANA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Safi {
     /// Unicast forwarding (SAFI 1).
     Unicast = 1,
@@ -170,6 +172,7 @@ pub struct LlgrFamily {
 /// negotiator, not by this codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum BgpRole {
     /// Speaker is a transit Provider for the peer.
     Provider = 0,
@@ -207,6 +210,7 @@ impl BgpRole {
 
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Capability {
     /// RFC 4760: Multi-Protocol Extensions.
     MultiProtocol {

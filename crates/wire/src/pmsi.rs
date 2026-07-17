@@ -59,6 +59,7 @@ use crate::error::DecodeError;
 
 /// PMSI tunnel type (RFC 6514 §11.1, IANA registry RFC 7385).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PmsiTunnelType {
     /// 0 — no tunnel info present (PE listens on a local set).
     NoTunnelInfo,
@@ -120,6 +121,7 @@ impl PmsiTunnelType {
 /// For Ingress Replication, this is the originator's unicast endpoint
 /// IP address. Other tunnel types carry opaque bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PmsiTunnelIdentifier {
     /// No identifier (zero-length on the wire).
     Empty,

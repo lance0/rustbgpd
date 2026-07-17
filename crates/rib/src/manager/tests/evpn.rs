@@ -1599,7 +1599,7 @@ async fn evpn_event_history_filters_peer_rd_type_and_limit() {
     let peer1 = IpAddr::V4(peer1_addr);
     let peer2 = IpAddr::V4(peer2_addr);
     let route1 = make_evpn_macip(peer1_addr, mac, Some(0), false);
-    let rd = crate::event::evpn_key_rd(&route1.key());
+    let rd = crate::event::evpn_key_rd(&route1.key()).expect("MAC/IP key carries an RD");
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,

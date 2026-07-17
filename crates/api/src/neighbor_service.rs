@@ -350,6 +350,8 @@ fn bgp_role_to_string(role: Option<BgpRole>) -> String {
         Some(BgpRole::RouteServerClient) => "rs-client".to_string(),
         Some(BgpRole::Customer) => "customer".to_string(),
         Some(BgpRole::Peer) => "peer".to_string(),
+        // Non-exhaustive registry enum: label future roles honestly.
+        Some(_) => "unrecognized".to_string(),
         None => String::new(),
     }
 }

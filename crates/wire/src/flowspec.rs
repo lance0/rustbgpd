@@ -90,6 +90,7 @@ pub struct Ipv6PrefixOffset {
 /// Components are identified by type code (1–13) and must be stored in
 /// ascending type order within a [`FlowSpecRule`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum FlowSpecComponent {
     /// Type 1: Destination IP prefix (IPv4 or IPv6 with offset).
     DestinationPrefix(FlowSpecPrefix),
@@ -256,6 +257,7 @@ impl fmt::Display for FlowSpecRule {
 
 /// A traffic action decoded from a `FlowSpec` extended community.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FlowSpecAction {
     /// Traffic-rate (type 0x8006): rate=0.0 means drop.
     TrafficRateBytes {

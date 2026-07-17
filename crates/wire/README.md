@@ -184,6 +184,34 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `COMMUNITY_GRACEFUL_SHUTDOWN` (RFC 8326), `COMMUNITY_LLGR_STALE` /
   `COMMUNITY_NO_LLGR` (RFC 9494)
 
+## Enum exhaustiveness
+
+The enums that track IANA/RFC registries — `Capability`, `PathAttribute`,
+`Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`,
+`RouteRefreshSubtype`, the EVPN route/key enums, `BgpLsNlriType`, the
+FlowSpec component/action enums, the ORF type/entries enums, the PMSI
+tunnel enums, `BgpRole`, `AspaValidation`, and the decode/encode error
+enums — are `#[non_exhaustive]`. Match them with a wildcard arm:
+
+```rust
+use rustbgpd_wire::Capability;
+
+fn negotiate(capability: &Capability) {
+    match capability {
+        Capability::RouteRefresh => { /* ... */ }
+        // New registry variants arrive in minor releases without a
+        // semver-major break; ignore what you do not support.
+        _ => {}
+    }
+}
+```
+
+Registry growth (a new capability code, path attribute, AFI/SAFI, EVPN
+route type, …) is therefore a non-breaking addition from 0.15.0 on.
+Closed-by-construction sets — `Origin`, `AsPathSegment`, `Prefix`,
+`AddPathMode`, `ErrorDisposition`, `RpkiValidation`, and the fixed V4/V6
+family enums — remain exhaustively matchable on purpose.
+
 ## Fuzz tested
 
 Twelve fuzz targets exercise the codec continuously in CI:

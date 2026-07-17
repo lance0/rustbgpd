@@ -85,7 +85,6 @@ impl DeferredSelectionKeyCharge for crate::route::FlowSpecKey {
         );
         for component in &self.rule.components {
             let nested = match component {
-                FlowSpecComponent::DestinationPrefix(_) | FlowSpecComponent::SourcePrefix(_) => 0,
                 FlowSpecComponent::IpProtocol(values)
                 | FlowSpecComponent::Port(values)
                 | FlowSpecComponent::DestinationPort(values)
@@ -100,6 +99,11 @@ impl DeferredSelectionKeyCharge for crate::route::FlowSpecKey {
                 FlowSpecComponent::TcpFlags(values) | FlowSpecComponent::Fragment(values) => values
                     .len()
                     .saturating_mul(size_of::<rustbgpd_wire::BitmaskMatch>()),
+                // Prefix components carry no nested op lists; a future
+                // component type (`FlowSpecComponent` is non-exhaustive)
+                // contributes no nested-heap estimate either — a
+                // conservative under-count for the deferral budget gauge.
+                _ => 0,
             };
             bytes = bytes.saturating_add(nested);
         }

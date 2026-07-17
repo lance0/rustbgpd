@@ -1231,7 +1231,7 @@ impl SessionExportProfile {
             ExportWithdrawal::Evpn(key) => PreparedWithdrawal::Evpn(PreparedMpWithdrawal::new(
                 Afi::L2Vpn,
                 Safi::Evpn,
-                evpn_route_from_key(*key),
+                evpn_route_from_key(*key).ok_or(ExportProbeError::UnmodeledEvpnRouteType)?,
             )),
             ExportWithdrawal::BgpLs(key) => PreparedWithdrawal::BgpLs(PreparedMpWithdrawal::new(
                 Afi::BgpLs,
@@ -1547,6 +1547,9 @@ pub(crate) enum ExportProbeError {
     Encode(EncodeError),
     MissingIpv6NextHop,
     Ipv4RequiresExtendedNextHop,
+    /// An EVPN route type this build does not model (non-exhaustive
+    /// `EvpnRouteKey`) cannot be converted back into wire NLRI.
+    UnmodeledEvpnRouteType,
 }
 
 impl From<EncodeError> for ExportProbeError {
@@ -1562,6 +1565,9 @@ impl std::fmt::Display for ExportProbeError {
             Self::MissingIpv6NextHop => formatter.write_str("no usable local IPv6 next-hop"),
             Self::Ipv4RequiresExtendedNextHop => formatter
                 .write_str("IPv4 on a scoped link-local session requires Extended Next Hop"),
+            Self::UnmodeledEvpnRouteType => {
+                formatter.write_str("EVPN route type not modeled by this build")
+            }
         }
     }
 }
@@ -1595,12 +1601,15 @@ pub(super) fn bgpls_nlri_from_key(key: &BgpLsRouteKey) -> rustbgpd_wire::bgpls::
     }
 }
 
-pub(super) fn evpn_route_from_key(key: EvpnRouteKey) -> EvpnRoute {
+/// `None` for a route type this build does not model (`EvpnRouteKey` is
+/// non-exhaustive): such a route was never encoded outbound, so there is
+/// nothing to withdraw.
+pub(super) fn evpn_route_from_key(key: EvpnRouteKey) -> Option<EvpnRoute> {
     use rustbgpd_wire::{
         EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet, EvpnIpPrefixRoute, EvpnMacIp, MplsLabel,
     };
     let zero_label = MplsLabel::new(0);
-    match key {
+    let route = match key {
         EvpnRouteKey::EadPerEs {
             rd,
             esi,
@@ -1671,7 +1680,10 @@ pub(super) fn evpn_route_from_key(key: EvpnRouteKey) -> EvpnRoute {
                 label: zero_label,
             })
         }
-    }
+        // Non-exhaustive: no wire NLRI form for unmodeled route types.
+        _ => return None,
+    };
+    Some(route)
 }
 
 /// Exact result consumed by live builders now and the RIB precommit gate in
@@ -1812,7 +1824,11 @@ fn exact_export_result(
 ) -> Result<ExactExportResult, ExactExportError> {
     let probe = probe.map_err(|error| {
         let code = match &error {
-            ExportProbeError::Encode(_) => ExactExportErrorCode::Encoding,
+            // Unmodeled EVPN route types are encoding failures too; the
+            // error text names the precise cause.
+            ExportProbeError::Encode(_) | ExportProbeError::UnmodeledEvpnRouteType => {
+                ExactExportErrorCode::Encoding
+            }
             ExportProbeError::MissingIpv6NextHop => ExactExportErrorCode::MissingIpv6NextHop,
             ExportProbeError::Ipv4RequiresExtendedNextHop => {
                 ExactExportErrorCode::Ipv4RequiresExtendedNextHop
