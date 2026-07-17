@@ -42,6 +42,21 @@ to cap threads. Both raw runs preserved (`artifacts-rung2/bird`,
 `artifacts-bird-threads32/`); the trade goes in the receipt's
 config-disclosure section.
 
+## Campaign runs A + B: COMPLETE (2026-07-17, 12/12 cells pass)
+
+All four legs pass at head `40fd0a0c` (jemalloc-default binary +
+rs_control opt-in fix): `artifacts-runA-s2`, `artifacts-runA-s3`
+(flapstorm 50), `artifacts-runB-s2`, `artifacts-runB-s3`. rustbgpd
+S2 stall p50 652/808 ms, completion p50 1.51/1.66 s, daemon RSS
+~755-785 MB (the jemalloc default nearly halves the prior 1.3 GiB
+glibc peak at this shape). Two anomalies preserved as `*-fail-*`
+artifact siblings, both for the receipt's notes: (1) the initial
+rustbgpd cells RSS-aborted >100 GiB because rs_control_communities
+defaulted on for rs-clients and collapsed update-group sharing —
+caught by this campaign, fixed same-night (#976, follow-up filed);
+(2) openbgpd runB-s2 attempt 1 established 700 sessions but moved
+zero prefixes for 120 s (RDE wedge, did not recur on rerun).
+
 ## Remaining (in order)
 
 1. **Campaign run A** (overnight, box exclusively quiet): for each
