@@ -842,6 +842,19 @@ the peer via MP-BGP capabilities. Supported values:
   See [docs/USE_CASES.md](USE_CASES.md) § "VXLAN-EVPN DC Fabric"
   for a worked example and `examples/rr-evpn-fabric/config.toml`
   for a copy-paste-ready starting point.
+- `"l3vpn_ipv4_unicast"` — VPNv4 (AFI 1, SAFI 128, RFC 4364)
+- `"l3vpn_ipv6_unicast"` — VPNv6 (AFI 2, SAFI 128, RFC 4659)
+
+  Both ship as a route-reflector / controller-feed slice: receive, store,
+  reflect, and withdraw with RD / MPLS label stack / next-hop / Route
+  Targets preserved verbatim, plus the RFC 8277 §2.4 withdraw codec and
+  Enhanced Route Refresh stale lifecycle. No VRF import, label allocation,
+  or MPLS FIB (deliberate — see [docs/gobgp-parity.md](gobgp-parity.md)).
+- `"ipv4_labeled_unicast"` — IPv4 labeled-unicast (AFI 1, SAFI 4, RFC 8277)
+- `"ipv6_labeled_unicast"` — IPv6 labeled-unicast (AFI 2, SAFI 4, RFC 8277)
+- `"rtc"` — Route Target Constrain (AFI 1, SAFI 132, RFC 4684). Strict
+  per-peer VPN reflection filtering: a negotiated peer with empty RTC
+  interest receives nothing, with RFC-faithful 96-bit prefix matching.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
@@ -3328,7 +3341,7 @@ starting:
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
-| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, or `"linkstate_vpn"` | `unknown address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, or `"rtc"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |

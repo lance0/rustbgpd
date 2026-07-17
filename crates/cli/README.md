@@ -81,6 +81,8 @@ rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
 rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
 rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
+rbgp rib add <prefix> --nexthop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
+rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 
 rbgp policy list
@@ -113,6 +115,11 @@ rbgp evpn instances
 rbgp evpn nexthops
 rbgp evpn vrfs
 rbgp evpn diagnose
+rbgp evpn es list [<esi>]                        # Ethernet Segments joined with drain/DF/FDB-NHG state (ADR-0084)
+rbgp evpn es drain <esi>                         # drain an ES before access-circuit maintenance
+rbgp evpn es undrain <esi>                       # undrain an ES
+rbgp evpn managed-netdevs                        # rustbgpd-managed netdev ownership/status (ADR-0091)
+rbgp evpn clear-duplicate-mac --vni <n> --mac <addr>   # clear a duplicate-MAC local-origin quarantine
 rbgp evpn add-mac-ip ...
 rbgp evpn add-imet ...
 rbgp evpn add-ip-prefix ...

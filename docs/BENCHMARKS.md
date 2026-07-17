@@ -117,9 +117,9 @@ in `tests/soak/README.md` under "Host mutex".
 ```bash
 # Default-feature benchmarks. A bare `cargo bench` runs only the targets that
 # build with default features (codec, rib_ops, policy_eval, explain_snapshot,
-# validate); the three `bench-internals`-gated targets (fanout, inbound_attrs,
-# fib_projection) are skipped and must be run explicitly with
-# `--features bench-internals` as shown below.
+# validate); the five `bench-internals`-gated targets (fanout, inbound_attrs,
+# fib_projection, route_paging, event_history_producer) are skipped and must
+# be run explicitly with `--features bench-internals` as shown below.
 cargo bench
 
 # Wire codec only
@@ -550,6 +550,10 @@ and withdraw phases — −59% from `v0.31.0` (the sprint's index + hasher wins 
 the lookup-heavy churn path).
 
 ## Memory Footprint
+
+> **Superseded (2026-07-17):** these figures predate the RouteSlab migration
+> (LAN-335) and `PathAttribute` enum growth; re-measurement on the pinned
+> host is pending.
 
 Measured using a tracking global allocator that counts every `alloc` and
 `dealloc`. The normal test compiles and schema-checks the harness; the ignored

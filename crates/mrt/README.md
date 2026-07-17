@@ -19,6 +19,33 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
   (`decompress_if_gzip`)
 
+## Warm bundle
+
+Durable, fail-closed warm-checkpoint bundle storage (`warm_bundle` module),
+used by coordinated-shutdown checkpointing. A bundle directory holds a
+content-addressed MRT snapshot artifact; publication fsyncs and renames that
+artifact before atomically replacing `manifest.json` (the commit point), then
+fsyncs the directory, so a crash can never observe a half-written manifest or
+snapshot.
+
+Public entry points:
+
+- `WarmBundleDirectory::open` — pins a preexisting, owner-verified bundle
+  directory as a file descriptor; every subsequent read, create, rename,
+  unlink, and fsync is descriptor-relative, so path replacement and symlink
+  races cannot redirect publication or loading.
+- `write_warm_bundle` / `write_warm_bundle_bounded` — atomically publish a V1
+  bundle (the bounded form additionally observes a shutdown cancellation
+  token and deadline, safe to cancel at any point before the manifest
+  rename).
+- `load_warm_bundle` — loads only an exact, fresh, byte- and
+  semantically-valid bundle against an independently derived expectation.
+
+**Scope boundary:** this module stops at storage and identity validation. It
+never restores a route, mutates the RIB, runs selection, releases RFC 4724
+deferral, or advertises a recovered candidate — a later boot coordinator must
+keep all recovered candidates behind that gate.
+
 ## License
 
 MIT OR Apache-2.0

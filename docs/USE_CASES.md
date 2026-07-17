@@ -833,8 +833,12 @@ Be honest about where rustbgpd isn't the right tool:
 	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
 	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
-- **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
-  no VPNv4/v6. Use FRR or commercial NOS.
+- **Service provider core** — No Confederation (RFC 5065). VPNv4/VPNv6 and
+  labeled-unicast ship only as a route-reflector / controller-feed slice
+  (receive, store, reflect, withdraw — see ADR-0077 and
+  [gobgp-parity.md](gobgp-parity.md)): no VRF import, no label allocation,
+  and no MPLS FIB, so this is not a PE role. Use FRR or commercial NOS for a
+  full SP PE.
 - **CLI-first operations** — The CLI is a thin gRPC wrapper, not a full
   interactive shell. If you want IOS-style CLI, use FRR.
 - **BIRD replacement at established IXPs** — BIRD + ARouteServer + IXP Manager

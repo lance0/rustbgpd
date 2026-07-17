@@ -18,7 +18,7 @@ Each script:
 
 | Script | Topology | Closes | Notes |
 |---|---|---|---|
-| [`chaos-flap-storm.sh`](chaos-flap-storm.sh) | M33 (synthetic peers) | Peer flap storms | Bounces a synthetic tester via `EnableNeighbor`/`DisableNeighbor` in a tight loop; verifies no memory leak, no stuck FSM state, no dropped reflections beyond writer-split saturation cap. |
+| [`chaos-flap-storm.sh`](chaos-flap-storm.sh) | M33 (synthetic peers) | Peer flap storms | Bounces a synthetic tester via `EnableNeighbor`/`DisableNeighbor` in a tight loop; verifies gRPC `GetHealth` stays OK throughout, memory growth stays under 10 MB above the pre-storm baseline, no process restart, and at least 3 successful Established-after-Disable cycles. |
 | [`chaos-grpc-churn.sh`](chaos-grpc-churn.sh) | M33 (synthetic peers) | gRPC churn | Fires concurrent `AddNeighbor` + `DeleteNeighbor` + `SoftResetIn` calls against the daemon; verifies no deadlock, gRPC stays responsive throughout, no panic. |
 | [`chaos-gr-cycles.sh`](chaos-gr-cycles.sh) | M16 (FRR LLGR) | Repeated GR recovery | Bounces FRR's BGP daemon repeatedly with GR negotiated; verifies the RR's stale-sweep / LLGR-promote / clear-on-reconnect lifecycle works correctly across N cycles. |
 

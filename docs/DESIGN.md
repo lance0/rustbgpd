@@ -592,16 +592,6 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCH
 - UPDATE attribute size limits enforced at decode time. Oversized attributes are rejected before allocation.
 - gRPC request size limits enforced by tonic configuration.
 
-### Global Route Limit Policy
-
-When `max_total_routes` is exceeded, the offending session is torn down with NOTIFICATION Cease (Out of Resources, subcode 8) as defined in RFC 4486 §3. The structured event includes the peer address, the route that triggered the limit, and the current total count.
-
-**Interop note:** Cease subcodes are defined in RFC 4486, not RFC 4271. If interop testing reveals a peer that rejects unknown Cease subcodes, the fallback is generic Cease (code 6, subcode 0). This is documented in INTEROP.md per peer.
-
-This is a deliberate choice. The alternative — partial acceptance (reject individual prefixes while keeping the session established) — introduces per-UPDATE partial semantics that generate subtle correctness bugs and are difficult to reason about operationally. Option A (tear down the session) is explainable, safe, and what operators expect.
-
-If the global limit is hit, it means either the limit is configured too low or the peer is sending more routes than expected — both conditions warrant human attention, not silent partial behavior.
-
 ### gRPC Security (v1)
 
 - gRPC listens on a configurable address (default: localhost only).
@@ -623,8 +613,7 @@ If the global limit is hit, it means either the limit is configured too low or t
 |---|---|---|
 | Max message size | 4096 bytes (65535 with RFC 8654) | 4096 by default; raised per-session only when Extended Messages is negotiated |
 | Max attributes per UPDATE | 256 | Safety bound |
-| Max prefixes per neighbor | 1,000,000 | NOTIFICATION on exceed |
-| Max total routes | 10,000,000 | Backpressure, not crash |
+| Max prefixes per neighbor | none (unbounded) | `max_prefixes` (aggregate) and the independent `max_prefixes_ipv4` / `max_prefixes_ipv6` per-family caps (ADR-0108) default to `None`; when set, exceeding the cap tears the session down with NOTIFICATION Cease (Maximum Number of Prefixes Reached, subcode 1) per RFC 4486 |
 | Bounded channel size | 4096 | Per-session and RIB channels |
 | Connect retry interval | 1s for the first two refused TCP dials, then 5s exponential backoff capped at 300s | Applies to prompt TCP failures where the peer is not listening yet; OPEN/config failures use the slower Idle reconnect guard. The 1s floor and two-attempt count are fixed daemon defaults. |
 | Hold time | 90s | Negotiated per-peer |

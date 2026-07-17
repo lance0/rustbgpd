@@ -116,6 +116,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 |
 | [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 |
 | [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Proposed | 2026-07-15 |
+| [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 |
+| [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 |
 
 ## Template
 
