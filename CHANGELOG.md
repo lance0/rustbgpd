@@ -21,6 +21,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complementing the existing per-group member-count gauge. Both series
   are reaped on session teardown.
 
+- **Route-server NEXT_HOP ownership enforcement (ADR-0107, RFC 7948
+  §4.8).** New opt-in `next_hop_ownership = "strict_peer"` neighbor /
+  peer-group knob (requires `route_server_client = true`): an inbound
+  unicast announcement is accepted only when every address component of
+  its decoded wire next-hop identity — classic IPv4 `NEXT_HOP`, IPv6
+  global, RFC 8950 IPv4-over-IPv6, and scoped link-local forms — is the
+  advertising session's own address, closing the RFC 7948 §4.8
+  next-hop-hijack case on shared IXP fabrics. The gate runs before
+  import policy on the immutable wire value (a policy rewrite cannot
+  launder an unauthorized next hop), fails closed (a global +
+  link-local pair or an unscoped link-local is always rejected; an
+  RFC 7999 BLACKHOLE community is not a bypass), and preserves
+  replacement semantics: a rejection replacing a previously accepted
+  route withdraws exactly that prior `(prefix, path_id)` identity while
+  first-seen rejections stay silent. Rejections log at `warn` with the
+  peer, rejected prefixes, offending next-hop tuple, and a stable
+  `reason` token (`foreign_next_hop`, `unverified_link_local_companion`,
+  `unscoped_link_local`). The RFC 7948 `same-AS` and
+  `explicit-authorized` relationships remain deferred per the ADR.
+  (LAN-473)
+
 - **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
   reloadstall harness extensions). The reload-stall harness gains an
   optional `reload_cmd` trailing argument (reloads run `sh -c <cmd>`, e.g.

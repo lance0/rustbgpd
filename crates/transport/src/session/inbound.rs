@@ -10,7 +10,9 @@ use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteFamily, RouteModifications,
     RouteType,
 };
-use rustbgpd_telemetry::reason_labels::{OtcBlockReason, RrLoopReason};
+use rustbgpd_telemetry::reason_labels::{
+    NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
+};
 use rustbgpd_wire::{AspaValidationContext, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -159,6 +161,41 @@ fn otc_ingress_action(
         }
         _ => OtcIngressAction::None,
     }
+}
+/// ADR-0107 strict-peer `NEXT_HOP` ownership check for one decoded wire
+/// next-hop identity (RFC 7948 §4.8).
+///
+/// The strict pilot accepts a form only when every address component of
+/// its complete wire identity is the advertising session's own address:
+///
+/// - a global + link-local pair carries two address identities while the
+///   session maps to exactly one, so one component is always
+///   unverifiable — rejected rather than silently ignoring the
+///   companion (ADR-0107 §2);
+/// - a link-local next-hop is an identity only together with an
+///   interface scope; without a scoped link-local session there is no
+///   scope to map it to, so it fails closed regardless of value;
+/// - everything else (classic IPv4, IPv6 global, RFC 8950
+///   IPv4-over-IPv6) must equal the session address exactly.
+///
+/// Communities are invisible here by construction: a BLACKHOLE tag
+/// cannot bypass the ownership gate (ADR-0107 §5).
+fn strict_peer_next_hop_violation(
+    session_addr: IpAddr,
+    session_is_scoped_link_local: bool,
+    next_hop: IpAddr,
+    link_local_companion: Option<std::net::Ipv6Addr>,
+) -> Option<NextHopOwnershipBlockReason> {
+    if link_local_companion.is_some() {
+        return Some(NextHopOwnershipBlockReason::UnverifiedLinkLocalCompanion);
+    }
+    if let IpAddr::V6(v6) = next_hop
+        && is_ipv6_link_local(&v6)
+        && !session_is_scoped_link_local
+    {
+        return Some(NextHopOwnershipBlockReason::UnscopedLinkLocal);
+    }
+    (next_hop != session_addr).then_some(NextHopOwnershipBlockReason::ForeignNextHop)
 }
 /// Policy-context fields extracted from a route's path attributes in a
 /// single pass over the attribute vector. This replaces what used to be
@@ -365,6 +402,61 @@ impl PeerSession {
             );
         }
         identities
+    }
+
+    /// ADR-0107 strict-peer pre-policy gate: return the first announced
+    /// unicast wire form whose complete next-hop identity does not belong
+    /// to this session, as `(reason, next_hop, link_local_companion)`.
+    ///
+    /// Only forms the import loops below would accept are inspected —
+    /// the same gates as [`Self::eligible_unicast_announcements`]
+    /// (negotiated family, IPv4-MP extended next-hop, no body NLRI on a
+    /// scoped link-local session). `body_next_hop` is the value the
+    /// body-NLRI import loop evaluates: the decoded wire `NEXT_HOP`
+    /// when present, else the session's own address — which is
+    /// self-consistent by definition. Runs before import policy can
+    /// rewrite anything, so a policy rewrite can never launder an
+    /// unauthorized wire value (ADR-0107 §3).
+    fn next_hop_ownership_violation(
+        &self,
+        parsed: &ParsedUpdate,
+        body_next_hop: IpAddr,
+    ) -> Option<(
+        NextHopOwnershipBlockReason,
+        IpAddr,
+        Option<std::net::Ipv6Addr>,
+    )> {
+        let scoped = self.is_scoped_link_local_peer();
+        if !parsed.announced.is_empty()
+            && !scoped
+            && let Some(reason) =
+                strict_peer_next_hop_violation(self.peer_ip, scoped, body_next_hop, None)
+        {
+            return Some((reason, body_next_hop, None));
+        }
+        for attr in &parsed.attributes {
+            let PathAttribute::MpReachNlri(mp) = attr else {
+                continue;
+            };
+            let family = (mp.afi, mp.safi);
+            if mp.announced.is_empty()
+                || mp.safi != Safi::Unicast
+                || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                || !self.negotiated_families.contains(&family)
+                || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
+            {
+                continue;
+            }
+            if let Some(reason) = strict_peer_next_hop_violation(
+                self.peer_ip,
+                scoped,
+                mp.next_hop,
+                mp.link_local_next_hop,
+            ) {
+                return Some((reason, mp.next_hop, mp.link_local_next_hop));
+            }
+        }
+        None
     }
 
     /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
@@ -692,6 +784,35 @@ impl PeerSession {
                     self.event_sink().publish_otc_route_blocked(&otc_event);
                 }
             }
+        }
+        // ADR-0107: route-server strict-peer NEXT_HOP ownership. Inspects
+        // the immutable decoded wire next-hop before import policy can
+        // rewrite it (RFC 7948 §4.8). Skipped when OTC already dropped
+        // this UPDATE's unicast announcements — the treat-as-withdraw
+        // identity sets would be identical.
+        let next_hop_ownership_rejection =
+            if self.config.next_hop_ownership_strict_peer && !otc_drop_unicast_announcements {
+                self.next_hop_ownership_violation(&parsed, body_next_hop)
+            } else {
+                None
+            };
+        let ownership_drop_unicast_announcements = next_hop_ownership_rejection.is_some();
+        let ownership_rejected_unicast = if ownership_drop_unicast_announcements {
+            self.eligible_unicast_announcements(&parsed)
+        } else {
+            Vec::new()
+        };
+        if let Some((reason, next_hop, link_local)) = next_hop_ownership_rejection {
+            warn!(
+                peer = %self.peer_label,
+                reason = reason.as_str(),
+                next_hop = %next_hop,
+                link_local_next_hop = ?link_local,
+                rejected = ownership_rejected_unicast.len(),
+                prefixes = ?ownership_rejected_unicast,
+                "strict-peer next-hop ownership rejected unicast announcements \
+                 (ADR-0107); withdrawals still processed"
+            );
         }
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
         // announcements if our local ASN appears in the AS_PATH.
@@ -1421,116 +1542,118 @@ impl PeerSession {
         // A denied announcement replaces any prior accepted path under the
         // same wire identity; retire it after explicit withdrawals below.
         let mut denied_unicast: Vec<(Prefix, u32)> = Vec::new();
-        let mut announced: Vec<Route> =
-            if unnumbered_ipv4_body_forbidden || otc_drop_unicast_announcements {
-                Vec::new()
-            } else {
-                parsed
-                    .announced
-                    .iter()
-                    .filter_map(|entry| {
-                        let prefix = Prefix::V4(entry.prefix);
-                        let rpki_state = validation
+        let mut announced: Vec<Route> = if unnumbered_ipv4_body_forbidden
+            || otc_drop_unicast_announcements
+            || ownership_drop_unicast_announcements
+        {
+            Vec::new()
+        } else {
+            parsed
+                .announced
+                .iter()
+                .filter_map(|entry| {
+                    let prefix = Prefix::V4(entry.prefix);
+                    let rpki_state = validation
+                        .as_ref()
+                        .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                            v.validate_rpki(&prefix, origin_asn)
+                        });
+                    let ctx = RouteContext {
+                        prefix: Some(prefix),
+                        next_hop: Some(body_next_hop),
+                        extended_communities: update_ecs,
+                        communities: update_communities,
+                        large_communities: update_large_communities,
+                        as_path_str: &aspath_str,
+                        as_path: parsed_as_path,
+                        as_path_len: aspath_len,
+                        origin_asn,
+                        validation_state: rpki_state,
+                        aspa_state: body_aspa_state,
+                        peer_address: Some(self.peer_ip),
+                        peer_asn: policy_peer_asn,
+                        peer_group: self.config.peer_group.as_deref(),
+                        route_type: policy_route_type,
+                        family: Some(RouteFamily::Ipv4Unicast),
+                        evpn_route_type: None,
+                        local_pref: policy_local_pref,
+                        med: policy_med,
+                    };
+                    let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
+                        self.import_policy.as_ref(),
+                        &ctx,
+                    );
+                    record_import_policy_eval(
+                        &self.metrics,
+                        &self.peer_label,
+                        &evaluation,
+                        &mut import_policy_routes_permitted,
+                        &mut import_policy_routes_denied,
+                    );
+                    // ADR-0073: record the decision before the
+                    // permit gate so denies — the load-bearing
+                    // explain case — are captured too. Gated on
+                    // `explain_enabled` so a disabled deployment
+                    // never pays the context / modification clone.
+                    // `modifications` is cloned here because the
+                    // permit path consumes it via
+                    // `apply_modifications` just below.
+                    if let Some(policy_context) = cached_policy_context.as_ref() {
+                        import_decisions.push((
+                            ImportDecisionKey {
+                                afi: Afi::Ipv4,
+                                safi: Safi::Unicast,
+                                prefix,
+                                path_id: entry.path_id,
+                            },
+                            CachedDecision {
+                                outcome: result.action.into(),
+                                matched_policy: evaluation.matched_policy.clone(),
+                                rpki: rpki_state,
+                                aspa: body_aspa_state,
+                                policy_context: policy_context.clone(),
+                                next_hop: Some(body_next_hop),
+                                modifications: result.modifications.clone(),
+                                evaluated_at: SystemTime::now(),
+                                policy_generation: self.import_policy_generation,
+                            },
+                        ));
+                    }
+                    if result.action != rustbgpd_policy::PolicyAction::Permit {
+                        denied_unicast.push((prefix, entry.path_id));
+                        return None;
+                    }
+                    let (attrs, nh_action) =
+                        materialize_attrs(&attr_bundle.unicast, &result.modifications);
+                    let next_hop = resolve_import_nexthop(
+                        nh_action.as_ref(),
+                        body_next_hop,
+                        self.read_half.as_ref(),
+                        &self.config,
+                    );
+                    Some(Route {
+                        prefix,
+                        next_hop,
+                        link_local_next_hop: None,
+                        next_hop_scope: self.link_local_next_hop_scope(next_hop),
+                        peer: self.peer_ip,
+                        attributes: attrs,
+                        received_at: now,
+                        origin_type: route_origin,
+                        peer_router_id: self
+                            .negotiated
                             .as_ref()
-                            .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
-                                v.validate_rpki(&prefix, origin_asn)
-                            });
-                        let ctx = RouteContext {
-                            prefix: Some(prefix),
-                            next_hop: Some(body_next_hop),
-                            extended_communities: update_ecs,
-                            communities: update_communities,
-                            large_communities: update_large_communities,
-                            as_path_str: &aspath_str,
-                            as_path: parsed_as_path,
-                            as_path_len: aspath_len,
-                            origin_asn,
-                            validation_state: rpki_state,
-                            aspa_state: body_aspa_state,
-                            peer_address: Some(self.peer_ip),
-                            peer_asn: policy_peer_asn,
-                            peer_group: self.config.peer_group.as_deref(),
-                            route_type: policy_route_type,
-                            family: Some(RouteFamily::Ipv4Unicast),
-                            evpn_route_type: None,
-                            local_pref: policy_local_pref,
-                            med: policy_med,
-                        };
-                        let (result, evaluation) = rustbgpd_policy::evaluate_chain_with_attribution(
-                            self.import_policy.as_ref(),
-                            &ctx,
-                        );
-                        record_import_policy_eval(
-                            &self.metrics,
-                            &self.peer_label,
-                            &evaluation,
-                            &mut import_policy_routes_permitted,
-                            &mut import_policy_routes_denied,
-                        );
-                        // ADR-0073: record the decision before the
-                        // permit gate so denies — the load-bearing
-                        // explain case — are captured too. Gated on
-                        // `explain_enabled` so a disabled deployment
-                        // never pays the context / modification clone.
-                        // `modifications` is cloned here because the
-                        // permit path consumes it via
-                        // `apply_modifications` just below.
-                        if let Some(policy_context) = cached_policy_context.as_ref() {
-                            import_decisions.push((
-                                ImportDecisionKey {
-                                    afi: Afi::Ipv4,
-                                    safi: Safi::Unicast,
-                                    prefix,
-                                    path_id: entry.path_id,
-                                },
-                                CachedDecision {
-                                    outcome: result.action.into(),
-                                    matched_policy: evaluation.matched_policy.clone(),
-                                    rpki: rpki_state,
-                                    aspa: body_aspa_state,
-                                    policy_context: policy_context.clone(),
-                                    next_hop: Some(body_next_hop),
-                                    modifications: result.modifications.clone(),
-                                    evaluated_at: SystemTime::now(),
-                                    policy_generation: self.import_policy_generation,
-                                },
-                            ));
-                        }
-                        if result.action != rustbgpd_policy::PolicyAction::Permit {
-                            denied_unicast.push((prefix, entry.path_id));
-                            return None;
-                        }
-                        let (attrs, nh_action) =
-                            materialize_attrs(&attr_bundle.unicast, &result.modifications);
-                        let next_hop = resolve_import_nexthop(
-                            nh_action.as_ref(),
-                            body_next_hop,
-                            self.read_half.as_ref(),
-                            &self.config,
-                        );
-                        Some(Route {
-                            prefix,
-                            next_hop,
-                            link_local_next_hop: None,
-                            next_hop_scope: self.link_local_next_hop_scope(next_hop),
-                            peer: self.peer_ip,
-                            attributes: attrs,
-                            received_at: now,
-                            origin_type: route_origin,
-                            peer_router_id: self
-                                .negotiated
-                                .as_ref()
-                                .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
-                            is_stale: false,
-                            is_llgr_stale: false,
-                            path_id: entry.path_id,
-                            validation_state: rpki_state,
-                            aspa_state: body_aspa_state,
-                            aspa_context,
-                        })
+                            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                        is_stale: false,
+                        is_llgr_stale: false,
+                        path_id: entry.path_id,
+                        validation_state: rpki_state,
+                        aspa_state: body_aspa_state,
+                        aspa_context,
                     })
-                    .collect()
-            };
+                })
+                .collect()
+        };
         // Drain the collected import decisions into the per-session
         // explain cache (ADR-0073). Now that the `.collect()` above has
         // released its immutable borrow of `self`, the `&mut
@@ -2018,7 +2141,7 @@ impl PeerSession {
                         }
                         continue;
                     }
-                    if otc_drop_unicast_announcements {
+                    if otc_drop_unicast_announcements || ownership_drop_unicast_announcements {
                         continue;
                     }
                     // Unicast routes
@@ -2214,6 +2337,29 @@ impl PeerSession {
         // under the same wire identity. Explicit withdrawals above win on
         // overlap; first-seen rejected announcements remain silent.
         for (prefix, path_id) in otc_rejected_unicast {
+            if self.forget_known_path(prefix, path_id) {
+                withdrawn.push((prefix, path_id));
+                if explain_enabled {
+                    let afi = match prefix {
+                        Prefix::V4(_) => Afi::Ipv4,
+                        Prefix::V6(_) => Afi::Ipv6,
+                    };
+                    self.import_decision_cache
+                        .mark_withdrawn(&ImportDecisionKey {
+                            afi,
+                            safi: Safi::Unicast,
+                            prefix,
+                            path_id,
+                        });
+                }
+            }
+        }
+        // ADR-0107 §3: identical replacement semantics for the ownership
+        // gate — retire only the exact prior accepted (prefix, path_id)
+        // identity; a first-seen rejection emits no withdrawal. Disjoint
+        // from the OTC set by construction (the ownership check is
+        // skipped when OTC already dropped this UPDATE).
+        for (prefix, path_id) in ownership_rejected_unicast {
             if self.forget_known_path(prefix, path_id) {
                 withdrawn.push((prefix, path_id));
                 if explain_enabled {
@@ -2573,5 +2719,84 @@ mod route_attr_bundle_tests {
             "set_local_pref modification must be applied"
         );
         assert!(nh.is_none(), "no set_next_hop → no nh_action");
+    }
+}
+#[cfg(test)]
+mod next_hop_ownership_tests {
+    use super::{NextHopOwnershipBlockReason, strict_peer_next_hop_violation};
+    use std::net::{IpAddr, Ipv6Addr};
+
+    const V4_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10));
+    const V6_PEER: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
+    const LL_PEER: IpAddr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+
+    #[test]
+    fn own_addresses_conform() {
+        // Classic IPv4, IPv6 global, RFC 8950 IPv4-over-IPv6 (the wire
+        // AFI never reaches the identity check — ownership is a pure
+        // address comparison), and a scoped link-local session.
+        assert_eq!(
+            strict_peer_next_hop_violation(V4_PEER, false, V4_PEER, None),
+            None
+        );
+        assert_eq!(
+            strict_peer_next_hop_violation(V6_PEER, false, V6_PEER, None),
+            None
+        );
+        assert_eq!(
+            strict_peer_next_hop_violation(LL_PEER, true, LL_PEER, None),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_addresses_are_rejected() {
+        let other_v4: IpAddr = "192.0.2.99".parse().unwrap();
+        let other_v6: IpAddr = "2001:db8::99".parse().unwrap();
+        let other_ll: IpAddr = "fe80::99".parse().unwrap();
+        for (session, nh, scoped) in [
+            (V4_PEER, other_v4, false),
+            (V6_PEER, other_v6, false),
+            // RFC 8950 session announcing a v4 next-hop it cannot own.
+            (V6_PEER, other_v4, false),
+            // Same fe80:: space, different host, same interface scope.
+            (LL_PEER, other_ll, true),
+        ] {
+            assert_eq!(
+                strict_peer_next_hop_violation(session, scoped, nh, None),
+                Some(NextHopOwnershipBlockReason::ForeignNextHop),
+                "session {session} must reject foreign next-hop {nh}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_local_companion_pair_always_fails_closed() {
+        // ADR-0107 §2: the 32-octet global + link-local pair carries two
+        // address identities; the session maps to one, so the strict
+        // pilot can never verify both — even when one component matches.
+        let companion: Ipv6Addr = "fe80::2".parse().unwrap();
+        for (session, scoped) in [(V6_PEER, false), (LL_PEER, true)] {
+            assert_eq!(
+                strict_peer_next_hop_violation(session, scoped, V6_PEER, Some(companion)),
+                Some(NextHopOwnershipBlockReason::UnverifiedLinkLocalCompanion),
+                "session {session} must fail closed on a paired companion"
+            );
+        }
+    }
+
+    #[test]
+    fn link_local_without_session_scope_fails_closed() {
+        // A link-local identity is address + interface scope; a session
+        // without a scoped link-local identity has no scope to map it
+        // to — rejected regardless of the address value.
+        assert_eq!(
+            strict_peer_next_hop_violation(V6_PEER, false, LL_PEER, None),
+            Some(NextHopOwnershipBlockReason::UnscopedLinkLocal)
+        );
+        assert_eq!(
+            strict_peer_next_hop_violation(V4_PEER, false, LL_PEER, None),
+            Some(NextHopOwnershipBlockReason::UnscopedLinkLocal)
+        );
     }
 }

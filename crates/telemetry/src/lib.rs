@@ -19,4 +19,4 @@ pub mod reason_labels;
 
 pub use logging::{LoggingError, init_logging, reload_per_peer_directives};
 pub use metrics::BgpMetrics;
-pub use reason_labels::{OtcBlockReason, RrLoopReason};
+pub use reason_labels::{NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};

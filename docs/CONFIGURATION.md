@@ -596,6 +596,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
+| `next_hop_ownership`   | string   | no       | --      | ADR-0107 pre-policy NEXT_HOP ownership enforcement for route-server clients (RFC 7948 §4.8). `"strict_peer"` accepts a unicast announcement only when its complete wire next-hop identity is the advertising session's own address; non-conforming announcements are rejected before import policy (fail-closed, treat-as-withdraw). Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
@@ -1262,15 +1263,60 @@ This applies to:
 - IPv4 and IPv6 FlowSpec export (`AS_PATH` transparency only; FlowSpec has no
   wire-level `NEXT_HOP`)
 
-Transparent export does not currently verify that an inbound unicast next hop
-belongs to the advertising route-server client. A per-client import policy can
-constrain the primary address where today's exact `match_next_hop` matcher is
-sufficient, but it is not a complete ownership check for every wire form. See
-[ADR-0107](adr/0107-route-server-next-hop-ownership.md); a next-hop rewrite
-alone is not ownership validation.
+Transparent export does not by itself verify that an inbound unicast next hop
+belongs to the advertising route-server client — a next-hop rewrite alone is
+not ownership validation. Enable the ownership gate below where members must
+not announce third-party next hops.
 
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
+
+#### NEXT_HOP ownership enforcement (`next_hop_ownership`, ADR-0107)
+
+RFC 7948 §4.8 describes next-hop hijacking on a shared IXP fabric: a member
+announces a route whose `NEXT_HOP` points at another member, blackholing or
+intercepting that traffic through the transparent route server. The opt-in
+strict-peer mode closes this:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+next_hop_ownership = "strict_peer"
+```
+
+With `"strict_peer"` set, an inbound unicast announcement is accepted only
+when every address component of its decoded wire next-hop identity is the
+advertising session's own address. The check runs **before** import policy,
+on the immutable wire value — a policy rewrite can never launder an
+unauthorized next hop — and it is fail-closed:
+
+- classic IPv4 `NEXT_HOP`, IPv6 global, and RFC 8950 IPv4-over-IPv6 forms
+  must equal the session address exactly;
+- a global + link-local next-hop pair is always rejected: the session maps
+  to one address, so the companion is unverifiable (never silently ignored);
+- a link-local next hop is only accepted from a scoped link-local session
+  with that exact address (`fe80::/10` is an identity only together with an
+  interface scope);
+- an RFC 7999 BLACKHOLE community is not an ownership bypass.
+
+Rejected announcements are dropped treat-as-withdraw style: a rejection that
+replaces a previously accepted route withdraws exactly that prior
+`(prefix, path_id)` identity; a first-seen rejection emits no withdrawal.
+Withdrawals in the same UPDATE are always processed. Each rejection logs at
+`warn` with the peer, the rejected prefixes, the offending next-hop tuple,
+and a stable `reason` token (`foreign_next_hop`,
+`unverified_link_local_companion`, or `unscoped_link_local`).
+
+`next_hop_ownership` requires `route_server_client = true` and inherits from
+the peer-group. Unset means no ownership enforcement (RFC 7947 transparency
+only). The broader `same_as` / `explicit_authorized` relationships RFC 7948
+permits are deferred — see
+[ADR-0107](adr/0107-route-server-next-hop-ownership.md). Note that a member
+legitimately using a different connection in the same AS as its next hop
+will be rejected by the strict pilot; leave the knob unset for such members
+until the broader modes ship.
 
 #### Per-client best-path (RFC 7947 §2.3.2 path-hiding mitigation)
 

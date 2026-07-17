@@ -756,6 +756,15 @@ pub struct Neighbor {
     /// Families where the session negotiates Add-Path send use Add-Path
     /// instead — the negotiated capability outranks this fallback.
     pub per_client_best: Option<bool>,
+    /// Pre-policy `NEXT_HOP` ownership enforcement for this route-server
+    /// client (ADR-0107, RFC 7948 §4.8). `"strict_peer"` accepts a
+    /// unicast announcement only when every address component of its
+    /// decoded wire next-hop identity is the advertising session's own
+    /// address; non-conforming announcements are rejected before import
+    /// policy runs, fail-closed and treat-as-withdraw for previously
+    /// accepted identities. Requires `route_server_client = true`.
+    /// Unset = no ownership enforcement (RFC 7947 transparency only).
+    pub next_hop_ownership: Option<NextHopOwnershipConfig>,
     /// Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes
     /// received with either community are not advertised to this neighbor
     /// when it is eBGP. Default: `true` unless `route_server_client` is
@@ -837,6 +846,7 @@ impl fmt::Debug for Neighbor {
             .field("orr_vantage", &self.orr_vantage)
             .field("route_server_client", &self.route_server_client)
             .field("per_client_best", &self.per_client_best)
+            .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)
             .field("role", &self.role)
             .field("strict_role", &self.strict_role)
@@ -1026,6 +1036,9 @@ pub struct PeerGroupConfig {
     /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in
     /// this group. See the neighbor-level `per_client_best`.
     pub per_client_best: Option<bool>,
+    /// ADR-0107 `NEXT_HOP` ownership enforcement inherited by neighbors in
+    /// this group. See the neighbor-level `next_hop_ownership`.
+    pub next_hop_ownership: Option<NextHopOwnershipConfig>,
     /// RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in
     /// this group. See the neighbor-level `interpret_rfc1997`.
     pub interpret_rfc1997: Option<bool>,
@@ -1087,6 +1100,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("orr_vantage", &self.orr_vantage)
             .field("route_server_client", &self.route_server_client)
             .field("per_client_best", &self.per_client_best)
+            .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)
             .field("role", &self.role)
             .field("strict_role", &self.strict_role)
@@ -1101,6 +1115,21 @@ impl fmt::Debug for PeerGroupConfig {
             .field("export_policy_chain", &self.export_policy_chain)
             .finish()
     }
+}
+
+/// ADR-0107 route-server `NEXT_HOP` ownership enforcement modes
+/// (RFC 7948 §4.8).
+///
+/// Only the strict pilot ships today. The broader `same_as` and
+/// `explicit_authorized` relationships RFC 7948 permits are deferred
+/// until a generation-consistent authoritative fleet inventory exists
+/// (ADR-0107 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NextHopOwnershipConfig {
+    /// Accept a unicast announcement only when its complete wire
+    /// next-hop identity is the advertising session's own address.
+    StrictPeer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

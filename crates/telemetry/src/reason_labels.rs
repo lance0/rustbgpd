@@ -88,6 +88,60 @@ impl std::fmt::Display for OtcBlockReason {
     }
 }
 
+/// ADR-0107 route-server strict-peer `NEXT_HOP` ownership rejection
+/// reasons (RFC 7948 §4.8).
+///
+/// Surfaces sharing this vocabulary today:
+///
+/// - the `reason` token on the transport warn log line emitted when the
+///   pre-policy ownership gate rejects an UPDATE's unicast
+///   announcements.
+///
+/// A `bgp_next_hop_ownership_blocked_total{peer, reason}` counter and a
+/// structured event are planned follow-ups; they must consume these
+/// exact strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NextHopOwnershipBlockReason {
+    /// An address component of the wire next-hop identity is not the
+    /// advertising session's own address.
+    ForeignNextHop,
+    /// The wire identity carried a global + link-local next-hop pair;
+    /// the session maps to exactly one address, so the companion is
+    /// unverifiable under the strict-peer pilot (never silently
+    /// ignored — ADR-0107 §2).
+    UnverifiedLinkLocalCompanion,
+    /// A link-local next-hop arrived on a session without a scoped
+    /// link-local identity, so `fe80::/10` + interface scope cannot be
+    /// mapped to the advertising session.
+    UnscopedLinkLocal,
+}
+
+impl NextHopOwnershipBlockReason {
+    /// Every canonical ownership block reason, for vocabulary walks in
+    /// tests and docs.
+    pub const ALL: [Self; 3] = [
+        Self::ForeignNextHop,
+        Self::UnverifiedLinkLocalCompanion,
+        Self::UnscopedLinkLocal,
+    ];
+
+    /// The canonical reason string shared by every surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForeignNextHop => "foreign_next_hop",
+            Self::UnverifiedLinkLocalCompanion => "unverified_link_local_companion",
+            Self::UnscopedLinkLocal => "unscoped_link_local",
+        }
+    }
+}
+
+impl std::fmt::Display for NextHopOwnershipBlockReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// RFC 4456 §8 route-reflection loop signals.
 ///
 /// `bgp_rr_loop_detected_total{peer}` counts both signals together
@@ -161,7 +215,7 @@ impl std::fmt::Display for ExactExportReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExactExportReason, OtcBlockReason, RrLoopReason};
+    use super::{ExactExportReason, NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};
 
     fn assert_snake_case(label: &str) {
         assert!(!label.is_empty(), "reason label must not be empty");
@@ -181,6 +235,15 @@ mod tests {
     fn otc_block_reasons_are_snake_case_and_distinct() {
         let mut seen = std::collections::HashSet::new();
         for reason in OtcBlockReason::ALL {
+            assert_snake_case(reason.as_str());
+            assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn next_hop_ownership_block_reasons_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for reason in NextHopOwnershipBlockReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
         }
@@ -219,6 +282,18 @@ mod tests {
                 "ingress_peer_mismatch",
                 "malformed_length",
                 "egress_to_upstream_via_otc",
+            ]
+        );
+        let ownership: Vec<&str> = NextHopOwnershipBlockReason::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(
+            ownership,
+            [
+                "foreign_next_hop",
+                "unverified_link_local_companion",
+                "unscoped_link_local",
             ]
         );
         let rr: Vec<&str> = RrLoopReason::ALL.iter().map(|r| r.as_str()).collect();

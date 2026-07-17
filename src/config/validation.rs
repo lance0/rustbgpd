@@ -496,6 +496,22 @@ impl Config {
                 });
             }
 
+            // ADR-0107 NEXT_HOP ownership is a route-server ingress
+            // guard: it authorizes a member's announced next hop against
+            // the advertising session, which only makes sense on a
+            // transparent route-server client session.
+            let next_hop_ownership = neighbor
+                .next_hop_ownership
+                .or_else(|| group.and_then(|g| g.next_hop_ownership));
+            if next_hop_ownership.is_some() && !route_server_client {
+                return Err(ConfigError::InvalidRouteServerConfig {
+                    reason: format!(
+                        "next_hop_ownership on neighbor {} requires route_server_client = true",
+                        neighbor.address
+                    ),
+                });
+            }
+
             let role = neighbor.role.or_else(|| group.and_then(|g| g.role));
             let strict_role = neighbor
                 .strict_role

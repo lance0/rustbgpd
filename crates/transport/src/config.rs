@@ -376,6 +376,16 @@ pub struct TransportConfig {
     /// for clients without Add-Path). Requires `route_server_client`;
     /// families with negotiated Add-Path send ignore it.
     pub per_client_best: bool,
+    /// ADR-0107 strict-peer `NEXT_HOP` ownership enforcement for a
+    /// route-server client (RFC 7948 §4.8). When `true`, an inbound
+    /// unicast announcement is accepted only when every address
+    /// component of its decoded wire next-hop identity is the
+    /// advertising session's own address; non-conforming announcements
+    /// are rejected before import policy runs (fail-closed,
+    /// treat-as-withdraw for accepted replacements). Requires
+    /// `route_server_client`. Operator knob:
+    /// `next_hop_ownership = "strict_peer"`.
+    pub next_hop_ownership_strict_peer: bool,
     /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement:
     /// when `true` and this peer is eBGP, the RIB suppresses source
     /// routes carrying either community at export staging. Resolved in
@@ -433,6 +443,7 @@ impl TransportConfig {
             orr_vantage: None,
             route_server_client: false,
             per_client_best: false,
+            next_hop_ownership_strict_peer: false,
             interpret_rfc1997: true,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,

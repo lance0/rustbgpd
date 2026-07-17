@@ -88,6 +88,7 @@ impl PeerManager {
             orr_vantage: tc.orr_vantage,
             route_server_client: tc.route_server_client,
             per_client_best: tc.per_client_best,
+            next_hop_ownership_strict_peer: tc.next_hop_ownership_strict_peer,
             interpret_rfc1997: tc.interpret_rfc1997,
             remove_private_as: tc.remove_private_as,
             add_path_receive: tc.peer.add_path_receive,

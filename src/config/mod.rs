@@ -1230,6 +1230,14 @@ impl Config {
             .per_client_best
             .or_else(|| group.and_then(|g| g.per_client_best))
             .unwrap_or(false);
+        // ADR-0107: strict-peer NEXT_HOP ownership for route-server
+        // clients; the single shipped mode resolves to a bool here.
+        transport.next_hop_ownership_strict_peer = matches!(
+            neighbor
+                .next_hop_ownership
+                .or_else(|| group.and_then(|g| g.next_hop_ownership)),
+            Some(NextHopOwnershipConfig::StrictPeer)
+        );
         // RFC 1997 egress enforcement defaults to on, except for
         // route-server clients (transparent pass-through unless the
         // operator opts in explicitly).
@@ -1311,6 +1319,7 @@ impl Config {
             orr_vantage: None,
             route_server_client: None,
             per_client_best: None,
+            next_hop_ownership: None,
             interpret_rfc1997: None,
             role: None,
             strict_role: None,
@@ -2086,6 +2095,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "orr_vantage"
         | "route_server_client"
         | "per_client_best"
+        | "next_hop_ownership"
         | "interpret_rfc1997" => (
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
@@ -2225,6 +2235,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(per_client_best);
+    cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);
     cmp_field!(role);
     cmp_field!(strict_role);
@@ -2344,6 +2355,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.orr_vantage == new.orr_vantage
         && old.route_server_client == new.route_server_client
         && old.per_client_best == new.per_client_best
+        && old.next_hop_ownership == new.next_hop_ownership
         && old.interpret_rfc1997 == new.interpret_rfc1997
         && old.role == new.role
         && old.strict_role == new.strict_role
@@ -3025,6 +3037,12 @@ impl Config {
                     .or_else(|| group.and_then(|g| g.per_client_best))
                     .unwrap_or(false),
             );
+            // ADR-0107: unset means no ownership enforcement, so the
+            // effective value stays an honest Option (no Some-wrapping
+            // of a default).
+            neighbor.next_hop_ownership = neighbor
+                .next_hop_ownership
+                .or_else(|| group.and_then(|g| g.next_hop_ownership));
             // After route_server_client above so the derived default
             // reads the resolved value.
             neighbor.interpret_rfc1997 = Some(
@@ -5389,6 +5407,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
     cmp_field!(per_client_best);
+    cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);
     cmp_field!(role);
     cmp_field!(strict_role);
