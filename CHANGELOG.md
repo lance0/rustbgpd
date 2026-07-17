@@ -43,6 +43,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **IXP route-server receipt matrix refreshed with post-fix flapstorm
+  numbers** (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd
+  cells rerun at the deferred-PeerUp-dump fix head — S3 re-announce
+  p50 9.5–9.8 s → 0.46–0.49 s, S1/S2/RSS moved only within run-to-run
+  spread — with a post-publication note documenting the plateau the
+  receipt itself exposed, the head-of-line mechanism, and the rerun;
+  committed raw artifacts swapped to the new runs (BIRD/OpenBGPD cells
+  unchanged).
+
 - **jemalloc is now the default allocator feature.** Shipped artifacts
   (GHCR image, release tarballs) have built with jemalloc since
   v0.50.0+; defaulting the feature makes plain `cargo build --release`

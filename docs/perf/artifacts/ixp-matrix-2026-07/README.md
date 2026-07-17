@@ -1,9 +1,18 @@
 # IXP route-server receipt matrix — raw artifacts (2026-07)
 
 Raw data behind [`../../ixp-matrix-2026-07.md`](../../ixp-matrix-2026-07.md):
-the cross-daemon reload-stall matrix (rustbgpd `40fd0a0c` vs BIRD 3.3.1
+the cross-daemon reload-stall matrix (rustbgpd `576c6c9b` vs BIRD 3.3.1
 vs OpenBGPD 9.1) at 700 peers × 400,400 prefixes through the shared
 `bench/scale/reloadstall` harness.
+
+The four `rustbgpd/` cells were refreshed after the receipt's first
+publication: the S3 re-announce plateau the receipt itself exposed was
+root-caused (PeerUp initial-dump head-of-line blocking) and fixed at
+`576c6c9b`, and all rustbgpd cells were rerun at that head (the S3
+logs now also carry the harness's additive per-round `first_reann_s`
+lines). The `bird/` and `openbgpd/` cells stand from the original
+campaign at `40fd0a0c`, which is code-identical for them. See the
+receipt's post-publication fix note.
 
 ## Layout
 
@@ -47,6 +56,10 @@ the receipt's honesty notes, and available on request:
   threads-8 configuration decision.
 - `artifacts-rung1/`, `artifacts-rung2/` — the 20×20k and 200×115k
   scale-ladder runs summarized in the receipt's ladder table.
+- `artifacts-run*/rustbgpd-prefix475/` — the pre-fix rustbgpd cells
+  from the receipt's first publication (the flat ~9.5–9.8 s S3
+  re-announce plateau), preserved unmodified as the before-side of the
+  post-publication fix note.
 
 No host paths or identifiers appear in the committed files (verified by
 scrub before staging; no substitutions were needed).
