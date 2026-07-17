@@ -62,6 +62,7 @@ fn multipath_candidates<'a>(
     target_peer: IpAddr,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
+    rs_control: Option<(u32, u32)>,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
     family: (Afi, Safi),
@@ -92,6 +93,21 @@ fn multipath_candidates<'a>(
             target_is_ebgp,
             interpret_rfc1997,
         ) {
+            return false;
+        }
+        // RFC 7947 §2.3.2: a control community forbidding announcement
+        // toward this target's ASN is candidate ineligibility — a
+        // suppressed sibling must not hold an Add-Path rank (or the
+        // per-client-best slot). `rs_control` is `(rs_asn, peer_asn)`
+        // for sessions with `rs_control_communities`, `None` otherwise.
+        if let Some((rs_asn, peer_asn)) = rs_control
+            && super::rs_control::rs_control_export_suppressed(
+                route.communities(),
+                route.large_communities(),
+                rs_asn,
+                peer_asn,
+            )
+        {
             return false;
         }
         // RFC 9494 §4.4: each staged candidate is gated individually —
@@ -148,6 +164,7 @@ impl RibManager {
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
+        rs_control_asn: Option<u32>,
         target_is_rr_client: bool,
         target_local_role: Option<rustbgpd_wire::BgpRole>,
         cluster_id: Option<Ipv4Addr>,
@@ -375,6 +392,7 @@ impl RibManager {
                 target_peer,
                 target_is_ebgp,
                 interpret_rfc1997,
+                rs_control_asn.zip(target_peer_asn),
                 target_is_rr_client,
                 cluster_id,
                 family,
@@ -1180,6 +1198,7 @@ impl RibManager {
         stage_path_id_zero: bool,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
+        rs_control_asn: Option<u32>,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -1233,6 +1252,7 @@ impl RibManager {
             target_peer,
             target_is_ebgp,
             interpret_rfc1997,
+            rs_control_asn.zip(target_peer_asn),
             target_is_rr_client,
             cluster_id,
             family,
@@ -1324,6 +1344,17 @@ impl RibManager {
                 });
                 continue;
             }
+            // RFC 7947 §2.3.2 outbound actions per staged candidate —
+            // same prepend + control-community scrub as the single-best
+            // body, before the Adj-RIB-Out diff below.
+            if let (Some(rs_asn), Some(peer_asn)) = (rs_control_asn, target_peer_asn) {
+                let prepend = super::rs_control::rs_control_prepend_count(
+                    candidate.large_communities(),
+                    rs_asn,
+                    peer_asn,
+                );
+                super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
+            }
             modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
 
             // Only announce if different from what's already in AdjRibOut.
@@ -1383,6 +1414,7 @@ impl RibManager {
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
+        rs_control_asn: Option<u32>,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
@@ -1569,6 +1601,30 @@ impl RibManager {
             }
             return;
         }
+        // RFC 7947 §2.3.2: route-server control communities on the SOURCE
+        // route (pre-policy, like the RFC 1997 gates above) decide
+        // per-target announcement. Active only for sessions with
+        // `rs_control_communities` (the RS-side local ASN arrives via
+        // `SetPeerRsControl` — enabled peers are always on the ungrouped
+        // per-peer path); every other session keeps full transparency.
+        if let (Some(rs_asn), (_, Some(peer_asn), _)) = (rs_control_asn, target.ctx_peer())
+            && super::rs_control::rs_control_export_suppressed(
+                best.communities(),
+                best.large_communities(),
+                rs_asn,
+                peer_asn,
+            )
+        {
+            target.gate("rs_control", "rs_control_suppressed", Stop, || {
+                "route carries an RFC 7947 route-server control community that forbids \
+                     announcing it toward this peer's ASN"
+                    .to_string()
+            });
+            for &path_id in &existing_path_ids {
+                withdraw.push((*prefix, path_id));
+            }
+            return;
+        }
         // Export policy check. Group staging passes no peer-context
         // fields: a chain that reads them disqualifies its peers from
         // grouping (`requires_peer_context`), so the verdict here is
@@ -1689,6 +1745,22 @@ impl RibManager {
                 withdraw.push((*prefix, path_id));
             }
             return;
+        }
+
+        // RFC 7947 §2.3.2 outbound actions for an enabled target: prepend
+        // the announcing client's ASN toward this peer (`RS:101|102|103:*`,
+        // decided on the source route like the suppression gate) and scrub
+        // the control communities from the wire-bound attribute set
+        // (post-policy, so policy-added control communities are scrubbed
+        // too). Runs before the Adj-RIB-Out diff so advertised state and
+        // re-announcement suppression see the final form.
+        if let (Some(rs_asn), (_, Some(peer_asn), _)) = (rs_control_asn, target.ctx_peer()) {
+            let prepend = super::rs_control::rs_control_prepend_count(
+                best.large_communities(),
+                rs_asn,
+                peer_asn,
+            );
+            super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
         }
 
         // RFC 9234 §5 egress enforcement belongs before the advertised-state

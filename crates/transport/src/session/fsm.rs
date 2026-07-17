@@ -459,6 +459,23 @@ impl PeerSession {
                         })
                         .await;
 
+                    // Stage RFC 7947 §2.3.2 control-community context before
+                    // `PeerUp` for the same reason: the initial Adj-RIB-Out
+                    // build must already honor the member's steering
+                    // communities. The RS-side local ASN is what the control
+                    // communities' administrator field is matched against.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerRsControl {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            rs_control_asn: self
+                                .config
+                                .rs_control_communities
+                                .then_some(self.config.peer.local_asn),
+                        })
+                        .await;
+
                     // Fence the exact encoder to this transport generation
                     // before `PeerUp` synchronously builds the initial
                     // Adj-RIB-Out. Every resulting envelope must carry a

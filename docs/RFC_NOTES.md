@@ -20,6 +20,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
 | Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` and `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
+| Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks |
@@ -89,6 +90,30 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   that RT.
 - `NO_ADVERTISE` and `NO_EXPORT` enforcement for EVPN and FlowSpec remains
   deferred.
+
+---
+
+## RFC 7947 §2.3.2 / RFC 8195 — route-server control communities
+
+- A member steers per-target redistribution with communities keyed on the
+  TARGET peer's ASN: `0:PEER` / `RS:0:PEER` (do not announce to `PEER`),
+  `0:RS` / `RS:0:0` (announce to none) overridable per target by `RS:PEER` /
+  `RS:1:PEER`, and `RS:101|102|103:PEER` (prepend the announcing member's
+  leftmost ASN 1–3× toward `PEER`; `RS:10x:0` = every target). Standard and
+  RFC 8195 large forms compose; extended-community control forms are
+  deliberately not implemented (draft-ietf-grow-ixp-ext-comms). Full matrix
+  and evaluation ladder: the [route-server cookbook](cookbook/route-server.md).
+- Enforcement is gated per session by `rs_control_communities` (default
+  `route_server_client`), evaluated pre-policy on the source route like the
+  RFC 1997 gates (its own `rs_control` explain rung), and covers the unicast
+  export shapes: single-best, Add-Path, and per-client-best (suppressed
+  candidates are removed before ranking). Non-unicast families are out of
+  scope — RFC 7947 is an IPv4/IPv6 unicast IXP profile.
+- Acted-on control communities are scrubbed from the wire-bound attribute set
+  toward enabled sessions (standard admin `0`/`RS` outside the `0xFFFF____`
+  well-known space; large `RS:{0,1,101,102,103}:*`); disabled sessions keep
+  RFC 7947 §2.2 byte-level transparency. Enabled sessions are excluded from
+  update-group sharing (`rs_control_communities` disqualifier reason).
 
 ---
 

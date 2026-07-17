@@ -787,6 +787,16 @@ pub struct Neighbor {
     /// set (route servers pass communities through transparently and let
     /// clients enforce them). Set explicitly to override either default.
     pub interpret_rfc1997: Option<bool>,
+    /// Interpret RFC 7947 §2.3.2 route-server control communities set by
+    /// this neighbor: per-target announce suppression (`0:PEER`,
+    /// `RS:0:PEER`), announce-only (`RS:PEER` / `RS:1:PEER` overriding
+    /// `0:RS` / `RS:0:0`), and prepend toward a target
+    /// (`RS:101|102|103:PEER`, RFC 8195 large-community forms). Matched
+    /// control communities are scrubbed from this session's outbound
+    /// announcements. Default: `true` when `route_server_client` is set,
+    /// `false` otherwise. Enabled sessions are excluded from update-group
+    /// sharing (per-target outcomes cannot share a staged winner).
+    pub rs_control_communities: Option<bool>,
     /// Local BGP Role for RFC 9234 route-leak prevention. eBGP only.
     pub role: Option<BgpRoleConfig>,
     /// Require the peer to advertise a compatible BGP Role capability.
@@ -867,6 +877,7 @@ impl fmt::Debug for Neighbor {
             .field("per_client_best", &self.per_client_best)
             .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)
+            .field("rs_control_communities", &self.rs_control_communities)
             .field("role", &self.role)
             .field("strict_role", &self.strict_role)
             .field("prefix_orf_receive", &self.prefix_orf_receive)
@@ -1070,6 +1081,10 @@ pub struct PeerGroupConfig {
     /// RFC 1997 `NO_EXPORT` egress enforcement inherited by neighbors in
     /// this group. See the neighbor-level `interpret_rfc1997`.
     pub interpret_rfc1997: Option<bool>,
+    /// RFC 7947 route-server control-community interpretation inherited
+    /// by neighbors in this group. See the neighbor-level
+    /// `rs_control_communities`.
+    pub rs_control_communities: Option<bool>,
     /// Local BGP Role (RFC 9234) inherited by neighbors in this group.
     pub role: Option<BgpRoleConfig>,
     /// Require a compatible BGP Role capability from peers in this group.
@@ -1133,6 +1148,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("per_client_best", &self.per_client_best)
             .field("next_hop_ownership", &self.next_hop_ownership)
             .field("interpret_rfc1997", &self.interpret_rfc1997)
+            .field("rs_control_communities", &self.rs_control_communities)
             .field("role", &self.role)
             .field("strict_role", &self.strict_role)
             .field("prefix_orf_receive", &self.prefix_orf_receive)

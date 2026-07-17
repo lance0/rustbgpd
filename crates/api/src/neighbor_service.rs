@@ -793,6 +793,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             // default. Configure exceptions via the static TOML
             // `interpret_rfc1997` knob.
             interpret_rfc1997: !config.route_server_client,
+            // Same runtime-surface treatment as `interpret_rfc1997`:
+            // dynamic peers take the config-derived default (control
+            // communities on for route-server clients); configure
+            // exceptions via the static TOML `rs_control_communities`.
+            rs_control_communities: config.route_server_client,
             remove_private_as,
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
@@ -1354,6 +1359,7 @@ mod tests {
             slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
             slow_peer_isolation: false,
             interpret_rfc1997: true,
+            rs_control_communities: false,
             remove_private_as: RemovePrivateAs::Disabled,
             add_path_receive: false,
             add_path_send: false,

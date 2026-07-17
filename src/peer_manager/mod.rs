@@ -677,6 +677,11 @@ impl PeerManager {
         // RFC 1997: resolved in config (default !route_server_client);
         // pinned by the build_transport_config field-threading test.
         transport.interpret_rfc1997 = config.interpret_rfc1997;
+        // RFC 7947 §2.3.2: resolved in config (default
+        // route_server_client); same field-threading hazard as the
+        // knobs above — without this line control communities are
+        // parsed and validated but never enforced.
+        transport.rs_control_communities = config.rs_control_communities;
         transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
         // ADR-0073: per-session import-decision explain cache wiring.

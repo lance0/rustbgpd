@@ -58,6 +58,10 @@ pub struct UpdateGroupClassifierInput {
     pub llgr_families: Vec<(u16, u8)>,
     pub add_path_send: bool,
     pub per_client_best: bool,
+    /// RFC 7947 §2.3.2 control communities: the export outcome (and the
+    /// prepend/scrub rewrite) is keyed on the TARGET peer's ASN per
+    /// route, so no shared staged winner exists for enabled sessions.
+    pub rs_control_communities: bool,
     pub orr_vantage: Option<IpAddr>,
     pub orf_installed: bool,
 }
@@ -89,6 +93,7 @@ pub enum UpdateGroupClassification {
     PolicyPeerContext,
     AddPathSend,
     PerClientBest,
+    RsControlCommunities,
     OrrVantage,
     OrfInstalled,
 }
@@ -101,6 +106,7 @@ impl UpdateGroupClassification {
             Self::PolicyPeerContext => Some("policy_peer_context"),
             Self::AddPathSend => Some("add_path_send"),
             Self::PerClientBest => Some("per_client_best"),
+            Self::RsControlCommunities => Some("rs_control_communities"),
             Self::OrrVantage => Some("orr_vantage"),
             Self::OrfInstalled => Some("orf_installed"),
         }
@@ -120,6 +126,8 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
         UpdateGroupClassification::AddPathSend
     } else if input.per_client_best {
         UpdateGroupClassification::PerClientBest
+    } else if input.rs_control_communities {
+        UpdateGroupClassification::RsControlCommunities
     } else if input.orr_vantage.is_some() {
         UpdateGroupClassification::OrrVantage
     } else if input.orf_installed {
@@ -230,6 +238,7 @@ mod update_group_classifier_tests {
             llgr_families: vec![],
             add_path_send: false,
             per_client_best: false,
+            rs_control_communities: false,
             orr_vantage: None,
             orf_installed: false,
         }
@@ -1369,6 +1378,21 @@ pub enum RibUpdate {
         session_id: u64,
         /// Local RFC 9234 BGP Role, if configured.
         local_role: Option<BgpRole>,
+    },
+    /// Stage the session's RFC 7947 §2.3.2 route-server control-community
+    /// context immediately before [`RibUpdate::PeerUp`] builds the initial
+    /// Adj-RIB-Out. The session id prevents a collision loser from
+    /// overwriting the winner's context. Absent (never sent, or sent as
+    /// `None`) means the session does not interpret control communities.
+    SetPeerRsControl {
+        /// Peer whose control-community context is being staged.
+        peer: IpAddr,
+        /// Transport session identity that will accompany `PeerUp`.
+        session_id: u64,
+        /// The route server's local ASN for this session when
+        /// `rs_control_communities` is enabled; `None` disables
+        /// interpretation (full transparency).
+        rs_control_asn: Option<u32>,
     },
     /// Stage the session's exact outbound encoder immediately before
     /// [`RibUpdate::PeerUp`] builds the initial Adj-RIB-Out. The session id
