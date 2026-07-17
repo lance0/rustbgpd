@@ -54,7 +54,9 @@ shapes — the historical full import+export swap, and the export-only
 change that route-server operators perform routinely (both ride the
 same batched cohort path since the import-tolerant cohort change). Four
 SIGHUP reloads per mode, 30 s control window, live churn throughout, on
-an otherwise idle host.
+an otherwise idle host. Raw artifacts (harness output, health-probe
+CSV, full daemon log, both shapes) are committed under
+`docs/perf/artifacts/reload-stall-2026-07-16/`.
 
 | Metric (700 route-server clients x 400,400 IPv4 routes, churn running) | import+export | export-only |
 |---|---|---|
