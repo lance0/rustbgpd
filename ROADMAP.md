@@ -192,6 +192,11 @@ the existing shadow-trial runbook (LAN-484).
 Deliberately *not* here: a web UI, Terraform/Ansible providers (maintenance
 surface without demonstrated demand — revisit on operator pull), and
 BIRD-filter-language translation (the importer stops at structure).
+- Positioning: frame the published matrix receipt against the documented
+  market history (route servers were won and lost on reload behavior; the
+  validate-then-apply transaction model vs the blank-config reload failure
+  class; the config-converter vacuum) in COMPARISON.md — externally
+  verifiable, neutral-tone, citation-backed (LAN-485).
 
 ### Immediate: post-v0.50 audit remediation (2026-07-09)
 
