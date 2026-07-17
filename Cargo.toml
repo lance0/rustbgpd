@@ -18,6 +18,7 @@ members = [
     "bench/evpn-load",
     "examples/event-bridge",
     "examples/birdwatcher-adapter",
+    "tools/rs-config-render",
 ]
 resolver = "2"
 
@@ -78,6 +79,10 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 clap_mangen = "0.2"
 serde_json = "1"
+# Consumed by tools/rs-config-render: `arouteserver template-context`
+# output is YAML (JSON parses through the same path, YAML being a
+# superset). Generate-time tooling only — never a daemon dependency.
+serde_yaml = "0.9"
 sha2 = "0.10"
 owo-colors = { version = "4", features = ["supports-colors"] }
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -182,6 +187,10 @@ path = "src/main.rs"
 bench = false
 
 [dev-dependencies]
+# The emitted-config gate (tests/rs_config_render_emitted_check.rs)
+# renders the tool's fixture and proves the output passes `--check`.
+rs-config-render = { path = "tools/rs-config-render" }
+serde_yaml.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 criterion.workspace = true

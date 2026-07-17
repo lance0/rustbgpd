@@ -301,6 +301,18 @@ hygiene and per-member export views without carrying member traffic yet.
 Migration mapping for FRR, BIRD, and ARouteServer lives in
 [`route-server-migration.md`](route-server-migration.md).
 
+## IRR-driven member filters (arouteserver data)
+
+Per-member IRR prefix/origin filters, PeeringDB max-prefix ceilings,
+and the shared hygiene chain do not need hand-authoring: keep your
+arouteserver `general.yml`/`clients.yml` and render rustbgpd
+configuration from its resolved data model with
+[`tools/rs-config-render/`](../../tools/rs-config-render/README.md)
+(`arouteserver template-context` → `rs-config-render` →
+`rustbgpd --check` → swap → SIGHUP, fail-stale at every step). Design
+and failure policy:
+[ADR-0110](../adr/0110-irr-peeringdb-filtering-pipeline.md).
+
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboards in
