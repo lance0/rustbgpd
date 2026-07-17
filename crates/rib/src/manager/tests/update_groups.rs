@@ -4420,3 +4420,352 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Regression test for membership-during-prestage (LAN-463): a peer whose
+/// export policy is content-equal to a mid-walk prestaged destination joins
+/// that group via the ordinary registration seam. The join must not adopt
+/// the partial table — the prestage is discarded and the group rebuilt, so
+/// the joiner's initial dump carries the full table.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression fixture preserves full session, route, and prestage-race setup"
+)]
+#[tokio::test]
+async fn prestage_mid_walk_join_of_prestaged_destination() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // One test-sized (1-prefix) slice per prestage advance.
+    manager.flush_poll_budget = std::time::Duration::ZERO;
+    let handle = tokio::spawn(manager.run());
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up(&tx, spec).await);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 99);
+    let announced = (0..3)
+        .map(|i| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113 + i, 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+    }
+
+    // Queue the prestage AND a stranger's PeerUp (content-equal policy)
+    // back-to-back: mutation traffic outranks the walk, so the join lands
+    // on the still-partial prestaged table.
+    let (reply, prepare_response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(next_policy.clone()),
+        reply,
+    })
+    .await
+    .unwrap();
+    let stranger = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+    let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: stranger,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: stranger_tx,
+        export_policy: Some(next_policy.clone()),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    // The prepare reply resolves either way (Ok if the walk finished before
+    // the join landed, Err when the join discarded it); it must never hang.
+    let _ = prepare_response.await;
+
+    // The stranger owns the group now.
+    let group = query_update_group(&tx, stranger).await;
+    assert!(group.starts_with("group:"), "stranger ungrouped: {group}");
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "prestaged group became OWNED mid-walk"
+    );
+
+    // Churn one more prefix so every member gets one ordinary delta.
+    let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(churned, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    // Collect everything the stranger was ever sent.
+    let mut stranger_announced: Vec<Prefix> = Vec::new();
+    let mut got_eor = false;
+    while let Ok(Some(update)) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), stranger_rx.recv()).await
+    {
+        stranger_announced.extend(update.announce.iter().map(|r| r.prefix));
+        got_eor |= !update.end_of_rib.is_empty();
+    }
+    assert!(got_eor, "stranger never finished its initial dump");
+    assert_eq!(
+        stranger_announced.len(),
+        4,
+        "UNDER-ADVERTISE: stranger received {stranger_announced:?}, \
+         but the group table holds 4 routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Control for the membership-during-prestage regression test above: the
+/// same join with no prestage in flight replays the full group table.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression fixture preserves full session, route, and join setup"
+)]
+#[tokio::test]
+async fn prestage_control_join_without_prestage() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // One test-sized (1-prefix) slice per prestage advance.
+    manager.flush_poll_budget = std::time::Duration::ZERO;
+    let handle = tokio::spawn(manager.run());
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up(&tx, spec).await);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 99);
+    let announced = (0..3)
+        .map(|i| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113 + i, 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+    }
+
+    // The same join as the regression test above, with no prestage queued.
+    let stranger = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+    let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: stranger,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: stranger_tx,
+        export_policy: Some(next_policy.clone()),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    // The stranger owns its group.
+    let group = query_update_group(&tx, stranger).await;
+    assert!(group.starts_with("group:"), "stranger ungrouped: {group}");
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "no unowned group may remain after the join"
+    );
+
+    // Churn one more prefix so every member gets one ordinary delta.
+    let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(churned, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    // Collect everything the stranger was ever sent.
+    let mut stranger_announced: Vec<Prefix> = Vec::new();
+    let mut got_eor = false;
+    while let Ok(Some(update)) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), stranger_rx.recv()).await
+    {
+        stranger_announced.extend(update.announce.iter().map(|r| r.prefix));
+        got_eor |= !update.end_of_rib.is_empty();
+    }
+    assert!(got_eor, "stranger never finished its initial dump");
+    assert_eq!(
+        stranger_announced.len(),
+        4,
+        "UNDER-ADVERTISE: stranger received {stranger_announced:?}, \
+         but the group table holds 4 routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A completed prestage whose cohort later resolves a DIFFERENT destination
+/// must not leak the staged memberless group: the transition discards the
+/// exact prestaged gid when it commits elsewhere.
+#[tokio::test]
+async fn prestage_discarded_when_cohort_resolves_different_destination() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.flush_poll_budget = std::time::Duration::ZERO;
+    let handle = tokio::spawn(manager.run());
+    let old_policy = community_chain(0xFDE8_0001);
+    let prepared_policy = community_chain(0xFDE8_0002);
+    let committed_policy = community_chain(0xFDE8_0003);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up(&tx, spec).await);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 99);
+    let announced = (0..3)
+        .map(|i| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113 + i, 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+    }
+
+    // Prepare one destination and let the walk complete.
+    let (prepare_reply, prepare_response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: peers[0],
+        export_policy: Some(prepared_policy.clone()),
+        reply: prepare_reply,
+    })
+    .await
+    .unwrap();
+    prepare_response.await.unwrap().unwrap();
+
+    // The cohort then commits under a DIFFERENT policy (different group key).
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(committed_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap(),
+        crate::update::ExportPolicyCohortOutcome::Committed
+    );
+    // The prestaged group (never adopted by the cohort) must be gone.
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        0,
+        "the prestaged destination leaked past a commit that resolved elsewhere"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}

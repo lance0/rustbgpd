@@ -440,6 +440,12 @@ pub struct RibManager {
     /// mutation traffic is queued — churn keeps flowing, and keeps the
     /// staged table current, while this walk covers the snapshot.
     pending_destination_prestage: Option<distribution::DestinationPrestage>,
+    /// The exact group id a COMPLETED prestage staged, recorded so every
+    /// discard removes the group that was actually built (never a
+    /// re-derivation from current attributes, which can drift) and so a
+    /// committing cohort that resolves a different destination discards
+    /// the unadopted group instead of leaking it.
+    prepared_destination: Option<usize>,
     /// Withdrawn NLRI identities accumulated across the currently-draining
     /// batch. Retired only after distribution so the exact overlay can
     /// suppress any rejected-only wire withdrawal first.
@@ -1209,6 +1215,7 @@ impl RibManager {
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
             pending_destination_prestage: None,
+            prepared_destination: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
@@ -2131,10 +2138,9 @@ impl RibManager {
                 export_policy,
                 reply,
             } => self.begin_destination_prestage(peer, export_policy.as_ref(), reply),
-            RibUpdate::DiscardPreparedExportPolicyDestination {
-                peer,
-                export_policy,
-            } => self.discard_prepared_export_destination(peer, export_policy.as_ref()),
+            RibUpdate::DiscardPreparedExportPolicyDestination { .. } => {
+                self.discard_prepared_export_destination();
+            }
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }

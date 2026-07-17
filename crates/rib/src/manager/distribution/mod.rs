@@ -1267,6 +1267,17 @@ impl RibManager {
                     let Some((source, destination)) = transition else {
                         return CleanPolicyTransitionAdvance::Fallback(pending);
                     };
+                    // The cohort's destination is now known: consume the
+                    // completed-prestage record. A match hands ownership to
+                    // the transition (the Maintained/memberless arm of the
+                    // staging phase marks it for fallback cleanup); a
+                    // mismatch means the prepared group will never be
+                    // adopted — discard it now, by the exact staged gid.
+                    if let Some(prepared) = self.prepared_destination.take()
+                        && prepared != destination
+                    {
+                        self.discard_uncommitted_policy_transition_group(prepared);
+                    }
                     pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
                         source,
                         destination,
@@ -2555,6 +2566,12 @@ impl RibManager {
             ));
             return;
         };
+        // A stale completed preparation that was never consumed (its
+        // cohort never arrived) is discarded before a new one begins;
+        // the record must only ever name the latest staged group.
+        if let Some(stale) = self.prepared_destination.take() {
+            self.discard_uncommitted_policy_transition_group(stale);
+        }
         // A leftover unowned group under this id may be partially staged
         // from an aborted attempt; recreate it deterministically. An OWNED
         // group is maintained by definition — nothing to stage.
@@ -2573,6 +2590,33 @@ impl RibManager {
                 });
             }
         }
+    }
+
+    /// Discard a mid-walk destination prestage that a membership event is
+    /// about to land on. The partial table was built with staging deltas
+    /// discarded (correct only while memberless), so a member joining it
+    /// would replay a partial view and then miss every remaining walk
+    /// slice — routes recorded as advertised but never emitted. Dropping
+    /// the prestage costs only the optimization; the held prepare reply
+    /// resolves `Err` so the transition stages under its fence instead.
+    pub(super) fn discard_destination_prestage_on_membership(&mut self, gid: usize) {
+        let Some(prestage) = self
+            .pending_destination_prestage
+            .take_if(|prestage| prestage.destination == gid)
+        else {
+            return;
+        };
+        self.discard_uncommitted_policy_transition_group(gid);
+        if let Some(reply) = prestage.reply {
+            let _ = reply.send(Err(
+                "prepared destination group adopted by a membership change; preparation discarded"
+                    .to_string(),
+            ));
+        }
+        debug!(
+            destination = gid,
+            "discarded mid-walk destination prestage on membership adoption"
+        );
     }
 
     /// One budgeted, unfenced staging slice of a pending destination
@@ -2605,6 +2649,10 @@ impl RibManager {
                     prefixes = prestage.prefixes.len(),
                     "prepared clean-transition destination group without the fence"
                 );
+                // Record the exact staged gid: every later discard (and the
+                // committing cohort's adopt-or-discard decision) keys off
+                // this, never a re-derivation from current attributes.
+                self.prepared_destination = Some(prestage.destination);
                 if let Some(reply) = prestage.reply.take() {
                     let _ = reply.send(Ok(()));
                 }
@@ -2619,21 +2667,17 @@ impl RibManager {
 
     /// Discard a prepared destination that will never be committed
     /// ([`crate::update::RibUpdate::DiscardPreparedExportPolicyDestination`]).
-    /// Only a memberless group is removed; a committed destination has
-    /// members and stays.
-    pub(super) fn discard_prepared_export_destination(
-        &mut self,
-        peer: IpAddr,
-        export_policy: Option<&rustbgpd_policy::PolicyChain>,
-    ) {
+    /// Removes exactly the gid(s) the preparation actually staged (the
+    /// mid-walk one and/or the completed record) — never a re-derivation
+    /// from current attributes, which can resolve a different gid and
+    /// leak the staged group. Only a memberless group is removed; an
+    /// adopted destination has members and stays.
+    pub(super) fn discard_prepared_export_destination(&mut self) {
         if let Some(prestage) = self.pending_destination_prestage.take() {
             self.discard_uncommitted_policy_transition_group(prestage.destination);
-            return;
         }
-        if let Some((_, destination)) =
-            self.clean_policy_transition_destination(peer, export_policy)
-        {
-            self.discard_uncommitted_policy_transition_group(destination);
+        if let Some(prepared) = self.prepared_destination.take() {
+            self.discard_uncommitted_policy_transition_group(prepared);
         }
     }
 

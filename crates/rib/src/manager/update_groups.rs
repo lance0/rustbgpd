@@ -2344,6 +2344,14 @@ impl RibManager {
     /// are key-equal) and builds the shared table with one staging pass
     /// — the policy work every subsequent join replays for free.
     fn join_group(&mut self, gid: usize, peer: IpAddr) {
+        // Every membership seam funnels through here (registration,
+        // recompute, per-peer policy install): a join landing on the gid
+        // of a mid-walk destination prestage must discard the prestage
+        // BEFORE the member replays any table — adopting the partial
+        // table would record the remaining walk's routes as advertised
+        // without ever emitting them (LAN-463). The discard makes the
+        // group absent again, so the ordinary rebuild below runs.
+        self.discard_destination_prestage_on_membership(gid);
         if !self.group_ribs.contains_key(&gid) {
             let group = GroupRibOut::new(
                 // `share()`, not `clone()`: the snapshot must keep
