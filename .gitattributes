@@ -1,0 +1,4 @@
+# Raw measurement artifacts are byte-exact evidence: exempt from
+# whitespace checks and collapsed as generated in forge diffs.
+docs/perf/artifacts/** -whitespace linguist-generated=true
+bench/scale/matrix/artifacts-*/** -whitespace linguist-generated=true
