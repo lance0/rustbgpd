@@ -1,0 +1,148 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=0
+established 700 at 126.5s
+converged (>= 399828/observer) at 397.4s rss_mib=0
+control_maxgap_ms: p50=15.22 p95=15.28 max=30.82 (n=700)
+control_rss_mib 0
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1784289102504499 policy=/tmp/ixp-openbgpd/gen-b.conf
+reload request sent.
+request processed
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 completion_s: p50=252.88 p95=252.93 max=252.93 (n=700)
+reload 1 maxgap_ms: p50=280.20 p95=286.27 max=325.64 (n=700)
+reload 1 all_observer_maxgap_ms: p50=280.20 p95=286.27 max=325.64 (n=700)
+reload 1 first_update_ms: p50=2.65 p95=4.20 max=17.96 (n=700)
+reload 1 rss_mib before=0 after=0 comms_sample=[4292610000]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,700,700,0,400400,252.880609,252.929236,252.932547,280.202,286.267,325.640,280.202,286.267,325.640,2.647,4.200,17.965,0,0,0,700,0
+reload 2 reload_cmd wall_us=1784289375508706 policy=/tmp/ixp-openbgpd/gen-a.conf
+reload request sent.
+request processed
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 completion_s: p50=251.21 p95=251.22 max=251.22 (n=700)
+reload 2 maxgap_ms: p50=259.17 p95=300.06 max=338.04 (n=700)
+reload 2 all_observer_maxgap_ms: p50=259.17 p95=300.06 max=338.04 (n=700)
+reload 2 first_update_ms: p50=2.48 p95=4.07 max=4.59 (n=700)
+reload 2 rss_mib before=0 after=0 comms_sample=[4292609000]
+reload 2 sessions_up 700/700
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,700,700,0,400400,251.208815,251.217676,251.221138,259.168,300.058,338.040,259.168,300.058,338.040,2.478,4.069,4.587,0,0,0,700,0
+reload 3 reload_cmd wall_us=1784289646820799 policy=/tmp/ixp-openbgpd/gen-b.conf
+reload request sent.
+request processed
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 completion_s: p50=251.42 p95=251.42 max=251.43 (n=700)
+reload 3 maxgap_ms: p50=247.00 p95=284.16 max=352.95 (n=700)
+reload 3 all_observer_maxgap_ms: p50=247.00 p95=284.16 max=352.95 (n=700)
+reload 3 first_update_ms: p50=3.28 p95=5.17 max=10.07 (n=700)
+reload 3 rss_mib before=0 after=0 comms_sample=[4292610000]
+reload 3 sessions_up 700/700
+reload 3 stable_marker_peers 0/0
+reloadstall_csv,3,700,700,0,400400,251.419270,251.424526,251.431280,246.997,284.160,352.955,246.997,284.160,352.955,3.277,5.170,10.072,0,0,0,700,0
+reload 4 reload_cmd wall_us=1784289918328130 policy=/tmp/ixp-openbgpd/gen-a.conf
+reload request sent.
+request processed
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 completion_s: p50=251.27 p95=251.28 max=251.28 (n=700)
+reload 4 maxgap_ms: p50=272.54 p95=316.01 max=317.31 (n=700)
+reload 4 all_observer_maxgap_ms: p50=272.54 p95=316.01 max=317.31 (n=700)
+reload 4 first_update_ms: p50=61.76 p95=63.64 max=68.12 (n=700)
+reload 4 rss_mib before=0 after=0 comms_sample=[4292609000]
+reload 4 sessions_up 700/700
+reload 4 stable_marker_peers 0/0
+reloadstall_csv,4,700,700,0,400400,251.266833,251.281445,251.281637,272.542,316.014,317.309,272.542,316.014,317.309,61.755,63.643,68.118,0,0,0,700,0
+done rss_mib=0

@@ -1,0 +1,2 @@
+bird: 2026-07-17 09:35:52.646 [0000] <WARN> nh_glue.ipv4: Ignoring bogus route 127.1.0.0/16 
+bird: 2026-07-17 09:35:52.646 [0000] <INFO> Started

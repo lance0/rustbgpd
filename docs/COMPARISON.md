@@ -297,6 +297,13 @@ roughly proportional to event volume. FRR and OpenBGPd were not in this
 run. See [BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables,
 the RIB memory profile, and methodology.
 
+At route-server scale, the [IXP receipt
+matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and
+OpenBGPD 9.1 head-to-head at 700 peers × 400k prefixes under live churn
+— policy-reload stall and completion, member-flap propagation,
+convergence, and RSS — with identical wire inputs, config disclosure,
+and the losses published alongside the wins.
+
 ## Positioning
 
 **rustbgpd** is an API-first BGP daemon targeting data-center fabric, IX
