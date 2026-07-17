@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **jemalloc is now the default allocator feature.** Shipped artifacts
+  (GHCR image, release tarballs) have built with jemalloc since
+  v0.50.0+; defaulting the feature makes plain `cargo build --release`
+  produce the same allocator configuration, so locally-built binaries
+  and receipts match the shipped product. Motivation: an 8-cycle
+  policy-reload probe (200 peers x 115k prefixes) showed stock-glibc
+  RSS ratcheting 301->555 / 295->639 MiB across reload cycles without
+  returning memory — allocator arena retention of reload transients,
+  with live bytes flat — while jemalloc oscillated at 270-330 MiB and
+  returned memory via background decay. Default builds also expose the
+  `jemalloc_*` allocated/active/resident gauges on `/metrics`. A
+  stock-glibc build remains available with `--no-default-features`
+  (kept compiling in CI).
+
 ### Added
 
 - **Per-peer fanout observability gauges.**

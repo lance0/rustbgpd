@@ -7,11 +7,19 @@ For the consolidated operator-facing proof index that rolls benchmark, memory,
 interop, dataplane, and soak receipts together, see
 [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
 
-Releases newer than v0.50.0 build the published artifacts — the GHCR
-runtime image and the release tarballs — with this same `--release`
-profile plus `--features jemalloc`, so shipped binaries match the
-benchmarked build (earlier releases shipped a CI-profile, glibc-malloc
-build).
+jemalloc is the default allocator feature, so a plain
+`cargo build --release` produces the same allocator configuration as the
+published artifacts — the GHCR runtime image and the release tarballs
+(which have built with jemalloc since v0.50.0+; earlier releases shipped
+a CI-profile, glibc-malloc build). This matters for memory numbers: an
+8-cycle policy-reload probe at 200 peers × 115k prefixes showed
+stock-glibc RSS climbing 301→555 MiB and 295→639 MiB across two runs
+without returning memory (live bytes flat — allocator arena retention of
+reload transients), while the identical workload under jemalloc
+oscillated at 270–330 MiB and returned memory via background decay.
+Daemon RSS figures measured on glibc builds before 2026-07-17 overstate
+steady-state RSS relative to the shipped binary. A stock-glibc build
+remains available via `--no-default-features`.
 
 **Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
 current-main reconfirmation and memory attribution correction: 2026-06-02;
