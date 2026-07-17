@@ -1257,13 +1257,19 @@ impl Config {
             .interpret_rfc1997
             .or_else(|| group.and_then(|g| g.interpret_rfc1997))
             .unwrap_or(!transport.route_server_client);
-        // RFC 7947 §2.3.2 control communities default on for
-        // route-server clients (the standard IXP posture) and off for
-        // everyone else; set explicitly to override either default.
+        // RFC 7947 §2.3.2 control communities are OPT-IN, even for
+        // route-server clients: an enabled session is disqualified from
+        // update-group sharing (per-target export divergence), and at
+        // high fanout that costs per-peer Adj-RIB-Out + per-peer encode
+        // for the whole session — a 700-client route server went from
+        // ~1.3 GiB to >100 GiB daemon RSS when this defaulted on for
+        // rs-clients. Enable per member (or group) that actually uses
+        // steering communities; a route-granular emit-time filter
+        // (ADR-0101 Decision 3) is the path back to a safe default.
         transport.rs_control_communities = neighbor
             .rs_control_communities
             .or_else(|| group.and_then(|g| g.rs_control_communities))
-            .unwrap_or(transport.route_server_client);
+            .unwrap_or(false);
         transport.route_reflector_client = neighbor
             .route_reflector_client
             .or_else(|| group.and_then(|g| g.route_reflector_client))

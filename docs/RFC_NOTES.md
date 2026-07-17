@@ -104,7 +104,9 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   deliberately not implemented (draft-ietf-grow-ixp-ext-comms). Full matrix
   and evaluation ladder: the [route-server cookbook](cookbook/route-server.md).
 - Enforcement is gated per session by `rs_control_communities` (default
-  `route_server_client`), evaluated pre-policy on the source route like the
+  off/opt-in — an enabled session leaves update-group sharing, which at
+  large fanout costs per-peer staging), evaluated pre-policy on the source
+  route like the
   RFC 1997 gates (its own `rs_control` explain rung), and covers the unicast
   export shapes: single-best, Add-Path, and per-client-best (suppressed
   candidates are removed before ranking). Non-unicast families are out of
