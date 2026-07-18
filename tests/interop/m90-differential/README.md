@@ -1,0 +1,91 @@
+# M90 — arouteserver differential lab (ADR-0110 phase 1)
+
+One `general.yml`/`clients.yml` pair drives **both** route servers:
+
+- **BIRD 2** gets its config from **arouteserver proper**, run
+  containerized at lab runtime from the official `pierky/arouteserver`
+  image;
+- **rustbgpd** gets its config from
+  [`tools/rs-config-render`](../../../tools/rs-config-render/README.md),
+  fed the site's `arouteserver template-context` dump (`context.yml`).
+
+Three GoBGP members (AS64500–AS64502) peer with both servers over a
+bridged 192.0.2.0/24 peering LAN and announce the canned set in
+[`announcements.json`](announcements.json). The lab proves that every
+announcement gets an **identical accept/reject verdict on both
+daemons**, and that for every rejection rustbgpd's
+`rbgp policy explain` names the **generated policy term** the manifest
+predicts (plus the canonical `policy_reject` reason token in
+`rbgp rib received <member> --rejected`). The expected verdicts were
+derived by hand from the renderer's emission logic — shared hygiene
+policy first (its term order is fixed: AS_SET, never-via-RS, path
+length, bogons, black list, prefix-length windows), then the
+per-client IRR policy ending in a fail-closed `rest` term — so the
+lab's job is to prove BIRD agrees with that reading.
+
+The member roster covers three distinct outcomes:
+
+| Member | ASN | Behavior | Rejecting term(s) |
+|--------|-----|----------|--------------------|
+| member1 | AS64500 | IRR-clean, but also announces the peering LAN | `rs-hygiene` / `reject-black-list-prefix` |
+| member2 | AS64501 | announces outside its IRR set (another member's prefix, an unregistered more-specific) | `client-as64501-1` / `rest` |
+| member3 | AS64502 | bogon, too-long prefix, default route, never-via-RS ASN in path | `reject-bogon-prefix`, `reject-v4-len-outside-window`, `reject-never-via-rs` |
+
+## Running it
+
+```bash
+docker build --target dev -t rustbgpd:dev .
+docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+containerlab deploy -t tests/interop/m90-differential.clab.yml
+bash tests/interop/scripts/test-m90-differential.sh
+containerlab destroy -t tests/interop/m90-differential.clab.yml
+```
+
+The driver renders both configs itself (nothing is bind-mounted into
+the route-server nodes): `arouteserver bird` in the pinned container
+for BIRD, `cargo run -p rs-config-render` for rustbgpd, followed by
+the pipeline's own gates (`rustbgpd --check`, `rbgp policy check` on
+every generated `.rpol`).
+
+**Image pin:** the `pierky/arouteserver` digest in
+`scripts/test-m90-differential.sh` is a deliberate all-zeros tripwire
+until the verification run pins the real digest (or exports
+`M90_ARS_IMAGE`).
+
+## The canonical context path
+
+`context.yml` is checked in hand-authored (matching the renderer's
+fingerprint-pinned 17-key shape, same as its golden fixture) so the
+rustbgpd side renders deterministically offline. The canonical way to
+produce it is arouteserver itself, with the same mounts the driver
+uses for the BIRD render:
+
+```bash
+arouteserver template-context --cfg arouteserver.yml --output context.yml
+```
+
+The lab never trusts the fixture alone: the BIRD side always re-runs
+arouteserver proper from `general.yml`/`clients.yml` at runtime, so if
+the fixture drifts from the site files the differential verdicts
+diverge and the lab fails.
+
+## Site quirks (deliberate)
+
+- **Documentation ranges everywhere** (RFC 5398 ASNs, RFC 5737
+  prefixes), per repo convention — which forces two site-level
+  choices:
+  - `reject_invalid_as_in_as_path: False` in `general.yml`: the
+    documentation ASN blocks sit inside the invalid-ASN range both
+    pipelines reject by default;
+  - a lab-local [`bogons.yml`](bogons.yml): arouteserver's default
+    bogons list rightly treats the RFC 5737 prefixes as bogons.
+- **`bgpq4-stub.sh`** answers the IRR queries with canned data (the
+  documentation AS-SETs have no live registry objects); its answers
+  must stay in lockstep with the `irrdb_info` bundles in
+  `context.yml`.
+- RPKI origin validation is off — the differential under test is the
+  IRR/hygiene pipeline; ROV interop has its own lab (M83).
+- Both route servers carry the same BGP identifier (the one
+  `router_id` in `general.yml` renders into both configs); they never
+  peer with each other, so this is harmless.

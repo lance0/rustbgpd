@@ -1,0 +1,116 @@
+[
+  {
+    "client": "member1",
+    "asn": 64500,
+    "ip": "192.0.2.11",
+    "bird_protocol": "AS64500_1",
+    "prefix": "198.51.100.0/24",
+    "expect": "accept",
+    "why": "exact IRR route object, origin 64500 registered"
+  },
+  {
+    "client": "member1",
+    "asn": 64500,
+    "ip": "192.0.2.11",
+    "bird_protocol": "AS64500_1",
+    "prefix": "203.0.113.0/27",
+    "expect": "accept",
+    "why": "covered by route object 203.0.113.0/26 le 28; length 27 inside the 8-28 window"
+  },
+  {
+    "client": "member1",
+    "asn": 64500,
+    "ip": "192.0.2.11",
+    "bird_protocol": "AS64500_1",
+    "prefix": "192.0.2.0/24",
+    "expect": "reject",
+    "policy": "rs-hygiene",
+    "term": "reject-black-list-prefix",
+    "why": "the IXP peering LAN is in global_black_list_pref; hygiene runs before the client IRR policy"
+  },
+  {
+    "client": "member2",
+    "asn": 64501,
+    "ip": "192.0.2.12",
+    "bird_protocol": "AS64501_1",
+    "prefix": "203.0.113.128/25",
+    "expect": "accept",
+    "why": "exact IRR route object, origin 64501 registered"
+  },
+  {
+    "client": "member2",
+    "asn": 64501,
+    "ip": "192.0.2.12",
+    "bird_protocol": "AS64501_1",
+    "prefix": "198.51.100.0/24",
+    "expect": "reject",
+    "policy": "client-as64501-1",
+    "term": "rest",
+    "why": "member1's prefix, absent from member2's IRR set; passes hygiene, falls through accept-authorized to the fail-closed tail"
+  },
+  {
+    "client": "member2",
+    "asn": 64501,
+    "ip": "192.0.2.12",
+    "bird_protocol": "AS64501_1",
+    "prefix": "203.0.113.192/26",
+    "expect": "reject",
+    "policy": "client-as64501-1",
+    "term": "rest",
+    "why": "unregistered more-specific of member2's own exact /25 route object (allow_longer_prefixes off)"
+  },
+  {
+    "client": "member3",
+    "asn": 64502,
+    "ip": "192.0.2.13",
+    "bird_protocol": "AS64502_1",
+    "prefix": "203.0.113.64/26",
+    "expect": "accept",
+    "why": "sanity: the violator's registered route object is still accepted"
+  },
+  {
+    "client": "member3",
+    "asn": 64502,
+    "ip": "192.0.2.13",
+    "bird_protocol": "AS64502_1",
+    "prefix": "10.64.0.0/16",
+    "expect": "reject",
+    "policy": "rs-hygiene",
+    "term": "reject-bogon-prefix",
+    "why": "inside bogon 10.0.0.0/8 (subtree match); bogon term precedes the length-window term"
+  },
+  {
+    "client": "member3",
+    "asn": 64502,
+    "ip": "192.0.2.13",
+    "bird_protocol": "AS64502_1",
+    "prefix": "203.0.113.64/30",
+    "expect": "reject",
+    "policy": "rs-hygiene",
+    "term": "reject-v4-len-outside-window",
+    "why": "length 30 exceeds the ipv4_pref_len max of 28 (even though it sits under member3's route object)"
+  },
+  {
+    "client": "member3",
+    "asn": 64502,
+    "ip": "192.0.2.13",
+    "bird_protocol": "AS64502_1",
+    "prefix": "0.0.0.0/0",
+    "expect": "reject",
+    "policy": "rs-hygiene",
+    "term": "reject-v4-len-outside-window",
+    "why": "default route; length 0 is below the ipv4_pref_len min of 8"
+  },
+  {
+    "client": "member3",
+    "asn": 64502,
+    "ip": "192.0.2.13",
+    "bird_protocol": "AS64502_1",
+    "prefix": "198.51.100.128/25",
+    "aspath": "65551",
+    "expect": "reject",
+    "policy": "rs-hygiene",
+    "term": "reject-never-via-rs",
+    "why": "wire AS_PATH is 64502 65551; 65551 is in never_via_route_servers_asns, and the hygiene term fires before any origin/IRR evaluation"
+  }
+]

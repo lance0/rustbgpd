@@ -1,0 +1,116 @@
+# Containerlab topology: arouteserver differential lab
+# (M90 — ADR-0110 phase 1: one general.yml/clients.yml, two daemons)
+#
+# One IXP peering LAN (192.0.2.0/24, RFC 5737) bridged through a
+# dedicated switch node, carrying:
+#   - rustbgpd route server  192.0.2.9   (config rendered by
+#     tools/rs-config-render from the site's template-context dump)
+#   - BIRD 2 route server    192.0.2.10  (config rendered by
+#     arouteserver proper from the SAME general.yml/clients.yml)
+#   - three GoBGP members    192.0.2.11-13 (AS64500-AS64502), each
+#     peering with BOTH route servers and injecting the canned
+#     announcement set from m90-differential/announcements.json
+#
+# Both route servers carry BGP identifier 192.0.2.10 (the single
+# router_id in general.yml renders into both configs). They never peer
+# with each other, and the members hold one session per server, so the
+# duplicate identifier is harmless.
+#
+# Configs are rendered and copied in by the driver script AFTER deploy
+# (docker cp), because both renders are themselves part of the test —
+# nothing is bind-mounted into the route-server nodes.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   containerlab deploy -t tests/interop/m90-differential.clab.yml
+#   bash tests/interop/scripts/test-m90-differential.sh
+#   containerlab destroy -t tests/interop/m90-differential.clab.yml
+
+name: m90-differential
+
+topology:
+  nodes:
+    # Plain bridge over all five access ports (the m65 CE idiom):
+    # a multipoint peering LAN out of containerlab's p2p links.
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth5 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set eth5 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.9/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/rustbgpd /var/lib/rustbgpd
+      env:
+        RUST_LOG: info
+
+    bird:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.10/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/bird /run/bird
+
+    member1:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.11/24 dev eth1
+        - ip link set eth1 up
+
+    member2:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.12/24 dev eth1
+        - ip link set eth1 up
+
+    member3:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member3.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.13/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "bird:eth1"]
+    - endpoints: ["switch:eth3", "member1:eth1"]
+    - endpoints: ["switch:eth4", "member2:eth1"]
+    - endpoints: ["switch:eth5", "member3:eth1"]
+
+# rustbgpd RS: AS 64496, 192.0.2.9 (BGP identifier 192.0.2.10)
+# BIRD RS:     AS 64496, 192.0.2.10
+# member1: AS64500, 192.0.2.11 — IRR-clean
+# member2: AS64501, 192.0.2.12 — out-of-set announcements
+# member3: AS64502, 192.0.2.13 — hygiene violations

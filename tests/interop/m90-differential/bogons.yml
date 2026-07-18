@@ -1,0 +1,20 @@
+# M90 differential lab — arouteserver bogons override.
+#
+# arouteserver's DEFAULT bogons list correctly includes the RFC 5737
+# documentation prefixes (192.0.2.0/24, 198.51.100.0/24,
+# 203.0.113.0/24) — exactly the space this lab announces from, per the
+# repo's documentation-range convention. Using the default list would
+# make BIRD reject every announcement as a bogon while the rustbgpd
+# side (whose context.yml carries this trimmed list) accepts them.
+# This override keeps only entries that are NOT lab actor space, and
+# it must stay in lockstep with the `bogons:` key of context.yml.
+bogons:
+  - prefix: "10.0.0.0"
+    length: 8
+    comment: "RFC 1918"
+  - prefix: "192.168.0.0"
+    length: 16
+    comment: "RFC 1918"
+  - prefix: "fc00::"
+    length: 7
+    comment: "unique local"
