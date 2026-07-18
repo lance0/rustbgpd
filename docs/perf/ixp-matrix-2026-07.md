@@ -364,6 +364,52 @@ is reported as run-to-run variance with the artifact preserved
 DNF — but at an IXP, a reload that wedges the RDE until restart would
 be an incident, so it is part of the record.
 
+## Current-tip revalidation (2026-07-18)
+
+The published rustbgpd cells predate the control-communities feature
+from anomaly (a) returning to **default-on** for route-server clients
+(it came back behind an emit-time route-granular filter), so the
+receipt no longer described the shipped default configuration. All
+four rustbgpd cells were rerun at the current tip with that default
+active; the BIRD and OpenBGPD cells stand unchanged (code-identical
+for what they execute).
+
+The rerun caught a **second fleet-scale regression** before it
+shipped in any release: with every route-server client now carrying
+control-community context, the shared clean policy-transition path —
+the machinery behind the receipt's reload-completion numbers —
+excluded all 700 members as a "rare, tiny cohort" and fell back to
+serial per-member full-table resyncs. Reload completion measured
+p50 **271–292 s** against the published 1.5–2.2 s band (stall,
+flapstorm, and memory were unaffected). The exclusion predated this
+campaign's shape and had never been visible at unit scale. It was
+root-caused the same night (0.22 s vs 28.6 s policy-apply at a 200 ×
+115k discriminator shape isolated the knob; the eligibility check
+confirmed it in code) and fixed by admitting members whose transition
+inventory carries no control-form communities — decided against the
+source routes, so stripped or policy-added tags still force the
+per-target path. The pre-fix S2 runs are preserved with the campaign
+working state as the catch evidence.
+
+Post-fix numbers at the revalidation tip (`f98e1297` for S2; S3 ran
+at the immediately preceding docs-only commit, which the flapstorm
+path does not execute):
+
+| KPI (range over both runs) | published receipt | revalidation |
+|---|---|---|
+| S2 reload stall p50 | 0.43–0.84 s | 0.44–0.92 s |
+| S2 completion p50 | 1.5–2.2 s | 1.50–2.12 s |
+| S3 re-announce p50 | 0.46–0.49 s | 0.48–0.49 s |
+| S3 first re-announce p50 | — (introduced post-publication) | 0.21–0.22 s |
+| RSS settled / peak | ~0.78 GiB / 1.03 GiB transient | 0.74–0.87 GiB / 0.90 GiB |
+
+The stall band's upper edge widened slightly (0.92 s vs 0.84 s, still
+under the 1 s gate; single worst reload of eight). One reload in run A
+had a single-peer completion tail of 11.2 s (p95 of that reload:
+2.61 s); no other reload exceeded 2.8 s. Sessions 700/700 and zero
+parse errors in every cell. Raw revalidation artifacts:
+[`artifacts/ixp-matrix-2026-07/revalidation-2026-07/`](artifacts/ixp-matrix-2026-07/revalidation-2026-07/).
+
 ## Raw artifacts
 
 Committed under

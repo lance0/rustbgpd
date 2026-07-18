@@ -1,0 +1,43 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=2798739
+established 700 at 0.6s
+converged (>= 399828/observer) at 4.9s rss_mib=809
+control_maxgap_ms: p50=20.37 p95=21.00 max=42.34 (n=700)
+control_rss_mib 735
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1784354331764876 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 1 completion_s: p50=1.84 p95=2.09 max=2.10 (n=700)
+reload 1 maxgap_ms: p50=437.46 p95=568.59 max=707.98 (n=700)
+reload 1 all_observer_maxgap_ms: p50=437.46 p95=568.59 max=707.98 (n=700)
+reload 1 first_update_ms: p50=12.21 p95=14.27 max=36.81 (n=700)
+reload 1 rss_mib before=735 after=801 comms_sample=[4286056400]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,700,700,0,400400,1.842656,2.088719,2.102284,437.465,568.593,707.978,437.465,568.593,707.978,12.207,14.272,36.809,735,801,0,700,0
+reload 2 SIGHUP wall_us=1784354353974270 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 2 completion_s: p50=1.52 p95=1.99 max=2.02 (n=700)
+reload 2 maxgap_ms: p50=508.46 p95=1035.34 max=1318.28 (n=700)
+reload 2 all_observer_maxgap_ms: p50=508.46 p95=1035.34 max=1318.28 (n=700)
+reload 2 first_update_ms: p50=1.75 p95=35.44 max=39.42 (n=700)
+reload 2 rss_mib before=761 after=808 comms_sample=[4286055400]
+reload 2 sessions_up 700/700
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,700,700,0,400400,1.524749,1.988603,2.018075,508.465,1035.340,1318.281,508.465,1035.340,1318.281,1.751,35.442,39.416,761,808,0,700,0
+reload 3 SIGHUP wall_us=1784354376031193 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 3 completion_s: p50=1.53 p95=1.89 max=1.93 (n=700)
+reload 3 maxgap_ms: p50=536.34 p95=1134.46 max=1203.78 (n=700)
+reload 3 all_observer_maxgap_ms: p50=634.27 p95=1134.46 max=1203.78 (n=700)
+reload 3 first_update_ms: p50=4.79 p95=6.56 max=8.70 (n=700)
+reload 3 rss_mib before=762 after=869 comms_sample=[4286056400]
+reload 3 sessions_up 700/700
+reload 3 stable_marker_peers 0/0
+reloadstall_csv,3,700,700,0,400400,1.525292,1.888548,1.926332,536.337,1134.465,1203.778,634.270,1134.465,1203.778,4.793,6.558,8.699,762,869,0,700,0
+reload 4 SIGHUP wall_us=1784354398011344 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 4 completion_s: p50=1.50 p95=1.86 max=2.19 (n=700)
+reload 4 maxgap_ms: p50=666.75 p95=1193.79 max=1295.23 (n=700)
+reload 4 all_observer_maxgap_ms: p50=748.98 p95=1193.79 max=1295.23 (n=700)
+reload 4 first_update_ms: p50=1.93 p95=3.68 max=5.08 (n=700)
+reload 4 rss_mib before=770 after=853 comms_sample=[4286055400]
+reload 4 sessions_up 700/700
+reload 4 stable_marker_peers 0/0
+reloadstall_csv,4,700,700,0,400400,1.500483,1.864450,2.193081,666.747,1193.794,1295.228,748.977,1193.794,1295.228,1.933,3.676,5.085,770,853,0,700,0
+done rss_mib=770
