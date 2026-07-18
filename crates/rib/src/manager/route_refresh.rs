@@ -977,14 +977,19 @@ impl RibManager {
             // apply to a grouped member.
             if let Some(group) = self.group_ribs.get(&gid) {
                 // LAN-474: same per-target divergence as the join
-                // replay — suppressed entries skipped, announced tagged
-                // entries rewritten per target.
+                // replay — source-suppressed entries skipped, announced
+                // tagged entries rewritten per target (prepend from the
+                // captured source, scrub post-policy).
                 let rs_control = rs_control_asn.zip(target_peer_asn);
                 for route in group.table.iter() {
+                    let (source_communities, source_large_communities) =
+                        group.source_control((route.prefix, route.path_id));
                     if route.peer == peer
                         || prefix_family(&route.prefix) != family
-                        || super::distribution::rs_control::rs_control_route_suppressed(
-                            route, rs_control,
+                        || super::distribution::rs_control::rs_control_suppressed(
+                            source_communities,
+                            source_large_communities,
+                            rs_control,
                         )
                     {
                         continue;
@@ -992,7 +997,9 @@ impl RibManager {
                     nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
                     let mut route = route.clone();
                     super::distribution::rs_control::rs_control_route_rewrite(
-                        &mut route, rs_control,
+                        &mut route,
+                        source_large_communities,
+                        rs_control,
                     );
                     announce.push(route);
                 }

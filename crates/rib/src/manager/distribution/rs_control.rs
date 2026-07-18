@@ -89,7 +89,7 @@ pub(super) fn rs_control_export_suppressed(
 /// Prepend count toward `peer_asn`: the largest matching
 /// `RS:101|102|103:PEER` (target-specific) or `RS:10x:0` (every
 /// target) large community, `0` when none match.
-pub(super) fn rs_control_prepend_count(
+pub(in crate::manager) fn rs_control_prepend_count(
     large_communities: &[LargeCommunity],
     rs_asn: u32,
     peer_asn: u32,
@@ -140,33 +140,36 @@ pub(in crate::manager) fn rs_control_route_tagged(
             .any(|lc| is_large_control(lc, rs_asn))
 }
 
-/// Per-target suppression at the group emit seam: `rs` is
+/// Per-target suppression at the group emit seams: `rs` is
 /// `(rs_asn, target_peer_asn)` for an enabled session, `None` when the
-/// knob is off (never suppressed).
-pub(in crate::manager) fn rs_control_route_suppressed(
-    route: &crate::route::Route,
+/// knob is off (never suppressed). The community slices MUST be the
+/// SOURCE route's — the staged group-table route is post-policy, and
+/// deciding on it would leak a source-prohibited route when policy
+/// strips the tag (or spuriously steer on a policy-added one).
+pub(in crate::manager) fn rs_control_suppressed(
+    communities: &[u32],
+    large_communities: &[LargeCommunity],
     rs: Option<(u32, u32)>,
 ) -> bool {
     rs.is_some_and(|(rs_asn, peer_asn)| {
-        rs_control_export_suppressed(
-            route.communities(),
-            route.large_communities(),
-            rs_asn,
-            peer_asn,
-        )
+        rs_control_export_suppressed(communities, large_communities, rs_asn, peer_asn)
     })
 }
 
-/// Per-target egress rewrite (prepend + scrub) at the group emit seam,
-/// for a route already cleared by [`rs_control_route_suppressed`].
+/// Per-target egress rewrite at the group emit seams, for a route
+/// already cleared by [`rs_control_suppressed`]: prepend decided on
+/// the SOURCE route's large communities (like the suppression gate),
+/// scrub applied to the post-policy `route` so policy-added control
+/// communities are scrubbed too — the ungrouped path's exact split.
 /// No-op (and allocation-free) for untagged routes or a disabled
 /// session.
 pub(in crate::manager) fn rs_control_route_rewrite(
     route: &mut crate::route::Route,
+    source_large_communities: &[LargeCommunity],
     rs: Option<(u32, u32)>,
 ) {
     if let Some((rs_asn, peer_asn)) = rs {
-        let prepend = rs_control_prepend_count(route.large_communities(), rs_asn, peer_asn);
+        let prepend = rs_control_prepend_count(source_large_communities, rs_asn, peer_asn);
         apply_rs_control_egress(route, rs_asn, prepend);
     }
 }

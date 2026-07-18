@@ -441,6 +441,7 @@ fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
             new: Some((route.clone(), None)),
             old_source: Some(source),
             policy_label: None,
+            source_attrs: None,
         }],
     )]);
 
@@ -998,6 +999,7 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
         new: Some((route.clone(), None)),
         old_source: Some(source),
         policy_label: None,
+        source_attrs: None,
     }];
     let announce: Arc<[Route]> = vec![route].into();
     let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
@@ -1045,6 +1047,7 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         new: Some((route.clone(), None)),
         old_source: Some(source),
         policy_label: None,
+        source_attrs: None,
     }];
     let announce: Arc<[Route]> = vec![route].into();
     let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();
@@ -1108,6 +1111,7 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
         new: Some((route.clone(), None)),
         old_source: Some(source),
         policy_label: None,
+        source_attrs: None,
     }];
     let announce: Arc<[Route]> = vec![route].into();
     let next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]> = vec![None].into();

@@ -1135,22 +1135,31 @@ impl RibManager {
         let mut vpn_group_replayed = false;
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
-            // control-tagged table entry may be suppressed toward this
-            // member or rewritten (prepend + scrub) for it; untagged
+            // table entry whose captured SOURCE communities tag it may
+            // be suppressed toward this member or rewritten (prepend
+            // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
             for route in group.table.iter() {
+                let (source_communities, source_large_communities) =
+                    group.source_control((route.prefix, route.path_id));
                 if route.peer == peer
                     || self.selection_deferred(prefix_family(&route.prefix))
-                    || super::distribution::rs_control::rs_control_route_suppressed(
-                        route, rs_control,
+                    || super::distribution::rs_control::rs_control_suppressed(
+                        source_communities,
+                        source_large_communities,
+                        rs_control,
                     )
                 {
                     continue;
                 }
                 nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
                 let mut route = route.clone();
-                super::distribution::rs_control::rs_control_route_rewrite(&mut route, rs_control);
+                super::distribution::rs_control::rs_control_route_rewrite(
+                    &mut route,
+                    source_large_communities,
+                    rs_control,
+                );
                 announce.push(route);
             }
             // VPN join replay: table minus own-sourced, filtered by the

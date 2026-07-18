@@ -56,6 +56,19 @@ async fn rs_peer_up(
     peer_asn: u32,
     rs_control_asn: Option<u32>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    rs_peer_up_with_policy(tx, peer, peer_asn, rs_control_asn, None).await
+}
+
+/// [`rs_peer_up`] with an export policy — the policy-interaction seams
+/// (control decisions on the SOURCE route, scrub on the post-policy
+/// route) need sessions whose export chain mutates communities.
+async fn rs_peer_up_with_policy(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    peer_asn: u32,
+    rs_control_asn: Option<u32>,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     tx.send(RibUpdate::SetPeerRsControl {
         peer,
         session_id: 0,
@@ -70,7 +83,7 @@ async fn rs_peer_up(
         peer_asn,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
-        export_policy: None,
+        export_policy,
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
@@ -443,4 +456,202 @@ async fn prepend_toward_target_asn_only() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// One-statement permit-everything export chain applying `mods` to
+/// every route.
+fn modifying_export_chain(
+    mods: rustbgpd_policy::RouteModifications,
+) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: mods,
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+/// The RFC 7947 decision is made on the SOURCE route: an export policy
+/// that strips the "do not announce to PEER" community must not make
+/// the route leak to that peer — the source member prohibited it, and
+/// the ungrouped path's pre-policy gate honors that. Both sessions
+/// share one update group (identical chain), so this drives the
+/// grouped emit seam.
+#[tokio::test]
+async fn policy_stripped_suppression_community_still_suppresses_toward_target() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let client_a: IpAddr = "192.0.2.241".parse().unwrap();
+    let client_b: IpAddr = "192.0.2.242".parse().unwrap();
+
+    // Both members strip the control community on export.
+    let strip = rustbgpd_policy::RouteModifications {
+        large_communities_remove: vec![large(0, 65001)],
+        ..rustbgpd_policy::RouteModifications::default()
+    };
+    let chain = modifying_export_chain(strip);
+    let mut a_rx =
+        rs_peer_up_with_policy(&tx, client_a, 65001, Some(RS_AS), Some(chain.clone())).await;
+    let mut b_rx = rs_peer_up_with_policy(&tx, client_b, 65002, Some(RS_AS), Some(chain)).await;
+    assert_eq!(
+        query_update_group_label(&tx, client_a).await,
+        query_update_group_label(&tx, client_b).await,
+        "identical chains must share one update group — this test drives the grouped seam"
+    );
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 124, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44));
+    let steered = tagged(
+        make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 44), vec![65010]),
+        vec![],
+        vec![large(0, 65001)], // source says: do not announce to 65001
+    );
+    announce_unicast(&tx, source, vec![steered]).await;
+    let _ = query_best_routes(&tx).await;
+
+    assert!(
+        a_rx.try_recv().is_err(),
+        "route must stay suppressed toward the named peer even though the \
+         export policy stripped the control community (decision is source-based)"
+    );
+    let update = b_rx.try_recv().expect("other client still receives");
+    assert_eq!(update.announce.len(), 1);
+    assert!(update.announce[0].large_communities().is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A control community ADDED by export policy is scrubbed from the
+/// wire (the scrub runs post-policy) but must not steer: suppression
+/// and prepend are decided on the SOURCE route, which carried no tags.
+#[tokio::test]
+async fn policy_added_control_communities_scrub_but_do_not_steer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let client_a: IpAddr = "192.0.2.243".parse().unwrap();
+    let client_b: IpAddr = "192.0.2.244".parse().unwrap();
+
+    // Policy stamps a deny-to-65001 and a prepend-toward-65002 tag onto
+    // every route; neither may act.
+    let add = rustbgpd_policy::RouteModifications {
+        large_communities_add: vec![large(0, 65001), large(102, 65002)],
+        ..rustbgpd_policy::RouteModifications::default()
+    };
+    let chain = modifying_export_chain(add);
+    let mut a_rx =
+        rs_peer_up_with_policy(&tx, client_a, 65001, Some(RS_AS), Some(chain.clone())).await;
+    let mut b_rx = rs_peer_up_with_policy(&tx, client_b, 65002, Some(RS_AS), Some(chain)).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 125, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
+    let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 45), vec![65010]);
+    announce_unicast(&tx, source, vec![plain]).await;
+    let _ = query_best_routes(&tx).await;
+
+    let update = a_rx
+        .try_recv()
+        .expect("a policy-added deny tag must not suppress — the source carried no tags");
+    assert_eq!(update.announce.len(), 1);
+    assert!(
+        update.announce[0].large_communities().is_empty(),
+        "policy-added control communities must still be scrubbed from the wire"
+    );
+    assert_eq!(sequence_asns(&update.announce[0]), vec![65010]);
+
+    let update = b_rx.try_recv().expect("other client receives");
+    assert_eq!(update.announce.len(), 1);
+    assert!(update.announce[0].large_communities().is_empty());
+    assert_eq!(
+        sequence_asns(&update.announce[0]),
+        vec![65010],
+        "a policy-added prepend tag must not prepend — the source carried no tags"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Grouped/ungrouped equivalence for the policy-strip interaction: the
+/// per-peer path is the group path's correctness oracle, so an
+/// identical (tagged route, stripping policy) scenario must produce
+/// identical per-member streams with grouping on and off.
+#[tokio::test]
+async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
+    async fn run(
+        force_ungrouped: bool,
+    ) -> Vec<(Vec<(Prefix, Vec<LargeCommunity>)>, Vec<(Prefix, u32)>)> {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = force_ungrouped;
+        let handle = tokio::spawn(manager.run());
+        let client_a: IpAddr = "192.0.2.245".parse().unwrap();
+        let client_b: IpAddr = "192.0.2.246".parse().unwrap();
+
+        let strip = rustbgpd_policy::RouteModifications {
+            large_communities_remove: vec![large(0, 65001)],
+            ..rustbgpd_policy::RouteModifications::default()
+        };
+        let chain = modifying_export_chain(strip);
+        let mut a_rx =
+            rs_peer_up_with_policy(&tx, client_a, 65001, Some(RS_AS), Some(chain.clone())).await;
+        let mut b_rx = rs_peer_up_with_policy(&tx, client_b, 65002, Some(RS_AS), Some(chain)).await;
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 126, 0), 24);
+        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 46));
+        let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 46), vec![65010]);
+        // Pass 1: untagged — everyone receives. Pass 2: the source
+        // re-announces with a deny-to-65001 tag the policy strips —
+        // the named member must see a withdraw, the other an update.
+        announce_unicast(&tx, source, vec![plain.clone()]).await;
+        let _ = query_best_routes(&tx).await;
+        let steered = tagged(plain, vec![], vec![large(0, 65001)]);
+        announce_unicast(&tx, source, vec![steered]).await;
+        let _ = query_best_routes(&tx).await;
+
+        let mut streams = Vec::new();
+        for out_rx in [&mut a_rx, &mut b_rx] {
+            let mut announced = Vec::new();
+            let mut withdrawn = Vec::new();
+            while let Ok(update) = out_rx.try_recv() {
+                announced.extend(
+                    update
+                        .announce
+                        .iter()
+                        .map(|route| (route.prefix, route.large_communities().to_vec())),
+                );
+                withdrawn.extend(update.withdraw.iter().copied());
+            }
+            streams.push((announced, withdrawn));
+        }
+        drop(tx);
+        handle.await.unwrap();
+        streams
+    }
+
+    assert_eq!(
+        run(false).await,
+        run(true).await,
+        "grouped and ungrouped paths must agree on source-based RFC 7947 decisions"
+    );
 }
