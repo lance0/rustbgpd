@@ -72,6 +72,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
+  malformed UPDATE from session reset.** The "no reachable NLRI"
+  escalation gate tested MP_REACH attribute *presence*, not content —
+  an UPDATE carrying a structurally valid MP_REACH with zero NLRI plus
+  a treat-as-withdraw-class attribute error stayed Established via the
+  treat-as-withdraw arm, which had nothing to withdraw. The gate now
+  inspects the parsed MP_REACH payload across every family's announced
+  vector; the attribute validator keeps its presence-based
+  mandatory-attribute semantics unchanged, and an MP_REACH that does
+  carry NLRI still takes treat-as-withdraw (no over-reset). Malformed
+  UPDATEs are additionally dumped at DEBUG per the §5.2 debugging
+  guidance: NLRI/withdrawn counts plus the raw message sections
+  hex-encoded, bounded at 512 bytes per section so an Extended-Messages
+  peer cannot spam the logs.
+
 - **Rejected-route retention now enforces its per-entry byte budget.**
   The `[policy.reject_retention]` store was bounded in entry count
   (LRU, 1024/peer) but each entry retained unbounded wire-derived data

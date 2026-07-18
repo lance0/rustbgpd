@@ -14931,6 +14931,82 @@ async fn rfc7606_malformed_attr_without_reachable_nlri_resets_session() {
     }
 }
 
+/// Structurally valid IPv6-unicast `MP_REACH_NLRI` raw attribute:
+/// next-hop `2001:db8::1`, then the given NLRI prefix bytes (an empty
+/// slice encodes an `MP_REACH` that carries zero NLRI).
+fn rfc7606_mp_reach(nlri: &[u8]) -> Vec<u8> {
+    let mut attr = vec![0x80, 14, 0]; // optional flags, type, len (patched)
+    attr.extend([0, 2, 1, 16]); // AFI=IPv6, SAFI=unicast, NH-Len=16
+    attr.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    attr.push(0); // reserved
+    attr.extend_from_slice(nlri);
+    attr[2] = u8::try_from(attr.len() - 3).expect("attribute fits one length octet");
+    attr
+}
+
+/// RFC 7606 §5.2: an `MP_REACH_NLRI` attribute that is present but
+/// encodes ZERO NLRI provides no reachable NLRI — a
+/// treat-as-withdraw-class error must escalate to session reset exactly
+/// as when the attribute is absent. Attribute presence must not shield
+/// the reset: treat-as-withdraw would withdraw nothing here.
+#[tokio::test]
+async fn rfc7606_empty_mp_reach_with_taw_error_resets_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    // Malformed MED (treat-as-withdraw) + an empty-NLRI MP_REACH; no
+    // body NLRI anywhere.
+    let mut extra = vec![0x80, 4, 3, 0, 0, 1];
+    extra.extend(rfc7606_mp_reach(&[]));
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&extra), &[]))
+        .await;
+    assert_ne!(
+        session.fsm.state(),
+        SessionState::Established,
+        "an empty-NLRI MP_REACH encodes no reachable NLRI; the error must reset (RFC 7606 §5.2)"
+    );
+    while let Ok(msg) = rib_rx.try_recv() {
+        assert!(
+            !matches!(msg, RibUpdate::RoutesReceived { .. }),
+            "no routes may be delivered"
+        );
+    }
+}
+
+/// Regression guard for the §5.2 tightening above: an `MP_REACH` that
+/// DOES carry NLRI keeps the ordinary treat-as-withdraw behavior — the
+/// session stays Established and no announcement is admitted.
+#[tokio::test]
+async fn rfc7606_nonempty_mp_reach_with_taw_error_stays_established() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    // Malformed MED + MP_REACH announcing 2001:db8::/32.
+    let mut extra = vec![0x80, 4, 3, 0, 0, 1];
+    extra.extend(rfc7606_mp_reach(&[32, 0x20, 0x01, 0x0d, 0xb8]));
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&extra), &[]))
+        .await;
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "reachable MP NLRI keeps the treat-as-withdraw path (no over-reset)"
+    );
+    while let Ok(msg) = rib_rx.try_recv() {
+        if let RibUpdate::RoutesReceived { announced, .. } = msg {
+            assert!(
+                announced.is_empty(),
+                "treat-as-withdraw must not admit the announcement"
+            );
+        }
+    }
+}
+
 /// An UPDATE whose only attributes were discarded as malformed must not be
 /// mistaken for an End-of-RIB marker.
 #[tokio::test]

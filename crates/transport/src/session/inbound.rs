@@ -198,6 +198,25 @@ fn strict_peer_next_hop_violation(
     }
     (next_hop != session_addr).then_some(NextHopOwnershipBlockReason::ForeignNextHop)
 }
+/// Bounded hex rendering of one raw UPDATE section for the
+/// malformed-UPDATE debug dump. Truncated output states how many bytes
+/// were omitted so the log is honest about what it shows.
+fn bounded_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    /// Per-section cap: enough to reconstruct any ordinary UPDATE in
+    /// full while keeping an Extended-Messages-sized dump out of the
+    /// logs.
+    const MAX_HEX_DUMP_BYTES: usize = 512;
+    let shown = &bytes[..bytes.len().min(MAX_HEX_DUMP_BYTES)];
+    let mut out = String::with_capacity(shown.len() * 2 + 24);
+    for byte in shown {
+        let _ = write!(out, "{byte:02x}");
+    }
+    if bytes.len() > MAX_HEX_DUMP_BYTES {
+        let _ = write!(out, "…(+{} bytes)", bytes.len() - MAX_HEX_DUMP_BYTES);
+    }
+    out
+}
 /// Policy-context fields extracted from a route's path attributes in a
 /// single pass over the attribute vector. This replaces what used to be
 /// eight independent `find_map` / `iter` scans of the same vector on the
@@ -959,6 +978,29 @@ impl PeerSession {
         }
         self.drive_fsm(Event::UpdateReceived).await;
     }
+    /// RFC 7606 §5.2 minimum debugging guidance: retain enough of a
+    /// malformed UPDATE — the NLRI involved and the complete message —
+    /// for offline analysis. DEBUG-only by design: a hostile peer can
+    /// trigger this once per UPDATE, so it must never land at
+    /// info/warn where it would spam operators; the per-section hex is
+    /// byte-bounded for the same reason (Extended Messages reach
+    /// 65535 B). The `tracing` macro skips the hex rendering entirely
+    /// when DEBUG is disabled.
+    fn debug_dump_malformed_update(
+        &self,
+        update: &rustbgpd_wire::UpdateMessage,
+        parsed: &ParsedUpdate,
+    ) {
+        debug!(
+            peer = %self.peer_label,
+            announced = parsed.announced.len(),
+            withdrawn = parsed.withdrawn.len(),
+            nlri_hex = %bounded_hex(&update.nlri),
+            withdrawn_routes_hex = %bounded_hex(&update.withdrawn_routes),
+            path_attributes_hex = %bounded_hex(&update.path_attributes),
+            "malformed UPDATE raw sections (RFC 7606 §5.2 debugging guidance)"
+        );
+    }
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
@@ -1008,6 +1050,9 @@ impl PeerSession {
                 "malformed path attribute (RFC 7606 revised error handling)"
             );
         }
+        if !malformed.is_empty() {
+            self.debug_dump_malformed_update(&update, &parsed);
+        }
         // RFC 7606 §3 (h): when multiple attribute errors exist, the approach
         // with the strongest action wins.
         let mut disposition = malformed.iter().map(|m| m.disposition).max();
@@ -1027,13 +1072,34 @@ impl PeerSession {
                 u64::from(parsed.bgpls_nlri_discarded),
             );
         }
-        // 2. Semantic validation
-        let has_mp_nlri = parsed
+        // 2. Semantic validation. Two distinct MP_REACH_NLRI facts feed
+        // two different consumers and must not be conflated: the
+        // attribute validator keys mandatory-attribute rules off
+        // attribute PRESENCE (an UPDATE that carries an MP_REACH at all
+        // must carry ORIGIN / AS_PATH), while the RFC 7606 §5.2
+        // reachability gate below needs NLRI CONTENT — an MP_REACH that
+        // encodes zero NLRI provides no reachable NLRI, and its mere
+        // presence must not shield a treat-as-withdraw-class error from
+        // the mandated session reset (treat-as-withdraw would withdraw
+        // nothing).
+        let has_mp_reach_attr = parsed
             .attributes
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
+        let mp_reach_carries_nlri = parsed.attributes.iter().any(|a| match a {
+            PathAttribute::MpReachNlri(mp) => {
+                !mp.announced.is_empty()
+                    || !mp.flowspec_announced.is_empty()
+                    || !mp.evpn_announced.is_empty()
+                    || !mp.bgpls_announced.is_empty()
+                    || !mp.vpn_announced.is_empty()
+                    || !mp.labeled_announced.is_empty()
+                    || !mp.rtc_announced.is_empty()
+            }
+            _ => false,
+        });
         let has_body_nlri = !parsed.announced.is_empty();
-        let has_nlri = has_body_nlri || has_mp_nlri;
+        let has_nlri = has_body_nlri || has_mp_reach_attr;
         let validation_options = rustbgpd_wire::UpdateValidationOptions {
             allow_ipv4_link_local_mp_reach_next_hop: self.is_scoped_link_local_peer()
                 && self.use_extended_nexthop_ipv4(),
@@ -1052,6 +1118,7 @@ impl PeerSession {
                 disposition = update_err.disposition.as_str(),
                 "UPDATE validation error"
             );
+            self.debug_dump_malformed_update(&update, &parsed);
             if update_err.disposition == ErrorDisposition::SessionReset {
                 let notif = NotificationMessage::new(
                     NotificationCode::UpdateMessage,
@@ -1073,8 +1140,10 @@ impl PeerSession {
             // RFC 7606 §5.2: an UPDATE with path attributes but no reachable
             // NLRI encoded gives no confidence that its NLRI was parsed
             // successfully; for any error stronger than attribute-discard the
-            // session-reset approach MUST be used instead.
-            if parsed.announced.is_empty() && !has_mp_nlri {
+            // session-reset approach MUST be used instead. "Encoded" means
+            // actual NLRI content — an MP_REACH_NLRI attribute carrying zero
+            // NLRI counts as no reachable NLRI.
+            if parsed.announced.is_empty() && !mp_reach_carries_nlri {
                 warn!(
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
