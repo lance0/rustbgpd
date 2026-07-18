@@ -28,6 +28,8 @@ Start here if you have never run the daemon.
 | [cookbook/peer-flap-triage.md](cookbook/peer-flap-triage.md) | Runbook: a peer is flapping — what to look at, in order |
 | [cookbook/rr-pair-day2.md](cookbook/rr-pair-day2.md) | Runbook: day-2 operations on a redundant RR pair — GR sanity, adding clients, safe config edits |
 | [cookbook/route-server-migration.md](cookbook/route-server-migration.md) | Shadow cutover runbook: map FRR/BIRD/ARouteServer concepts, run the shadow trial, gate cutover on `rbgp diff advertised` |
+| [cookbook/ixp-filter-pipeline.md](cookbook/ixp-filter-pipeline.md) | End-to-end IXP toolchain: arouteserver → `rs-config-render` → validated reload → Alice-LG looking glass |
+| [explain.md](explain.md) | Answer "why is this route (not) here?": the catalog of every explain surface, with the support-ticket workflow |
 | [deployment.md](deployment.md) | End-to-end install + lifecycle: systemd, Docker, containerlab, validate, reload, upgrade |
 | [ribdiff.md](ribdiff.md) | Drive `rbgp diff advertised` for the shadow trial (also the `rbgp-ribsnap/1` snapshot-format reference) |
 | [evpn-vtep-setup.md](evpn-vtep-setup.md) | Prepare kernel netdev topology (bridge/VXLAN/VRF) for the EVPN VTEP dataplane |
@@ -54,6 +56,7 @@ Start here if you have never run the daemon.
 | [SECURITY.md](SECURITY.md) | Security posture, deployment tiers, firewall guidance |
 | [LIMITATIONS.md](LIMITATIONS.md) | Current product boundaries and known non-goals |
 | [gobgp-parity.md](gobgp-parity.md) | Feature-by-feature parity table against GoBGP |
+| [../crates/cli/README.md#familiar-command-map](../crates/cli/README.md#familiar-command-map) | Familiar command map: the FRR/BIRD show-command mental model translated to `rbgp` |
 | [COMPARISON.md](COMPARISON.md) | Feature comparison across open-source BGP daemons |
 | [kernel-dataplane-runner.md](kernel-dataplane-runner.md) | How the privileged Linux dataplane CI workflow runs |
 | [grafana/](grafana/) | The importable Grafana dashboard JSON |

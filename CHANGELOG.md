@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Docs: operator discoverability pass.** New `docs/explain.md` catalog
+  of every explain/introspection surface, an end-to-end IXP tutorial
+  (`docs/cookbook/ixp-filter-pipeline.md`: arouteserver →
+  `rs-config-render` → validated reload → Alice-LG), and a pre-built
+  tarball install path ahead of building from source in README and
+  QUICKSTART.
+
 - Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
   effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
   zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and

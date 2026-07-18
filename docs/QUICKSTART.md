@@ -8,6 +8,25 @@ For the fastest no-host setup, use the Docker Compose lab in
 
 ## 1. Install
 
+Grab the pre-built release tarball — no Rust toolchain, no compile:
+
+```bash
+SUFFIX=linux-amd64   # or linux-arm64
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-${SUFFIX}.tar.gz"
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
+sha256sum -c "checksums-${SUFFIX}.txt"
+tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
+sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+
+rustbgpd --version && rbgp --version
+```
+
+The tarball also ships man pages and shell completions under `share/`;
+[deployment.md](deployment.md#install) covers installing those and
+pinning a specific version instead of `latest`.
+
+### Or build from source
+
 ```bash
 # Debian/Ubuntu build dependency for tonic/prost codegen.
 sudo apt-get install -y protobuf-compiler
@@ -15,10 +34,9 @@ sudo apt-get install -y protobuf-compiler
 cargo build --release -p rustbgpd -p rustbgpctl
 ```
 
-The built binaries are:
-
-- `target/release/rustbgpd` — daemon
-- `target/release/rbgp` — CLI
+The built binaries are `target/release/rustbgpd` (daemon) and
+`target/release/rbgp` (CLI); the commands below assume both are on
+`PATH`.
 
 ## 2. Create a config
 
@@ -27,7 +45,7 @@ Generate a starter config from a built-in profile:
 ```bash
 # `lab` = minimal single-box setup:
 # gRPC over a local UDS, state under /tmp, Prometheus probes enabled.
-./target/release/rustbgpd --init-config lab --stdout > config.toml
+rustbgpd --init-config lab --stdout > config.toml
 $EDITOR config.toml
 ```
 
@@ -49,13 +67,13 @@ the route-server cookbook.
 
 ```bash
 # Validate config without starting the daemon.
-./target/release/rustbgpd --check config.toml
+rustbgpd --check config.toml
 
 # Preview what a config reload would change.
-./target/release/rustbgpd --diff new-config.toml config.toml
+rustbgpd --diff new-config.toml config.toml
 
 # Start the daemon.
-./target/release/rustbgpd config.toml
+rustbgpd config.toml
 ```
 
 ## 4. Verify
@@ -145,6 +163,10 @@ An Envoy proxy front-end is also supported for multi-host fan-out; see
 [`docs/SECURITY.md`](SECURITY.md).
 
 ## Docker standalone
+
+Release images are published to GHCR with versioned tags
+(e.g. `ghcr.io/lance0/rustbgpd:0.51.0`); `docker build -t rustbgpd .`
+produces the same lean runtime image locally.
 
 ```bash
 docker run -d --name rustbgpd \
