@@ -94,16 +94,25 @@ recheck_all_sessions() {
 
 candidate_shape_is_exact() {
     local family=${1:?} prefix=${2:?}
+    # Next hops are pinned per family: v4 is the session address, v6 is the
+    # route-map-set global (see frr-bgpd-m89-source-a.conf). A link-local or
+    # unspecified v6 next hop here would mean the sources raced their zebra
+    # address sync again.
+    local nh1=10.89.1.2 nh2=10.89.2.2 nh3=10.89.3.2
+    if [ "$family" = ipv6_unicast ]; then
+        nh1=fd89:1::2 nh2=fd89:2::2 nh3=fd89:3::2
+    fi
     {
         rbgp rib received 10.89.1.2 -a "$family" -j 2>/dev/null
         rbgp rib received 10.89.2.2 -a "$family" -j 2>/dev/null
         rbgp rib received 10.89.3.2 -a "$family" -j 2>/dev/null
-    } | jq -se --arg prefix "$prefix" 'add | map(select(.prefix == $prefix)) |
+    } | jq -se --arg prefix "$prefix" --arg nh1 "$nh1" --arg nh2 "$nh2" --arg nh3 "$nh3" '
+        add | map(select(.prefix == $prefix)) |
         length == 3
-        and ([.[] | {peer: .peer_address, as_path}] | sort_by(.peer)) == [
-            {"peer":"10.89.1.2","as_path":[65002]},
-            {"peer":"10.89.2.2","as_path":[65003]},
-            {"peer":"10.89.3.2","as_path":[65004]}
+        and ([.[] | {peer: .peer_address, as_path, next_hop}] | sort_by(.peer)) == [
+            {"peer":"10.89.1.2","as_path":[65002],"next_hop":$nh1},
+            {"peer":"10.89.2.2","as_path":[65003],"next_hop":$nh2},
+            {"peer":"10.89.3.2","as_path":[65004],"next_hop":$nh3}
         ]
     ' >/dev/null
 }
