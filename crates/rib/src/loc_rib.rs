@@ -91,7 +91,9 @@ impl LocRib {
         Self {
             routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
             ordered_prefixes: FamilyPrefixMap::default(),
-            ordered_journal: Vec::new(),
+            // Pre-reserve the journal floor so recompute's membership note
+            // never allocates on the hot path.
+            ordered_journal: Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP),
             ordered_rebuild: false,
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
@@ -158,7 +160,9 @@ impl LocRib {
         }
         if self.ordered_journal.len() >= self.routes.len().max(ORDERED_JOURNAL_MIN_CAP) {
             self.ordered_rebuild = true;
-            self.ordered_journal = Vec::new();
+            // Release the outgrown buffer but keep the floor warm: the next
+            // notes after the rebuild must not re-pay the first allocation.
+            self.ordered_journal = Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP);
             return;
         }
         self.ordered_journal.push(prefix);
