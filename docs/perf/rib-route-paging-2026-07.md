@@ -191,11 +191,22 @@ the nightly runner, `rib_pipeline` +8-10%, `bulk_initial_load/10000` +13.5%).
 Maintenance is now deferred: recompute journals membership changes into a
 capacity-reserved buffer and a listing replays the journal — or rebuilds the
 index outright once the journal would match the table size — so the eager trie
-insertion left the hot path entirely.
+insertion left the hot path entirely. The deferral is fenced by a Loc-RIB
+unit test (`recompute_journals_membership_without_touching_ordered_index`)
+that fails if eager index maintenance is ever restored to `recompute`.
 
-Post-fix A/B (pinned harness, three alternating attempts, v0.51.0 base):
-`rib_pipeline` -0.2%/-1.5%/-1.1%, `bulk_initial_load` -0.7% at 10k and a
-non-confident straddle at 100k. A flat residual of roughly 20-30 ns per call
+The three A/B comparison summaries are retained under
+[`artifacts/rib-route-paging-2026-07/ordered-index-ab/`](artifacts/rib-route-paging-2026-07/ordered-index-ab/):
+[`ab-initial-repro.md`](artifacts/rib-route-paging-2026-07/ordered-index-ab/ab-initial-repro.md)
+(the eager-maintenance regression reproduced against v0.51.0),
+[`ab-noop-discriminator.md`](artifacts/rib-route-paging-2026-07/ordered-index-ab/ab-noop-discriminator.md)
+(the no-op-body discriminator), and
+[`ab-final-post-fix.md`](artifacts/rib-route-paging-2026-07/ordered-index-ab/ab-final-post-fix.md)
+(the three-group run at the fix).
+
+Post-fix A/B (pinned harness, three alternating attempts, v0.51.0 base —
+`ab-final-post-fix.md`): `rib_pipeline` -0.2%/-1.5%/-1.1%, `bulk_initial_load`
+-0.7% at 10k and a non-confident straddle at 100k. A flat residual of roughly 20-30 ns per call
 remains visible only in the `loc_rib_recompute` microbenchmark (+21-49%); a
 discriminator build with the journal note stubbed to a no-op still measures
 +18-30%, attributing the residual to carrying the index feature itself (a

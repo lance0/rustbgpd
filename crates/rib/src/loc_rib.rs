@@ -240,6 +240,20 @@ impl LocRib {
         self.routes.capacity()
     }
 
+    /// Ordered-index staleness probe: `(indexed prefixes, journaled changes)`.
+    ///
+    /// Exposed only to the test asserting that `recompute` stays off the
+    /// ordered index (journaling membership changes for the next listing to
+    /// replay). That test fails if eager index maintenance is ever restored
+    /// to the recompute hot path.
+    #[cfg(test)]
+    pub(crate) fn ordered_index_probe(&self) -> (usize, usize) {
+        (
+            self.ordered_prefixes.iter_from(None).count(),
+            self.ordered_journal.len(),
+        )
+    }
+
     /// Return `true` if no best routes are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1999,6 +2013,47 @@ mod tests {
             loc.get(&prefix).unwrap().peer,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
         );
+    }
+
+    /// The deferral itself, not just listing correctness: `recompute` must
+    /// journal membership changes and leave the ordered index untouched
+    /// until a listing syncs it. Restoring eager index maintenance to the
+    /// recompute hot path keeps every listing test green but fails this one.
+    #[test]
+    fn recompute_journals_membership_without_touching_ordered_index() {
+        let n = 16usize; // below the 64-entry journal floor: no rebuild flip
+        let prefix_at = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24);
+        let mut loc = LocRib::new();
+
+        for octet in 0..u8::try_from(n).unwrap() {
+            let route = make_route(1, prefix_at(octet), 100);
+            assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+        }
+        assert_eq!(
+            loc.ordered_index_probe(),
+            (0, n),
+            "with no listing run, recompute must only journal — an eagerly \
+             maintained ordered index is the reverted hot-path regression"
+        );
+
+        // One listing replays the journal: index synced, journal drained.
+        assert_eq!(loc.iter_ordered_from(None).count(), n);
+        assert_eq!(loc.ordered_index_probe(), (n, 0));
+
+        // Post-listing mutations (one insert, one withdraw) go back to the
+        // journal; the index stays stale until the next listing.
+        let fresh = make_route(1, prefix_at(200), 100);
+        assert!(loc.recompute(fresh.prefix, std::iter::once(&fresh)));
+        assert!(loc.recompute(Prefix::V4(prefix_at(0)), std::iter::empty()));
+        assert_eq!(
+            loc.ordered_index_probe(),
+            (n, 2),
+            "mutations after a sync must journal, not touch the index"
+        );
+
+        // The next listing resolves both journal entries (-1 +1 = n rows).
+        assert_eq!(loc.iter_ordered_from(None).count(), n);
+        assert_eq!(loc.ordered_index_probe(), (n, 0));
     }
 
     #[test]
