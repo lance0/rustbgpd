@@ -388,9 +388,10 @@ The in-daemon Birdwatcher-shaped looking glass HTTP server has been removed.
 The daemon's durable API is gRPC + `rbgp`; its four status, peer, and
 accepted-route endpoints (`/status`, `/protocols/bgp`,
 `/routes/protocol/{id}`, `/routes/peer/{peer}`) now live in the maintained
-external `examples/birdwatcher-adapter`. This is not yet a complete Alice-LG
-backend: the adapter's filtered/noexport views are absent (the structured
-reject reasons behind them are served by `PolicyService.ListRejectedRoutes`). A
+external `examples/birdwatcher-adapter`, which also serves a filtered-route
+view (`/routes/filtered/{id}`, from `PolicyService.ListRejectedRoutes` with
+structured reject reasons). This is not yet a complete Alice-LG backend:
+noexport views are absent. A
 config that still sets `[global.telemetry.looking_glass]` fails to load with a
 migration error. See the adapter README for the endpoint→gRPC mapping.
 

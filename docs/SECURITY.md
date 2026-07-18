@@ -165,10 +165,35 @@ to gRPC.
 
 The in-daemon looking glass HTTP server has been removed. The external
 `examples/birdwatcher-adapter` binary serves a Birdwatcher-shaped read-only
-status, peer, and accepted-route subset over the daemon's gRPC API. It is not a
-complete Alice-LG backend. The adapter is unauthenticated and exposes neighbor
-state, received routes, and peer addresses, so apply the same network-level
-access controls as Prometheus.
+status, peer, accepted-route, and filtered-route subset over the daemon's
+gRPC API. It is not a complete Alice-LG backend (noexport views are not
+wired).
+
+**Disclosure surface.** Beyond neighbor state, received routes, and peer
+addresses, the adapter's `GET /routes/filtered/{id}` endpoint serves
+rejected announcements from `PolicyService.ListRejectedRoutes`: each
+retained rejection's prefix, next hop, AS path, communities, RPKI/ASPA
+validation state, and the policy rejection reason (canonical reason token,
+human-readable detail string, and a synthesized reject-reason large
+community). `GET /protocols/bgp` carries real per-neighbor filtered counts.
+The adapter's HTTP listener is unauthenticated and has no TLS; it binds
+`127.0.0.1:8080` by default and listens elsewhere only if you pass
+`--listen` / `BIRDWATCHER_ADAPTER_LISTEN`. Anyone who can reach it can
+enumerate what your import policy rejects and why — treat that as
+looking-glass data you are choosing to publish.
+
+Mitigations, in preference order:
+
+- Keep the loopback default, or bind the adapter to a management network,
+  and put an authenticating reverse proxy in front of it before any wider
+  exposure — the same network-level discipline as Prometheus.
+- Point the adapter at a dedicated gRPC listener and cap it:
+  `ListRejectedRoutes` is a `sensitive_read`-tier method, so `max_tier =
+  "read"` on that listener denies the filtered view while keeping liveness
+  reads working.
+- Disable retention daemon-side with `[policy.reject_retention]
+  enabled = false`: the reject store is never populated and the filtered
+  view is served empty as a configuration fact.
 
 ## TCP MD5 and GTSM
 
