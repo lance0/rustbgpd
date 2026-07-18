@@ -221,7 +221,10 @@ item). None blocks a first pilot at OpenBGPD-equivalence level.
    below).*
 2. Refresh-loop cookbook: cron cadence, `--check` gate, SIGHUP,
    fail-stale semantics, staleness alerting; extends the existing
-   route-server example.
+   route-server example. *Delivered:
+   `docs/cookbook/ixp-filter-pipeline.md` §3 — fail-stale cron loop,
+   per-exit-code alerting matrix, cadence guidance, freshness-metric
+   wiring.*
 3. Differential interop lab (M-series): one `general.yml`/`clients.yml`
    drives both a BIRD instance (via arouteserver proper) and rustbgpd
    (via the renderer); a canned announcement set must produce identical

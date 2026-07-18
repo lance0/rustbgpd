@@ -127,10 +127,34 @@ required. The daemon's reload is itself parse-then-swap: a config that
 fails to parse or validate at SIGHUP leaves the running configuration
 untouched, so a bad swap can never evict working policy.
 
+Run the loop at the cadence your IRR data actually changes —
+arouteserver deployments typically refresh every 6–24 hours, and the
+renderer adds no reason to differ. The arouteserver cache TTLs govern
+data staleness; the refresh script above only re-renders what those
+caches resolve.
+
+`rs-config-render` distinguishes its failure classes by exit code so
+the cron wrapper can alert on *why* the loop is stuck, not just that
+it is:
+
+| Exit | Meaning | Operator action |
+|------|---------|-----------------|
+| `0` | Rendered; receipt written | none |
+| `1` | Context parse error | inspect the `template-context` output |
+| `2` | Refused — unsupported context knobs (listed on stderr) | remove the knob or wait for renderer support; repeats every run until the site config changes |
+| `3` | Implausible data — empty/collapsed member sets | usually an upstream IRR/PeeringDB outage; the previous config stays live by design |
+| `4` | Context shape mismatch — arouteserver output changed | pin the arouteserver version or update the renderer |
+
+Exit `3` is the fail-stale case the pipeline exists for: a transient
+upstream outage must never strip a member's filters, so nothing is
+emitted and the daemon keeps serving the last good generation.
+
 Alert on the age of `render-receipt.json` — a pipeline stuck for more
-than a couple of refresh intervals should page. The matching metric is
-`bgp_policy_generation_loaded_timestamp_seconds` ("Policy artifact
-freshness" in [OPERATIONS.md](../OPERATIONS.md)).
+than a couple of refresh intervals should page. The matching
+daemon-side signal is `bgp_policy_generation_loaded_timestamp_seconds`
+("Policy artifact freshness" in [OPERATIONS.md](../OPERATIONS.md)),
+which deliberately stays frozen when a reload is rejected — file
+mtimes can lie about what the daemon actually accepted.
 
 ## 4. Verify member sessions and filters
 
