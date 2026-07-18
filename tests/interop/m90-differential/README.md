@@ -48,22 +48,33 @@ for BIRD, `cargo run -p rs-config-render` for rustbgpd, followed by
 the pipeline's own gates (`rustbgpd --check`, `rbgp policy check` on
 every generated `.rpol`).
 
-**Image pin:** the `pierky/arouteserver` digest in
-`scripts/test-m90-differential.sh` is a deliberate all-zeros tripwire
-until the verification run pins the real digest (or exports
-`M90_ARS_IMAGE`).
+**Image pin:** the driver runs
+`pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66`
+(`:latest` as of 2026-07-18, arouteserver 1.23.2). Override with
+`M90_ARS_IMAGE` to test another build.
 
 ## The canonical context path
 
 `context.yml` is checked in hand-authored (matching the renderer's
 fingerprint-pinned 17-key shape, same as its golden fixture) so the
-rustbgpd side renders deterministically offline. The canonical way to
-produce it is arouteserver itself, with the same mounts the driver
-uses for the BIRD render:
+rustbgpd side renders deterministically offline. arouteserver's own
+dump of the same site is
 
 ```bash
 arouteserver template-context --cfg arouteserver.yml --output context.yml
 ```
+
+(same mounts as the driver's BIRD render), but as of arouteserver
+1.23.2 that command emits a *sectioned report* (per-key heading +
+underline + YAML fragment), not one YAML document, and its section
+names differ from the renderer's pinned top-level keys (e.g.
+`arin_whois_db_records` vs `arin_whois_records`; `irrdb_info` as a
+list of hash-keyed bundles vs a map). So the dump is not a drop-in
+replacement for this fixture; converting it is an rs-config-render
+follow-up. The fixture's *data* was verified in lockstep against a
+real 1.23.2 dump when the image was pinned: filtering knobs, client
+roster, bogons, never-via ASNs, and every per-client IRR asn/prefix
+bundle match.
 
 The lab never trusts the fixture alone: the BIRD side always re-runs
 arouteserver proper from `general.yml`/`clients.yml` at runtime, so if

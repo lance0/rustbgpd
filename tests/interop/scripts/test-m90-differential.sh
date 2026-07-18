@@ -9,15 +9,15 @@
 #     AS-SETs are RFC 5398 documentation objects with no live IRR
 #     data);
 #   - rustbgpd: config rendered by tools/rs-config-render from the
-#     site's `arouteserver template-context` dump. The checked-in
-#     m90-differential/context.yml is that dump, hand-authored against
-#     the renderer's fingerprint-pinned shape; regenerating it via
-#         arouteserver template-context --cfg arouteserver.yml \
-#             --output context.yml
-#     (same mounts as the BIRD render below) is the canonical refresh
-#     path. Because the BIRD side ALWAYS re-runs arouteserver proper
-#     at lab runtime, drift between context.yml and the site files
-#     surfaces as a verdict mismatch — the differential is the guard.
+#     site's template-context model. The checked-in
+#     m90-differential/context.yml is hand-authored against the
+#     renderer's fingerprint-pinned shape; arouteserver 1.23.2's own
+#     `template-context` emits a sectioned report that is NOT a
+#     drop-in for it (see the lab README), so the fixture is
+#     hand-maintained with its data verified against a real dump.
+#     Because the BIRD side ALWAYS re-runs arouteserver proper at lab
+#     runtime, drift between context.yml and the site files surfaces
+#     as a verdict mismatch — the differential is the guard.
 #
 # Three GoBGP members then announce the canned set from
 # announcements.json, and every entry is asserted on BOTH daemons:
@@ -56,17 +56,14 @@ MANIFEST="$LAB_DIR/announcements.json"
 BIRD="clab-${TOPO}-bird"
 RS_ADDR="192.0.2.9"
 
-# TODO(verification run): pin the digest of the official
-# pierky/arouteserver image (docker pull pierky/arouteserver:latest,
-# then docker inspect --format '{{index .RepoDigests 0}}'). The
-# all-zeros digest below is a deliberate tripwire — the guard in
-# render_bird_config refuses to run until it is replaced or
-# M90_ARS_IMAGE is exported.
-ARS_IMAGE="${M90_ARS_IMAGE:-pierky/arouteserver@sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+# Pinned official image: pierky/arouteserver:latest as of 2026-07-18
+# (arouteserver 1.23.2). Refresh with `docker pull` + `docker inspect
+# --format '{{index .RepoDigests 0}}'`, or override via M90_ARS_IMAGE.
+ARS_IMAGE="${M90_ARS_IMAGE:-pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66}"
 # BIRD 2 target for arouteserver's renderer. Debian bookworm's bird2
-# package (the bird:2-bookworm image) is BIRD 2.13; adjust to the
-# nearest version `arouteserver bird --help` actually offers.
-BIRD_TARGET_VERSION="${M90_BIRD_TARGET_VERSION:-2.13}"
+# package (the bird:2-bookworm image) is BIRD 2.0.12; 2.0.11 is the
+# nearest version `arouteserver bird --help` offers.
+BIRD_TARGET_VERSION="${M90_BIRD_TARGET_VERSION:-2.0.11}"
 
 # ---------------------------------------------------------------------------
 # Helpers

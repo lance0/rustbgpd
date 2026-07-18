@@ -10,3 +10,7 @@ cfg_bogons: /site/bogons.yml
 cache_dir: /site/cache
 cache_expiry: 3600
 bgpq3_path: /site/bgpq4-stub.sh
+# Without these, arouteserver looks for log.ini and templates/ next to
+# this file and aborts; the image ships both at the standard path.
+logging_config_file: /etc/arouteserver/log.ini
+templates_dir: /etc/arouteserver/templates
