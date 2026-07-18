@@ -67,6 +67,28 @@ pub const EXPECTED_TOP_LEVEL_KEYS: &[&str] = &[
     "rtt_based_functions_are_used",
 ];
 
+/// Section names of the supported *sectioned* `template-context`
+/// report, sorted.
+///
+/// `arouteserver template-context` (pinned against 1.23.2) does not
+/// emit one YAML document: it emits a report of sections, each a
+/// heading line plus a dash underline followed by a YAML fragment.
+/// The section roster is this format's shape, gated exactly like the
+/// single-document top-level keys: a section added, removed, or
+/// renamed upstream refuses the render until reviewed.
+pub const EXPECTED_SECTION_NAMES: &[&str] = &[
+    "arin_whois_db_records",
+    "asns",
+    "bogons",
+    "cfg",
+    "clients",
+    "ip_ver",
+    "irrdb_info",
+    "never_via_route_servers_asns",
+    "registrobr_whois_db_records",
+    "rpki_roas",
+];
+
 /// Rejects 0, AS_TRANS (23456), the 16-bit documentation / private /
 /// reserved block (64496-65551), and the 32-bit private + reserved
 /// range (4200000000-4294967295; every 10-digit AS number starting
@@ -393,12 +415,20 @@ struct ClientFiltering {
     max_prefix: Option<ClientMaxPrefix>,
     #[serde(default)]
     reject_policy: Option<RejectPolicy>,
+    #[serde(default)]
+    black_list_pref: Option<serde_yaml::Value>,
 }
 
 #[derive(Deserialize, Default)]
 struct ClientIrrdb {
     #[serde(default)]
     as_set_bundle_ids: Vec<String>,
+    #[serde(default)]
+    white_list_asn: Option<serde_yaml::Value>,
+    #[serde(default)]
+    white_list_pref: Option<serde_yaml::Value>,
+    #[serde(default)]
+    white_list_route: Option<serde_yaml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -492,11 +522,14 @@ impl PrefixEntry {
                 None
             }
         });
-        if let Some(ge) = self.ge {
+        // A ge equal to the entry's own length is a no-op (bgpq4 emits
+        // one on bounded records); suppress it.
+        let ge = self.ge.filter(|ge| *ge > self.length);
+        if let Some(ge) = ge {
             let _ = write!(member, " ge {ge}");
         }
         if let Some(le) = le
-            && (self.ge.is_some() || le != self.length)
+            && (ge.is_some() || le != self.length)
         {
             let _ = write!(member, " le {le}");
         }
@@ -546,50 +579,20 @@ pub fn expected_fingerprint() -> String {
     shape_fingerprint(&keys)
 }
 
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-struct ResolvedClient<'a> {
-    client: &'a Client,
-    slug: String,
-    description: String,
-    prefixes: Vec<&'a PrefixEntry>,
-    origins: Vec<u32>,
-    enforce_origin: bool,
-    enforce_prefix: bool,
-    strict_next_hop: bool,
-    add_path: bool,
-    per_client_best: bool,
-    gtsm: bool,
-    allow_longer_prefixes: bool,
-    limit_ipv4: Option<u32>,
-    limit_ipv6: Option<u32>,
-}
-
-pub fn render(context_yaml: &str, opts: &Options) -> Result<Rendered, RenderError> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(context_yaml).map_err(|e| RenderError::Parse(e.to_string()))?;
-    let mapping = value
-        .as_mapping()
-        .ok_or_else(|| RenderError::Parse("context is not a mapping".to_owned()))?;
-
-    let mut found_keys: Vec<String> = mapping
-        .keys()
-        .map(|k| match k.as_str() {
-            Some(s) => Ok(s.to_owned()),
-            None => Err(RenderError::Parse(
-                "non-string top-level context key".to_owned(),
-            )),
-        })
-        .collect::<Result<_, _>>()?;
-    found_keys.sort();
-
-    let found_fingerprint = shape_fingerprint(&found_keys);
-    let expected = expected_fingerprint();
-    let mut warnings = Vec::new();
+/// Gate a found key/section roster against a pinned one; on drift,
+/// refuse (or warn under `--allow-shape-drift`). Returns the found
+/// fingerprint.
+fn gate_shape(
+    found_keys: &[String],
+    expected_keys: &[&str],
+    opts: &Options,
+    warnings: &mut Vec<String>,
+) -> Result<String, RenderError> {
+    let expected_list: Vec<String> = expected_keys.iter().map(|k| (*k).to_owned()).collect();
+    let expected = shape_fingerprint(&expected_list);
+    let found_fingerprint = shape_fingerprint(found_keys);
     if found_fingerprint != expected {
-        let expected_set: BTreeSet<&str> = EXPECTED_TOP_LEVEL_KEYS.iter().copied().collect();
+        let expected_set: BTreeSet<&str> = expected_keys.iter().copied().collect();
         let found_set: BTreeSet<&str> = found_keys.iter().map(String::as_str).collect();
         let missing = expected_set
             .difference(&found_set)
@@ -612,6 +615,227 @@ pub fn render(context_yaml: &str, opts: &Options) -> Result<Rendered, RenderErro
              (expected {expected}, found {found_fingerprint})"
         ));
     }
+    Ok(found_fingerprint)
+}
+
+// ---------------------------------------------------------------------------
+// Ingestion — the two on-disk forms of `template-context` output
+// ---------------------------------------------------------------------------
+
+fn ingest_single_document(
+    context_yaml: &str,
+    opts: &Options,
+    warnings: &mut Vec<String>,
+) -> Result<(serde_yaml::Value, String), RenderError> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(context_yaml).map_err(|e| RenderError::Parse(e.to_string()))?;
+    let mapping = value
+        .as_mapping()
+        .ok_or_else(|| RenderError::Parse("context is not a mapping".to_owned()))?;
+
+    let mut found_keys: Vec<String> = mapping
+        .keys()
+        .map(|k| match k.as_str() {
+            Some(s) => Ok(s.to_owned()),
+            None => Err(RenderError::Parse(
+                "non-string top-level context key".to_owned(),
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    found_keys.sort();
+
+    let fingerprint = gate_shape(&found_keys, EXPECTED_TOP_LEVEL_KEYS, opts, warnings)?;
+    Ok((value, fingerprint))
+}
+
+/// A section heading is a bare identifier line whose next line is a
+/// dash underline of the same length ("cfg" / "---"). YAML content
+/// never matches: mapping lines carry a colon, list items lead with
+/// "- ", nested lines are indented.
+fn is_heading(line: &str, underline: Option<&str>) -> bool {
+    let name = line.trim_end();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    underline
+        .map(str::trim_end)
+        .is_some_and(|u| !u.is_empty() && u.len() == name.len() && u.bytes().all(|b| b == b'-'))
+}
+
+fn looks_sectioned(input: &str) -> bool {
+    let lines: Vec<&str> = input.lines().collect();
+    lines
+        .iter()
+        .position(|l| !l.trim().is_empty())
+        .is_some_and(|i| is_heading(lines[i], lines.get(i + 1).copied()))
+}
+
+/// Split a sectioned report into `(section name, YAML fragment)` pairs.
+fn split_sections(input: &str) -> Result<Vec<(String, String)>, RenderError> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut sections = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if is_heading(lines[i], lines.get(i + 1).copied()) {
+            let name = lines[i].trim_end().to_owned();
+            let mut body = String::new();
+            let mut j = i + 2;
+            while j < lines.len() && !is_heading(lines[j], lines.get(j + 1).copied()) {
+                body.push_str(lines[j]);
+                body.push('\n');
+                j += 1;
+            }
+            sections.push((name, body));
+            i = j;
+        } else if lines[i].trim().is_empty() {
+            i += 1;
+        } else {
+            return Err(RenderError::Parse(format!(
+                "sectioned template-context: content outside any section at line {}",
+                i + 1
+            )));
+        }
+    }
+    Ok(sections)
+}
+
+fn untag(value: serde_yaml::Value) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::Tagged(tagged) => tagged.value,
+        other => other,
+    }
+}
+
+/// Normalize one parsed section fragment: fragments either repeat the
+/// section name as a single wrapping key (`cfg:`, `clients:`) or are
+/// bare values (`irrdb_info`, `never_via_route_servers_asns`).
+fn unwrap_section(value: serde_yaml::Value, name: &str) -> serde_yaml::Value {
+    if let serde_yaml::Value::Mapping(mut m) = value {
+        if m.len() == 1
+            && let Some(inner) = m.remove(name)
+        {
+            return inner;
+        }
+        return serde_yaml::Value::Mapping(m);
+    }
+    value
+}
+
+/// The sectioned report's `irrdb_info` is a list of bundle records
+/// carrying their own hash `id`; the internal model keys bundles by
+/// that id.
+fn irrdb_list_to_map(value: serde_yaml::Value) -> Result<serde_yaml::Value, RenderError> {
+    let serde_yaml::Value::Sequence(items) = value else {
+        // Already a map (the single-document form) — pass through.
+        return Ok(value);
+    };
+    let mut map = serde_yaml::Mapping::new();
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(serde_yaml::Value::as_str)
+            .ok_or_else(|| RenderError::Parse("irrdb_info entry without a string `id`".to_owned()))?
+            .to_owned();
+        map.insert(serde_yaml::Value::String(id), item);
+    }
+    Ok(serde_yaml::Value::Mapping(map))
+}
+
+/// The sectioned report emits each client's `as_set_bundle_ids` as a
+/// YAML `!!set`; the internal model wants a list. Sorted for a
+/// deterministic bundle-union order.
+fn normalize_bundle_id_sets(root: &mut serde_yaml::Mapping) {
+    let Some(clients) = root
+        .get_mut("clients")
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return;
+    };
+    for client in clients {
+        let Some(irrdb) = client
+            .get_mut("cfg")
+            .and_then(|v| v.get_mut("filtering"))
+            .and_then(|v| v.get_mut("irrdb"))
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        else {
+            continue;
+        };
+        let Some(ids) = irrdb.get_mut("as_set_bundle_ids") else {
+            continue;
+        };
+        let current = untag(std::mem::replace(ids, serde_yaml::Value::Null));
+        *ids = match current {
+            serde_yaml::Value::Mapping(set) => {
+                let mut keys: Vec<serde_yaml::Value> = set.into_iter().map(|(k, _)| k).collect();
+                keys.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                serde_yaml::Value::Sequence(keys)
+            }
+            other => other,
+        };
+    }
+}
+
+fn ingest_sectioned(
+    input: &str,
+    opts: &Options,
+    warnings: &mut Vec<String>,
+) -> Result<(serde_yaml::Value, String), RenderError> {
+    let sections = split_sections(input)?;
+    let mut names: Vec<String> = sections.iter().map(|(name, _)| name.clone()).collect();
+    names.sort();
+    let fingerprint = gate_shape(&names, EXPECTED_SECTION_NAMES, opts, warnings)?;
+
+    let mut root = serde_yaml::Mapping::new();
+    for (name, body) in sections {
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&body)
+            .map_err(|e| RenderError::Parse(format!("section `{name}`: {e}")))?;
+        let parsed = unwrap_section(parsed, &name);
+        // The sectioned report names the whois-record sections with a
+        // `_db_` infix the internal model does not use.
+        let internal_name = match name.as_str() {
+            "arin_whois_db_records" => "arin_whois_records",
+            "registrobr_whois_db_records" => "registrobr_whois_records",
+            other => other,
+        };
+        let parsed = if internal_name == "irrdb_info" {
+            irrdb_list_to_map(parsed)?
+        } else {
+            parsed
+        };
+        root.insert(serde_yaml::Value::String(internal_name.to_owned()), parsed);
+    }
+    normalize_bundle_id_sets(&mut root);
+    Ok((serde_yaml::Value::Mapping(root), fingerprint))
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+struct ResolvedClient<'a> {
+    client: &'a Client,
+    slug: String,
+    description: String,
+    prefixes: Vec<&'a PrefixEntry>,
+    origins: Vec<u32>,
+    enforce_origin: bool,
+    enforce_prefix: bool,
+    strict_next_hop: bool,
+    add_path: bool,
+    per_client_best: bool,
+    gtsm: bool,
+    allow_longer_prefixes: bool,
+    limit_ipv4: Option<u32>,
+    limit_ipv6: Option<u32>,
+}
+
+pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderError> {
+    let mut warnings = Vec::new();
+    let (value, found_fingerprint) = if looks_sectioned(context_input) {
+        ingest_sectioned(context_input, opts, &mut warnings)?
+    } else {
+        ingest_single_document(context_input, opts, &mut warnings)?
+    };
 
     let ctx: Context =
         serde_yaml::from_value(value).map_err(|e| RenderError::Parse(e.to_string()))?;
@@ -761,6 +985,30 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 &mut refusals,
             );
         }
+        // Per-client black/white lists are not rendered; dropping a
+        // black list would fail open, dropping a white list would
+        // reject routes the site intends to accept.
+        if value_present(client.cfg.filtering.black_list_pref.as_ref()) {
+            refusals.push(format!(
+                "client {}: black_list_pref is not rendered; silently dropping it would \
+                 fail open",
+                client.id
+            ));
+        }
+        let irrdb = &client.cfg.filtering.irrdb;
+        for (name, value) in [
+            ("white_list_asn", &irrdb.white_list_asn),
+            ("white_list_pref", &irrdb.white_list_pref),
+            ("white_list_route", &irrdb.white_list_route),
+        ] {
+            if value_present(value.as_ref()) {
+                refusals.push(format!(
+                    "client {}: irrdb.{name} is not rendered; silently dropping it would \
+                     reject routes the site intends to accept",
+                    client.id
+                ));
+            }
+        }
     }
 
     if refusals.is_empty() {
@@ -768,6 +1016,17 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
     } else {
         Err(RenderError::Refused(refusals))
     }
+}
+
+/// True when an optional list/mapping knob is actually set (not
+/// absent, null, or empty).
+fn value_present(value: Option<&serde_yaml::Value>) -> bool {
+    value.is_some_and(|v| match v {
+        serde_yaml::Value::Null => false,
+        serde_yaml::Value::Sequence(s) => !s.is_empty(),
+        serde_yaml::Value::Mapping(m) => !m.is_empty(),
+        _ => true,
+    })
 }
 
 fn community_configured(value: &serde_yaml::Value) -> bool {
@@ -826,7 +1085,10 @@ fn resolve_clients<'a>(
         let enforce_origin = ctx.cfg.filtering.irrdb.enforce_origin_in_as_set;
         let enforce_prefix = ctx.cfg.filtering.irrdb.enforce_prefix_in_as_set;
 
-        let mut prefixes = Vec::new();
+        let mut prefixes: Vec<&PrefixEntry> = Vec::new();
+        // A client's bundles overlap (arouteserver resolves both the
+        // AS-SET and the bare origin-ASN object); the union dedupes.
+        let mut seen_prefixes = BTreeSet::new();
         let mut origins = BTreeSet::new();
         for bundle_id in &filtering.irrdb.as_set_bundle_ids {
             let bundle = ctx.irrdb_info.get(bundle_id).ok_or_else(|| {
@@ -835,7 +1097,19 @@ fn resolve_clients<'a>(
                     client.id
                 ))
             })?;
-            prefixes.extend(bundle.prefixes.iter());
+            for prefix in &bundle.prefixes {
+                let key = (
+                    prefix.prefix.clone(),
+                    prefix.length,
+                    prefix.exact,
+                    prefix.ge,
+                    prefix.le,
+                    prefix.max_length,
+                );
+                if seen_prefixes.insert(key) {
+                    prefixes.push(prefix);
+                }
+            }
             for asn in &bundle.asns {
                 origins.insert(asn.value().map_err(RenderError::Parse)?);
             }

@@ -1,0 +1,771 @@
+ip_ver
+------
+null
+...
+
+
+cfg
+---
+cfg:
+  add_path: false
+  blackhole_filtering:
+    add_noexport: true
+    announce_to_client: true
+    policy_ipv4: null
+    policy_ipv6: null
+    rewrite_next_hop_ipv4: null
+    rewrite_next_hop_ipv6: null
+  communities:
+    add_noadvertise_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    add_noadvertise_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    add_noexport_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    add_noexport_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    announce_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    announce_to_peers_with_rtt_higher_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    announce_to_peers_with_rtt_lower_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    blackholing:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    do_not_announce_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    do_not_announce_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    do_not_announce_to_peers_with_rtt_higher_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    do_not_announce_to_peers_with_rtt_lower_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    origin_not_present_in_as_set:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    origin_present_in_as_set:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prefix_not_present_in_as_set:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prefix_present_in_as_set:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prefix_validated_via_arin_whois_db_dump:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prefix_validated_via_registrobr_whois_db_dump:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prefix_validated_via_rpki_roas:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    prepend_once_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_once_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    prepend_once_to_peers_with_rtt_higher_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_once_to_peers_with_rtt_lower_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_thrice_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_thrice_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    prepend_thrice_to_peers_with_rtt_higher_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_thrice_to_peers_with_rtt_lower_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_twice_to_any:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_twice_to_peer:
+      ext: null
+      lrg: null
+      peer_as: true
+      std: null
+      type: inbound
+    prepend_twice_to_peers_with_rtt_higher_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    prepend_twice_to_peers_with_rtt_lower_than:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: inbound
+    reject_cause:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_1:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_10:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_11:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_12:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_13:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_14:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_15:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_2:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_3:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_4:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_5:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_6:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_7:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_8:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    reject_cause_map_9:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    rejected_route_announced_by:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    route_validated_via_white_list:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    rpki_bgp_origin_validation_invalid:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    rpki_bgp_origin_validation_not_performed:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: outbound
+    rpki_bgp_origin_validation_unknown:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+    rpki_bgp_origin_validation_valid:
+      ext: null
+      lrg: null
+      peer_as: false
+      std: null
+      type: internal
+  custom_communities: {}
+  filtering:
+    global_black_list_pref:
+    - comment: IXP peering LAN
+      exact: false
+      ge: null
+      le: null
+      length: 24
+      max_length: 32
+      prefix: 192.0.2.0
+    ipv4_pref_len:
+      max: 28
+      min: 8
+    ipv6_pref_len:
+      max: 48
+      min: 12
+    irrdb:
+      allow_longer_prefixes: false
+      enforce_origin_in_as_set: true
+      enforce_prefix_in_as_set: true
+      peering_db: false
+      tag_as_set: true
+      use_arin_bulk_whois_data:
+        enabled: false
+        source: null
+      use_registrobr_bulk_whois_data:
+        enabled: false
+        source: ftp://ftp.registro.br/pub/numeracao/origin/nicbr-asn-blk-latest.txt
+      use_rpki_roas_as_route_objects:
+        enabled: false
+    max_as_path_len: 32
+    max_prefix:
+      action: shutdown
+      count_rejected_routes: true
+      general_limit_ipv4: 170000
+      general_limit_ipv6: 12000
+      peering_db:
+        enabled: false
+        increment:
+          absolute: 100
+          relative: 15
+      restart_after: 15
+    never_via_route_servers:
+      asns:
+      - 65551
+      peering_db: false
+    next_hop:
+      policy: strict
+    reject_invalid_as_in_as_path: false
+    reject_policy:
+      policy: reject
+    roles:
+      enabled: false
+      strict_mode: false
+    rpki_bgp_origin_validation:
+      enabled: false
+      reject_invalid: true
+    transit_free:
+      action: null
+      asns: null
+  graceful_shutdown:
+    enabled: false
+    local_pref: 0
+  gtsm: false
+  multihop: null
+  passive: true
+  path_hiding: true
+  prepend_rs_as: false
+  rfc1997_wellknown_communities:
+    policy: pass
+  rfc8950: false
+  router_id: 192.0.2.10
+  rpki_roas:
+    allowed_trust_anchors:
+    - APNIC RPKI Root
+    - AfriNIC RPKI Root
+    - LACNIC RPKI Root
+    - RIPE NCC RPKI Root
+    - apnic
+    - afrinic
+    - lacnic
+    - ripe
+    ignore_cache_files_older_than: 21600
+    ripe_rpki_validator_url:
+    - https://console.rpki-client.org/vrps.json
+    - https://rpki.gin.ntt.net/api/export.json
+    - https://rpki-validator.ripe.net/api/export.json
+    source: ripe-rpki-validator-cache
+  rs_as: 64496
+  rtt_thresholds: null
+
+
+bogons
+------
+bogons:
+- comment: RFC 1918
+  exact: false
+  ge: null
+  le: null
+  length: 8
+  max_length: 32
+  prefix: 10.0.0.0
+- comment: RFC 1918
+  exact: false
+  ge: null
+  le: null
+  length: 16
+  max_length: 32
+  prefix: 192.168.0.0
+- comment: unique local
+  exact: false
+  ge: null
+  le: null
+  length: 7
+  max_length: 128
+  prefix: 'fc00::'
+
+
+clients
+-------
+clients:
+- 16bit_mapped_asn: null
+  asn: 64500
+  cfg:
+    add_path: false
+    attach_custom_communities: null
+    blackhole_filtering:
+      announce_to_client: true
+    custom_options: null
+    filtering:
+      black_list_pref: null
+      ipv4_pref_len: &id001
+        max: 28
+        min: 8
+      ipv6_pref_len: &id002
+        max: 48
+        min: 12
+      irrdb:
+        as_set_bundle_ids: !!set
+          ? 25d771a4428d196b80d0a609b73650953432e63a9fe29a30f5bde367b02e91fa2730b4aac9d8254f7514e981fdbb44f24befd83859f956ce6b69fa29fa87d762
+          : null
+          ? a10e82f50d922732a6340bbcb610cb4ad1c7f7432c875659c5eebcd8783374713f953c5ea032b4ae0535daf085d1891b255a29bcd5ee49b72d1a2365a554b71d
+          : null
+        as_sets:
+        - AS-M90-ONE
+        enforce_origin_in_as_set: true
+        enforce_prefix_in_as_set: true
+        white_list_asn: null
+        white_list_pref: null
+        white_list_route: null
+      max_as_path_len: 32
+      max_prefix:
+        action: shutdown
+        count_rejected_routes: true
+        limit_ipv4: 100
+        limit_ipv6: 12000
+        peering_db:
+          enabled: false
+          increment:
+            absolute: 100
+            relative: 15
+        restart_after: 15
+      next_hop:
+        authorized_addresses_list: null
+        policy: strict
+      reject_invalid_as_in_as_path: false
+      reject_policy:
+        policy: reject
+      roles:
+        enabled: false
+        local_role: rs
+        strict_mode: false
+      rpki_bgp_origin_validation:
+        enabled: false
+        reject_invalid: true
+    graceful_shutdown:
+      enabled: false
+    gtsm: false
+    multihop: null
+    passive: true
+    prepend_rs_as: false
+    rfc8950: false
+  description: member1 - IRR-clean member
+  id: AS64500_1
+  ip: 192.0.2.11
+  password: null
+- 16bit_mapped_asn: null
+  asn: 64501
+  cfg:
+    add_path: false
+    attach_custom_communities: null
+    blackhole_filtering:
+      announce_to_client: true
+    custom_options: null
+    filtering:
+      black_list_pref: null
+      ipv4_pref_len: *id001
+      ipv6_pref_len: *id002
+      irrdb:
+        as_set_bundle_ids: !!set
+          ? 5a5be9a41cd6ec1de0017a58713d7572c914c2de926e273124e84fa47445982843162879345154c188fc77a1278094c51a623ec20e19560fb17e5d8ae39feeca
+          : null
+          ? f86b61b28b5255c383c7be5ffef7c4388a3499b3ff69a00760d6018760bac5770ca7747c21f66d59ff304d8944cc8114257b3c7910759f428ed85f402b011308
+          : null
+        as_sets:
+        - AS-M90-TWO
+        enforce_origin_in_as_set: true
+        enforce_prefix_in_as_set: true
+        white_list_asn: null
+        white_list_pref: null
+        white_list_route: null
+      max_as_path_len: 32
+      max_prefix:
+        action: shutdown
+        count_rejected_routes: true
+        limit_ipv4: 100
+        limit_ipv6: 12000
+        peering_db:
+          enabled: false
+          increment:
+            absolute: 100
+            relative: 15
+        restart_after: 15
+      next_hop:
+        authorized_addresses_list: null
+        policy: strict
+      reject_invalid_as_in_as_path: false
+      reject_policy:
+        policy: reject
+      roles:
+        enabled: false
+        local_role: rs
+        strict_mode: false
+      rpki_bgp_origin_validation:
+        enabled: false
+        reject_invalid: true
+    graceful_shutdown:
+      enabled: false
+    gtsm: false
+    multihop: null
+    passive: true
+    prepend_rs_as: false
+    rfc8950: false
+  description: member2 - announces outside its IRR set
+  id: AS64501_1
+  ip: 192.0.2.12
+  password: null
+- 16bit_mapped_asn: null
+  asn: 64502
+  cfg:
+    add_path: false
+    attach_custom_communities: null
+    blackhole_filtering:
+      announce_to_client: true
+    custom_options: null
+    filtering:
+      black_list_pref: null
+      ipv4_pref_len: *id001
+      ipv6_pref_len: *id002
+      irrdb:
+        as_set_bundle_ids: !!set
+          ? 0bc1901455a1b347485ca19202f83ed0417c085dcc45e0e3befbe3043f1c7fb6506d6b4d65cc3e93db0376a8b360154a2bbbd905dff863e5f9c319b5718f11f1
+          : null
+          ? f20eabc5a79f5a6440d9c261afc56598619d1372cc2bd1fb0a2ece8b736771e0cf982b4b2069e09730a56eb5ed8a761d8b3e6b200a8cf02b485b2f0aac1f9c98
+          : null
+        as_sets:
+        - AS-M90-THREE
+        enforce_origin_in_as_set: true
+        enforce_prefix_in_as_set: true
+        white_list_asn: null
+        white_list_pref: null
+        white_list_route: null
+      max_as_path_len: 32
+      max_prefix:
+        action: shutdown
+        count_rejected_routes: true
+        limit_ipv4: 100
+        limit_ipv6: 12000
+        peering_db:
+          enabled: false
+          increment:
+            absolute: 100
+            relative: 15
+        restart_after: 15
+      next_hop:
+        authorized_addresses_list: null
+        policy: strict
+      reject_invalid_as_in_as_path: false
+      reject_policy:
+        policy: reject
+      roles:
+        enabled: false
+        local_role: rs
+        strict_mode: false
+      rpki_bgp_origin_validation:
+        enabled: false
+        reject_invalid: true
+    graceful_shutdown:
+      enabled: false
+    gtsm: false
+    multihop: null
+    passive: true
+    prepend_rs_as: false
+    rfc8950: false
+  description: member3 - hygiene violator
+  id: AS64502_1
+  ip: 192.0.2.13
+  password: null
+
+
+asns
+----
+asns: {}
+
+
+irrdb_info
+----------
+- asns:
+  - 64502
+  descr: AS-M90-THREE
+  id: 0bc1901455a1b347485ca19202f83ed0417c085dcc45e0e3befbe3043f1c7fb6506d6b4d65cc3e93db0376a8b360154a2bbbd905dff863e5f9c319b5718f11f1
+  name: AS_M90_THREE
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 26
+    max_length: 32
+    prefix: 203.0.113.64
+  used_by: client AS64502_1
+- asns:
+  - 64500
+  descr: AS-M90-ONE
+  id: 25d771a4428d196b80d0a609b73650953432e63a9fe29a30f5bde367b02e91fa2730b4aac9d8254f7514e981fdbb44f24befd83859f956ce6b69fa29fa87d762
+  name: AS_M90_ONE
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 24
+    max_length: 32
+    prefix: 198.51.100.0
+  - comment: null
+    exact: false
+    ge: 26
+    le: 28
+    length: 26
+    max_length: 32
+    prefix: 203.0.113.0
+  used_by: client AS64500_1
+- asns:
+  - 64501
+  descr: AS-M90-TWO
+  id: 5a5be9a41cd6ec1de0017a58713d7572c914c2de926e273124e84fa47445982843162879345154c188fc77a1278094c51a623ec20e19560fb17e5d8ae39feeca
+  name: AS_M90_TWO
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 25
+    max_length: 32
+    prefix: 203.0.113.128
+  used_by: client AS64501_1
+- asns:
+  - 64500
+  descr: AS64500
+  id: a10e82f50d922732a6340bbcb610cb4ad1c7f7432c875659c5eebcd8783374713f953c5ea032b4ae0535daf085d1891b255a29bcd5ee49b72d1a2365a554b71d
+  name: AS64500
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 24
+    max_length: 32
+    prefix: 198.51.100.0
+  - comment: null
+    exact: false
+    ge: 26
+    le: 28
+    length: 26
+    max_length: 32
+    prefix: 203.0.113.0
+  used_by: client AS64500_1
+- asns:
+  - 64502
+  descr: AS64502
+  id: f20eabc5a79f5a6440d9c261afc56598619d1372cc2bd1fb0a2ece8b736771e0cf982b4b2069e09730a56eb5ed8a761d8b3e6b200a8cf02b485b2f0aac1f9c98
+  name: AS64502
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 26
+    max_length: 32
+    prefix: 203.0.113.64
+  used_by: client AS64502_1
+- asns:
+  - 64501
+  descr: AS64501
+  id: f86b61b28b5255c383c7be5ffef7c4388a3499b3ff69a00760d6018760bac5770ca7747c21f66d59ff304d8944cc8114257b3c7910759f428ed85f402b011308
+  name: AS64501
+  prefixes:
+  - comment: null
+    exact: true
+    ge: null
+    le: null
+    length: 25
+    max_length: 32
+    prefix: 203.0.113.128
+  used_by: client AS64501_1
+
+
+rpki_roas
+---------
+[]
+
+
+arin_whois_db_records
+---------------------
+{}
+
+
+registrobr_whois_db_records
+---------------------------
+{}
+
+
+never_via_route_servers_asns
+----------------------------
+- 65551

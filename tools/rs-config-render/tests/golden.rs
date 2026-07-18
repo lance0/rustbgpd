@@ -8,6 +8,14 @@ use rs_config_render::{Options, RenderError, render};
 
 const FIXTURE: &str = include_str!("fixtures/context-small.yml");
 
+/// A verbatim `arouteserver template-context` dump (pinned
+/// pierky/arouteserver image, arouteserver 1.23.2) of the M90
+/// differential lab's site — the *sectioned report* form.
+const SECTIONED: &str =
+    include_str!("../../../tests/interop/m90-differential/context-sectioned.yml");
+/// The hand-authored single-document context for the same site.
+const M90_HAND: &str = include_str!("../../../tests/interop/m90-differential/context.yml");
+
 fn fixture_value() -> serde_yaml::Value {
     serde_yaml::from_str(FIXTURE).expect("fixture parses")
 }
@@ -315,6 +323,134 @@ fn add_path_replaces_per_client_best() {
     let toml = &rendered.files["config.toml"];
     assert!(toml.contains("[neighbors.add_path]"), "{toml}");
     assert!(!toml.contains("per_client_best"), "{toml}");
+}
+
+// ---------------------------------------------------------------------------
+// Sectioned template-context ingestion (the format arouteserver 1.23.2
+// actually emits)
+// ---------------------------------------------------------------------------
+
+/// Drop the context-shape fingerprint line — the one legitimate
+/// difference between renders of the two input forms.
+fn strip_fingerprint(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.contains("fingerprint"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn sectioned_dump_renders_identically_to_the_hand_authored_context() {
+    let real = render(SECTIONED, &Options::default()).expect("sectioned dump renders");
+    let hand = render(M90_HAND, &Options::default()).expect("hand-authored context renders");
+    assert_eq!(
+        real.files.keys().collect::<Vec<_>>(),
+        hand.files.keys().collect::<Vec<_>>()
+    );
+    for (path, content) in &real.files {
+        assert_eq!(
+            strip_fingerprint(content),
+            strip_fingerprint(&hand.files[path]),
+            "render divergence between input forms in {path}"
+        );
+    }
+    assert_eq!(real.warnings, hand.warnings);
+    assert_eq!(real.receipt["clients"], hand.receipt["clients"]);
+    // The real dump resolves TWO overlapping bundles per client (the
+    // AS-SET and the bare origin-ASN object); the union must dedupe.
+    assert_eq!(real.receipt["clients"][0]["prefix_set_size"], 2);
+    assert_eq!(real.receipt["clients"][0]["origin_set_size"], 1);
+}
+
+#[test]
+fn sectioned_unknown_section_is_refused_and_overridable() {
+    let doctored = format!("{SECTIONED}\n\nshiny_new_knob\n--------------\ntrue\n");
+    match render(&doctored, &Options::default()) {
+        Err(RenderError::ShapeMismatch {
+            missing,
+            unexpected,
+            ..
+        }) => {
+            assert!(missing.is_empty(), "{missing:?}");
+            assert_eq!(unexpected, vec!["shiny_new_knob".to_owned()]);
+        }
+        other => panic!("expected shape mismatch, got {other:?}"),
+    }
+    let opts = Options {
+        allow_shape_drift: true,
+        ..Options::default()
+    };
+    let rendered = render(&doctored, &opts).expect("drift override renders");
+    assert!(
+        rendered
+            .warnings
+            .iter()
+            .any(|w| w.contains("fingerprint mismatch overridden")),
+        "{:?}",
+        rendered.warnings
+    );
+}
+
+#[test]
+fn sectioned_missing_section_is_refused() {
+    // The never-via section is the report's last; cut it off.
+    let truncated = SECTIONED
+        .split("never_via_route_servers_asns")
+        .next()
+        .expect("fixture carries the never-via section");
+    match render(truncated, &Options::default()) {
+        Err(RenderError::ShapeMismatch { missing, .. }) => {
+            assert_eq!(missing, vec!["never_via_route_servers_asns".to_owned()]);
+        }
+        other => panic!("expected shape mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn sectioned_malformed_section_body_is_a_parse_error() {
+    let corrupted = SECTIONED.replace("\nrpki_roas\n---------\n[]", "\nrpki_roas\n---------\n[");
+    assert_ne!(corrupted, SECTIONED, "corruption target not found");
+    match render(&corrupted, &Options::default()) {
+        Err(err @ RenderError::Parse(_)) => {
+            assert_eq!(err.exit_code(), 1);
+            assert!(err.to_string().contains("rpki_roas"), "{err}");
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_black_and_white_lists_are_refused() {
+    use serde_yaml::Value;
+    let entry: Value = serde_yaml::from_str("[{prefix: 203.0.113.0, length: 24}]").unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (&["cfg", "filtering", "black_list_pref"], "black_list_pref"),
+        (
+            &["cfg", "filtering", "irrdb", "white_list_pref"],
+            "white_list_pref",
+        ),
+        (
+            &["cfg", "filtering", "irrdb", "white_list_asn"],
+            "white_list_asn",
+        ),
+        (
+            &["cfg", "filtering", "irrdb", "white_list_route"],
+            "white_list_route",
+        ),
+    ];
+    for (path, marker) in cases {
+        let mut value = healthy_value();
+        let mut clients = value["clients"].clone();
+        set_path(&mut clients[0], path, entry.clone());
+        set_path(&mut value, &["clients"], clients);
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.contains(marker) && i.contains("client AS4242_1")),
+            "no refusal containing {marker:?}: {items:?}"
+        );
+    }
 }
 
 #[test]

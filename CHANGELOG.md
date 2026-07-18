@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rs-config-render` ingests real `arouteserver template-context`
+  output.** arouteserver 1.23.2 emits a sectioned report (per-key
+  heading + YAML fragment), not the single YAML document the renderer
+  previously required; the renderer now auto-detects and ingests both
+  forms, normalizing the report's section names, hash-keyed
+  `irrdb_info` bundle list, and `!!set`-typed `as_set_bundle_ids`, and
+  deduping the overlapping AS-SET/origin-ASN bundle union. The
+  sectioned shape is fingerprint-pinned like the single-document form
+  (same exit-code discipline), and per-client `black_list_pref` /
+  IRR `white_list_*` knobs are now refused instead of silently
+  dropped. A verbatim dump from the digest-pinned image is checked in,
+  the test suite pins render parity between the two forms, and
+  `tests/interop/m90-differential/prove-context-ingestion.sh` proves
+  the advertised pipeline (`template-context` in the pinned container
+  → `rs-config-render` → `rustbgpd --check` + `rbgp policy check`)
+  end to end with true exit codes.
+
 - **arouteserver differential interop lab (M90).** One
   `general.yml`/`clients.yml` pair drives both route servers — BIRD 2
   configured by containerized arouteserver 1.23.2 (digest-pinned),

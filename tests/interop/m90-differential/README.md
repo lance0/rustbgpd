@@ -56,29 +56,32 @@ every generated `.rpol`).
 ## The canonical context path
 
 `context.yml` is checked in hand-authored (matching the renderer's
-fingerprint-pinned 17-key shape, same as its golden fixture) so the
-rustbgpd side renders deterministically offline. arouteserver's own
-dump of the same site is
+fingerprint-pinned 17-key single-document shape, same as its golden
+fixture) so the rustbgpd side renders deterministically offline.
+arouteserver's own dump of the same site is
 
 ```bash
 arouteserver template-context --cfg arouteserver.yml --output context.yml
 ```
 
-(same mounts as the driver's BIRD render), but as of arouteserver
-1.23.2 that command emits a *sectioned report* (per-key heading +
-underline + YAML fragment), not one YAML document, and its section
-names differ from the renderer's pinned top-level keys (e.g.
-`arin_whois_db_records` vs `arin_whois_records`; `irrdb_info` as a
-list of hash-keyed bundles vs a map). So the dump is not a drop-in
-replacement for this fixture; converting it is an rs-config-render
-follow-up. The fixture's *data* was verified in lockstep against a
-real 1.23.2 dump when the image was pinned: filtering knobs, client
-roster, bogons, never-via ASNs, and every per-client IRR asn/prefix
-bundle match.
+(same mounts as the driver's BIRD render). As of arouteserver 1.23.2
+that command emits a *sectioned report* (per-key heading + underline +
+YAML fragment) whose section names and value shapes differ from the
+single-document form (e.g. `arin_whois_db_records` vs
+`arin_whois_records`; `irrdb_info` as a list of hash-keyed bundles vs
+a map); `rs-config-render` auto-detects and ingests **both** forms. A
+real dump from the pinned image is checked in verbatim as
+[`context-sectioned.yml`](context-sectioned.yml), and
+[`prove-context-ingestion.sh`](prove-context-ingestion.sh) re-runs the
+dump against the pinned image and asserts, with true exit codes, that
+it still matches the checked-in dump byte for byte and that both
+fixtures render identical configuration (modulo the context-shape
+fingerprint header). The renderer's test suite pins the same parity
+offline.
 
-The lab never trusts the fixture alone: the BIRD side always re-runs
+The lab never trusts the fixtures alone: the BIRD side always re-runs
 arouteserver proper from `general.yml`/`clients.yml` at runtime, so if
-the fixture drifts from the site files the differential verdicts
+a fixture drifts from the site files the differential verdicts
 diverge and the lab fails.
 
 ## Site quirks (deliberate)
