@@ -66,6 +66,23 @@ Note that the schema checks structure, types, and enum values; semantic
 rules (ASN/hold-time ranges, cross-field requirements, name references)
 are still enforced by `rustbgpd --check`. Run both for full coverage.
 
+Every table in the schema rejects unknown keys, and a typo'd key is
+diagnosed with the file/line/column, the enclosing table, and the
+closest valid key(s):
+
+```
+error: failed to parse config
+   --> /etc/rustbgpd/config.toml:13:1
+   |
+13 | route_server_clint = true
+   | ^^^^^^^^^^^^^^^^^^ unknown field `route_server_clint` in [[neighbors]]; did you mean `route_server_client`?
+```
+
+If no valid key is close enough, the error lists the full set of keys
+accepted at that position instead. Lines carrying secret material
+(`md5_password`, `tcp_ao` keys) stay redacted in these excerpts even
+when the key itself is the typo.
+
 To see what a **running** daemon is actually using — the post-defaults
 config, with peer-group inheritance and computed defaults (`hold_time`,
 `send_hold_time`, GR timers, address families) materialized on every

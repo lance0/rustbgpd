@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Did-you-mean suggestions for unknown config keys.** A typo'd TOML
+  key at any level (root, `[[neighbors]]`, peer groups, nested tables)
+  now renders the enclosing table and the closest valid key(s) inside
+  the existing source-excerpt diagnostic — `unknown field
+  `` `route_server_clint` `` in `[[neighbors]]`; did you mean
+  `` `route_server_client` ``? — reusing the `.rpol` frontend's
+  edit-distance ranking. Garbage keys with no close match keep serde's
+  full expected-key list; secret-bearing lines stay redacted.
+
 ### Changed
 
 - **Docs: operator discoverability pass.** New `docs/explain.md` catalog
