@@ -182,6 +182,29 @@ equivalent resumable continuation against its ingest and memory cost; it must
 retain an opaque cursor while replacing the permissive mutation behavior above
 with an explicit fail-closed generation fence.
 
+## Ordered-index ingest cost (2026-07-18 follow-up)
+
+The ordered-continuation index initially maintained its prefix trie eagerly
+inside `LocRib::recompute`; the nightly criterion tripwire caught the ingest
+cost against the v0.51.0 baseline (`loc_rib_recompute/1..8` +54% to +183% on
+the nightly runner, `rib_pipeline` +8-10%, `bulk_initial_load/10000` +13.5%).
+Maintenance is now deferred: recompute journals membership changes into a
+capacity-reserved buffer and a listing replays the journal — or rebuilds the
+index outright once the journal would match the table size — so the eager trie
+insertion left the hot path entirely.
+
+Post-fix A/B (pinned harness, three alternating attempts, v0.51.0 base):
+`rib_pipeline` -0.2%/-1.5%/-1.1%, `bulk_initial_load` -0.7% at 10k and a
+non-confident straddle at 100k. A flat residual of roughly 20-30 ns per call
+remains visible only in the `loc_rib_recompute` microbenchmark (+21-49%); a
+discriminator build with the journal note stubbed to a no-op still measures
++18-30%, attributing the residual to carrying the index feature itself (a
+larger `LocRib` moved by value in the bench's fresh-rib iteration shape), not
+to the deferred maintenance. The constant does not reproduce in the
+long-lived-rib pipeline or bulk-load shapes. The nightly comparison's
+`loc_rib_recompute` rows therefore stay red against the v0.51.0 baseline until
+the next release rebaselines them; this section is the accepted-cost record.
+
 ## Ordered-continuation campaign contract
 
 The retained results above remain the immutable borrowed-view receipt; its
