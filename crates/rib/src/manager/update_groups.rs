@@ -1328,14 +1328,25 @@ impl RibManager {
     }
 
     /// Accumulate one bounded key chunk. A withdrawal, source flip, or table
-    /// drift rejects the complete optimized plan before emission.
+    /// drift rejects the complete optimized plan before emission — and so
+    /// does a control-form community (RFC 7947 §2.3.2) for any of the
+    /// cohort's RS ASNs (`rs_asns`), on EITHER side of policy: the source
+    /// residue drives per-target suppression/prepend even when policy
+    /// strips the tag from the post-policy route, and a policy-added tag
+    /// needs the per-target scrub. Untagged (the overwhelming case) is
+    /// proven in this same single walk, so rs-control members ride the
+    /// shared cohort at zero extra passes; a tagged inventory hands the
+    /// whole cohort to the authoritative per-peer path, whose emit seams
+    /// apply the per-target filter.
     pub(in crate::manager) fn extend_clean_policy_transition_inventory(
         &self,
         source: usize,
         destination: usize,
         keys: &[(Prefix, u32)],
+        rs_asns: &[u32],
         inventory: &mut CleanPolicyTransitionInventoryBuilder,
     ) -> Option<()> {
+        use super::distribution::rs_control::rs_control_route_tagged;
         let old = self.group_ribs.get(&source)?;
         let new = self.group_ribs.get(&destination)?;
         // Fold permit counts per chunk keyed by borrowed labels, then merge
@@ -1360,6 +1371,21 @@ impl RibManager {
             }
             let next_hop = new.nh_override(key);
             if !routes_equal(prior, route) || old.nh_override(key) != next_hop {
+                if !rs_asns.is_empty() {
+                    let (old_communities, old_large) = old.source_control(key);
+                    let (new_communities, new_large) = new.source_control(key);
+                    let tagged = rs_asns.iter().any(|&rs_asn| {
+                        rs_control_route_tagged(
+                            route.communities(),
+                            route.large_communities(),
+                            rs_asn,
+                        ) || rs_control_route_tagged(old_communities, old_large, rs_asn)
+                            || rs_control_route_tagged(new_communities, new_large, rs_asn)
+                    });
+                    if tagged {
+                        return None;
+                    }
+                }
                 inventory.announce.push(route.clone());
                 inventory.next_hop_override.push(next_hop);
             }

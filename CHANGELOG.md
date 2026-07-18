@@ -1310,6 +1310,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counts stay consistent. Regression tests cover both the fn and policy passes;
   found by the nightly `rpol_compile` fuzz target.
 
+- **Route-server fleets take the shared clean export-policy transition
+  again — ~150× reload-completion regression fixed.** The shared
+  transition's member-eligibility check blanket-excluded every
+  `rs_control_communities` session, a leftover from when the knob was
+  opt-in; with it defaulting on for `route_server_client` neighbors, an
+  entire IXP fleet fell back to serial per-member full-table resyncs on
+  every export-policy reload (200 members × 115k routes: ~28.6 s vs
+  0.22 s with the knob off; ~4.5 min at 700 × 400k). The transition's
+  single inventory walk now proves the diff carries no RFC 7947
+  control-form community for the cohort's RS ASNs — checking the
+  post-policy routes AND the captured source communities on both sides,
+  so a policy that strips or adds a control tag still rejects the
+  optimized plan — and untagged inventories (the overwhelming case) let
+  rs-control members ride the shared cohort and shared encode exactly
+  like ordinary members. Tagged inventories keep the whole cohort on
+  the authoritative per-peer path, whose emit seams apply the
+  per-target suppression/prepend/scrub.
+
 ## [0.51.0] — 2026-07-11
 
 ### Added

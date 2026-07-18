@@ -1166,6 +1166,14 @@ fn adj_rib_out_contains_exact_key(
 }
 
 impl RibManager {
+    /// Per-member eligibility for the shared clean export-policy
+    /// transition. Route-server control members (RFC 7947 §2.3.2) are
+    /// eligible like ordinary members: the shared inventory/encode is
+    /// per-target-correct for them exactly when the inventory carries
+    /// no control-form community, which the inventory build proves per
+    /// RS ASN (`extend_clean_policy_transition_inventory`) — a tagged
+    /// inventory rejects the whole optimized plan there, before any
+    /// member is moved or an envelope emitted.
     fn clean_policy_transition_peer_ready(&self, peer: IpAddr) -> bool {
         let sendable = self.peer_sendable_families.get(&peer);
         let only_unicast = sendable.is_some_and(|families| {
@@ -1206,13 +1214,6 @@ impl RibManager {
             && !self.peer_unexportable.contains_key(&peer)
             && !self.peer_orf_pending.contains_key(&peer)
             && !self.peer_orf_filters.contains_key(&peer)
-            // LAN-474: the strict transition's shared inventory /
-            // shared encode is one payload for the whole cohort, but an
-            // rs-control member's emission can diverge per target on
-            // tagged routes. Rare event, tiny cohort cost: these
-            // members take the ordinary regroup baseline diff, which
-            // applies the emit-time filter.
-            && !self.peer_rs_control.contains_key(&peer)
     }
 
     /// Advance one bounded production step of the actor-owned transition.
@@ -1414,6 +1415,16 @@ impl RibManager {
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
                 let snapshot = keys.as_ref().expect("initialized above");
+                // The cohort's RS ASNs (typically zero or one distinct
+                // value): the inventory walk proves untagged-ness per
+                // ASN so rs-control members can ride the shared cohort.
+                let mut rs_asns = pending
+                    .replacements
+                    .iter()
+                    .filter_map(|replacement| self.peer_rs_control.get(&replacement.peer).copied())
+                    .collect::<Vec<u32>>();
+                rs_asns.sort_unstable();
+                rs_asns.dedup();
                 // Budgeted stride loop (see the probe phase): extend the
                 // inventory by route-slices until the poll budget elapses.
                 let poll_start = std::time::Instant::now();
@@ -1428,6 +1439,7 @@ impl RibManager {
                             source,
                             destination,
                             &snapshot[cursor..end],
+                            &rs_asns,
                             &mut inventory,
                         )
                         .is_none()
