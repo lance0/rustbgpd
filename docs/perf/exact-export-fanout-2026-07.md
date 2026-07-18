@@ -111,7 +111,8 @@ justify that additional correctness surface.
 The real exact probe remained a per-peer operation after the attribute memo,
 so its cost scaled with fanout even when update-group members shared one staged
 payload. This campaign compares current `main`'s permissive benchmark, the
-pre-cache LAN-361 head, and the wire-equivalence cohort optimization.
+pre-cache attribute-memo head from campaign 1, and the wire-equivalence
+cohort optimization.
 
 ### Compared revisions
 
@@ -228,9 +229,9 @@ member. It must not be described as performing a full exact encode per peer.
 Campaign 2 removed redundant exact encoding across compatible update-group
 members, but the common all-success path still rebuilt every candidate key,
 walked the group's advertised-state delta for every peer, and allocated a
-per-peer prior set that was used only when a probe failed. LAN-395 defers that
-work until the rejection fallback actually needs it and keeps the clean
-grouped path keyless.
+per-peer prior set that was used only when a probe failed. The grouped
+fast-path continuation defers that work until the rejection fallback actually
+needs it and keeps the clean grouped path keyless.
 
 ### Compared revisions
 

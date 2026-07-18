@@ -1,6 +1,7 @@
 # RIB route-paging materialization receipt — 2026-07
 
-LAN-391 identified two independent costs in bounded unicast route listings:
+The route-paging investigation identified two independent costs in bounded
+unicast route listings:
 every page scans its complete scope, and a grouped advertised-route page also
 cloned the complete member view before that scan. This first tranche measures
 both costs and removes only the grouped full-view clone. It deliberately does
@@ -173,10 +174,10 @@ full-view clone without changing the cursor contract or adding persistent
 memory, clears every tranche gate, and leaves the best-scope control within the
 declared complete-traversal envelope.
 
-Do not close LAN-391. The 400k grouped p99 proxy is now below 5 ms, but the
-complete-traversal speedups are 9.342x and 8.086x rather than the issue's full
-10x gate. The residual cost is the measured repeated full-table scan shared by
-grouped and best scopes. A continuation should evaluate an ordered index or
+Do not treat the route-paging work as closed. The 400k grouped p99 proxy is
+now below 5 ms, but the complete-traversal speedups are 9.342x and 8.086x
+rather than the full 10x gate. The residual cost is the measured repeated
+full-table scan shared by grouped and best scopes. A continuation should evaluate an ordered index or
 equivalent resumable continuation against its ingest and memory cost; it must
 retain an opaque cursor while replacing the permissive mutation behavior above
 with an explicit fail-closed generation fence.

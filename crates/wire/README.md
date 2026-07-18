@@ -40,6 +40,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
+| 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
 | 7674 | Clarification of MP_REACH_NLRI next-hop encoding |
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
@@ -60,6 +61,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
 | 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche. Typed topology read accessors now live in the crate (the `bgpls_topo` module); outbound reflection and topology production remain outside the wire crate |
+| 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
@@ -165,6 +167,14 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `_NOT_FOUND` / `_INVALID` constants (type 0x43) for the RPKI prefix-origin
   validation-state extended community, rendered `OV_VALID` / `OV_NOT_FOUND` /
   `OV_INVALID` by `Display` (0.14.0)
+- **Revised error handling (RFC 7606)** — `UpdateMessage::parse_revised`
+  returns `RevisedParsedUpdate`: the cleanly decoded `ParsedUpdate` plus the
+  `MalformedAttribute`s recovered without aborting the parse (collected via
+  `RevisedAttributeDecode`), each carrying an `ErrorDisposition`
+  (`AttributeDiscard` / `TreatAsWithdraw` / `SessionReset`) from
+  `malformed_attr_disposition(type_code, is_ibgp)`. `UpdateError` from
+  attribute validation also exposes the disposition a revised-error-handling
+  caller should apply
 - **`UpdateValidationOptions`** — opt-in relaxations for
   `validate_update_attributes_with_options`, e.g. accepting a link-local-primary
   IPv4 `MP_REACH_NLRI` next-hop on a scoped unnumbered session (RFC 8950)

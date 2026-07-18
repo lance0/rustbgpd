@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **arouteserver differential interop lab (M90).** One
+  `general.yml`/`clients.yml` pair drives both route servers — BIRD 2
+  configured by containerized arouteserver 1.23.2 (digest-pinned),
+  rustbgpd by `rs-config-render` from the site's template-context dump.
+  Three GoBGP members announce a canned set spanning IRR, bogon,
+  prefix-length, black-list, and never-via-RS rejections; the lab
+  passes 65/65 assertions with identical accept/reject verdicts on both
+  daemons, and `rbgp policy explain` names the predicted generated
+  policy term for every rejection.
+
+- **Paths-Limit interop receipt (M89).** Three digest-pinned FRR 10.3.1
+  source ASes originate the same IPv4 and IPv6 prefix through a
+  rustbgpd route server to a real FRR sink, proving the experimental
+  Paths-Limit capability (code 76) per family end to end: exact
+  configured/advertised/received/effective values, exact Adj-RIB-Out
+  and independent sink counts, and typed FRR capability state. Runs in
+  hosted CI sharing the M17 Add-Path build and job.
+
 - **Did-you-mean suggestions for unknown config keys.** A typo'd TOML
   key at any level (root, `[[neighbors]]`, peer groups, nested tables)
   now renders the enclosing table and the closest valid key(s) inside
@@ -817,6 +835,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bench/scale/reloadstall/gen-scenario.py`.
 
 ### Fixed
+
+- **Interop: FRR zebra startup race pinned out of M10 and M89.** On a
+  loaded runner FRR can send its initial IPv6 UPDATE before zebra
+  reports a global address on the peering interface; the
+  link-local-only MP_REACH next hop is rightly rejected
+  (treat-as-withdraw) and FRR never re-advertises, starving the proofs
+  for the whole convergence window. Explicit outbound route-maps now
+  set the IPv6 global next hop on the FRR sources, removing the
+  interface-address timing dependency.
 
 - **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
   malformed UPDATE from session reset.** The "no reachable NLRI"

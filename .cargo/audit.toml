@@ -21,8 +21,8 @@ ignore = [
     # (the `rbgp top` command). We do not install a custom rand
     # logger anywhere in the workspace, so the unsoundness isn't
     # reachable. Pending a ratatui-termwiz bump that pulls a fixed
-    # rand. Tracked in ROADMAP.md under "Resolve open cargo audit
-    # findings."
+    # rand. Tracked in ROADMAP.md under the "`cargo deny` for
+    # license / dependency / advisory audit" bullet.
     "RUSTSEC-2026-0097",
     # RUSTSEC-2024-0436 — `paste` 1.0.15 unmaintained (the upstream
     # author archived the repo). Informational, no security
@@ -32,6 +32,7 @@ ignore = [
     # `pastey` or the equivalent. We accept this surface because the
     # paste invocation in netlink-packet-utils is a `nla_get_*` /
     # `nla_put_*` macro generator — pure proc-macro, no runtime
-    # behavior to worry about. Tracked in ROADMAP.md.
+    # behavior to worry about. Tracked in ROADMAP.md under the
+    # "`cargo deny` for license / dependency / advisory audit" bullet.
     "RUSTSEC-2024-0436",
 ]

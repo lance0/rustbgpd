@@ -8,8 +8,8 @@ sharding). ADR-0105 discloses that the grouped export-policy transition
 runs **two un-chunked O(table) snapshot polls** plus an O(outbound-peers
 + table × dirty-peers) finalize tail inside the single-owner actor, and
 warns that at ~1M routes a single such poll plausibly exceeds the 200 ms
-readiness deadline, depooling the node during a *legitimate* reload
-(LAN-418). This receipt confirms or refutes that empirically.
+readiness deadline, depooling the node during a *legitimate* reload.
+This receipt confirms or refutes that empirically.
 
 > **Question: at ~1M routes, does a single policy-transition actor poll
 > exceed the 200 ms `/readyz` deadline, and if the node depools during a

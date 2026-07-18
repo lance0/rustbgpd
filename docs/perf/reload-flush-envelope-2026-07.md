@@ -4,7 +4,7 @@ The 1M actor-ceiling receipt (`actor-ceiling-1m-2026-07.md`) found that a
 policy reload depools the node for ~2 s — not in the policy transition
 (whose polls stay under the 200 ms readiness deadline) but in the
 **post-commit outbound re-advertisement flush**. This receipt answers the
-follow-on question that decides how to fix it (LAN-447):
+follow-on question that decides how the cooperative-flush fix is shaped:
 
 > **Is the reload-flush `/readyz` stall driven by route volume
 > (routes re-advertised) or by the peer fleet (how many peers)?**
@@ -70,7 +70,7 @@ Roughly, stall ≈ f(changed_peers × total_peers), superlinear at the top end,
 ~100–150 changed peers on a 300-client fleet and is left far behind (seconds)
 at 500-client internet-scale fleets.
 
-### What this means for LAN-447
+### What this means for the cooperative-flush fix
 
 The cooperative-flush fix should target the **per-peer distribution loop**,
 not route encoding. The stall does not track how many routes are pushed; it
