@@ -115,6 +115,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the reconnect loop immediately and resyncs from a fresh initial
   snapshot + `sync_response`.
 
+- **Grouped route-server control decisions are now made on the source
+  route, matching the ungrouped path.** The update-groups emission path
+  evaluated RFC 7947 control communities (`0:PEER` suppression,
+  `RS:0:PEER` large-community forms, prepend requests) on the
+  post-export-policy route, so a policy that stripped a control
+  community could leak a route the source member prohibited, and
+  policy-added control communities could spuriously suppress or
+  prepend. Suppression and prepend are now decided from the source
+  route's communities captured at staging time; the egress scrub still
+  runs post-policy so policy-added control forms are removed without
+  acting. Tag-only transitions (policy strips or adds the tag while the
+  route is otherwise unchanged) now emit the exact per-member withdraw /
+  re-announce delta instead of being equality-suppressed.
+
 ### Changed
 
 - **BREAKING (library API): registry-tracking wire/fsm enums are now
