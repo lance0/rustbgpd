@@ -214,6 +214,7 @@ fn peer_context_chain() -> PolicyChain {
 /// `PeerUp` with update-group-relevant knobs; the rest defaulted.
 struct PeerUpSpec {
     peer: IpAddr,
+    peer_asn: u32,
     export_policy: Option<PolicyChain>,
     is_ebgp: bool,
     route_reflector_client: bool,
@@ -228,6 +229,7 @@ impl PeerUpSpec {
     fn ibgp(peer: IpAddr) -> Self {
         Self {
             peer,
+            peer_asn: 65000,
             export_policy: None,
             is_ebgp: false,
             route_reflector_client: false,
@@ -271,7 +273,7 @@ async fn peer_up_with_capacity(
         interpret_rfc1997: true,
         session_id: 0,
         peer: spec.peer,
-        peer_asn: 65000,
+        peer_asn: spec.peer_asn,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: spec.export_policy,
@@ -2506,6 +2508,303 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
             .starts_with("group:")
     );
     assert_eq!(query_update_group(&tx, peers[1]).await, "add_path_send");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Permit-all chain applying `mods` to every route (rs-control
+/// transition scenarios).
+fn mods_chain(mods: RouteModifications) -> PolicyChain {
+    let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    statement.prefix = None;
+    statement.action = PolicyAction::Permit;
+    statement.modifications = mods;
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// `SetPeerRsControl` (staged before `PeerUp`, mirroring the transport
+/// registration order) + [`peer_up_with_cohort_encoder`].
+async fn rs_peer_up_with_cohort_encoder(
+    tx: &mpsc::Sender<RibUpdate>,
+    spec: PeerUpSpec,
+    rs_control_asn: u32,
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerRsControl {
+        peer: spec.peer,
+        session_id: 0,
+        rs_control_asn: Some(rs_control_asn),
+    })
+    .await
+    .unwrap();
+    peer_up_with_cohort_encoder(tx, spec, encoder).await
+}
+
+/// An `rs_control_communities` cohort whose inventory carries no
+/// control-form community — the overwhelming route-server case — must
+/// take the shared clean transition like ordinary members instead of
+/// the serial per-member full-table resync (the reload-completion
+/// regression at route-server scale).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cohort setup, shared-payload proof, and stats assertions form one scenario"
+)]
+async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory() {
+    const MEMBER_COUNT: usize = 3;
+    const ROUTE_COUNT: usize = 8;
+    const RS_AS: u32 = 64512;
+
+    let (tx, rx) = mpsc::channel(128);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let mut peers = Vec::new();
+    let mut receivers = Vec::new();
+    for index in 0..MEMBER_COUNT {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 61, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        let mut spec = PeerUpSpec::ebgp(peer);
+        spec.peer_asn = 65001 + u32::try_from(index).unwrap();
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            rs_peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                RS_AS,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 19,
+                    max_len: 65_535,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+
+    let source = Ipv4Addr::new(192, 0, 2, 61);
+    let announced = (0..ROUTE_COUNT)
+        .map(|index| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, u8::try_from(index).unwrap(), 0), 24),
+                source,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed),
+        "an untagged inventory must admit rs-control members to the shared transition"
+    );
+
+    let mut updates = Vec::new();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.announce.len(), ROUTE_COUNT);
+        updates.push(update);
+    }
+    for update in &updates[1..] {
+        assert!(
+            Arc::ptr_eq(&updates[0].announce, &update.announce),
+            "rs-control members must share the cohort's one announce payload"
+        );
+    }
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(
+        stats_response.await.unwrap().0,
+        1,
+        "the cohort must commit through exactly one shared plan, not per-member resyncs"
+    );
+    for &peer in &peers {
+        assert_eq!(query_update_group(&tx, peer).await, "group:1");
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The tagged-inventory gate must consider the SOURCE routes: a policy
+/// that strips a "do not announce to PEER" community leaves the
+/// post-policy inventory clean while the member's verdict still
+/// diverges. The cohort must fall back to the authoritative per-peer
+/// path, and the suppressed member must never receive the route.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the tagged-source setup, fallback handoff, and per-member wire proofs form one scenario"
+)]
+async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative_path() {
+    const RS_AS: u32 = 64512;
+    let deny_to_a = rustbgpd_wire::LargeCommunity {
+        global_admin: RS_AS,
+        local_data1: 0,
+        local_data2: 65001,
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    // Both chains strip the control community (the stripped-tag trap:
+    // the post-policy inventory looks clean while the source verdict
+    // diverges); the replacement also stamps a community so the table
+    // diffs.
+    let old_policy = mods_chain(RouteModifications {
+        large_communities_remove: vec![deny_to_a],
+        ..RouteModifications::default()
+    });
+    let next_policy = mods_chain(RouteModifications {
+        large_communities_remove: vec![deny_to_a],
+        communities_add: vec![0xFDE8_0002],
+        ..RouteModifications::default()
+    });
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ebgp(peer);
+        spec.peer_asn = 65001 + u32::try_from(index).unwrap();
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            rs_peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                RS_AS,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 23,
+                    max_len: 65_535,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24);
+    let source = Ipv4Addr::new(192, 0, 2, 62);
+    let mut steered = make_route_with_as_path(prefix, source, vec![65010]);
+    Arc::make_mut(&mut steered.attributes).push(PathAttribute::LargeCommunities(vec![deny_to_a]));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![steered],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    assert!(
+        receivers[0].try_recv().is_err(),
+        "the source-denied member must not receive the route initially"
+    );
+    assert_eq!(receivers[1].try_recv().unwrap().announce.len(), 1);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let outcome = response.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+        "a source-tagged inventory must keep rs members off the shared transition"
+    );
+    apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
+
+    while let Ok(update) = receivers[0].try_recv() {
+        assert!(
+            !update
+                .announce
+                .iter()
+                .any(|route| route.prefix == Prefix::V4(prefix)),
+            "the source-denied member must never receive the route through any transition path"
+        );
+    }
+    let mut b_routes = Vec::new();
+    while let Ok(update) = receivers[1].try_recv() {
+        b_routes.extend(update.announce.iter().cloned());
+    }
+    let reannounced = b_routes
+        .iter()
+        .find(|route| route.prefix == Prefix::V4(prefix))
+        .expect("the other member re-receives the route under the new policy");
+    assert!(reannounced.communities().contains(&0xFDE8_0002));
+    assert!(
+        reannounced.large_communities().is_empty(),
+        "the control community stays stripped/scrubbed from the wire"
+    );
+    let (stats_reply, stats_response) = oneshot::channel();
+    tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
+        .await
+        .unwrap();
+    assert_eq!(
+        stats_response.await.unwrap().0,
+        0,
+        "no shared plan may commit"
+    );
 
     drop(tx);
     handle.await.unwrap();
