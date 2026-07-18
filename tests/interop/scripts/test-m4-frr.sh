@@ -179,6 +179,11 @@ test_add_neighbor() {
 
     local result
     result=$(grpc_add_neighbor "10.0.18.2" 65018 "frr-09-dynamic" 2>&1 || true)
+    if printf '%s' "$result" | grep -qi 'error'; then
+        fail "AddNeighbor RPC failed: $result"
+        return
+    fi
+    ok "AddNeighbor RPC accepted"
 
     # Wait for session to establish
     sleep 5
