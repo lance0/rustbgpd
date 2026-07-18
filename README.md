@@ -8,100 +8,45 @@
 [![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
-An API-first BGP daemon in Rust, built for programmable data-center fabric,
-route-server, and automation-heavy control-plane use cases. gRPC is the primary
-interface for all peer lifecycle, routing, and policy operations. The config
-file bootstraps initial state; after startup, gRPC owns the truth. No restarts
-to add peers, change policy, or inject routes.
+An API-first BGP daemon in Rust for IXP route servers, route reflectors, and
+automation-heavy control planes. gRPC is the primary interface for all peer
+lifecycle, routing, and policy operations — the config file bootstraps initial
+state, then gRPC owns the truth. No restarts to add peers, change policy, or
+inject routes. And every route decision can explain itself from the live RIB:
+per-peer received / best / advertised views, policy and export-gate explain,
+retained rejected routes with reasons, BMP/MRT/metrics — with receipt-backed
+interop behind each claimed behavior.
 
-The practical beachhead is explainable route-server and route-reflector
-operation: per-peer received / best / advertised views, policy and export-gate
-explain output, BMP/MRT/metrics, and receipt-backed interop around those roles.
+**Measured, not marketed** — every number below links to its published,
+reproducible receipt:
+
+- **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
+  live churn, same harness / same host): new policy fully delivered to every
+  member in **1.5–2.2 s p50** vs BIRD 3.3.1's 77–86 s and OpenBGPD 9.1's
+  249–253 s — [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
+- **Member-flap propagation** (50 members flap, 650 observers): re-announce
+  p50 **0.46–0.49 s** vs BIRD's 2.8–4.2 s and OpenBGPD's 21–22 s; withdraw
+  p50 0.28–0.48 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
+- **Cold start**: full 400,400-route table delivered to all 700 members in
+  **4.9–5.1 s** vs 59.0–62.1 s (BIRD) and 396.1–417.3 s (OpenBGPD) —
+  [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
+- **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
+  wire in **1.82 s** at **419 MiB** whole-process RSS —
+  [1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)
+- **The losses, stated plainly**: OpenBGPD holds a smaller reload stall
+  (p50 0.25–0.29 s vs rustbgpd's 0.43–0.84 s) and BIRD wins settled memory
+  outright (408/416 MiB vs rustbgpd's 768/763 MiB at the matrix shape) —
+  published in the [same receipt](docs/perf/ixp-matrix-2026-07.md#memory),
+  methodology and fairness protocol included
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
 fabric use.
 
-- **Implemented:** dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA
-  path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full
-  gRPC/CLI management. Linux FIB integration is default-off and scoped to
-  RFC 7999 discard routes and configured unicast tables (including ECMP and
-  weighted multipath); broader routing-suite features remain future work.
-- **Validated** with a workspace test suite, fuzz targets, and an automated
-  interop suite — primarily against FRR 10.3.1, plus GoBGP 3.37.0–4.6.0 and
-  StayRTR-backed RTR coverage, with BIRD 2.0.12 (M0) and BIRD 3.3.1 (TCP-AO
-  smoke). A foundation tier runs on every PR and the privileged Linux
-  dataplane smokes run in hosted CI; longer soaks and platform-diversity
-  scripts remain local. Full matrix: [`docs/INTEROP.md`](docs/INTEROP.md).
-
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
 > Linux (the primary target); other platforms are not tested. See
 > [Project Status](#project-status) for details.
-
-## Why rustbgpd
-
-- **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
-- **Native route explainability** -- answers "why is this route (not) here?" from the live RIB in one command: import explain, best-path explain with decisive-comparison attribution, export explain that dry-runs the real per-peer gate ladder, and a retained rejected-route view with machine-readable reasons -- where incumbents need an external looking-glass stack for less. See [docs/explain.md](docs/explain.md).
-- **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
-- **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
-- **Typed, compiled policy language** (`.rpol`, ADR-0096) -- named prefix/community sets compiled to indexed matchers, parameterized policies, policy composition, and in-language unit tests (`rbgp policy check`); candidate policies dry-run read-only against the live RIB (`rbgp policy test`), decisions explain themselves per term (`rbgp policy explain`), and installed chains expose live per-term hit counters (`rbgp policy stats`). Mixes freely with the existing TOML policy chains; FRR route-map parity proven route-for-route in interop (M80). See [docs/rpol-language.md](docs/rpol-language.md).
-- **Full BMP monitoring trio** (RFC 7854/8671/9069, ADR-0097) -- per-collector selectable Adj-RIB-In (pre-policy), Adj-RIB-Out (post-policy, byte-exact wire PDUs), and Loc-RIB views on one exporter. Loc-RIB collectors get a chunked table dump + End-of-RIB when they connect; Adj-RIB-In/Out are live streams by design. Optional per-collector BMPv4 TLV framing plus the Path Marking TLV (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv, pre-IANA -- code points may renumber; default stays BMP v3). Validated against pmacct, gobmp, and tshark at once (M81).
-- **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a Birdwatcher-shaped status/peer/accepted-route REST subset via the external `examples/birdwatcher-adapter`, structured JSON logging, and per-peer counters. The explain surfaces have their own catalog: [docs/explain.md](docs/explain.md).
-- **Update-group fanout** (ADR-0098, ADR-0099) -- peers whose staged output is provably identical automatically share one outbound staging pass and one Arc-shared announce payload; measured ~28x faster 100k-route convergence at 256 uniform RR clients (15.1 s to 0.54 s), and 1.8 s wire-measured convergence / 419 MiB process RSS at 1,000 uniform RR clients x 100k routes ([scale receipt](docs/perf/scale-receipt-2026-07.md)), with a structural per-peer fallback (no knob) and a differential oracle pinning identical wire behavior. v2 extends the sharing to VPNv4/VPNv6 with the RFC 4684 RT filter applied per member at emit: 1,000 clients x 100k VPNv4 converge in 12.6 s / 625 MiB uniform and 3.9 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB and ~12.5 s / ~5.7 GiB extrapolated per-peer), and a member's RT-membership flip at 100k staged routes hits the wire in ~15 ms with zero policy evaluations.
-- **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop primarily against FRR plus GoBGP / StayRTR and documented BIRD coverage, extensive workspace tests, architecture decision records for every protocol and design choice.
-- **Reusable wire codec and FSM** -- `rustbgpd-wire` has zero internal dependencies and `rustbgpd-fsm` depends only on `wire`; both are published as daemon-independent crates for Rust BGP tooling that does not need the full router.
-
-## Good fit
-
-- **DDoS mitigation platforms** — FlowSpec + RTBH route injection from automation
-- **Cloud / AI-scale data-center fabrics** — API-first BGP control, BFD, ECMP,
-  EVPN/VXLAN alpha, and whitebox-friendly interop surfaces
-- **Hosting provider prefix management** — API-driven customer prefix announcements
-- **Internet exchange route servers** — transparent mode, Add-Path, per-client best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member policy
-- **SDN / network automation controllers** — programmable BGP control plane
-- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, plus a Birdwatcher-shaped status/peer/accepted-route subset via the external `examples/birdwatcher-adapter` (not yet a complete Alice-LG backend)
-- **Lab and test environments** — clean API, structured logs, containerlab interop
-
-BGP-LS receive/reflection/API export (RFC 9552), VPNv4/VPNv6 L3VPN
-route-reflection (RFC 4364 / RFC 4659, SAFI 128 — RR/controller-feed with RD,
-MPLS label stack, next-hop, and Route Targets preserved verbatim; no VRF import
-or MPLS FIB), RT-Constrain (RFC 4684, SAFI 132 — strict per-peer VPN
-reflection filtering), and IPv4/IPv6 labeled-unicast route-reflection
-(RFC 8277, SAFI 4 — label stack and next-hop preserved verbatim) have shipped
-under ADR-0077, and **Optimal Route
-Reflection (RFC 9107, ADR-0095)** computes per-client best paths via SPF over
-the BGP-LS-sourced topology — a capability no other open-source BGP daemon
-ships; future BGP-LS local topology
-production stays scoped by
-[ADR-0077](docs/adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
-families must land as typed route-family slices or unreachable substrate, not as
-unicast `Prefix` shortcuts or MPLS dataplane creep.
-
-See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
-architecture diagrams, example configs, and API workflows.
-
-## Not the best fit today
-
-- Full general-purpose router deployments expecting default-on,
-  fully policy-guarded FIB integration
-- Large-scale production EVPN fabrics that need the full feature
-  surface — VXLAN EVPN is functional and FRR-interop-tested but still
-  **alpha**. VXLAN local-bias split-horizon remains the one open
-  all-active correctness gate (ASIC/offload-dependent on the Linux
-  softswitch — see ADR-0065); service-provider EVPN families such as
-  MPLS / PBB / MVPN are deliberately out of the current VXLAN/Linux
-  lane. See [Current limitations](#current-limitations) for the alpha
-  boundary and [docs/evpn-enablement.md](docs/evpn-enablement.md) for
-  the shipped feature ladder and standards-tail map
-- VPNv4 / VPNv6 PE roles — VRF import, MPLS label forwarding, and CE-facing
-  attachment circuits are out of scope; the shipped SAFI-128 support is the
-  route-reflector / controller-feed slice only
-- Environments that need the breadth of FRR's multi-decade feature surface
-- Operators who want a CLI-first operational model
-
-See [docs/COMPARISON.md](docs/COMPARISON.md) for a detailed feature comparison
-with FRR, BIRD, GoBGP, and OpenBGPd.
 
 ## Try it (60 seconds)
 
@@ -129,6 +74,123 @@ docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 ![rbgp top — live TUI dashboard](docs/images/tui-screenshot.png)
 
 Press `q` to exit the TUI. When you're done: `docker compose down`.
+
+## Policy you can test before it touches a route
+
+Policies are written in `.rpol` — a typed, compiled language with named
+prefix/community sets (indexed matchers, not linear walks), parameterized
+policies, composition, and unit tests **in the policy file itself**. From the
+shipped [route-server example](examples/route-server/hygiene.rpol):
+
+```rpol
+policy ixp-hygiene {
+    # AS_SETs are deprecated (RFC 9774); reject them like arouteserver does.
+    term reject-as-set { if route.as-path matches "\\{" { reject } }
+    term reject-aspa-invalid { if route.aspa == invalid { reject } }
+    # Tag the RPKI outcome as an RFC 8097 extended community for members.
+    term tag-ov-valid { if route.rpki == valid { add ext-community OV_VALID } }
+}
+
+test as-set-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501 {64502 64503}" }
+    expect ixp-hygiene == reject
+}
+```
+
+Then ask the daemon *what would happen* — before you commit anything:
+
+```bash
+rbgp policy check hygiene.rpol      # offline: compile + run the in-language tests
+rbgp policy test hygiene.rpol --policy ixp-hygiene --direction import
+                                    # read-only dry run against the LIVE RIB:
+                                    # accept/reject/modify counts, per-term hits
+rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.7 --explain
+                                    # walk the real export gate ladder to one peer
+rbgp policy stats                   # live per-term hit counters once installed
+```
+
+Edits hot-apply on SIGHUP, `.rpol` mixes freely with the existing TOML policy
+chains, and FRR route-map parity is proven route-for-route in interop (M80).
+Language reference: [docs/rpol-language.md](docs/rpol-language.md) · explain
+surfaces: [docs/explain.md](docs/explain.md) · IXPs on arouteserver can render
+config from their existing `general.yml`/`clients.yml`:
+[IXP filter-pipeline tutorial](docs/cookbook/ixp-filter-pipeline.md).
+
+## Why rustbgpd
+
+- **API-first control plane** — full gRPC surface across 11 services plus a
+  thin CLI (`rbgp`): dynamic peer management, policy CRUD, route injection,
+  streaming events, all without restarts
+- **Native route explainability** — "why is this route (not) here?" answered
+  from the live RIB in one command, where incumbents need an external
+  looking-glass stack for less ([docs/explain.md](docs/explain.md))
+- **Update-group fanout** — peers with provably identical staged output share
+  one staging pass: ~28x faster 100k-route convergence at 256 uniform RR
+  clients (15.1 s to 0.54 s); v2 extends sharing to VPNv4/v6 with per-member
+  RT filtering at emit ([receipt](docs/perf/scale-receipt-2026-07.md))
+- **Full BMP monitoring trio** — per-collector Adj-RIB-In / Adj-RIB-Out
+  (byte-exact wire PDUs) / Loc-RIB on one exporter, validated against pmacct,
+  gobmp, and tshark at once
+- **Modern protocol surface** — MP-BGP, Add-Path, GR/LLGR, RPKI/RTR + ASPA,
+  FlowSpec, Prefix ORF, large/extended communities — plus VPNv4/v6, RT-Constrain,
+  labeled-unicast, and BGP-LS reflection, and **RFC 9107 Optimal Route
+  Reflection** (per-client best paths via SPF over BGP-LS topology — a
+  capability no other open-source BGP daemon ships)
+- **Explicit architecture** — pure FSM with no I/O, single-owner RIB with no
+  locks, bounded channels; no `Arc<RwLock>` on routing state
+  ([ARCHITECTURE.md](ARCHITECTURE.md))
+- **Reusable crates** — `rustbgpd-wire` (zero internal deps) and
+  `rustbgpd-fsm` are published for BGP tooling that doesn't need the router
+
+The full-depth version of each item — the complete observability surface, the
+BMP/BMPv4 details, the ADR-0077 route-reflector family boundary, the VPN
+fanout numbers — is the [feature tour](docs/feature-tour.md).
+
+## Good fit
+
+- **Internet exchange route servers** — transparent mode, Add-Path, per-client
+  best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member policy
+- **Route reflectors** — including VPNv4/v6, RT-Constrain, labeled-unicast, and
+  BGP-LS reflection, GR/LLGR, and RFC 9107 Optimal Route Reflection
+- **DDoS mitigation platforms** — FlowSpec + RTBH route injection from automation
+- **Cloud / AI-scale data-center fabrics** — API-first BGP control, BFD, ECMP,
+  EVPN/VXLAN alpha, and whitebox-friendly interop surfaces
+- **Hosting provider prefix management** — API-driven customer prefix announcements
+- **SDN / network automation controllers** — programmable BGP control plane
+- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP,
+  plus a Birdwatcher-shaped status/peer/accepted-route subset via the external
+  `examples/birdwatcher-adapter` (not yet a complete Alice-LG backend)
+- **Lab and test environments** — clean API, structured logs, containerlab interop
+
+See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
+architecture diagrams, example configs, and API workflows, and the
+[feature tour](docs/feature-tour.md#route-reflector-families-beyond-unicast)
+for exactly which route-reflector families have shipped and where the
+ADR-0077 scope boundary sits.
+
+## Not the best fit today
+
+- Full general-purpose router deployments expecting default-on,
+  fully policy-guarded FIB integration — Linux FIB integration is default-off
+  and scoped to RFC 7999 discard routes and configured unicast tables
+  (including ECMP and weighted multipath)
+- Large-scale production EVPN fabrics that need the full feature
+  surface — VXLAN EVPN is functional and FRR-interop-tested but still
+  **alpha**. VXLAN local-bias split-horizon remains the one open
+  all-active correctness gate (ASIC/offload-dependent on the Linux
+  softswitch — see ADR-0065); service-provider EVPN families such as
+  MPLS / PBB / MVPN are deliberately out of the current VXLAN/Linux
+  lane. See [Current limitations](#current-limitations) for the alpha
+  boundary and [docs/evpn-enablement.md](docs/evpn-enablement.md) for
+  the shipped feature ladder and standards-tail map
+- VPNv4 / VPNv6 PE roles — VRF import, MPLS label forwarding, and CE-facing
+  attachment circuits are out of scope; the shipped SAFI-128 support is the
+  route-reflector / controller-feed slice only
+- Environments that need the breadth of FRR's multi-decade feature surface
+- Operators who want a CLI-first operational model
+
+See [docs/COMPARISON.md](docs/COMPARISON.md) for a detailed feature comparison
+with FRR, BIRD, GoBGP, and OpenBGPd.
 
 ## Install
 
@@ -190,26 +252,52 @@ entry points for the daily checks: `rbgp summary`, `rbgp rib recv <peer>`,
 `rbgp rib sent <peer>`, `rbgp policy counters`, and `rbgp doctor` for a
 redacted support bundle. See the [CLI command map](crates/cli/README.md).
 
+## Performance vs the incumbents
+
+The [IXP route-server receipt matrix](docs/perf/ixp-matrix-2026-07.md) runs
+rustbgpd, BIRD 3.3.1, and OpenBGPD 9.1 through **the same harness on the same
+host** — 700 route-server clients × 400,400 routes with live churn, each
+incumbent at its documented strongest configuration, receiver-side timestamps,
+two independent campaign runs, losses published alongside wins:
+
+| KPI (700 clients × 400,400 routes, p50) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
+|---|---|---|---|
+| Sessions Established | **0.6 s** | 17.3–19.7 s | 124.4–141.4 s |
+| Cold start, full table to all members | **4.9–5.1 s** | 59.0–62.1 s | 396.1–417.3 s |
+| Reload: UPDATE stall | 0.43–0.84 s | 1.61–2.29 s | **0.25–0.29 s** |
+| Reload: new policy fully delivered | **1.5–2.2 s** | 77–86 s | 249–253 s |
+| Flapstorm: withdraw propagation | **0.28–0.48 s** | 0.45–0.61 s | 10.84–12.43 s |
+| Flapstorm: re-announce | **0.46–0.49 s** | 2.8–4.2 s | 21–22 s |
+| Settled RSS (S2, runs A/B) | 768 / 763 MiB | **408 / 416 MiB** | 769 / 767 MiB |
+
+rustbgpd is the only daemon in the matrix holding both a sub-second median
+stall **and** single-digit-seconds completion; OpenBGPD has the smallest stall
+at every scale rung, and BIRD wins memory outright. The receipt includes the
+full method, configuration disclosure, honesty notes, raw artifacts — and a
+post-publication note where the receipt's own tables exposed a rustbgpd
+re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s →
+0.46–0.49 s).
+
+At route-reflector shapes, the
+[1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md) measures 1,000
+uniform RR clients × 100k routes converging on the wire in 1.82 s at 419 MiB
+whole-process RSS, and 1,000 clients × 100k VPNv4 in 12.60 s / 625 MiB uniform
+and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
+and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
+delivering its 1600-route delta in ~15 ms with zero policy evaluations.
+
+Microbenchmarks, memory scaling, and the bgperf2 cross-daemon comparison:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md). Every receipt is indexed in
+[docs/RECEIPTS.md](docs/RECEIPTS.md); GoBGP-specific parity is in
+[docs/gobgp-parity.md](docs/gobgp-parity.md).
+
 ## gRPC API
 
-Eleven native `rustbgpd.v1` services cover the daemon's operational surface,
-with a separate `gnmi.gNMI` service for OpenConfig BGP telemetry and the first
-transaction-backed config subset:
-
-| Service | RPCs | Purpose |
-|---------|------|---------|
-| `GlobalService` | `GetGlobal` | Daemon identity |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig` | Candidate-vs-live config diff, effective running config with defaults materialized and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, and status |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to config when started with `--config`), `ListDynamicNeighbors` for visibility |
-| `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy decision explain (per-term traces for `.rpol` members), retained rejected-route views with reject reasons, read-only candidate-policy dry runs over the live RIB, and live per-term hit counters |
-| `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
-| `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
-| `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
-| `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
-| `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`); served on UDS and mTLS TCP listeners |
+Eleven native `rustbgpd.v1` services cover the daemon's operational surface —
+Global, Config, Neighbor, Policy (22 RPCs including explain, dry-run, and
+per-term stats), PeerGroup, Rib, BFD, Event, Injection, Control, and Evpn —
+plus a separate `gnmi.gNMI` service for OpenConfig BGP telemetry and the first
+transaction-backed config subset.
 
 ```bash
 # Stream route changes in real time over the default UDS listener
@@ -218,21 +306,23 @@ grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
   rustbgpd.v1.RibService/WatchRoutes
 ```
 
-Full API reference: [docs/API.md](docs/API.md). gNMI operator guide:
-[docs/GNMI.md](docs/GNMI.md).
+The full service/RPC table and per-RPC examples: [docs/API.md](docs/API.md).
+gNMI operator guide: [docs/GNMI.md](docs/GNMI.md).
 
 ## Design choices
 
 rustbgpd is intentionally built around:
 
 - **gRPC-driven control** instead of a large interactive CLI surface
-- **A pure FSM crate** with no I/O -- `(State, Event) -> (State, Vec<Action>)`
+- **A pure FSM crate** with no I/O — `(State, Event) -> (State, Vec<Action>)`
 - **Single-owner routing state** instead of shared mutable state across tasks
-- **Bounded channels** for all inter-task communication -- backpressure, not locks
+- **Bounded channels** for all inter-task communication — backpressure, not locks
 - **Explicit protocol feature boundaries** with ADRs and test-backed development
 
 Designed around an API-first operating model similar to GoBGP, with a smaller
-and more explicit internal architecture.
+and more explicit internal architecture. Rationale:
+[docs/DESIGN.md](docs/DESIGN.md); crate graph and runtime model:
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Deployment examples
 
@@ -257,13 +347,19 @@ and more explicit internal architecture.
 - **Remote access:** native gRPC mTLS on the TCP listener (`tls_cert_file` / `tls_key_file` / `tls_client_ca_file`), or an Envoy mTLS proxy front-end for multi-host fan-out — never plaintext TCP off-host
 - **Network controls:** put gRPC on a management VLAN/interface and firewall it to known hosts
 
+Full guidance and deployment tiers: [docs/SECURITY.md](docs/SECURITY.md).
+
 ## Testing and correctness
+
+Evidence-driven development: fuzz targets on the wire decoder, property tests
+on the FSM, automated containerlab interop, extensive workspace tests, and an
+architecture decision record for every protocol and design choice.
 
 | Evidence | Details |
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, run nightly in CI |
-| Interop suites | Automated interop suite (see `docs/INTEROP.md` for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0–4.6.0 across labs and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.3.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
+| Interop suites | Automated interop suite (see [docs/INTEROP.md](docs/INTEROP.md) for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0–4.6.0 across labs and StayRTR-backed RTR coverage; BIRD 2.0.12 covers M0 and BIRD 3.3.1 covers the TCP-AO smoke. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md). |
 | Protocol coverage | [Supported standards at a glance](docs/RFC_NOTES.md#supported-standards-at-a-glance) plus per-RFC conformance notes in [docs/RFC_NOTES.md](docs/RFC_NOTES.md); interop matrix in [docs/INTEROP.md](docs/INTEROP.md) and receipts in [docs/RECEIPTS.md](docs/RECEIPTS.md). |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
@@ -294,17 +390,19 @@ evolving API.**
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
 | **Maturity** | Public alpha (v0.51.0) |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
+| **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.95+ (workspace MSRV — set by the bundled SQLite build), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | Inventoried RS/RR v1 fields follow the narrow compatibility policy; unlisted TOML may change between minor versions with migrations documented in CHANGELOG. |
 | **API stability** | Inventoried native gRPC/CLI/JSON surfaces follow the narrow v1 policy; unlisted API remains alpha and may evolve between minor versions. |
 | **Not yet supported** | EVPN runtime L3VNI/device/table IP-VRF identity changes (restart-required by design), true RFC VLAN-aware bundle VTEP origination + dataplane (non-zero Ethernet Tag RR receive/reflect shipped, M82), EVPN route types 6-11 / PBB / MVPN / MPLS/SRv6 service encapsulation, BGP-LS local topology production, Confederation, TCP-AO live selection/deprecation/deletion or runtime protected-range CRUD (ordered keyrings and add-only successor installation on SIGHUP are supported) |
-| **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see `docs/INTEROP.md`) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
+| **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see [docs/INTEROP.md](docs/INTEROP.md)) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
 
 | Document | Content |
 |----------|---------|
+| [docs/feature-tour.md](docs/feature-tour.md) | The full-depth feature tour behind the README highlights |
 | [docs/cookbook/](docs/cookbook/README.md) | Scenario recipes with receipt-proven configs: RR at scale, L3VPN RR, IXP route server, monitoring feed, EVPN fabric RR, policy quickstart |
 | [docs/USE_CASES.md](docs/USE_CASES.md) | Deployment scenarios: DDoS, hosting, IX, SDN, collector |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Crate graph, runtime model, ownership, data flow |
