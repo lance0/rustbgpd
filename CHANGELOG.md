@@ -9,1382 +9,1287 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Release framing — why this is v0.60.0.** This release marks the
+> route-server stabilization line, a deliberate milestone jump from
+> v0.51.0. Every finding from an external release review is closed and
+> the flagship receipts are re-validated at this tip (reload stall
+> p50 0.44–0.92 s, completion 1.50–2.12 s at 700 clients × 400,400
+> routes). A differential interop lab drives BIRD 2 (configured by real
+> arouteserver 1.23.2) and rustbgpd (configured by `rs-config-render`
+> from the same site data) to 65/65 identical accept/reject verdicts,
+> and the renderer now ingests real `template-context` output directly.
+> RFC 1997 and RFC 7606 semantics are complete, the update-group
+> performance arc lands end to end, jemalloc becomes the default
+> allocator, and the `rustbgpd-wire` 0.15.0 / `rustbgpd-fsm` 0.3.0
+> breaking cut ships in one release.
+
+### Highlights
+
+**Route-server correctness and policy**
+
+- The full IXP pipeline is proven end to end: `rs-config-render`
+  consumes real arouteserver 1.23.2 `template-context` output (both the
+  single-YAML and sectioned-report forms, fingerprint-pinned) and the
+  differential lab passes 65/65 assertions with verdict parity against
+  BIRD 2 configured by the incumbent stack from the same
+  `general.yml`/`clients.yml`.
+- RFC 7947 control communities (do-not-announce, announce-override,
+  prepend-toward-target, standard + RFC 8195 large forms) land with
+  route-granular enforcement at emit, decided on the source route so
+  export policy can neither leak a member-prohibited route nor
+  spuriously suppress one.
+- RFC 7948 §4.8 next-hop ownership enforcement (`strict_peer`) closes
+  the next-hop-hijack case on shared fabrics, fail-closed across every
+  decoded next-hop form.
+- A member-eligibility leftover that forced entire route-server fleets
+  onto serial per-member resyncs is fixed: export-policy reload
+  completion 28.6 s → 0.26 s at 200 members × 115k routes.
+
+**Performance and receipts**
+
+- The update-group reload arc: pre-staged destination groups, one
+  encode-once wire stream per group, batched cohort commits, and 25 ms
+  wall-clock poll budgets throughout. Reload UPDATE stall p50
+  494–652 ms and full re-advertisement completion p50 1.54–2.89 s at
+  700 clients × 400,400 routes, receipts committed.
+- Post-flap re-announce no longer head-of-line blocks behind initial
+  table dumps: survivor completion 4.43–4.56 s → 0.32–0.33 s at
+  300 peers × 300k prefixes.
+- Cross-daemon IXP receipt matrix vs BIRD 3.3.1 and OpenBGPD 9.1 at
+  700 peers × 400,400 prefixes, with full config disclosure and raw
+  artifacts committed.
+
+**Protocol conformance**
+
+- RFC 7606 revised UPDATE error handling: treat-as-withdraw and
+  attribute-discard dispositions, content-based §5.2 reset escalation,
+  and complete §6 malformed-UPDATE diagnostics.
+- RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` honored at eBGP egress by
+  default, and `NO_ADVERTISE` can no longer be bypassed or leaked by
+  export policy across any family.
+- Experimental Add-Path Paths-Limit (capability 76) with an
+  interop receipt against FRR 10.3.1, per family, end to end.
+
+**Observability and operations**
+
+- gNMI dial-out streaming telemetry, a looking-glass filtered-route
+  surface with canonical reject reasons (Alice-LG-ready via the
+  birdwatcher adapter), policy artifact freshness metrics, slow-peer
+  detection with optional update-group isolation, and first-deploy
+  `rbgp doctor` environment probes.
+
+**Packaging and crates**
+
+- jemalloc is the default allocator (stock glibc retained reload
+  transients, 301→555 MiB across cycles; jemalloc returns them).
+- One breaking library cut: `rustbgpd-wire` 0.15.0 and `rustbgpd-fsm`
+  0.3.0, including `#[non_exhaustive]` on registry-tracking enums so
+  future registry additions land as minors.
+
 ### Added
 
-- **`rs-config-render` ingests real `arouteserver template-context`
-  output.** arouteserver 1.23.2 emits a sectioned report (per-key
-  heading + YAML fragment), not the single YAML document the renderer
-  previously required; the renderer now auto-detects and ingests both
-  forms, normalizing the report's section names, hash-keyed
-  `irrdb_info` bundle list, and `!!set`-typed `as_set_bundle_ids`, and
-  deduping the overlapping AS-SET/origin-ASN bundle union. The
-  sectioned shape is fingerprint-pinned like the single-document form
-  (same exit-code discipline), and per-client `black_list_pref` /
-  IRR `white_list_*` knobs are now refused instead of silently
-  dropped. A verbatim dump from the digest-pinned image is checked in,
-  the test suite pins render parity between the two forms, and
-  `tests/interop/m90-differential/prove-context-ingestion.sh` proves
-  the advertised pipeline (`template-context` in the pinned container
-  → `rs-config-render` → `rustbgpd --check` + `rbgp policy check`)
-  end to end with true exit codes.
-
-- **arouteserver differential interop lab (M90).** One
-  `general.yml`/`clients.yml` pair drives both route servers — BIRD 2
-  configured by containerized arouteserver 1.23.2 (digest-pinned),
-  rustbgpd by `rs-config-render` from the site's template-context dump.
-  Three GoBGP members announce a canned set spanning IRR, bogon,
-  prefix-length, black-list, and never-via-RS rejections; the lab
-  passes 65/65 assertions with identical accept/reject verdicts on both
-  daemons, and `rbgp policy explain` names the predicted generated
-  policy term for every rejection.
-
-- **Paths-Limit interop receipt (M89).** Three digest-pinned FRR 10.3.1
-  source ASes originate the same IPv4 and IPv6 prefix through a
-  rustbgpd route server to a real FRR sink, proving the experimental
-  Paths-Limit capability (code 76) per family end to end: exact
-  configured/advertised/received/effective values, exact Adj-RIB-Out
-  and independent sink counts, and typed FRR capability state. Runs in
-  hosted CI sharing the M17 Add-Path build and job.
-
-- **Did-you-mean suggestions for unknown config keys.** A typo'd TOML
-  key at any level (root, `[[neighbors]]`, peer groups, nested tables)
-  now renders the enclosing table and the closest valid key(s) inside
-  the existing source-excerpt diagnostic — `unknown field
-  `` `route_server_clint` `` in `[[neighbors]]`; did you mean
-  `` `route_server_client` ``? — reusing the `.rpol` frontend's
-  edit-distance ranking. Garbage keys with no close match keep serde's
-  full expected-key list; secret-bearing lines stay redacted.
-
-- **`rbgp doctor`: first-deploy environment probes.** Doctor now checks
-  the classic silent first-30-minutes failures: BGP listener bound
-  (daemon up: TCP connect; daemon down: test-bind and release, with
-  `CAP_NET_BIND_SERVICE` advice on permission-denied), per-endpoint TCP
-  reachability of every configured RTR cache, BMP collector, and gNMI
-  dial-out collector (2s bound each, run concurrently),
-  `runtime_state_dir` writability and free-space thresholds (yellow
-  < 1 GiB, red < 100 MiB), run-context detection (systemd / container —
-  also tailors the `nofile` rlimit remediation line), and a
-  config-freshness warning when the config file was modified after the
-  local daemon started (SIGHUP-pending edits). Daemon-down runs source
-  probe targets from the local config file, so doctor is useful before
-  the first start.
-
-- **birdwatcher-adapter: filtered-route views.** The external looking
-  glass adapter now serves `GET /routes/filtered/{id}` from
-  `PolicyService.ListRejectedRoutes` and a real per-neighbor
-  `routes.filtered` count on `GET /protocols/bgp` (previously a `0`
-  sentinel). Each filtered route carries a synthesized reject-reason
-  large community `64496:65520:<id>` — one stable id per canonical
-  reason token, matchable by Alice-LG's `[rejection]` /
-  `[rejection_reasons]` config — plus human-readable `reject_reason` /
-  `reject_reason_detail` fields. Retention disabled and no-live-session
-  both serve an empty view (configuration facts, not errors). The
-  mapping table and an Alice-LG config snippet are in the adapter
-  README.
-
-- **Policy artifact freshness metrics (ADR-0110): alert when the
-  filter-render pipeline is stuck instead of discovering it later.**
-  `bgp_policy_generation_loaded_timestamp_seconds` stamps every
-  successful full policy apply (initial load, SIGHUP reload — including
-  content-unchanged re-accepts — and config transactions);
-  `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` stamps each
-  external dataset's last accepted generation swap. Both deliberately
-  freeze across rejected loads — the moment the daemon *accepted*
-  artifacts is the source of truth, not file mtime — so
-  `time() - <gauge>` is a truthful staleness age even while a broken
-  render keeps rewriting files. Per-dataset series (including the
-  existing `bgp_policy_dataset_refresh_errors_total`) are now reaped
-  when a dataset is removed from config. Alert expressions documented
-  in `OPERATIONS.md` ("Policy artifact freshness").
-
-- **`rs-config-render`: IRR/PeeringDB-driven route-server configuration
-  from arouteserver data (ADR-0110 phase 1).** New standalone tool
+- **`rs-config-render`: IRR/PeeringDB-driven route-server
+  configuration from arouteserver data.** New standalone tool
   (`tools/rs-config-render/`) that consumes `arouteserver
-  template-context` output — the fully-resolved IRR/PeeringDB/RPKI data
-  model behind the incumbent IXP stack — and emits rustbgpd
+  template-context` output — the fully-resolved IRR/PeeringDB/RPKI
+  data model behind the incumbent IXP stack — and emits rustbgpd
   configuration: `config.toml` with transparent route-server-client
   sessions (strict next-hop ownership, per-family max-prefix ceilings,
   per-client import chains, per-client-best or Add-Path), a shared
-  hygiene `.rpol` (AS_SET reject first, invalid-ASN/transit-free/
-  never-via-RS path terms, prefix-length windows, bogons, black-list,
-  RPKI origin validation with RFC 8097 tagging), per-client IRR
-  prefix/origin `.rpol` filters with a default-reject tail, and a
-  refresh receipt. Fail-stale, never fail-open: unsupported knobs (RTT
-  communities, `next_hop.policy: same-as`, `tag`/`tag_and_reject`
-  reject policies, …) refuse loudly with distinct exit codes, empty or
-  implausibly shrunken per-client sets abort the render, and a
-  context-shape fingerprint refuses silent upstream drift. Generated
-  policies carry in-language `test` blocks derived from the site's own
-  data; a workspace test gates the emitted output through the real
-  `rustbgpd --check`. Cookbook pointer in
-  `docs/cookbook/route-server.md`; usage and the cron loop in
+  hygiene `.rpol` (AS_SET reject first, invalid-ASN / transit-free /
+  never-via-RS terms, prefix-length windows, bogons, black-list, RPKI
+  origin validation with RFC 8097 tagging), per-client IRR
+  prefix/origin filters with a default-reject tail, and a refresh
+  receipt. Fail-stale, never fail-open: unsupported knobs refuse
+  loudly with distinct exit codes, implausibly shrunken per-client
+  sets abort the render, and a context-shape fingerprint refuses
+  silent upstream drift. The renderer ingests real arouteserver 1.23.2
+  output directly, auto-detecting both the single YAML document and
+  the sectioned per-key report 1.23.2 actually emits (normalized
+  sections, hash-keyed `irrdb_info`, `!!set`-typed
+  `as_set_bundle_ids`, deduped bundle union), both shapes
+  fingerprint-pinned; a verbatim dump from the digest-pinned image is
+  checked in, tests pin render parity between the forms and gate
+  emitted output through the real `rustbgpd --check`, generated
+  policies carry in-language `test` blocks from the site's own data,
+  and an interop script proves the whole pipeline end to end with true
+  exit codes. Docs: `docs/cookbook/route-server.md`,
   `tools/rs-config-render/README.md`.
 
-- **Looking-glass filtered-route surface: rejected inbound routes are
-  retained with their reject reason (LAN-472).** Every rejected unicast
-  announcement — import-policy deny (including RPKI/ASPA-driven denies),
-  RFC 9234 OTC route-leak drop, ADR-0107 next-hop ownership, AS_PATH /
-  RFC 4456 reflection loop, and RFC 7606 treat-as-withdraw — is kept in
-  a bounded per-session store tagged with a canonical snake_case reason
-  token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`,
-  `as_path_loop`, `rr_loop`, `treat_as_withdraw`) plus detail, next-hop,
-  AS path, communities, and RPKI/ASPA states at rejection time. New
-  `PolicyService.ListRejectedRoutes` RPC (pre-v1, outside the v1-stable
-  surface) and `rbgp rib received <peer> --rejected` CLI answer the IXP
-  member-support question "why isn't my route accepted?" without
-  knowing the prefix in advance — the structured reject-reason source an
-  Alice-LG-style looking glass needs for its filtered view. Entries
-  self-clean when an identity is later accepted or explicitly withdrawn
-  and on session reset; the store is LRU-bounded per peer via the new
-  `[policy.reject_retention]` config (`enabled` default true, `capacity`
-  default 1024 ≈ 0.5 MiB/peer worst case; restart-required per peer),
-  and a `bgp_rejected_routes_retained{peer}` gauge (peer-reaped) tracks
-  occupancy. Docs: OPERATIONS.md runbook, route-server cookbook
-  member-support section, CONFIGURATION.md.
+- **arouteserver differential interop lab.** One
+  `general.yml`/`clients.yml` pair drives both route servers — BIRD 2
+  configured by containerized, digest-pinned arouteserver 1.23.2;
+  rustbgpd by `rs-config-render` from the same site's template-context
+  dump. Three GoBGP members announce a canned set spanning IRR, bogon,
+  prefix-length, black-list, and never-via-RS rejections; 65/65
+  assertions pass with identical accept/reject verdicts on both
+  daemons, and `rbgp policy explain` names the predicted generated
+  policy term for every rejection.
 
-- **gNMI dial-out streaming telemetry (LAN-471).** New `[gnmi_dialout]`
-  config section: the daemon opens a persistent gRPC connection OUT to
-  each configured collector and pushes the same `SubscribeResponse`
-  stream a dial-in `gnmi.gNMI/Subscribe` STREAM subscription would
-  produce (initial snapshot, `sync_response`, then SAMPLE ticks or
-  ON_CHANGE session-state events) — the central-sink ingestion model
-  large fleets use instead of per-device dial-in. Wire contract:
-  `rustbgpd.gnmi_dialout.v1.GnmiDialout/Publish`
-  (`proto/rustbgpd_dialout.proto`), a device-initiated
-  `stream gnmi.SubscribeResponse` mirroring the de-facto vendor
-  dial-out shape. Per-target TLS/mTLS (`tls_ca_file` /
-  `tls_cert_file` / `tls_key_file`, key files re-read per connection
-  attempt so rotation needs no reload), capped exponential reconnect
-  backoff (`backoff_initial` doubling to `backoff_max`), and a
-  `gnmi_dialout_connected{target}` 0/1 gauge refreshed on both
-  transitions and reaped on target removal. Subscription paths are
-  validated at config load with the exact dial-in Subscribe checks.
-  Reload-applied: SIGHUP reconciles the target set in place (removed
-  stop, added start, changed redial; unchanged targets keep their
-  connection). A collector being down never affects BGP operation.
-  Docs: `docs/GNMI.md` (dial-out section), `docs/CONFIGURATION.md`,
-  `docs/OPERATIONS.md`, `docs/reload-matrix.md`.
-
-- **IXP route-server receipt matrix** (`docs/perf/ixp-matrix-2026-07.md`):
-  rustbgpd vs BIRD 3.3.1 vs OpenBGPD 9.1 at 700 peers × 400,400
-  prefixes through the shared reload-stall harness — reload stall +
-  completion over two independent runs, flapstorm withdraw/re-announce,
-  convergence, and process-tree RSS, with a scale ladder, full config
-  disclosure, and raw per-cell artifacts committed under
-  `docs/perf/artifacts/ixp-matrix-2026-07/`. Cross-linked from
-  `docs/RECEIPTS.md` and `docs/COMPARISON.md`.
-
-- **Slow-peer detection + optional update-group isolation (LAN-470).**
-  A peer that is Established and alive but persistently fails to drain
-  its outbound queue — backlog at or above `slow_peer_threshold_pct`
-  (default 50%) of the writer buffer for `slow_peer_duration` seconds
-  (default 30; 0 disables) — is flagged slow: a `slow_peer` bool on the
-  neighbor status surface (`rbgp neighbor <ip>`, `NeighborState` proto
-  field 36), a warn log on both transitions, and a `bgp_peer_slow{peer}`
-  0/1 gauge (reaped on peer delete). Detection is evaluated at batch
-  granularity on the existing queue-depth sampling seams plus a 1s
-  re-check timer armed only during a backlog episode — zero
-  steady-state cost. With the new per-neighbor / peer-group knob
-  `slow_peer_isolation = true` (default off), a flagged peer is moved
-  onto its own per-peer update path (ungrouped reason `slow_peer`) so
-  it stops holding back its update-group's shared encode, and regroups
-  automatically through the ordinary regroup baseline diff when it
-  recovers or its session restarts. Complements RFC 9687 send-hold
-  (which only tears down a fully wedged socket); modeled on IOS-XR
-  BGP Slow Peer Detection/Handling.
+- **Experimental Add-Path Paths-Limit capability, with an interop
+  receipt.** Per-family receiver preference via
+  `add_path.receive_max`; remote tuples cap only the matching outbound
+  Add-Path family, with configured/advertised/received/effective
+  values in `rbgp neighbor` and its JSON. Wire format per the expired
+  `draft-abraitis-idr-addpath-paths-limit-04` (IANA capability
+  code 76), explicitly experimental. A hosted receipt proves it per
+  family end to end against three digest-pinned FRR 10.3.1 source ASes
+  and a real FRR sink: exact values at every stage, exact Adj-RIB-Out
+  and independent sink counts, typed FRR capability state.
 
 - **Route-server control communities (RFC 7947 §2.3.2 / RFC 8195).**
-  A route-server client can steer per-target-peer distribution by
-  tagging its announcements: "do not announce to PEER" (`0:PEER` /
-  `RS:0:PEER`), "announce to no one" (`0:RS` / `RS:0:0`) overridable
-  per target by `RS:PEER` / `RS:1:PEER`, and prepend-toward-target
-  (`RS:101|102|103:PEER` for 1–3 copies of the announcing client's own
-  ASN, `RS:10x:0` for every target). Standard and RFC 8195 large forms
-  compose; extended-community control forms are deliberately not
-  implemented (draft-ietf-grow-ixp-ext-comms). Matched control
-  communities are scrubbed from the outbound announcement toward
-  enabled sessions; everyone else keeps byte-level transparency.
-  Per-neighbor / per-group knob `rs_control_communities`, default on
-  for `route_server_client` sessions and off otherwise. Enforcement is
-  a per-target decision (suppression sits beside the RFC 1997 gates
-  with its own `rs_control` explain rung; Add-Path and per-client-best
-  exclude suppressed candidates before ranking). The filter is
-  route-granular at emit (ADR-0101 Decision 3): enabled sessions stay
-  in shared update-groups, untagged routes — the overwhelming
-  majority — ride the shared staged emission byte-identically, and
-  only routes carrying a control-form community diverge per target
-  (suppression/prepend/scrub against each target's ASN) at the group
-  emit seams: the source-flip matrix walk, dirty/regroup resync, and
-  the initial-dump and route-refresh replays. This is what makes the
-  rs-client default safe: a session-level update-group exclusion
-  would cost per-peer Adj-RIB-Out + per-peer encode for every enabled
-  session (~1.3 GiB → >100 GiB RSS on a 700-client full-table route
-  server when tried fleet-wide).
+  Clients steer per-target distribution by tagging announcements: do
+  not announce to PEER (`0:PEER` / `RS:0:PEER`), announce to no one
+  (`0:RS` / `RS:0:0`) with per-target override (`RS:PEER` /
+  `RS:1:PEER`), and prepend-toward-target (`RS:101|102|103:PEER`,
+  `RS:10x:0`). Standard and RFC 8195 large forms compose;
+  extended-community forms are deliberately not implemented. Matched
+  control communities are scrubbed toward enabled sessions; everyone
+  else keeps byte-level transparency. Knob: `rs_control_communities`,
+  default on for `route_server_client` sessions. Enforcement is
+  per-target (its own `rs_control` explain rung; Add-Path and
+  per-client-best exclude suppressed candidates before ranking) and
+  route-granular at emit: enabled sessions stay in shared
+  update-groups, untagged routes ride the shared staged emission
+  byte-identically, and only control-tagged routes diverge per target
+  at the group emit seams — which is what makes the default safe
+  (session-level exclusion would cost per-peer Adj-RIB-Out + encode:
+  ~1.3 GiB → >100 GiB RSS at 700 full-table clients fleet-wide).
 
-- **Per-peer fanout observability gauges.**
-  `bgp_peer_outbound_queue_depth{peer}` reports the coalesced update
-  frames buffered for a peer's outbound writer — the "which clients are
-  behind" signal during route-reflector convergence — sampled at batch
-  granularity on both enqueue and writer drain (never per message).
-  `bgp_peer_update_group{peer}` reports the stable update-group id a
-  peer currently belongs to (sentinel `-1` = ungrouped fallback path),
-  complementing the existing per-group member-count gauge. Both series
-  are reaped on session teardown.
-
-- **Route-server NEXT_HOP ownership enforcement (ADR-0107, RFC 7948
-  §4.8).** New opt-in `next_hop_ownership = "strict_peer"` neighbor /
-  peer-group knob (requires `route_server_client = true`): an inbound
-  unicast announcement is accepted only when every address component of
-  its decoded wire next-hop identity — classic IPv4 `NEXT_HOP`, IPv6
-  global, RFC 8950 IPv4-over-IPv6, and scoped link-local forms — is the
-  advertising session's own address, closing the RFC 7948 §4.8
-  next-hop-hijack case on shared IXP fabrics. The gate runs before
-  import policy on the immutable wire value (a policy rewrite cannot
-  launder an unauthorized next hop), fails closed (a global +
-  link-local pair or an unscoped link-local is always rejected; an
-  RFC 7999 BLACKHOLE community is not a bypass), and preserves
-  replacement semantics: a rejection replacing a previously accepted
-  route withdraws exactly that prior `(prefix, path_id)` identity while
-  first-seen rejections stay silent. Rejections log at `warn` with the
-  peer, rejected prefixes, offending next-hop tuple, and a stable
-  `reason` token (`foreign_next_hop`, `unverified_link_local_companion`,
-  `unscoped_link_local`). The RFC 7948 `same-AS` and
-  `explicit-authorized` relationships remain deferred per the ADR.
-  (LAN-473)
+- **Route-server NEXT_HOP ownership enforcement (RFC 7948 §4.8).**
+  Opt-in `next_hop_ownership = "strict_peer"` (requires
+  `route_server_client = true`): an inbound unicast announcement is
+  accepted only when every component of its decoded wire next-hop
+  identity — classic IPv4, IPv6 global, RFC 8950 IPv4-over-IPv6,
+  scoped link-local — is the advertising session's own address,
+  closing the next-hop-hijack case on shared IXP fabrics. Runs before
+  import policy on the immutable wire value (policy cannot launder a
+  next hop), fails closed (unverified link-local companions and
+  unscoped link-locals rejected; RFC 7999 BLACKHOLE is not a bypass),
+  and preserves replacement semantics (a rejection replacing an
+  accepted route withdraws exactly that `(prefix, path_id)`;
+  first-seen rejections stay silent). Rejections log at `warn` with a
+  stable `reason` token. RFC 7948 `same-AS` / `explicit-authorized`
+  remain deferred.
 
 - **RFC 7606 revised BGP UPDATE error handling** — a malformed path
   attribute no longer resets the session by default. The wire crate
-  classifies every attribute error with an RFC 7606 disposition
-  (`wire::validate::ErrorDisposition`): treat-as-withdraw (ORIGIN, AS_PATH,
-  NEXT_HOP, MED, communities, flag conflicts, missing mandatory attributes,
-  attribute-section overruns) withdraws the routes carried in the UPDATE
-  while the session stays Established; attribute-discard (ATOMIC_AGGREGATE,
-  AGGREGATOR, duplicate occurrences per §3 (g), and eBGP-received
+  classifies every attribute error with a disposition
+  (`wire::validate::ErrorDisposition`): treat-as-withdraw (ORIGIN,
+  AS_PATH, NEXT_HOP, MED, communities, flag conflicts, missing
+  mandatory attributes, section overruns) withdraws the UPDATE's
+  routes with the session Established; attribute-discard
+  (ATOMIC_AGGREGATE, AGGREGATOR, duplicates per §3 (g), eBGP-received
   LOCAL_PREF / ORIGINATOR_ID / CLUSTER_LIST) drops the attribute and
-  processes the rest. Session reset is retained only where the NLRI cannot
-  be trusted: section-length inconsistencies, malformed or duplicated
-  MP_REACH_NLRI / MP_UNREACH_NLRI, unparseable NLRI fields, and the §5.2
-  no-reachable-NLRI escalation. New `UpdateMessage::parse_revised` /
-  `decode_path_attributes_revised` APIs carry the per-attribute error
-  taxonomy; `UpdateError` gains a `disposition` field. The transport's
-  AS_PATH-loop and reflection-loop discard paths now share the same
-  treat-as-withdraw engine. Malformations are logged at `warn` with peer,
-  attribute type, and disposition. See `docs/RFC_NOTES.md` for the
-  per-attribute table and interpretation decisions.
+  processes the rest; session reset is retained only where the NLRI
+  cannot be trusted (section-length inconsistencies,
+  malformed/duplicated MP_REACH/MP_UNREACH, unparseable NLRI, the §5.2
+  escalation). New `UpdateMessage::parse_revised` /
+  `decode_path_attributes_revised` APIs carry the taxonomy,
+  `UpdateError` gains a `disposition` field, the AS_PATH-loop and
+  reflection-loop discards share the same engine, and malformations
+  log at `warn`. Per-attribute table in `docs/RFC_NOTES.md`.
 
-- **Cross-daemon IXP receipt-matrix tooling** (`bench/scale/matrix/` +
-  reloadstall harness extensions). The reload-stall harness gains an
-  optional `reload_cmd` trailing argument (reloads run `sh -c <cmd>`, e.g.
-  `docker exec <c> birdc configure`, instead of SIGHUP), a `daemon_pid 0`
-  convention that defers RSS sampling to an outer sampler, and a
-  `--flapstorm K` mode that closes K stub sessions simultaneously and
-  measures every survivor's withdrawal- and re-announce-completion
-  percentiles over three rounds. New scenario generators emit
-  addressing-compatible route-server configs for BIRD 3.3.1
-  (`gen-bird-scenario.py`: `rs client` transparency, `threads` knob,
-  static + `gateway recursive` next-hop glue, included filter-file
-  generations reloaded via `birdc configure`) and OpenBGPD 9.1
-  (`gen-obgpd-scenario.py`: `transparent-as yes`, `fib-update no`,
-  `nexthop qualify via default`, included rule-file generations reloaded
-  via `bgpctl reload`). `run-matrix.sh` sequences the per-daemon cells —
-  load-gated start, per-cell process-tree RSS CSV (`rss-sampler.sh`),
-  artifact collection, resumable per-cell status, 100 GiB RSS cell abort,
-  cool-down between cells. The existing 9/10-argument SIGHUP invocation is
-  unchanged.
+- **Looking-glass filtered-route surface: rejected inbound routes are
+  retained with their reject reason.** Every rejected unicast
+  announcement — import-policy deny (incl. RPKI/ASPA), RFC 9234 OTC
+  drop, next-hop ownership, AS_PATH / RFC 4456 reflection loop,
+  RFC 7606 treat-as-withdraw — is kept in a bounded per-session store
+  tagged with a canonical reason token (`policy_reject`,
+  `otc_route_leak`, `next_hop_ownership`, `as_path_loop`, `rr_loop`,
+  `treat_as_withdraw`) plus detail, next-hop, AS path, communities,
+  and RPKI/ASPA states at rejection time. New
+  `PolicyService.ListRejectedRoutes` RPC (pre-v1) and `rbgp rib
+  received <peer> --rejected` answer the IXP member-support question
+  "why isn't my route accepted?" without knowing the prefix in
+  advance. Entries self-clean on acceptance, withdrawal, and session
+  reset; LRU-bounded per peer via `[policy.reject_retention]`
+  (`enabled` default true, `capacity` default 1024 ≈ 0.5 MiB/peer
+  worst case; restart-required), occupancy on a peer-reaped
+  `bgp_rejected_routes_retained{peer}` gauge. The birdwatcher adapter
+  serves the view to Alice-LG: `GET /routes/filtered/{id}`, a real
+  per-neighbor `routes.filtered` count (previously a `0` sentinel),
+  `reject_reason` / `reject_reason_detail`, and a synthesized
+  reject-reason large community `64496:65520:<id>` (one stable id per
+  reason token) matchable by Alice-LG's `[rejection]` config;
+  retention-disabled and no-live-session serve an empty view. Docs:
+  OPERATIONS.md runbook, route-server cookbook, CONFIGURATION.md,
+  adapter README.
 
-- **Labeled-unicast export explain.** `rbgp rib advertised <peer> --prefix
-  <cidr> --explain --labeled` (gRPC `ExplainAdvertisedRoute` with
-  `labeled = true`) dry-runs the live labeled-unicast (SAFI 4, RFC 8277)
-  staging body with an explain-only target and reports the full export
-  gate ladder — family, best-route selection, RFC 9494 LLGR restriction,
-  split horizon, RFC 4456 reflection, RFC 1997 NO_ADVERTISE/NO_EXPORT,
-  export policy, and the advertised-state diff — matching the unicast and
-  VPN explains. Labeled export suppressions previously produced no reason
-  line.
+- **gNMI dial-out streaming telemetry.** New `[gnmi_dialout]` section:
+  the daemon opens a persistent gRPC connection OUT to each configured
+  collector and pushes the same `SubscribeResponse` stream a dial-in
+  STREAM subscription would produce (initial snapshot,
+  `sync_response`, SAMPLE ticks or ON_CHANGE events) — the
+  central-sink model large fleets use. Wire contract:
+  `rustbgpd.gnmi_dialout.v1.GnmiDialout/Publish`
+  (`proto/rustbgpd_dialout.proto`), mirroring the de-facto vendor
+  dial-out shape. Per-target TLS/mTLS (key files re-read per
+  connection attempt — rotation needs no reload), capped exponential
+  backoff, a `gnmi_dialout_connected{target}` 0/1 gauge (refreshed on
+  both transitions, reaped on removal), dial-in-exact path validation
+  at config load, and SIGHUP in-place target-set reconciliation. A
+  collector being down never affects BGP operation. Docs:
+  `docs/GNMI.md`, `docs/CONFIGURATION.md`, `docs/OPERATIONS.md`,
+  `docs/reload-matrix.md`.
 
-- **`interpret_rfc1997` per-neighbor / per-peer-group knob.** Controls the
-  RFC 1997 `NO_EXPORT` egress enforcement above. Default is derived:
-  `true` unless `route_server_client = true` (route servers stay
-  transparent and let members enforce the community). Explicit values on
-  the neighbor or peer-group override the derived default; peers whose
-  effective value differs never share an update group.
+- **Policy artifact freshness metrics — alert when the filter-render
+  pipeline is stuck.** `bgp_policy_generation_loaded_timestamp_seconds`
+  stamps every successful full policy apply (initial load, SIGHUP
+  incl. content-unchanged re-accepts, config transactions);
+  `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` stamps each
+  external dataset's last accepted generation swap. Both deliberately
+  freeze across rejected loads — acceptance, not file mtime, is the
+  source of truth — so `time() - <gauge>` is a truthful staleness age
+  even while a broken render keeps rewriting files. Per-dataset series
+  (incl. `bgp_policy_dataset_refresh_errors_total`) are reaped when a
+  dataset leaves the config. Alert expressions in `OPERATIONS.md`.
 
-- **Independent per-family maximum-prefix limits.** New `max_prefixes_ipv4`
-  and `max_prefixes_ipv6` neighbor / peer-group knobs bound unique
-  IPv4-unicast and IPv6-unicast prefixes independently of the aggregate
-  `max_prefixes` backstop (both enforced when both set; ADR-0108). A
-  per-family violation tears down with Cease/1 carrying the RFC 4486
-  AFI/SAFI/upper-bound data, and hot-applying a per-family limit below the
-  family's current count enforces immediately.
+- **Slow-peer detection, optional update-group isolation, and per-peer
+  fanout gauges.** An Established peer whose outbound backlog stays at
+  or above `slow_peer_threshold_pct` (default 50%) of the writer
+  buffer for `slow_peer_duration` seconds (default 30; 0 disables) is
+  flagged slow: a `slow_peer` bool on the neighbor surface
+  (`rbgp neighbor`, `NeighborState` field 36), warn logs on both
+  transitions, a peer-reaped `bgp_peer_slow{peer}` gauge. Detection
+  rides existing batch-granularity queue-depth seams plus a 1s
+  re-check timer armed only during an episode — zero steady-state
+  cost. `slow_peer_isolation = true` (default off) moves a flagged
+  peer onto its own update path (ungrouped reason `slow_peer`) so it
+  stops holding back the group's shared encode, regrouping
+  automatically on recovery; complements RFC 9687 send-hold, modeled
+  on IOS-XR Slow Peer handling. Alongside:
+  `bgp_peer_outbound_queue_depth{peer}` (the "which clients are
+  behind" signal, sampled at batch granularity on enqueue and drain)
+  and `bgp_peer_update_group{peer}` (stable group id, `-1` =
+  ungrouped), both reaped on teardown.
 
-- **Marker-backed planned-restart selection deferral.** After a valid restart
-  marker is consumed, rustbgpd freezes the eligible GR restarting-speaker
-  roster per family and withholds selection and outbound propagation until
-  every current-session EoR arrives or the bounded timer expires.
-  `NeighborState` protobuf field 31 (`selection_deferral`) and `rbgp neighbor`
-  human/JSON output expose family state; the original
-  `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
-  `bgp_selection_deferral_releases_total`, and
-  `bgp_selection_deferral_timeouts_total` metrics expose the gate. (#861)
+- **Operator UX: did-you-mean config diagnostics and first-deploy
+  `rbgp doctor` probes.** A typo'd TOML key at any level renders the
+  enclosing table and closest valid key(s) inside the existing
+  source-excerpt diagnostic, reusing the `.rpol` frontend's
+  edit-distance ranking; no-close-match keys keep serde's full
+  expected-key list, secret-bearing lines stay redacted. Doctor probes
+  the classic silent first-30-minutes failures: BGP listener bound
+  (TCP connect when the daemon is up, test-bind/release with
+  `CAP_NET_BIND_SERVICE` advice when down), per-endpoint TCP
+  reachability of every RTR cache, BMP collector, and gNMI dial-out
+  collector (2s each, concurrent), `runtime_state_dir` writability and
+  free space (yellow < 1 GiB, red < 100 MiB), run-context detection
+  (systemd/container, tailoring the `nofile` remediation), and a
+  config-freshness warning for post-start edits. Daemon-down runs
+  probe targets from the local config file, so doctor works before the
+  first start.
 
-- **Exact-export rejection is pinned against independent stacks.** Hosted M87
-  drives a legal 4,095-byte GoBGP 4.6 UPDATE through a sink-only route-server
-  policy that produces a 4,107-byte candidate for a BIRD 2.0.12 session capped
-  at 4,096 bytes. The receipt proves the production exact encoder rejects once,
-  withdraws the previously advertised BIRD route, keeps rejected state out of
-  Adj-RIB-Out with an `exact_export_rejected` explanation, preserves BIRD
-  session continuity, recovers on a small replacement, and converges on source
-  withdrawal. Mutation proofs make the independent BIRD stale-route check and
-  rejection evidence fail when their production guards are removed. (LAN-434)
+- **IXP route-server receipt matrix and cross-daemon tooling.**
+  `docs/perf/ixp-matrix-2026-07.md`: rustbgpd vs BIRD 3.3.1 vs
+  OpenBGPD 9.1 at 700 peers × 400,400 prefixes through the shared
+  reload-stall harness — reload stall + completion over two
+  independent runs, flapstorm withdraw/re-announce, convergence, and
+  process-tree RSS, with a scale ladder, full config disclosure, and
+  raw per-cell artifacts under
+  `docs/perf/artifacts/ixp-matrix-2026-07/`; cross-linked from
+  `docs/RECEIPTS.md` and `docs/COMPARISON.md`. Tooling
+  (`bench/scale/matrix/` + harness extensions): `reload_cmd` (reload
+  via `sh -c <cmd>` instead of SIGHUP; the SIGHUP invocation is
+  unchanged), `daemon_pid 0` (RSS deferred to an outer sampler),
+  `--flapstorm K` (simultaneous stub closes, per-survivor percentiles
+  over three rounds), addressing-compatible scenario generators for
+  BIRD (`gen-bird-scenario.py`) and OpenBGPD
+  (`gen-obgpd-scenario.py`) with reloadable filter/rule generations,
+  and `run-matrix.sh` cell sequencing (load-gated start, per-cell RSS
+  CSV, resumable status, 100 GiB RSS abort, cool-down).
 
-- **Planned-restart marker v3 resists discontinuous wall-clock steps in a
-  matched Linux clock domain.** On Linux 5.6+ with `CONFIG_TIME_NS`, this
-  requires a readable valid boot ID, inspectable time-namespace device/inode,
-  readable valid time-namespace offsets, and a sampleable and representable
-  `CLOCK_BOOTTIME` deadline. Startup uses boottime only when that complete
-  domain matches exactly, protecting against discontinuous `CLOCK_REALTIME`
-  steps between shutdown and startup. Legacy markers, mismatches, and sampling
-  failures use the wall deadline, bounded by the current configured maximum;
-  a forward wall-clock step can shorten or expire that fallback. Publication
-  degrades atomically to complete v1/v2 markers when necessary and logs the
-  actual visible version, checkpoint binding, and directory-sync durability
-  state. Runtime expiry remains process-local monotonic time after startup.
+- **Labeled-unicast export explain.** `rbgp rib advertised <peer>
+  --prefix <cidr> --explain --labeled` (gRPC `ExplainAdvertisedRoute`,
+  `labeled = true`) dry-runs the live labeled-unicast (SAFI 4,
+  RFC 8277) staging body and reports the full export gate ladder —
+  family, best-route selection, RFC 9494 LLGR restriction, split
+  horizon, RFC 4456 reflection, RFC 1997 gates, export policy,
+  advertised-state diff — matching the unicast and VPN explains.
+  Labeled suppressions previously produced no reason line.
 
-- **Coordinated shutdown can publish a bounded warm checkpoint.** The
-  restart-required, default-off `warm_cache_checkpoint_on_shutdown` setting
-  captures eligible established static peers' post-import-policy Adj-RIB-In
-  views into an owner-private, content-addressed MRT bundle under
-  `<runtime_state_dir>/warm-bundle-v1`. Publication is deadline-, allocation-,
-  and size-bounded, atomically binds exact live identity/config/policy inputs to
-  a generation-bound restart marker, and falls back to a generationless marker
-  on failure.
-  Startup does not restore, select, install, or advertise cached routes;
-  `forwarding_preserved` remains false.
+- **`interpret_rfc1997` per-neighbor / per-peer-group knob.** Controls
+  the RFC 1997 `NO_EXPORT` egress enforcement (see Changed). Default
+  derived: `true` unless `route_server_client = true` (route servers
+  stay transparent; members enforce the community). Explicit values
+  override; peers whose effective value differs never share an update
+  group.
 
-- **TCP-AO supports fail-closed add-only live rotation.** SIGHUP can append
-  non-preferred successor MKTs to unchanged static-neighbor and direct
-  dynamic-prefix owners. One immutable generation is globally preflighted,
-  installed idempotently on the listener and every managed protected session,
-  verified against complete kernel inventories, and fenced across passive
-  accepts. Neighbor API/CLI/JSON expose secret-free desired/applied generation,
-  phase, and actionable failure state. A partial failure preserves old
-  selectable keys and is safe to retry; selection, deprecation, deletion,
-  edits/reordering, and protected-owner CRUD remain restart-required. (LAN-16,
-  #159)
+- **Independent per-family maximum-prefix limits.**
+  `max_prefixes_ipv4` / `max_prefixes_ipv6` bound unique IPv4- and
+  IPv6-unicast prefixes independently of the aggregate `max_prefixes`
+  backstop (both enforced when both set). A per-family violation tears
+  down with Cease/1 carrying the RFC 4486 AFI/SAFI/upper-bound data;
+  hot-applying a limit below the current count enforces immediately.
 
-- **Unicast route pagination resumes from ordered indices and fails closed on
-  mutation.** Unfiltered received, best, and private advertised pages clone
-  only the requested page plus lookahead instead of sorting a full table.
-  Grouped advertised pages also resume from the shared index, while their
-  member-local split-horizon and exact-rejection filters may inspect additional
-  underlying rows. Opaque process-local continuations bind the exact route
-  scope, canonical filter semantics, conservative manager-owned scope-class
-  generation, and last route key. Changed scope or filters return gRPC
-  `INVALID_ARGUMENT`; any mutation in the same Received, Best, or Advertised
-  class returns `ABORTED` and requires a restart, without retaining server-side
-  snapshots or cursor registries. Filtered queries preserve their exact
-  full-scan semantics. The retained comparison enforces the 10x 400k-grouped
-  traversal target plus p99, seed-ingest, remove/reannounce churn, and
+- **Marker-backed planned-restart selection deferral.** After a valid
+  restart marker is consumed, rustbgpd freezes the eligible GR
+  restarting-speaker roster per family and withholds selection and
+  outbound propagation until every current-session EoR arrives or the
+  bounded timer expires. `NeighborState` field 31
+  (`selection_deferral`) and `rbgp neighbor` expose family state;
+  `bgp_selection_deferral_active`, `_waiters`, `_releases_total`,
+  `_timeouts_total` expose the gate.
+
+- **Exact-export rejection pinned against independent stacks.** A
+  hosted receipt drives a legal 4,095-byte GoBGP 4.6 UPDATE through a
+  sink-only route-server policy producing a 4,107-byte candidate for a
+  BIRD 2.0.12 session capped at 4,096 bytes: the production exact
+  encoder rejects once, withdraws the previously advertised BIRD
+  route, keeps rejected state out of Adj-RIB-Out with an
+  `exact_export_rejected` explanation, preserves session continuity,
+  recovers on a small replacement, and converges on source withdrawal.
+  Mutation proofs make the independent BIRD stale-route check and
+  rejection evidence fail when the production guards are removed.
+
+- **Planned-restart marker durability: clock-step resistance (v3) and
+  an optional warm checkpoint.** On Linux 5.6+ with `CONFIG_TIME_NS`,
+  startup uses a `CLOCK_BOOTTIME` deadline only when the complete
+  clock domain matches exactly (valid boot ID, time-namespace
+  device/inode and offsets, sampleable deadline), protecting deferral
+  against discontinuous `CLOCK_REALTIME` steps between shutdown and
+  startup; legacy markers, mismatches, and sampling failures use the
+  wall deadline bounded by the configured maximum. Publication
+  degrades atomically to complete v1/v2 markers when necessary,
+  logging the visible version, checkpoint binding, and directory-sync
+  durability state; runtime expiry stays process-local monotonic.
+  Separately, restart-required, default-off
+  `warm_cache_checkpoint_on_shutdown` captures eligible established
+  static peers' post-import-policy Adj-RIB-In views into an
+  owner-private, content-addressed MRT bundle under
+  `<runtime_state_dir>/warm-bundle-v1`: deadline-, allocation-, and
+  size-bounded, atomically binding exact live identity/config/policy
+  inputs to a generation-bound restart marker, with a generationless
+  fallback. Startup does not restore, select, install, or advertise
+  cached routes; `forwarding_preserved` remains false.
+
+- **TCP-AO: ordered startup keyrings, fail-closed add-only live
+  rotation, and dynamic-neighbor prefix protection.** Static neighbors
+  and direct dynamic-prefix selectors configure 1–256 MKTs (singleton
+  tables serialize unchanged; at most one `preferred`, at least one
+  non-deprecated, SendIDs/RecvIDs unique within the keyring); the
+  preferred — else first non-deprecated — key is selected for startup
+  transmission while every key is installed and reconciled against the
+  kernel, partial installs and inventory mismatches failing closed.
+  Passive opens: static exact ownership precedes dynamic
+  longest-prefix-match, the kernel inventory must equal the union of
+  covering protected owners, overlaps need directionally disjoint
+  SendID/RecvID sets, TCP-AO/plaintext and TCP-AO/MD5 overlaps remain
+  invalid, and listener inventories are capped at 4,096 MKTs per
+  address family so inspection cannot truncate a valid configuration.
+  SIGHUP appends non-preferred successor MKTs to unchanged owners as
+  one immutable, globally preflighted generation — installed
+  idempotently, verified against complete kernel inventories, fenced
+  across passive accepts, retryable on partial failure — with
+  secret-free generation/phase/failure state on the neighbor
+  API/CLI/JSON; other key edits and protected-owner CRUD remain
+  restart-required. Direct `[[dynamic_neighbors]].tcp_ao` installs
+  prefix MKTs before the listener enters `listen(2)` without
+  listener-wide `ao_required`; overlapping dynamic/static
+  authentication boundaries and inherited MD5 are rejected, and
+  protected accepts fail closed unless `TCP_AO_INFO` confirms the
+  expected key IDs and clean authentication counters.
+
+- **Unicast route pagination resumes from ordered indices and fails
+  closed on mutation.** Unfiltered received, best, and private
+  advertised pages clone only the requested page plus lookahead
+  instead of sorting a full table; grouped advertised pages resume
+  from the shared index (member-local split-horizon and
+  exact-rejection filters may inspect additional rows). Opaque
+  process-local continuations bind exact scope, filter semantics,
+  scope-class generation, and last route key; changed scope/filters
+  return `INVALID_ARGUMENT`, any same-class mutation returns `ABORTED`
+  (no server-side snapshots or cursor registries). Filtered queries
+  keep exact full-scan semantics. The retained comparison enforces the
+  10x 400k-grouped traversal target plus p99, seed-ingest, churn, and
   resident-memory gates.
 
-- **TCP-AO accepts ordered startup keyrings.** Static neighbors and direct
-  dynamic-prefix selectors may configure one to 256 MKTs. The existing
-  singleton table remains accepted and serializes unchanged; multiple keys use
-  an ordered array of inline tables. At most one key may be `preferred`, at
-  least one must be non-deprecated, and SendIDs and RecvIDs must each be unique
-  within the keyring. The preferred key, or otherwise the first declared
-  non-deprecated key, is selected for startup transmission while every key is
-  installed and reconciled against the kernel. Partial installation and
-  accepted-socket inventory mismatches fail closed. For passive opens, static
-  exact ownership precedes dynamic longest-prefix-match and the kernel
-  inventory must equal the union of every covering protected owner. Overlapping
-  owners require directionally disjoint SendID and RecvID sets;
-  TCP-AO/plaintext and TCP-AO/MD5 overlaps remain invalid. Listener inventories
-  are capped at 4,096 MKTs per address family so inspection cannot truncate a
-  valid configuration. Add-only non-preferred successors can be installed on
-  SIGHUP; selection, deprecation, deletion, and reordering remain
-  restart-required. (LAN-389)
+- **Narrow v1 route-server / route-reflector compatibility contract.**
+  A machine-checked inventory pins only the proven IPv4/IPv6 unicast
+  RS/RR config fields, native gRPC signatures and messages, CLI/JSON
+  contracts, and scoped RR-only BGP-LS, VPN, labeled-unicast, and RTC
+  surfaces; EVPN, dataplane, experimental, and unlisted surfaces stay
+  outside v1. Compatibility and deprecation windows, the canonical
+  transaction mutation path, SIGHUP reconcile limits, a release gate,
+  and a consecutive v0.50.0 → v0.51.0 upgrade receipt are explicit and
+  CI-pinned.
 
-- **Narrow v1 route-server / route-reflector compatibility contract.** A
-  machine-checked inventory now pins only the proven IPv4/IPv6 unicast RS/RR
-  config fields, native gRPC signatures and messages, CLI/JSON contracts, and
-  scoped RR-only BGP-LS, VPN, labeled-unicast, and RTC surfaces. EVPN,
-  dataplane, experimental, and otherwise unlisted surfaces remain outside v1.
-  Compatibility and deprecation windows, the canonical transaction mutation
-  path, SIGHUP reconcile limits, a release gate, and a consecutive v0.50.0 to
-  v0.51.0 route-server upgrade receipt are explicit and CI-pinned. (LAN-355)
+- **Neighbor state reports live transport and distribution truth,
+  including authentication health.** Neighbor API/JSON/human output
+  identify plaintext, TCP-MD5, and TCP-AO sessions; TCP-AO health is
+  refreshed read-only from the connected socket on every query, clears
+  rather than serving stale data when inspection fails, and retains
+  Linux's cumulative-per-socket degraded semantics, with current/RNext
+  KeyIDs and verification counters on connected AO peers. Connect
+  setup failures stay in `last_error`, `rbgp doctor` flags AO peers on
+  unsupported kernels, and the configuration guide documents
+  directional KeyID cross-mapping. The API and CLI report the RIB's
+  live effective distribution mode independently of update-group
+  diagnostic labels, and Paths-Limit rows use stable numeric AFI/SAFI
+  order plus an optional normalized limit — active-unlimited,
+  inactive, and finite send caps render without zero-value ambiguity
+  while the legacy raw sentinel is preserved for rolling clients.
 
-- **Neighbor state reports live effective transport and distribution truth.**
-  TCP-AO health is refreshed read-only from the connected socket for every
-  state query, clears rather than serving stale data when inspection fails,
-  and retains Linux's cumulative-per-socket degraded semantics. The API and
-  CLI report the RIB's live effective distribution mode independently of
-  update-group diagnostic labels. Paths-Limit rows use stable numeric AFI/SAFI
-  order and an optional normalized limit, allowing active unlimited, inactive,
-  and finite effective send caps to render without a zero-value ambiguity while
-  preserving the legacy raw sentinel for rolling protobuf and JSON clients.
-  (LAN-225, LAN-364, LAN-366)
+- **Config plans project update-group impact before apply.** One
+  deterministic schema-v1 structure: established-peer
+  current/candidate groupability, exact fallback reasons, plan-local
+  group IDs, transition and resync rollups, projected shared/private
+  totals, and only conservative capacity classes (exact labels for
+  published receipt topologies; a structural, explicitly unmeasured
+  `fully_shared` label otherwise). Session reshape and future
+  negotiation remain explicitly indeterminate — no memory/time
+  estimate is implied. The transaction token covers the negotiated
+  live-session snapshot as well as config, private fallbacks retain
+  policy-content identity, and intervening session changes are
+  rejected at the apply-time re-plan rather than silently changing the
+  accepted impact (the token does not freeze sessions after that
+  re-plan). Policy-lint integration and post-renegotiation projection
+  remain future work.
 
-- **Neighbor diagnostics expose transport authentication health.** Neighbor
-  API, JSON, and human output identify plaintext, TCP-MD5, and TCP-AO sessions;
-  connected TCP-AO peers include current/RNext KeyIDs and verification
-  counters when live socket inspection succeeds. Connect setup
-  failures remain visible in `last_error`;
-  `rbgp doctor` flags configured AO peers on unsupported kernels, and the
-  configuration guide documents directional KeyID cross-mapping.
-
-- **Experimental Add-Path Paths-Limit capability.** Neighbors and peer groups
-  can advertise a per-family receiver preference with `add_path.receive_max`.
-  Remote code-76 tuples cap only the matching outbound Add-Path family, with
-  configured, advertised, received, and effective values visible in
-  `rbgp neighbor` and its JSON output. The wire format follows the expired
-  `draft-abraitis-idr-addpath-paths-limit-04` and is explicitly experimental.
-  (LAN-242)
-
-- **Config plans project update-group impact before apply.** Plan and apply
-  expose one deterministic schema-v1 structure with established-peer
-  current/candidate groupability, exact fallback reasons, plan-local group IDs,
-  transition and resync rollups, projected shared/private totals, and only
-  conservative capacity classes: exact labels for published receipt topologies
-  plus a structural, explicitly unmeasured `fully_shared` label for other
-  one-group shapes. Session reshape and future negotiation remain explicitly
-  indeterminate; no memory or time estimate or extrapolation is implied.
-  Policy-lint integration and post-renegotiation projection remain in LAN-356.
-  The transaction token covers the negotiated live-session snapshot as well as
-  config, private fallbacks retain policy-content identity, and measured
-  capacity labels apply only to the exact receipt topologies; intervening
-  session changes are rejected at the apply-time re-plan rather than silently
-  changing the accepted impact. The token does not freeze sessions after that
-  re-plan.
-
-- **Management-plane credentials rotate atomically on SIGHUP.** Bearer tokens,
-  mTLS server identity, and client CA material behind unchanged configured paths
-  are staged for every gRPC/gNMI listener and published as one immutable
-  process-wide generation. New RPCs on an existing HTTP/2 connection use the
-  new bearer token; existing streams survive. New TLS accepts use the new
-  identity/CA while established TLS connections survive. Invalid or partial
-  material preserves the complete last-known-good generation, and confirmed
-  config transactions fence reload through the existing runtime lock. Listener
-  shape, paths, authorization roles, and access policy remain restart-required.
-  A bounded success/failure metric and redacted logs expose outcomes. (LAN-359)
-
-- **Dynamic-neighbor TCP-AO can protect a whole inbound prefix at startup.**
-  Direct `[[dynamic_neighbors]].tcp_ao` installs IPv4 or IPv6 prefix MKTs before
-  the BGP listener enters `listen(2)` without enabling listener-wide
-  `ao_required`. Configuration rejects overlapping dynamic/static authentication
-  boundaries and inherited MD5; protected accepts fail closed unless
-  `TCP_AO_INFO` confirms the expected key IDs and clean authentication counters.
-  SIGHUP can append non-preferred successor MKTs to an unchanged range owner;
-  other protected range/key edits remain pinned, and runtime CRUD rejects
-  protected ranges and overlaps. (#158)
+- **Management-plane credentials rotate atomically on SIGHUP.** Bearer
+  tokens, mTLS server identity, and client CA material behind
+  unchanged configured paths are staged for every gRPC/gNMI listener
+  and published as one immutable process-wide generation: new RPCs use
+  the new bearer token, new TLS accepts use the new identity/CA,
+  existing streams and established TLS connections survive. Invalid or
+  partial material preserves the complete last-known-good generation;
+  confirmed config transactions fence reload through the runtime lock;
+  listener shape, paths, roles, and access policy remain
+  restart-required. A bounded success/failure metric and redacted logs
+  expose outcomes.
 
 ### Changed
 
-- **Docs: operator discoverability pass.** New `docs/explain.md` catalog
-  of every explain/introspection surface, an end-to-end IXP tutorial
-  (`docs/cookbook/ixp-filter-pipeline.md`: arouteserver →
-  `rs-config-render` → validated reload → Alice-LG), and a pre-built
-  tarball install path ahead of building from source in README and
-  QUICKSTART.
+- **Docs: operator discoverability and positioning.** New
+  `docs/explain.md` catalog of every explain/introspection surface, an
+  end-to-end IXP tutorial (`docs/cookbook/ixp-filter-pipeline.md`:
+  arouteserver → `rs-config-render` → validated reload → Alice-LG),
+  and a pre-built tarball install path ahead of building from source
+  in README and QUICKSTART. COMPARISON.md gains a "Why reload behavior
+  decided this market" section — the OpenBGPD route-server reload
+  history and RIPE NCC funding rationale, the frr-reload.py
+  blank-config failure class vs the validate-then-apply transaction
+  model, and the inter-daemon config-converter vacuum, each with
+  public citations, framed against the published IXP receipt matrix.
 
-- Docs: COMPARISON.md gains a "Why reload behavior decided this market"
-  positioning section — the OpenBGPD route-server reload history and
-  RIPE NCC funding rationale, the frr-reload.py blank-config failure
-  class vs the validate-then-apply transaction model, and the
-  inter-daemon config-converter vacuum, each with public citations and
-  framed against the published IXP receipt matrix.
+- **Docs: measurement and invariant corrections.** `docs/BENCHMARKS.md`
+  memory tables refreshed with clean-build measurements — RIB
+  structural memory dropped, not grew: the `RouteSlab` migration plus
+  attribute interning corrects previously-overstated figures (e.g.
+  Full RIB @ 500k 484.0 → 316.6 MiB real), and the `AdjRibIn`
+  (1336 B) / `LocRib` (1008 B) stack sizes are confirmed against the
+  current structs. `docs/gobgp-parity.md`'s Summary table is
+  reconciled against its own detail tables under an explicit counting
+  rule (e.g. Path attributes 13/9 → 13/11, Monitoring 5/6 → 5/9,
+  Best-path steps 11/11 → 12/12). The update-group shared-encode
+  safety docs (module docs + ADR) now state the correct mid-stream
+  fallback invariant — per-NLRI attribute identity with the ordinary
+  encode, not byte-identical chunks (message boundaries and NLRI order
+  differ; skips remain impossible because fallback re-encodes the full
+  envelope) — document the encoder's no-await liveness requirement at
+  its two tempting yield points, and add four shared-encode regression
+  tests (chunk integrity under interning, next-hop-override alignment,
+  concurrent consumer streaming, wire-equivalence bounds).
 
 - Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
-  effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
-  zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
+  effective-config hash renders hex pairwise now), clap_mangen
+  0.2 → 0.3, zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
   cargo-deny-action 2.1.1 in the audit workflow. `cargo audit` clean.
 
 - **BREAKING (library API): registry-tracking wire/fsm enums are now
   `#[non_exhaustive]`** — absorbed into the in-flight `rustbgpd-wire`
   0.15.0 / `rustbgpd-fsm` 0.3.0 breaking cut. 22 wire enums
   (`Capability`, `PathAttribute`, `Afi`, `Safi`, `Message`,
-  `MessageType`, `NotificationCode`, `RouteRefreshSubtype`, `EvpnRoute`,
-  `EvpnRouteKey`, `RouteDistinguisherParseError`, `BgpLsNlriType`,
-  `FlowSpecComponent`, `FlowSpecAction`, `OrfType`, `OrfEntries`,
-  `PmsiTunnelType`, `PmsiTunnelIdentifier`, `BgpRole`, `AspaValidation`,
-  `DecodeError`, `EncodeError`) and 2 fsm enums (`TimerType`,
-  `error::FsmError`) now require a wildcard arm in downstream exhaustive
-  matches. This breaks such matches once, in this release; every future
-  registry addition (the recurring `Capability::PathsLimit` shape from
-  0.14.x) then lands as a non-breaking minor instead of another major.
-  Closed-by-construction enums deliberately remain exhaustively
-  matchable: `Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`,
-  `OrfAction`, `OrfMatch`, `OrfSendReceive`, `WhenToRefresh`,
-  `Ipv4UnicastMode`, `ErrorDisposition`, `RpkiValidation`,
-  `EvpnIpPrefixValue`, `FlowSpecPrefix`, `VpnAddressFamily`,
-  `VpnPrefix`, `LabeledAddressFamily`, and fsm `SessionState`. In-tree
-  daemon fallout: every new wildcard arm fails safe (unknown message
-  kind → NOTIFICATION via the FSM decode-error path; unsupported
+  `MessageType`, `NotificationCode`, `RouteRefreshSubtype`,
+  `EvpnRoute`, `EvpnRouteKey`, `RouteDistinguisherParseError`,
+  `BgpLsNlriType`, `FlowSpecComponent`, `FlowSpecAction`, `OrfType`,
+  `OrfEntries`, `PmsiTunnelType`, `PmsiTunnelIdentifier`, `BgpRole`,
+  `AspaValidation`, `DecodeError`, `EncodeError`) and 2 fsm enums
+  (`TimerType`, `error::FsmError`) now require a wildcard arm in
+  downstream exhaustive matches. This breaks such matches once, in
+  this release; every future registry addition (the recurring
+  `Capability::PathsLimit` shape from 0.14.x) then lands as a
+  non-breaking minor instead of another major. Closed-by-construction
+  enums deliberately remain exhaustively matchable: `Origin`,
+  `AsPathSegment`, `Prefix`, `AddPathMode`, `OrfAction`, `OrfMatch`,
+  `OrfSendReceive`, `WhenToRefresh`, `Ipv4UnicastMode`,
+  `ErrorDisposition`, `RpkiValidation`, `EvpnIpPrefixValue`,
+  `FlowSpecPrefix`, `VpnAddressFamily`, `VpnPrefix`,
+  `LabeledAddressFamily`, and fsm `SessionState`. In-tree daemon
+  fallout: every new wildcard arm fails safe (unknown message kind →
+  NOTIFICATION via the FSM decode-error path; unsupported
   ROUTE-REFRESH subtype → ignored with a warning; unmodeled EVPN
-  withdrawal → export error, never silently dropped; unknown timer kind
-  → no slot, no expiry; unknown BGP Role → conservative upstream ASPA
-  procedure and omitted from config snapshots; display surfaces render
-  `unrecognized`/`unmodeled` labels).
+  withdrawal → export error, never silently dropped; unknown timer
+  kind → no slot, no expiry; unknown BGP Role → conservative upstream
+  ASPA procedure and omitted from config snapshots; display surfaces
+  render `unrecognized`/`unmodeled` labels).
 
-- **IXP route-server receipt matrix refreshed with post-fix flapstorm
-  numbers** (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd
-  cells rerun at the deferred-PeerUp-dump fix head — S3 re-announce
-  p50 9.5–9.8 s → 0.46–0.49 s, S1/S2/RSS moved only within run-to-run
-  spread — with a post-publication note documenting the plateau the
-  receipt itself exposed, the head-of-line mechanism, and the rerun;
-  committed raw artifacts swapped to the new runs (BIRD/OpenBGPD cells
-  unchanged).
+- **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for
+  publish).** The exhaustive public `Capability` enum gains the
+  experimental `PathsLimit(Vec<PathsLimitFamily>)` variant for the
+  expired, archived draft-04 wire format using IANA-assigned
+  capability code 76. Downstream exhaustive matches must add an arm.
+  `EvpnRouteKey` also gains the additive `Ord` / `PartialOrd`
+  implementations for deterministic keyed collections.
+
+- **`rustbgpd-fsm` 0.2.0 → 0.3.0 (breaking, prepared for publish).**
+  The FSM's public API now negotiates experimental family-local
+  Paths-Limit state and exports `graceful_restart_preserves_family`.
+  Its new fields are additive behind `#[non_exhaustive]`, but the
+  public surface exposes wire types and now depends on incompatible
+  `rustbgpd-wire ^0.15.0`, requiring the 0.x breaking bump. Wire must
+  be published before the FSM package can be fully verified or
+  published against crates.io.
 
 - **jemalloc is now the default allocator feature.** Shipped artifacts
   (GHCR image, release tarballs) have built with jemalloc since
   v0.50.0+; defaulting the feature makes plain `cargo build --release`
-  produce the same allocator configuration, so locally-built binaries
-  and receipts match the shipped product. Motivation: an 8-cycle
-  policy-reload probe (200 peers x 115k prefixes) showed stock-glibc
-  RSS ratcheting 301->555 / 295->639 MiB across reload cycles without
-  returning memory — allocator arena retention of reload transients,
-  with live bytes flat — while jemalloc oscillated at 270-330 MiB and
-  returned memory via background decay. Default builds also expose the
-  `jemalloc_*` allocated/active/resident gauges on `/metrics`. A
-  stock-glibc build remains available with `--no-default-features`
-  (kept compiling in CI).
+  match the shipped product, so local binaries and receipts agree.
+  Motivation: an 8-cycle policy-reload probe (200 peers x 115k
+  prefixes) showed stock-glibc RSS ratcheting 301->555 / 295->639 MiB
+  across reload cycles without returning memory — allocator arena
+  retention of reload transients, live bytes flat — while jemalloc
+  oscillated at 270-330 MiB and returned memory via background decay.
+  Default builds also expose the `jemalloc_*`
+  allocated/active/resident gauges on `/metrics`; a stock-glibc build
+  remains available with `--no-default-features` (kept compiling in
+  CI).
 
-- Refreshed the `docs/BENCHMARKS.md` memory-footprint tables with fresh
-  clean-build measurements (RIB structural memory dropped, not grew: the
-  LAN-335 `RouteSlab` migration plus attribute interning corrects several
-  previously-overstated figures, e.g. Full RIB @ 500k 484.0 -> 316.6 MiB
-  real) and confirmed the `AdjRibIn` (1336 B) / `LocRib` (1008 B) stack
-  sizes against the current struct definitions. Also reconciled
-  `docs/gobgp-parity.md`'s Summary table against its own detail tables
-  under an explicit stated counting rule, correcting several category
-  tallies (e.g. Path attributes 13/9 -> 13/11, Monitoring 5/6 -> 5/9,
-  Best-path steps 11/11 -> 12/12).
+- **IXP receipt matrix refreshed with post-fix flapstorm numbers**
+  (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd cells rerun
+  at the deferred-PeerUp-dump fix head — S3 re-announce p50
+  9.5–9.8 s → 0.46–0.49 s, S1/S2/RSS within run-to-run spread — with a
+  post-publication note documenting the plateau the receipt itself
+  exposed, the head-of-line mechanism, and the rerun; committed raw
+  artifacts swapped to the new runs (BIRD/OpenBGPD cells unchanged).
 
-- Corrected the update-group shared-encode safety documentation (module
-  docs and ADR-0109): the mid-stream fallback invariant is per-NLRI
-  attribute identity with the ordinary encode — not byte-identical
-  chunks, since message boundaries and NLRI order differ — with skips
-  still impossible because fallback re-encodes the full envelope.
-  Documented the encoder's no-await liveness requirement at its two
-  tempting yield points, and added four shared-encode regression tests
-  (per-source chunk integrity under interning, next-hop-override
-  alignment across the source sort, concurrent consumer streaming, and
-  wire-equivalence normalization bounds).
+- **Reload UPDATE-stall receipt re-run at this tip, covering both
+  reload shapes.** `docs/perf/reload-stall-2026-07.md` now measures
+  the 700-client × 400,400-route scenario in both the historical
+  import+export swap and the export-only change operators perform
+  routinely, on the outbound size-chunking fix below. The corrected
+  harness (unique re-advertised prefixes carrying the new policy
+  community, no duplicate over-count) reports UPDATE stall p50
+  494–652 ms across both shapes and full new-policy re-advertisement
+  completion (p50/max) of 1.54–2.89 s — down from the earlier,
+  since-superseded 0.76 s stall / 155 s completion headline. All 700
+  clients verifiably received the full re-advertised table under the
+  new policy in every run; the daemon-side scenario generator is
+  committed at `bench/scale/reloadstall/gen-scenario.py`.
 
-- **Shared export-policy transitions now pre-stage their destination
-  update-group before the fence, halving the reload wall during which
-  interleaved churn stalls.** The cohort transaction first sends
-  `PrepareExportPolicyDestination`: the RIB creates the prospective
-  destination group and stages it in budgeted actor slices *without* the
-  transition fence — ordinary churn keeps flowing between slices, and the
-  same all-groups staging pass keeps the prepared table live rather than
-  a stale snapshot. The transition then finds the destination
-  `Maintained` and skips its fenced full-table staging walk. Preparation
-  is best-effort (any failure falls back to the ordinary fenced staging),
-  a superseded or abandoned preparation is discarded so an orphaned
-  staged table cannot keep consuming per-churn staging work, and a
-  partially staged leftover is rejected by the existing table-length
-  validation. Measured at 700 route-server members x 400,400 routes
-  (mixed export-only reload under churn): fenced transition wall
+- **Shared export-policy transitions pre-stage their destination group
+  and bound every fenced phase by a wall-clock budget.** The cohort
+  transaction first prepares the prospective destination update-group
+  in budgeted actor slices *without* the transition fence — ordinary
+  churn keeps flowing between slices, and the all-groups staging pass
+  keeps the prepared table live — so the transition finds it
+  `Maintained` and skips the fenced full-table staging walk, halving
+  the reload wall during which interleaved churn stalls (700 members x
+  400,400 routes, mixed export-only reload under churn: fenced wall
   0.95 s -> 0.45 s, per-observer max inter-UPDATE gap p50 ~1.0 s ->
-  ~0.53-0.64 s.
+  ~0.53-0.64 s). Preparation is best-effort with fallback to ordinary
+  fenced staging; superseded or abandoned preparations are discarded
+  so an orphaned staged table cannot keep consuming per-churn work,
+  and partially staged leftovers are rejected by table-length
+  validation. The exact-export probe reuses one result per probe shape
+  per batch instead of a single-entry UPDATE per route, and the
+  strict-cohort ceiling proof reads a store-time maximum instead of
+  rescanning per member (quadratic at fleet scale: ~200 ms of fenced
+  wall at 700 x 400k) — the fenced probe phase drops ~40% at the
+  receipt shape. Every pre-commit phase (member classification,
+  destination staging, inventory build, exact-export probe) strides
+  under the same 25 ms wall-clock poll budget as the commit flush
+  instead of parking after one fixed slice per poll, so the fenced
+  window no longer scales with members x table size (previously ~391
+  single-slice probe polls at 400k routes — a measured ~1.1 s observer
+  gap at 700 members).
 
-- The shared-transition exact-export probe now reuses one exact result
-  per probe shape (prepared-attribute identity, MP framing inputs, and
-  prefix bit-length) within a batch instead of building a single-entry
-  UPDATE message per route, and the strict-cohort ceiling proof consults
-  a maximum computed once at store time instead of rescanning the
-  per-route length vector for every member (quadratic at fleet scale:
-  ~200 ms of fenced actor wall at 700 members x 400k routes). Together
-  the fenced probe phase drops ~40% at the reload-stall receipt shape.
+- **Import+export reloads now take the batched export cohort instead
+  of the per-peer authoritative path.** Cohort eligibility no longer
+  requires an unchanged import chain: a changed import chain is
+  hot-applied during cohort setup and its inbound Route Refresh
+  deferred until the batched RIB commit acknowledges (once per member;
+  unchanged-import members get no refresh); on cohort failure the
+  rollback restores both chains and re-arms the per-peer retry intent.
+  Previously any import-chain change disqualified every peer, so a
+  routine import+export reload on a large fleet serialized N
+  full-table export restages and Route Refreshes instead of sharing
+  one batched transition.
 
-- Every pre-commit phase of a shared policy transition (member
-  classification, destination staging, inventory build, and the
-  exact-export probe) now strides under the same 25 ms wall-clock poll
-  budget as the commit flush, instead of parking after one fixed-size
-  slice per actor poll. The fenced window that excludes interleaved
-  churn during a transition no longer scales with members x table size
-  (400k routes cost ~391 single-slice probe polls — a measured ~1.1 s
-  observer gap at 700 members).
+- **Grouped policy-reload re-advertisement encodes each update-group's
+  wire UPDATE stream once instead of once per member.** The clean
+  export-policy transition hands every member envelope one encode-once
+  cell: the first consuming session task encodes the shared inventory
+  into per-source-peer, per-family chunks at the standard 4096-byte
+  ceiling, and every other member reuses the bytes after proving its
+  export profile wire-identical to the encoder's. Split horizon
+  composes from whole chunks (a member sends all but its own
+  source's), fewer-family members skip chunks, and any anomaly —
+  profile mismatch, preparation failure, OTC hit, oversize entry —
+  falls back to the unchanged per-session encode. This removes the N×
+  duplicate encode that delayed every observer's first post-reload
+  UPDATE by the full-table encode time. Publication is progressive:
+  chunks publish per slice as produced and members send them as they
+  arrive, so an observer's longest wire silence tracks per-slice
+  encode latency (single-digit milliseconds); a stream that fails
+  mid-way terminates explicitly (drop-guarded against encoder unwind)
+  and members fall back to the local encode, whose byte-identical
+  re-announcements are idempotent.
 
-- **Reloads that change import and export policy together now take the
-  batched export cohort instead of the per-peer authoritative path.** The
-  cohort's eligibility check no longer requires an unchanged import chain:
-  a member's changed import chain is hot-applied to its session during
-  cohort setup, and the corresponding inbound Route Refresh is deferred
-  until the batched RIB commit acknowledges (firing once per member;
-  members whose import chain did not change still get no refresh). On
-  cohort failure the rollback restores both chains and re-arms the
-  existing per-peer retry intent. Previously any import-chain content
-  change disqualified every peer, so a routine import+export reload on a
-  large fleet serialized N full-table export restages and Route Refreshes
-  behind one another instead of sharing one batched transition.
+- **Grouped export-policy transitions commit in bounded member batches
+  under a wall-clock budget.** The former single finalization poll —
+  one synchronous actor poll holding the whole per-peer commit/flush
+  loop — is now a `Validate` poll (the last that can fall back)
+  followed by `CommitMembers` polls that flush validated members under
+  a 25 ms wall-clock budget (initially a fixed eight per batch),
+  yielding to the dedicated readiness lane between batches, mid-flush
+  seam bounded well under the 200 ms readiness deadline. At internet
+  scale (1M routes / 500 peers / 300 changed) the old loop blocked the
+  actor 1.6–2.4 s and depooled `/readyz`; the stall is
+  peer-fleet-driven and volume-flat, so the bound is keyed on members,
+  not routes (a fixed-count poll still cost ~0.88 s of staggered first
+  emission at 700 members). Commit reply position, terminal retry
+  pass, fallback-implies-nothing-emitted contract, and the 30-second
+  stalled verdict are unchanged; the poll histogram gains a `commit`
+  kind.
 
-- **Grouped policy-reload re-advertisement now encodes each update-group's
-  wire UPDATE stream once instead of once per member** (ADR-0109). The
-  clean export-policy transition hands every member envelope one
-  encode-once cell; the first consuming session task encodes the shared
-  inventory into per-source-peer, per-family chunks at the standard
-  4096-byte ceiling and every other member reuses the bytes after proving
-  its export profile wire-identical to the encoder's. Split horizon
-  composes from whole chunks (a member sends all chunks except its own
-  source's), members that negotiated fewer families skip those chunks, and
-  any anomaly — profile mismatch, preparation failure, OTC hit, oversize
-  single entry — falls back to the unchanged per-session encode. At
-  route-server scale this removes the N× duplicate encode that delayed
-  every observer's first post-reload UPDATE by the full-table encode time.
-  Publication is progressive (ADR-0109 amendment): the encoder publishes
-  each slice's chunks as they are produced and members send them as they
-  arrive, so an observer's longest wire silence tracks per-slice encode
-  latency (single-digit milliseconds) instead of the single-threaded
-  full-table encode; a stream that fails mid-way terminates explicitly
-  (drop-guarded against encoder unwind) and members fall back to the local
-  encode, whose byte-identical re-announcements are idempotent.
+- **Dirty-peer resync is bounded per tick, budget-driven, and
+  round-robin.** A resync-timer tick used to hand every dirty peer to
+  one synchronous `distribute_changes` pass at O(table) each; ticks
+  now drain the backlog under the same 25 ms wall-clock budget as
+  commit flushes (via an interim 8-peers-per-10 ms bound), selecting
+  peers round-robin so a peer whose sends keep failing cannot
+  monopolize ticks while drainable peers starve. Partial passes are
+  safe because per-peer resync is idempotent — Adj-RIB-Out state and
+  the dirty flag commit only after a successful send. Recovery
+  throughput under backpressure no longer scales inversely with fleet
+  size; each peer is attempted at most once per tick, failed peers
+  wait for the ordinary retry interval.
 
-- Dirty-peer resync ticks now drain the backlog under the same 25 ms
-  wall-clock poll budget as policy-transition commit flushes, instead of a
-  fixed 8 peers per 10 ms re-arm, and select peers round-robin so a peer
-  whose sends keep failing cannot monopolize successive ticks while
-  drainable peers starve. Recovery throughput under outbound backpressure
-  no longer scales inversely with fleet size; each peer is attempted at
-  most once per tick, and failed peers keep waiting for the ordinary retry
-  interval.
-
-- Shared policy-transition commit polls now flush validated members under a
-  25 ms wall-clock budget instead of parking after a fixed 8 members. The
-  readiness lane keeps its mid-flush seam (bounded at the budget, well under
-  the 200 ms readiness deadline), while emission start no longer scales
-  linearly with update-group size — a fixed-count poll cost ~0.88 s of
-  staggered first emission at 700 members.
-
-- **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP egress
-  by default.** Routes received with either community are suppressed at
-  export staging toward eBGP peers across unicast (incl. RFC 8950 next-hop
-  forms), VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS — the same family set
-  as the existing `NO_ADVERTISE` enforcement. The check is source-route-only:
-  export policy that adds `NO_EXPORT` still delivers the route (the
-  route-server action idiom, also used by the RFC 9494 §4.6 LLGR form), and
-  policy that removes it cannot bypass the suppression. iBGP targets (incl.
-  RR reflection/ORR) are never suppressed. A received route carrying
-  `NO_EXPORT` is now suppressed toward eBGP peers even where RFC 9494 LLGR
-  eligibility previously passed it — RFC 1997 outranks LLGR eligibility.
-  Route-server clients are unchanged (transparent by default, see below).
-  The export-explain ladder gains a stable `no_export` gate rung beside
+- **RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` are now honored at eBGP
+  egress by default.** Routes received with either community are
+  suppressed at export staging toward eBGP peers across unicast (incl.
+  RFC 8950 next-hop forms), VPNv4/VPNv6, labeled-unicast, RTC, and
+  BGP-LS — the same family set as the existing `NO_ADVERTISE`
+  enforcement. The check is source-route-only: export policy that adds
+  `NO_EXPORT` still delivers the route (the route-server action idiom,
+  also used by the RFC 9494 §4.6 LLGR form), and policy that removes
+  it cannot bypass the suppression. iBGP targets (incl. RR
+  reflection/ORR) are never suppressed; a received `NO_EXPORT` now
+  outranks RFC 9494 LLGR eligibility toward eBGP peers; route-server
+  clients stay transparent by default via `interpret_rfc1997`. The
+  export-explain ladder gains a stable `no_export` rung beside
   `no_advertise`.
 
-- **Durable event-history conversion and encoding moved off the RIB actor.**
-  With `[event_history]` enabled, `RibManager::publish_route_event` /
-  `publish_evpn_route_event` now hand the owned event snapshot (plus the
-  producer-captured `timestamp_ns` and already-assigned `event_id`) to a
-  bounded FIFO channel; proto conversion, prost encoding, and envelope
-  construction run in a dedicated conversion stage in front of the event
-  outbox instead of on the RIB actor. Payload bytes, publish order,
-  EHM-assigned cursor contiguity, producer timestamps, queue-full/closed
-  drop counters, degraded-state semantics, and the legacy ring/broadcast
-  surfaces are unchanged; overload now sheds work before conversion instead
-  of after. The stage drains snapshots accepted before shutdown so they
-  still commit. Manager-side publish cost with durable history enabled
-  drops by roughly an order of magnitude (see
-  `docs/perf/event-history-producer-2026-07.md`). (LAN-393)
-
-- **Grouped export-policy transitions commit in bounded member batches.** The
-  transition's former single finalization poll — one synchronous actor poll
-  containing the whole per-peer commit/flush loop — is now a `Validate` poll
-  (the last that can fall back) followed by `CommitMembers` polls that flush
-  at most eight members each, yielding to the dedicated readiness lane
-  between batches. At internet scale (1M routes / 500 peers / 300 changed)
-  the old loop blocked the actor 1.6–2.4 s and depooled `/readyz`; the stall
-  is peer-fleet-driven and volume-flat, so the bound is keyed on members, not
-  routes. The commit reply position, terminal retry pass, fallback-implies-
-  nothing-emitted contract, and 30-second stalled verdict are unchanged. The
-  poll histogram gains a `commit` poll kind for re-measurement. (LAN-447)
-
-- **Dirty-peer resync is bounded per timer tick.** A resync-timer tick used
-  to hand every dirty peer to one synchronous `distribute_changes` pass at
-  O(table) each; it now processes at most eight dirty peers per tick and
-  re-arms the timer at a short 10 ms interval while a withheld backlog
-  remains. Partial passes are safe because per-peer resync is idempotent:
-  Adj-RIB-Out state and the dirty flag are committed only after a successful
-  send, and withheld peers are untouched. (LAN-447)
-
-- **`rustbgpd-wire` 0.14.1 → 0.15.0 (breaking, prepared for publish).** The
-  exhaustive public `Capability` enum gains the experimental
-  `PathsLimit(Vec<PathsLimitFamily>)` variant for the expired, archived
-  draft-04 wire format using IANA-assigned capability code 76. Downstream
-  exhaustive matches must add an arm. `EvpnRouteKey` also gains the additive
-  `Ord` / `PartialOrd` implementations for deterministic keyed collections.
-
-- **`rustbgpd-fsm` 0.2.0 → 0.3.0 (breaking, prepared for publish).** The FSM's
-  public API now negotiates experimental family-local Paths-Limit state and
-  exports `graceful_restart_preserves_family`. Its new fields are additive
-  behind `#[non_exhaustive]`, but the public surface exposes wire types and now
-  depends on incompatible `rustbgpd-wire ^0.15.0`, requiring the 0.x breaking
-  bump. Wire must be published before the FSM package can be fully verified or
-  published against crates.io.
+- **Durable event-history conversion and encoding moved off the RIB
+  actor.** With `[event_history]` enabled, route-event publication
+  hands the owned snapshot (producer-captured `timestamp_ns`,
+  already-assigned `event_id`) to a bounded FIFO channel; proto
+  conversion, prost encoding, and envelope construction run in a
+  dedicated conversion stage in front of the event outbox. Payload
+  bytes, publish order, cursor contiguity, producer timestamps, drop
+  counters, degraded-state semantics, and the legacy ring/broadcast
+  surfaces are unchanged; overload sheds before conversion instead of
+  after, and the stage drains pre-shutdown snapshots so they still
+  commit. Manager-side publish cost with durable history drops by
+  roughly an order of magnitude
+  (`docs/perf/event-history-producer-2026-07.md`).
 
 - **Policy rollback has one aggregate RIB wait budget.** Authoritative
-  self-heal and a subsequent cohort unwind now share one lazy absolute
-  five-second deadline instead of waiting up to five seconds per peer. Every
-  reverse-order RIB restore is registered before rollback Route Refresh or
-  later lifecycle work; timeout and caller cancellation retain the same pinned
-  late repairs while conservative pending flags preserve explicit retry intent.
-  The bound covers cumulative rollback RIB send/reply waiting, not sequential
-  session commands, Route Refresh acknowledgements, or late RIB repair.
+  self-heal and a subsequent cohort unwind share one lazy absolute
+  five-second deadline instead of up to five seconds per peer; every
+  reverse-order RIB restore is registered before rollback Route
+  Refresh or later lifecycle work, and timeout/cancellation retain the
+  same pinned late repairs with conservative pending flags preserving
+  retry intent. The bound covers cumulative rollback RIB send/reply
+  waiting — not sequential session commands, Route Refresh
+  acknowledgements, or late RIB repair.
 
-- **Mixed policy reloads batch their eligible export-only cohort.** Snapshot
-  application now selects the first equivalent Established export-only cohort
-  in configuration order, commits it through one shared RIB transition, then
-  preserves the original order for the authoritative remainder. Duplicate
-  targets disable partitioning wholesale. Cohort and remainder failures attempt
-  newest-first rollback and surface composed rollback failures. A successful
-  shared transition performs the same global dirty-resync opportunity as the
-  authoritative seam before replying. The reload-stall harness can
-  independently gate changed-observer completion while retaining full-fleet
-  delivery-gap and session checks. In the corrected 700-session / 400,400-route
-  mixed campaign (600 changed, 100 stable), median completion p50 improves
-  116.185x and median completion maximum improves 149.261x across four reloads,
-  with 700/700 sessions, 100/100 fresh stable markers, and zero parser errors in
-  every row. This is not an unconditional stall win: median full-fleet gap p50
-  regresses 2.070x to 2022.590 ms and median full-fleet maximum regresses 2.899x
-  to 2906.551 ms, so chunked member resync remains required. The exact raw
-  receipt and reproduction are retained under
+- **Mixed policy reloads batch their eligible export-only cohort.**
+  Snapshot application selects the first equivalent Established
+  export-only cohort in configuration order, commits it through one
+  shared RIB transition, then preserves the original order for the
+  authoritative remainder; duplicate targets disable partitioning
+  wholesale, failures roll back newest-first surfacing composed
+  errors, and a successful shared transition performs the same global
+  dirty-resync opportunity as the authoritative seam. The reload-stall
+  harness can independently gate changed-observer completion while
+  retaining full-fleet delivery-gap and session checks. Corrected
+  700-session / 400,400-route mixed campaign (600 changed,
+  100 stable): median completion p50 improves 116.185x and median
+  completion maximum 149.261x across four reloads, 700/700 sessions,
+  100/100 fresh stable markers, zero parser errors. Not an
+  unconditional stall win: median full-fleet gap p50 regresses 2.070x
+  to 2022.590 ms and maximum 2.899x to 2906.551 ms, so chunked member
+  resync remains required. Raw receipt under
   `docs/perf/artifacts/policy-reload-cohort-partition-2026-07/`.
 
-- **IXP route-server clients share exact-export work across remote ASNs.** The
-  immutable session export profile now retains the wire-relevant eBGP/iBGP
-  classification instead of negotiated remote-AS identity; every other wire
-  input still participates in full profile equality, and each target still
-  rechecks its own message ceiling and generation. Byte-level tests prove that
-  distinct eBGP ASNs encode identically while eBGP and iBGP remain
-  incompatible, including when dynamic peers negotiate away from a configured
-  ASN wildcard. In the pinned route-server fixture, 4,096-route policy
-  transitions across 700 distinct-ASN clients collapse from 2,867,200 to 4,096
-  full exact probes and improve from 510.332 ms to 7.604 ms; 64-route
-  first-advertise fanout improves 47%..65% at 8..256 clients with no
-  homogeneous first-advertise regression. The 64-client homogeneous transition
-  cell has no detected change while its distinct-ASN counterpart improves
-  93.00%.
-
-- **Changed-policy update groups share transition work without hiding live
-  export-policy counters.** Eligible grouped-to-grouped unicast reloads build
-  and exact-probe one destination inventory per wire cohort, then reuse its
-  immutable payload across members. Every grouped membership path—optimized
-  commit, authoritative fallback/recompute, and rollback—now installs the
-  exact destination-group policy-chain counter instance for every member, so
-  `rbgp policy stats` exposes the same staged evaluations for the whole group
-  and continues to advance as later routes arrive.
+- **IXP route-server clients share exact-export work across remote
+  ASNs.** The immutable session export profile retains the
+  wire-relevant eBGP/iBGP classification instead of negotiated
+  remote-AS identity; every other wire input still participates in
+  full profile equality, and each target still rechecks its own
+  message ceiling and generation. Byte-level tests prove distinct eBGP
+  ASNs encode identically while eBGP and iBGP remain incompatible,
+  including when dynamic peers negotiate away from a configured ASN
+  wildcard. Pinned fixture: 4,096-route policy transitions across 700
+  distinct-ASN clients collapse from 2,867,200 to 4,096 full exact
+  probes (510.332 ms → 7.604 ms); 64-route first-advertise fanout
+  improves 47%..65% at 8..256 clients with no homogeneous regression;
+  the 64-client homogeneous transition cell has no detected change
+  while its distinct-ASN counterpart improves 93.00%.
 
 - **Large uniform export-policy transitions stay observable while they
-  converge.** Clean grouped-to-grouped unicast cohorts reuse one immutable
-  transition inventory and exact-probe plan. Their post-snapshot staging,
-  inventory, and probe bodies process at most 1,024 route identities per poll;
-  the preceding Loc-RIB prefix snapshot and destination-key inventory snapshot
-  remain two explicit, measured O(table) actor polls with no extrapolated hard
-  bound. Live readiness uses dedicated type-narrow PeerManager and RIB lanes;
-  general RIB queries now remain queued with ordinary mutations behind the
-  transaction instead of extending its fence. The process-global
-  `bgp_rib_policy_transition_in_progress` and retained terminal-duration gauges,
-  a production actor-poll histogram split across bounded work, complete table
-  snapshots, and finalization, a five-second warning, and a shipped one-minute
-  alert make unexpectedly slow transitions visible. Readiness stays healthy
-  during legitimate bounded progress but fails closed when ownership reaches
-  30 seconds, recovering immediately at a terminal actor seam. Later readiness
-  can overtake queued general queries, although an
-  already-running O(table) query remains non-preemptible. Meanwhile,
-  membership and reserved writer sends still commit as one synchronous
-  section. A successfully enqueued cohort RIB reply remains transaction-owned
-  past the ordinary five-second per-peer timeout, preventing a forward/rollback
-  race while readiness continues to be served. Pinned 65,536-route/64-peer and
-  4,096-route/700-peer receipts record 4.927 ms as the largest production
-  actor poll and 2.001 ms for the 700-member atomic finalization, both below
-  the 50 ms engineering budget. Paused-clock regressions complete in-flight
-  readiness probes with zero 200 ms timeouts, including while one session
-  policy command is independently stalled.
+  converge, without hiding live export-policy counters.** Clean
+  grouped-to-grouped unicast cohorts reuse one immutable transition
+  inventory and exact-probe plan; staging, inventory, and probe bodies
+  process at most 1,024 route identities per poll, while the Loc-RIB
+  prefix snapshot and destination-key inventory snapshot remain two
+  explicit, measured O(table) actor polls. Live readiness uses
+  dedicated type-narrow PeerManager and RIB lanes; general RIB queries
+  stay queued with ordinary mutations behind the transaction instead
+  of extending its fence (later readiness can overtake queued general
+  queries; an already-running O(table) query is non-preemptible), and
+  membership plus reserved writer sends still commit as one
+  synchronous section. The process-global
+  `bgp_rib_policy_transition_in_progress` and terminal-duration
+  gauges, an actor-poll histogram split across bounded work / table
+  snapshots / finalization, a five-second warning, and a shipped
+  one-minute alert make slow transitions visible; readiness stays
+  healthy during legitimate bounded progress but fails closed at 30
+  seconds of ownership, recovering at a terminal actor seam. An
+  enqueued cohort RIB reply remains transaction-owned past the
+  ordinary five-second per-peer timeout, preventing a forward/rollback
+  race. Pinned 65,536-route/64-peer and 4,096-route/700-peer receipts:
+  largest production actor poll 4.927 ms, 700-member atomic
+  finalization 2.001 ms, both under the 50 ms budget; paused-clock
+  regressions complete in-flight readiness probes with zero 200 ms
+  timeouts, even while one session policy command is independently
+  stalled. Every grouped membership path — optimized commit,
+  authoritative fallback/recompute, rollback — installs the exact
+  destination-group policy-chain counter instance for every member, so
+  `rbgp policy stats` exposes the same staged evaluations for the
+  whole group and keeps advancing as later routes arrive.
 
-- **Authoritative export-policy fallbacks no longer multiply one RIB actor
-  stall by peer count.** An ineligible or invalidated clean transition now
-  returns a typed, fail-closed handoff after releasing writer permits and
-  removing every uncommitted destination. PeerManager applies one ordinary RIB
-  replacement at a time, keeps readiness live while awaiting each existing
-  five-second reply, and preserves newest-first session/RIB rollback without a
-  second session hot-apply. A 65,536-route stop-gate receipt records 104.25 ms
-  for one peer; a 64-peer lower-level reference retains roughly 4.29 seconds of
-  total RIB work while splitting it into individual operations whose first
-  warm-up maximum was 108.819 ms.
+- **Authoritative export-policy fallbacks no longer multiply one RIB
+  actor stall by peer count.** An ineligible or invalidated clean
+  transition returns a typed, fail-closed handoff after releasing
+  writer permits and removing every uncommitted destination;
+  PeerManager applies one ordinary RIB replacement at a time, keeps
+  readiness live while awaiting each five-second reply, and preserves
+  newest-first session/RIB rollback without a second session
+  hot-apply. A 65,536-route stop-gate receipt records 104.25 ms for
+  one peer; a 64-peer reference retains ~4.29 s of total RIB work
+  split into individual operations (first warm-up maximum 108.819 ms).
 
-- **Clean update-group exact precommit avoids unused per-peer bookkeeping.**
-  Ordinary grouped members whose exact probes all succeed no longer rebuild
-  candidate keys or walk and allocate the group's prior advertised set; that
-  work is deferred to the rejection/overlay fallback that actually needs it.
-  Per-target wire ceiling and generation checks remain mandatory, and resync,
-  regroup, VPN/mixed-family, malformed, rejected, and non-shared paths retain
-  the full reconciliation path. A pinned two-attempt Criterion matrix improves
-  64/256-peer fanout by 32%..36% with no one-peer regression, while the sealed
-  16-cell manager flood/churn matrix improves 197%..649%. Exact inputs,
-  counterbalancing, preflights, confidence gates, and checksummed artifacts are
-  retained in the performance receipt. (LAN-395)
+- **Clean update-group exact precommit avoids unused per-peer
+  bookkeeping.** Grouped members whose exact probes all succeed no
+  longer rebuild candidate keys or walk and allocate the group's prior
+  advertised set; that work defers to the rejection/overlay fallback
+  that needs it. Per-target wire ceiling and generation checks remain
+  mandatory; resync, regroup, VPN/mixed-family, malformed, rejected,
+  and non-shared paths keep the full reconciliation path. A pinned
+  two-attempt Criterion matrix improves 64/256-peer fanout 32%..36%
+  with no one-peer regression; the sealed 16-cell manager flood/churn
+  matrix improves 197%..649%. Exact inputs, counterbalancing,
+  preflights, confidence gates, and checksummed artifacts are retained
+  in the performance receipt.
 
-- **Update-group correctness now has a parameterized fixed-scenario
-  differential corpus.** The grouped manager path and forced-per-peer oracle
-  are compared with explicit exact-stream or normalized semantic-effect plus
-  folded-state semantics across bounded channel
-  saturation and virtual-time retry, repeated policy regroup while dirty, stale
-  session generations, and RT-Constrain membership churn. Every path must emit
-  non-empty traffic, deliver a terminal sentinel, finish its manager task, and
-  clear dirty/force/regroup/residue state. A hard-capped 24-seed extension runs
-  weekly and by manual dispatch on GitHub-hosted runners. Seeds vary fixture
-  identities, not schedule order or length; validated seed-start, seed-count,
-  and max-operation controls replay an individual failure without allowing an
-  unbounded run. (LAN-357)
-
-- **Reload UPDATE-stall receipt re-run against the 2026-07-16 campaign,
-  covering both reload shapes.** `docs/perf/reload-stall-2026-07.md` now
-  measures the 700-client × 400,400-route scenario in both the historical
-  import+export swap and the export-only change route-server operators
-  perform routinely, on the outbound size-chunking fix above. The corrected
-  harness (unique re-advertised prefixes carrying the new policy community,
-  no duplicate over-count) reports UPDATE stall p50 494–652 ms across both
-  shapes and full new-policy re-advertisement completion (p50/max) of
-  1.54–2.89 s — down from the earlier, since-superseded 0.76 s stall /
-  155 s completion headline. Every one of the 700 clients verifiably
-  received the full re-advertised table under the new policy in every run.
-  The daemon-side scenario generator is committed at
-  `bench/scale/reloadstall/gen-scenario.py`.
+- **Update-group correctness has a parameterized fixed-scenario
+  differential corpus.** The grouped manager path and forced-per-peer
+  oracle are compared with explicit exact-stream or normalized
+  semantic-effect plus folded-state semantics across bounded channel
+  saturation and virtual-time retry, repeated policy regroup while
+  dirty, stale session generations, and RT-Constrain membership churn;
+  every path must emit non-empty traffic, deliver a terminal sentinel,
+  finish its manager task, and clear dirty/force/regroup/residue
+  state. A hard-capped 24-seed extension runs weekly and by manual
+  dispatch on GitHub-hosted runners; seeds vary fixture identities,
+  not schedule order or length, and validated seed-start, seed-count,
+  and max-operation controls replay an individual failure without an
+  unbounded run.
 
 ### Fixed
 
-- **RFC 7606 §6: the malformed-UPDATE debug dump is now complete.** The
-  DEBUG-level diagnostic emitted on treat-as-withdraw and
-  attribute-discard events previously hex-dumped each raw UPDATE
-  section with a 512-byte cap and reported only NLRI counts. It now
-  captures the ENTIRE malformed UPDATE message as hex — untruncated,
-  since message size is already protocol-bounded (4096 bytes, or 65535
-  with Extended Messages) — and enumerates the NLRI involved explicitly
-  (prefixes with Add-Path path IDs, per family, announcements and
-  withdrawals), rendered from what the revised parse already produced.
-  Still DEBUG-gated and lazily built, so the clean path and log-spam
-  posture are unchanged; routing dispositions are untouched. The
-  rejected-route retention store keeps its separate, deliberate byte
-  caps.
+- **RFC 7606 §5.2 and §6: the reset escalation is content-based and
+  the malformed-UPDATE diagnostics are complete.** The "no reachable
+  NLRI" escalation gate tested MP_REACH attribute *presence*, not
+  content — an UPDATE carrying a structurally valid MP_REACH with zero
+  NLRI plus a treat-as-withdraw-class error stayed Established via the
+  treat-as-withdraw arm, which had nothing to withdraw. The gate now
+  inspects the parsed MP_REACH payload across every family's announced
+  vector; the attribute validator keeps its presence-based
+  mandatory-attribute semantics, and an MP_REACH that does carry NLRI
+  still takes treat-as-withdraw (no over-reset). Per the §5.2
+  debugging guidance, malformed UPDATEs are dumped at DEBUG: the
+  ENTIRE message as hex — untruncated, since message size is
+  protocol-bounded (4096 bytes, or 65535 with Extended Messages;
+  initially capped at 512 bytes per section) — with the involved NLRI
+  enumerated explicitly (prefixes with Add-Path path IDs, per family,
+  announcements and withdrawals), rendered from what the revised parse
+  already produced. Still DEBUG-gated and lazily built (clean path and
+  log-spam posture unchanged); routing dispositions untouched; the
+  rejected-route retention store keeps its separate byte caps.
 
-- **Interop: FRR zebra startup race pinned out of M10 and M89.** On a
-  loaded runner FRR can send its initial IPv6 UPDATE before zebra
-  reports a global address on the peering interface; the
+- **Interop: an FRR zebra startup race pinned out of two hosted
+  labs.** On a loaded runner FRR can send its initial IPv6 UPDATE
+  before zebra reports a global address on the peering interface; the
   link-local-only MP_REACH next hop is rightly rejected
   (treat-as-withdraw) and FRR never re-advertises, starving the proofs
   for the whole convergence window. Explicit outbound route-maps now
   set the IPv6 global next hop on the FRR sources, removing the
   interface-address timing dependency.
 
-- **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
-  malformed UPDATE from session reset.** The "no reachable NLRI"
-  escalation gate tested MP_REACH attribute *presence*, not content —
-  an UPDATE carrying a structurally valid MP_REACH with zero NLRI plus
-  a treat-as-withdraw-class attribute error stayed Established via the
-  treat-as-withdraw arm, which had nothing to withdraw. The gate now
-  inspects the parsed MP_REACH payload across every family's announced
-  vector; the attribute validator keeps its presence-based
-  mandatory-attribute semantics unchanged, and an MP_REACH that does
-  carry NLRI still takes treat-as-withdraw (no over-reset). Malformed
-  UPDATEs are additionally dumped at DEBUG per the §5.2 debugging
-  guidance: NLRI/withdrawn counts plus the raw message sections
-  hex-encoded, bounded at 512 bytes per section so an Extended-Messages
-  peer cannot spam the logs.
-
 - **Rejected-route retention now enforces its per-entry byte budget.**
-  The `[policy.reject_retention]` store was bounded in entry count
-  (LRU, 1024/peer) but each entry retained unbounded wire-derived data
-  — a hostile peer with a maximal AS_PATH and community lists (worse
-  under RFC 8654 Extended Messages) could push entries to multiple KB
-  across hundreds of peers, default-on. Entries are now truncated at
-  capture time: the rendered AS-path and detail strings are capped
-  (96 / 64 bytes, `…` marker appended), and the community vectors are
-  capped (16 standard / 8 large) with the dropped counts recorded and
-  surfaced (`ListRejectedRoutes` `communities_dropped` /
-  `large_communities_dropped`, and in `rbgp rib received --rejected`
-  JSON) so renderers can say "…and N more". The documented
-  ≤ 512 B/entry ⇒ ~0.5 MiB/peer bound is now an enforced fact, pinned
-  by a size-budget test against the real type sizes. One bounded
-  attribute summary is also built per UPDATE and shared across every
-  rejected identity, replacing the per-identity re-render and
-  deep-clone of the full attribute set.
+  The store was bounded in entry count (LRU, 1024/peer) but each entry
+  retained unbounded wire-derived data — a hostile peer with a maximal
+  AS_PATH and community lists (worse under RFC 8654 Extended Messages)
+  could push entries to multiple KB across hundreds of peers,
+  default-on. Entries are now truncated at capture time: AS-path and
+  detail strings capped (96 / 64 bytes, `…` marker), community
+  vectors capped (16 standard / 8 large) with dropped counts surfaced
+  (`communities_dropped` / `large_communities_dropped` in
+  `ListRejectedRoutes` and the CLI JSON) so renderers can say "…and N
+  more". The documented ≤ 512 B/entry ⇒ ~0.5 MiB/peer bound is now an
+  enforced fact, pinned by a size-budget test against the real type
+  sizes; one bounded attribute summary is built per UPDATE and shared
+  across every rejected identity, replacing the per-identity re-render
+  and deep-clone of the full attribute set.
 
 - **Post-flap re-announce latency: initial table dumps no longer
-  head-of-line block redistribution.** A peer's outbound registration at
-  `PeerUp` performed its full-table initial dump synchronously on the
-  RIB actor, so a mass reconnect (e.g. 50 route-server members
-  re-establishing after a flap) serialized N full-table passes ahead of
-  the re-announcements already queued behind the burst — survivors saw
-  the flapped prefixes only after the last dump finished (~9.5 s flat at
-  the 700x400k receipt shape, scaling with peers x table). When the
-  actor has queued work, the registration (and its dump) now defers to
-  the run loop, which completes one per iteration strictly after every
-  queued mutation batch has drained: imports and their fan-out to
-  established peers always preempt the reconnecting peers' full-table
-  catch-up. A quiet actor, or a table under 10k routes (whose dump is
-  sub-10-ms-class), still registers inline — registration-timing
-  semantics only change where deferring buys real latency back.
-  Session-semantic flags (eBGP / RR-client / RFC 9234 role /
-  per-client-best / RFC 1997 interpretation) always install immediately
-  at `PeerUp`, so inbound processing never runs with absent flags
-  during the deferral window. A session that drops, is superseded, or
-  fails over while
-  deferred resolves to its surviving live session, including the
-  inbound ROUTE-REFRESH re-solicitation on failover. GR/LLGR stale
-  retention, EoR emission, RFC 4724 selection deferral, and the RFC
-  5291 ORF gate are unchanged. Local flapstorm at 300 peers x 300k
-  prefixes, 30 flapped: survivor re-announce completion 4.43-4.56 s ->
-  0.32-0.33 s (first arrival 4.24-4.40 s -> 0.17 s), withdraws
-  unchanged at ~0.15 s. The flapstorm harness now also reports
-  per-survivor first re-announce arrival (`first_reann_s`), separating
-  delivery-start latency from fan-out completion.
+  head-of-line block redistribution.** A peer's outbound registration
+  at `PeerUp` ran its full-table initial dump synchronously on the RIB
+  actor, so a mass reconnect (e.g. 50 route-server members after a
+  flap) serialized N full-table passes ahead of the re-announcements
+  queued behind the burst — survivors saw the flapped prefixes only
+  after the last dump finished (~9.5 s flat at the 700x400k receipt
+  shape, scaling with peers x table). When the actor has queued work,
+  the registration (and dump) now defers to the run loop, one per
+  iteration strictly after every queued mutation batch drains, so
+  imports and their fan-out always preempt reconnecting peers'
+  catch-up; a quiet actor or a sub-10k-route table (sub-10-ms dump)
+  still registers inline. Session-semantic flags (eBGP / RR-client /
+  RFC 9234 role / per-client-best / RFC 1997 interpretation) always
+  install immediately at `PeerUp`, so inbound processing never runs
+  with absent flags; a session that drops, is superseded, or fails
+  over while deferred resolves to its surviving live session,
+  including the inbound ROUTE-REFRESH re-solicitation on failover.
+  GR/LLGR stale retention, EoR emission, RFC 4724 selection deferral,
+  and the RFC 5291 ORF gate are unchanged. Local flapstorm at
+  300 peers x 300k prefixes, 30 flapped: survivor re-announce
+  completion 4.43-4.56 s -> 0.32-0.33 s (first arrival 4.24-4.40 s ->
+  0.17 s), withdraws unchanged at ~0.15 s; the flapstorm harness now
+  also reports per-survivor first re-announce arrival
+  (`first_reann_s`), separating delivery-start latency from fan-out
+  completion.
 
-- **gNMI dial-out: a subscription error no longer strands the session on
-  a silent collector.** When the local subscription ended mid-session
-  (e.g. ON_CHANGE broadcast lag closing the stream with `DataLoss`), the
-  client ended its outbound stream but then kept waiting on the
-  collector's response stream for the disconnect signal — and the proto
-  reserves `PublishResponse` for future flow control, so a compliant
-  collector may never send anything and never close. The session hung
-  forever, the promised fresh-snapshot resync never happened, and
+- **gNMI dial-out: a subscription error no longer strands the session
+  on a silent collector.** When the local subscription ended
+  mid-session (e.g. ON_CHANGE broadcast lag closing the stream with
+  `DataLoss`), the client ended its outbound stream but kept waiting
+  on the collector's response stream — and the proto reserves
+  `PublishResponse` for future flow control, so a compliant collector
+  may never send anything and never close. The session hung forever,
+  the promised fresh-snapshot resync never happened, and
   `gnmi_dialout_connected{target}` stayed at 1. Outbound-stream
-  completion is now a first-class disconnect signal: the session returns
-  to the reconnect loop immediately and resyncs from a fresh initial
-  snapshot + `sync_response`.
+  completion is now a first-class disconnect signal: the session
+  returns to the reconnect loop immediately and resyncs from a fresh
+  initial snapshot + `sync_response`.
 
 - **Grouped route-server control decisions are now made on the source
-  route, matching the ungrouped path.** The update-groups emission path
-  evaluated RFC 7947 control communities (`0:PEER` suppression,
-  `RS:0:PEER` large-community forms, prepend requests) on the
+  route, matching the ungrouped path.** The update-groups emission
+  path evaluated RFC 7947 control communities on the
   post-export-policy route, so a policy that stripped a control
   community could leak a route the source member prohibited, and
   policy-added control communities could spuriously suppress or
   prepend. Suppression and prepend are now decided from the source
   route's communities captured at staging time; the egress scrub still
   runs post-policy so policy-added control forms are removed without
-  acting. Tag-only transitions (policy strips or adds the tag while the
-  route is otherwise unchanged) now emit the exact per-member withdraw /
-  re-announce delta instead of being equality-suppressed.
+  acting. Tag-only transitions (policy strips or adds the tag while
+  the route is otherwise unchanged) now emit the exact per-member
+  withdraw / re-announce delta instead of being equality-suppressed.
 
-- Membership changes during destination pre-staging now discard the
-  partial group table, so joiners always see a fully staged group. A
-  peer whose (attributes, policy) key equaled a mid-walk prestaged
-  destination could join the partially staged group through any
-  ordinary membership seam (session registration, per-peer policy
-  install, membership recompute), replay the partial table as its
-  initial view, and then have the remaining staging slices' deltas
-  discarded — routes recorded as advertised but never emitted, with
-  no later heal. The join now drops the prestage (the held prepare
-  reply resolves as skipped) and rebuilds the group on the ordinary
-  path. Discards are also exact now: the preparation records the
-  group id it actually staged, and both an explicit discard and a
-  cohort commit that resolved a different destination remove that
-  recorded group instead of re-deriving one from current attributes
-  (which could drift and leak the staged, memberless group).
+- **Route-server fleets take the shared clean export-policy transition
+  again — a ~150× reload-completion regression fixed.** The shared
+  transition's member-eligibility check blanket-excluded every
+  `rs_control_communities` session, a leftover from when the knob was
+  opt-in; with it defaulting on for `route_server_client` neighbors,
+  an entire IXP fleet fell back to serial per-member full-table
+  resyncs on every export-policy reload (200 members × 115k routes:
+  ~28.6 s vs 0.22 s with the knob off; ~4.5 min at 700 × 400k). The
+  transition's single inventory walk now proves the diff carries no
+  RFC 7947 control-form community for the cohort's RS ASNs — checking
+  the post-policy routes AND the captured source communities on both
+  sides, so a policy that strips or adds a control tag still rejects
+  the optimized plan — and untagged inventories (the overwhelming
+  case) let rs-control members ride the shared cohort and shared
+  encode exactly like ordinary members; tagged inventories keep the
+  whole cohort on the authoritative per-peer path, whose emit seams
+  apply the per-target suppression/prepend/scrub.
 
-- A cohort export hot-apply failure on a member whose import delta was
-  already acknowledged now reconciles the acked-import window after
-  reasserting the member's prior import chain: routes the session
-  accepted under the new chain between setup and the failed export apply
-  get a Route Refresh when the session is Established, or arm
-  `pending_refresh` for the retry pipeline when it is not. Previously a
-  successful inline repair left that window unreconciled — no refresh
-  fired and no retry intent was armed.
+- **Cohort transition edge cases: pre-staging joins and acked-import
+  repair windows.** A peer whose (attributes, policy) key equaled a
+  mid-walk prestaged destination could join the partially staged group
+  through any ordinary membership seam, replay the partial table as
+  its initial view, and have the remaining staging slices' deltas
+  discarded — routes recorded as advertised but never emitted, with no
+  later heal. The join now drops the prestage (the held prepare reply
+  resolves as skipped) and rebuilds the group on the ordinary path;
+  discards are also exact — the preparation records the group id it
+  actually staged, and both an explicit discard and a cohort commit
+  that resolved elsewhere remove that recorded group instead of
+  re-deriving one that could drift and leak a staged, memberless
+  group. Separately, a cohort export hot-apply failure on a member
+  whose import delta was already acknowledged now reconciles the
+  acked-import window after reasserting the prior import chain: routes
+  accepted under the new chain in that window get a Route Refresh when
+  Established, or arm `pending_refresh` for the retry pipeline;
+  previously a successful inline repair left the window unreconciled.
 
-- Config parse diagnostics no longer echo secret material past the exact
-  known keywords: a typo'd secret key rejected by unknown-field
-  validation (`md5password`, `tcpao`) is recognized by a normalized
-  key-prefix check and redacted, and an error inside a multi-line string
-  value walks back to the string's opening line so a secret two or more
-  lines below `md5_password = """` is redacted too. Ordinary lines,
-  including non-secret unknown fields, keep the full echoed snippet.
+- **Parse and runtime diagnostics no longer echo credential
+  material.** When a TOML error's snippet line — or the line before
+  it, for unterminated-quote spans — mentions `md5_password` or TCP-AO
+  key material, the diagnostic replaces the source line with a
+  redaction placeholder and collapses the caret run (whose width would
+  reveal the secret's length), keeping the file/line/column pointer;
+  this covers the SIGHUP reload log, daemon stderr, and the
+  `DiffRuntimeConfig`/`PlanConfigTransaction` gRPC statuses in one
+  place. Typo'd secret keys rejected by unknown-field validation
+  (`md5password`, `tcpao`) are caught by a normalized key-prefix check,
+  and an error inside a multi-line string walks back to the string's
+  opening line so a secret below `md5_password = """` is redacted too;
+  ordinary lines, including non-secret unknown fields, keep the full
+  snippet. The runtime snapshot token drops its config-rendering
+  byte-length component (the rendering includes plaintext secrets)
+  while staying a process-local equality token under the same keyed
+  digest, and `Neighbor`, `PeerGroupConfig`, and
+  `RuntimeConfigSnapshotReply` gain manual `Debug` impls that redact
+  `md5_password` and the runtime TOML.
 
-- `TransportAuthSecret` equality is now constant-time. The derived
-  `PartialEq` compared secret bytes with an early-out; the manual
-  implementation compares in time dependent only on the longer input's
-  length and does not short-circuit on a length mismatch. Current callers
-  only diff config against config, so this hardens a footgun rather than
-  fixing an exploitable path.
+- **Authentication secrets are zeroized, compared in constant time,
+  and reloaded under a lock.** TCP-AO MKT secrets and TCP-MD5
+  passwords use an immutable redacting wrapper across the internal
+  API, peer manager, and transport runtime, so each clone scrubs its
+  own allocation when replaced or dropped; the Linux `tcp_md5sig`
+  temporary scrubs its key buffer and length after every socket-option
+  attempt (TOML parser, config snapshot, protobuf, compiler-created,
+  and kernel copies retain separate lifetimes); management-plane
+  credential reads (bearer token, TLS private key) and retired
+  `BearerAuthSecret` generations are zeroized on drop.
+  `TransportAuthSecret` equality is constant-time — the derived
+  `PartialEq` had an early-out; the manual impl's timing depends only
+  on the longer input's length (current callers only diff config
+  against config: a hardened footgun, not an exploitable path).
+  `CredentialStore::reload` serializes its sequence increment and
+  generation publish behind a reload lock so concurrent reloads cannot
+  mint duplicate sequences or publish out of order. The queued-child
+  kernel receipt now also exercises a dynamic `127.0.0.0/24` owner and
+  proves its successor installs on the accepted child without changing
+  Current/RNext or authenticated traffic.
 
-- `CredentialStore::reload` now serializes its sequence increment and
-  generation publish behind a reload lock, so concurrent reloads can no
-  longer mint duplicate generation sequences or publish out of order.
-  Today's only caller (SIGHUP) already serialized reloads; the store no
-  longer relies on that.
+- **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by
+  export policy, and policy-added suppressions are observable.**
+  IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS
+  SAFI 71/72 check both the stored source route before export policy
+  and the modified route after policy across their supported export
+  shapes (unicast incl. grouped/private, RFC 7947 per-client-best,
+  RFC 9107 ORR; VPN incl. grouped/private; labeled-unicast incl. ORR):
+  policy cannot remove the community to make a scoped route
+  exportable, and a policy-added community suppresses the route before
+  Adj-RIB-Out commit. Scoped replacements withdraw existing state,
+  candidate modes compact surviving siblings, ORR suppresses its
+  selected winner without falling back; terminal export explain
+  reports the suppression (and, for a post-policy stop, the triggering
+  modification) for unicast and VPN, and unicast Add-Path best-path
+  explain mirrors the compacted advertised ranks. The single-best and
+  ORR single-best staging tails previously withheld a
+  policy-added-NO_ADVERTISE route with no filtered-routes entry or
+  `policy_filtered` event; both tails now record the suppression like
+  the policy-deny arm, and policy-added NO_ADVERTISE on a multipath
+  (Add-Path) candidate likewise surfaces through the same live
+  policy-filtered observability, where previously only export explain
+  covered it.
+
+- **Closed outbound channels no longer re-mark peers dirty for resync,
+  so shutdown quiesces instead of livelocking.** The outbound send
+  path treated a closed per-peer channel (session gone) like a full
+  one (peer slow): both re-marked the peer dirty, and the bounded
+  dirty-resync tick retried the dead channel forever — at scale each
+  tick's export pass outlasted the 10 ms backlog re-arm, so the RIB
+  actor never returned to its event loop to observe shutdown, spinning
+  at full CPU after SIGTERM until killed externally.
+  `mark_outbound_dirty` — the single dirty-insertion seam — now drops
+  a peer's dirty state when its channel is closed or deregistered, and
+  the resync tick prunes closed-channel peers before selecting its
+  slice, so a dead backlog quiesces in one tick and the timer disarms.
+  Full session teardown remains with the `PeerDown` path.
+
+- **`/readyz` treats the 200 ms core-readiness deadline as a hard
+  bound on the HTTP response.** A runtime stall (such as the
+  post-commit outbound flush) could hold the probe past the deadline
+  and then complete it, and the queued actor reply was polled before
+  the expired probe timer — a late 200 that silently violated the
+  readiness contract. The handler now wraps the probe in the deadline
+  and rejects a late success, answering `503 not ready: readiness
+  probe deadline exceeded`; the fast-503 daemon-gate path is
+  unchanged.
+
+- **Shutdown paths can no longer wedge, spin, or lose their
+  checkpoint.** GR restart marker publication, its generationless
+  fallback, and marker removal at coordinated shutdown run on a
+  detached writer thread under a 5-second terminal deadline, so a hung
+  filesystem cannot stall daemon exit; warm-bundle entry verification
+  treats an entry grown by a same-UID writer mid-read as a typed
+  mismatch instead of panicking; and a cleanup pass over a bundle
+  directory holding more than 65,536 candidates removes the first
+  cap-worth in deterministic name order before reporting the over-cap
+  error, so the directory shrinks on every pass instead of failing
+  unchanged forever. Peer sessions drain with fixed cross-peer
+  concurrency while preserving pending-before-primary ordering and
+  each session's timeout/abort/reap guarantees, so a backpressured
+  fleet cannot multiply the per-session deadline into a multi-minute
+  shutdown. Warm checkpoints retain one committed snapshot: only after
+  the `manifest.json` rename and directory fsync establish the commit
+  point does publication remove superseded content-addressed snapshots
+  and crash-leaked temporaries, continuing past entry-local unlink
+  failures and preserving the primary error when rollback also fails;
+  startup performs the same bounded descriptor-relative scavenging
+  without opening or adopting route snapshots (absent manifests permit
+  orphan cleanup, valid byte-stable manifests protect their selection,
+  invalid or changed manifests delete nothing), and cleanup failure
+  cannot delete the current snapshot or disable later publication.
+  Concurrent daemons must use distinct `runtime_state_dir` values.
+
+- **Planned-restart selection deferral: teardown, failback gating,
+  release accounting, clock-step bounds, and a bounded identity
+  ledger.** Deleting a GR neighbor mid-deferral removes its waiters
+  from the frozen roster, so the family releases when the remaining
+  waiters satisfy instead of freezing selection until timer expiry.
+  Collision failback applies the same OPEN gating as ordinary
+  classification: a Restart-State, non-GR, or plain-refresh (no
+  RFC 7313) survivor is excluded instead of parked in an unfulfillable
+  `awaiting_refresh` that convergence-holds the family; with Enhanced
+  Route Refresh negotiated, the exact nonzero, unambiguous survivor
+  enters `awaiting_refresh` — the current Loc-RIB stages as soon as
+  ordinary waiters finish, but downstream EoR and route-refresh
+  responses stay held until a post-failback BoRR/EoRR cycle completes
+  (ordinary EoR, stray EoRR, and the local refresh timeout cannot
+  release the hold; the marker-bounded selection timer is the
+  fallback), and a plain-refresh peer whose deferred route-refresh
+  response is delivered at release no longer gets a second
+  empty-UPDATE End-of-RIB after the genuine convergence EoR. Release
+  accounting: a family gate completing with zero completion markers
+  consumed records `all_excluded` instead of `all_eor`; simultaneous
+  identity-and-byte ledger exhaustion records
+  `identities_and_logical_bytes`. Marker-backed startup clamps the
+  persisted marker's remaining lifetime to the maximum effective
+  `gr_restart_time`, so a wall-clock correction cannot extend
+  restarting-speaker signaling or selection deferral; expired or
+  nonpositive-window markers cold-start immediately. The ledger is
+  bounded: at most one million affected route identities across all
+  gated families plus an independent 64 MiB process-wide ceiling on
+  deterministic logical retained-key data (incl. nested FlowSpec terms
+  and BGP-LS payload bytes — not RSS or allocator overhead); exceeding
+  either sends that family into overflow fallback, where release
+  performs a complete Adj-RIB-In + Loc-RIB sweep so pre-EoR
+  withdrawals cannot leave stale routes, exposed by a one-shot warning
+  and `bgp_selection_deferral_ledger_overflows_total{afi_safi}`.
+
+- **Hot-applied export-affecting knobs re-probe suppressed routes.** A
+  SIGHUP reload that hot-applies `local_ipv6_nexthop` or
+  `remove_private_as` to a live session issues a forced outbound
+  refresh (like the graceful-shutdown toggle and live policy apply),
+  so routes the exact-export preflight suppressed under the old knobs
+  go back on the wire immediately — and already-advertised AS_PATHs
+  re-encode — instead of waiting for unrelated churn or a session
+  bounce. Export-inert hot applies issue no refresh.
+
+- **Paths-Limit state survives collision failback and resists foreign
+  families.** The RIB's live-session record carries the per-family
+  Add-Path Paths-Limit map and restores it when an outbound
+  registration fails over to a surviving session, instead of clamping
+  every family to the scalar send limit; received limits outside the
+  peer's negotiated Add-Path send families are ignored, so they cannot
+  activate Add-Path for another family or trigger an initial-table
+  replay.
+
+- **Exact-export and outbound transport failures fail closed before
+  Adj-RIB-Out commit.** Every route-bearing envelope carries one
+  immutable snapshot of the session's exact encoder and negotiated
+  message ceiling; the RIB probes the final one-route wire form for
+  all supported families after policy and next-hop preparation, so a
+  rejected announcement is never recorded as advertised and a route
+  that becomes unexportable is withdrawn. Update-group members retain
+  the shared staged table with a sparse per-member rejection overlay,
+  so 4096-byte and Extended Message peers share policy work without
+  sharing an incorrect advertised view; rejections are logged once per
+  transition, counted by
+  `bgp_exact_export_rejections_total{peer,family,reason}`, retried on
+  a later accepted recompute or resync, and retired by an ordinary
+  source withdraw without a duplicate wire withdrawal. The transport's
+  Cease/8 overflow teardown remains a defense against invariant
+  violations, not the primary correctness mechanism: a single EVPN
+  announcement or withdrawal that cannot fit the negotiated ceiling
+  now invokes that teardown so an Established stream cannot survive
+  with logical Adj-RIB-Out ahead of the wire, and the post-commit IPv6
+  no-next-hop and Extended-Next-Hop IPv4 preparation arms tear down
+  with Cease/Out-of-Resources like the oversize branches instead of
+  silently dropping the route (both arms unreachable while producers
+  run the preflight). IPv6-unicast and FlowSpec Extended Message
+  batches start with a bounded 1,024-entry probe and grow through
+  exactly built candidates up to a 4,096-entry ceiling, remembering
+  successful and failed bounds without losing, duplicating, or
+  reordering NLRI; the transport's defense-only RFC 9234 OTC gate is
+  test-pinned as family-neutral for IPv4 and IPv6.
+
+- **Outbound unicast and FlowSpec UPDATEs are split by encoded message
+  size.** A same-attribute Adj-RIB-Out group larger than one BGP
+  message (≈1000 /24s ≈ 4114 bytes against the 4096-byte limit) was
+  built as a single UPDATE; the transport rejected it with
+  `MessageTooLong` and abandoned the rest of the batch — but never
+  reported the partial delivery back across the RIB/session boundary,
+  so the RIB kept believing the whole group was advertised, leaving
+  peers silently under-advertised with no dirty-resync recovery
+  (sharpest after a changed-policy reload, where every route is
+  re-advertised at once). IPv4 body/MP_REACH, IPv4 MP_UNREACH, IPv6
+  MP_REACH/MP_UNREACH, and IPv4/IPv6 FlowSpec MP_REACH/MP_UNREACH now
+  chunk to the negotiated maximum message size, using bounded, exactly
+  encoded probes that can grow beyond 1,024 entries when Extended
+  Messages are negotiated. FlowSpec uses fallible structured encoding
+  throughout, and its RIB and withdrawal identity now carries AFI
+  explicitly, so destination-less IPv4 and IPv6 rules coexist and
+  withdraw independently. A lone entry that still cannot fit tears the
+  session down so Adj-RIB-Out is rebuilt on reconnect, rather than
+  falsely reporting the route advertised.
+
+- **RFC 9234 OTC suppression precedes Adj-RIB-Out commit.** IPv4/IPv6
+  unicast routes carrying OTC toward a Provider, Peer, or Route Server
+  are rejected while staging grouped and private export views,
+  including ORR, Add-Path, and per-client-best: a newly blocked route
+  is never recorded as advertised, and a route that becomes blocked
+  generates a withdrawal and leaves logical advertised state.
+  Session-stamped local roles separate update groups from the initial
+  table onward, export explain reports the same OTC gate, and the
+  existing counter/event diagnostics remain emitted without relying on
+  a transport-only wire drop.
+
+- **Pre-policy and import-policy rejections withdraw prior accepted
+  paths.** OTC rejects retire exact accepted unicast
+  `(prefix, path_id)` identities; AS_PATH-loop and reflection-loop
+  rejects also retire exact VPN, labeled-unicast, RTC, and BGP-LS
+  identities. Import-policy-denied replacements do the same across
+  every family — unicast `(prefix, path_id)`, VPNv4/VPNv6
+  `(RD + prefix, path_id)`, labeled-unicast `(prefix, path_id)`, RTC
+  `(NLRI, path_id)`, BGP-LS `(family, NLRI, path_id)` — with the
+  removal reaching the RIB immediately. First-seen rejections/denials
+  remain filter-only, explicit withdrawals are deduplicated, and
+  Add-Path siblings stay intact.
+
+- **Enhanced-refresh omissions no longer poison max-prefix
+  accounting.** Inbound RFC 7313 windows mirror exact typed route
+  identities across every counted family, retire replayed or withdrawn
+  identities only after ordered RIB acceptance, and reconcile omitted
+  routes at `EoRR` or the shared timeout; timeout closure is ordered
+  ahead of later buffered UPDATEs, remains safe under RIB backpressure
+  or shutdown, and runs for quiet peers. GR peers cannot open a family
+  refresh window before that family's initial End-of-RIB.
+
+- **TCP-AO passive accepts survive an add-only listener generation
+  flip.** Linux does not copy newly added listener MKTs into children
+  already completed in the accept queue; rustbgpd now recognizes only
+  the exact immediately previous inventory, adds the missing successor
+  suffix while it still exclusively owns the child, verifies the exact
+  current inventory, and stamps the current generation — partial
+  inventories, out-of-fence generations, and failed repairs remain
+  fail-closed. The hosted kernel receipt deterministically exercises
+  the queued-child race, and a live SIGHUP successor rotation is
+  proven against BIRD 3.3.1 without a session flap.
+
+- **The v1 stable-surface gates close their coverage gaps.**
+  Contextual defaults: the dynamic-neighbor cap and
+  address-/inheritance-dependent family set join the resolver checks,
+  with schema omission representations distinguished from runtime
+  values and `PeerManager` pinned to the shared cap resolver. Release
+  cadence: patch and major releases are supported — upgrade exercises
+  remain a contiguous, fail-closed chain of adjacent release lines,
+  the latest targeting `vMAJOR.MINOR.0`, with the exact workspace
+  patch version pinned separately. Config shape: stable definition
+  digests cover the complete required-field set and unknown-field
+  policy in addition to selected property schemas, while still
+  allowing unselected optional sibling fields and descriptive-prose
+  changes. CLI: the inventory covers the complete `rbgp diff` command
+  tree and every shipped ribsnap producer — BIRD, FRR, GoBGP, MRT, and
+  BMP byte-exact producer tests linked to five pinned goldens, every
+  real golden checked against the required type floor, every complete
+  artifact still passing the fail-closed parser, and lost
+  command-path/golden/producer-test linkage rejected.
+
+- **ORR isolates its SPF graph to the RFC 9552 default topology.**
+  BGP-LS Node, Link, and Prefix inputs are classified before
+  deduplication or graph insertion: valid non-default MT-ID objects
+  and malformed topology/Attribute 29 inputs are excluded fail-closed,
+  so they cannot claim nodes, addresses, links, or reachability;
+  Flex-Algorithm data remains inert while the base default object and
+  classic IGP/Prefix Metric stay usable. `rbgp orr`, the status API,
+  aggregate transition logs, export explain, and five fixed-label
+  Prometheus series expose the bounded input diagnostics.
+
+- **Peer-supplied `LOCAL_PREF` is ignored on eBGP ingress.** Per
+  RFC 4271, external peers can no longer influence import policy,
+  explain output, Adj-RIB-In storage, or best-path selection by
+  sending `LOCAL_PREF`. iBGP values remain effective, import policy
+  may still set a local value, and the byte-exact pre-policy BMP view
+  continues to expose the original wire UPDATE.
+
+- **The route-server starter applies documented dual-stack ingress
+  hygiene.** Its policy rejects both default routes and a dated
+  2025-10-09 snapshot of active IANA special-purpose rows marked
+  non-globally reachable, while preserving active globally reachable
+  or N/A children of broader rejected parents. Production-loader tests
+  pin the complete snapshot, parent exceptions, chain order, and later
+  RPKI, ASPA, and prefix-length guards; the interop lab retains an
+  explicitly reduced IPv4 projection because its deterministic probes
+  use RFC 6598 and TEST-NET-3 space.
+
+- **`rpol` cost passes guard against duplicate-name underflow.** The
+  function-cost Kahn pass and the apply-bounds pass seeded their
+  `pending`/`dependents` accounting by iterating `file.fns` /
+  `file.policies` (which hold every duplicate AST definition) while
+  the `edges`/`defs` maps they consume key by name and collapse
+  duplicates — completing a shared callee or apply-target could
+  decrement a dependent's count past zero, panicking in debug/fuzz
+  builds and wrapping silently in release. Names are now seeded at
+  most once in both passes; regression tests cover both. Found by the
+  nightly `rpol_compile` fuzz target.
+
+- **EVPN load generation validates unsafe workloads and honors exact
+  event budgets.** The development-only `evpn-tester` rejects
+  zero-sized batches, zero-route or zero-rate churn, 1-2 s hold times,
+  out-of-range 24-bit VNIs, MAC/IP counts that would reuse the
+  synthetic MAC space, and initial/churn chunks that do not encode
+  within a standard 4096-byte message; hold time zero correctly
+  disables both periodic keepalives and the receive timer instead of
+  constructing a zero-duration Tokio interval. Initial injection and
+  withdraw/re-advertise churn wait against cumulative route events
+  before sending, avoiding an initial low-rate burst and integer
+  batch-rate rounding; configured rates hold when a batch exceeds the
+  per-second budget or a chunk is partial, churn does not emit a pair
+  scheduled beyond its duration, and session-only `--count 0` and
+  unlimited `--rate 0` remain supported.
+
+- **The committed July RIB rebaseline receipt is self-verifying
+  again.** The eight CPU derivatives match the current classifier, and
+  CI replays both checksum envelopes plus every CPU, DHAT, and
+  sanitized CSV derivative. No benchmark was rerun; no measured value
+  or performance claim changed.
 
 - The gNMI `subscribe_on_change_streams_session_transitions` test no
   longer flakes on a 2-second delivery timeout: the event-history test
   fixture commits with `SYNCHRONOUS=NORMAL` instead of `FULL` (the
-  subscription tests exercise plumbing, not outbox durability, and the
-  per-commit fsyncs were the latency source), and the bounded wait is now
-  a hang guard rather than a latency assertion.
-
-- **Single-best exports suppressed by policy-added NO_ADVERTISE now record
-  a policy-filtered entry.** When an export policy permitted a route but
-  added NO_ADVERTISE, the single-best and ORR single-best unicast staging
-  tails withheld the route without the policy-filtered entry the multipath
-  body records — the route disappeared from the peer with no
-  filtered-routes view entry or `policy_filtered` route event. Both tails
-  now record the suppression exactly like the policy-deny arm.
-
-- **Closed outbound channels no longer re-mark peers dirty for resync, so
-  shutdown quiesces instead of livelocking.** The outbound send path treated
-  a closed per-peer channel (session gone) the same as a full one (peer
-  slow): both re-marked the peer dirty, and the bounded dirty-resync tick
-  retried the dead channel forever — at scale each tick's export pass
-  outlasted the 10 ms backlog re-arm, so the RIB actor never returned to its
-  event loop to observe shutdown, spinning at full CPU after SIGTERM until
-  killed externally. `mark_outbound_dirty` — the single dirty-insertion
-  seam — now drops a peer's dirty state when its channel is closed or
-  deregistered, and the resync tick prunes closed-channel peers before
-  selecting its slice, so a dead backlog quiesces in one tick and the timer
-  disarms. Full session teardown remains with the `PeerDown` path. (LAN-459)
-
-- **`/readyz` now treats the 200 ms core-readiness deadline as a hard bound
-  on the HTTP response.** A runtime stall (such as the post-commit outbound
-  flush) could hold the probe past the deadline and then complete it, and the
-  queued actor reply was polled before the expired probe timer — so the probe
-  answered a late 200 that silently violated the readiness contract. The
-  `/readyz` handler now wraps the probe in the deadline and rejects a late
-  success, answering `503 not ready: readiness probe deadline exceeded`
-  instead. The fast-503 daemon-gate path is unchanged. (LAN-448)
-
-- **Policy-added NO_ADVERTISE on Add-Path candidates now emits a
-  policy-filtered route event.** When export policy adds NO_ADVERTISE to a
-  multipath (Add-Path) candidate, the suppression surfaces through the same
-  live policy-filtered observability (route events, transition-based) as an
-  export-policy deny; previously only export explain covered it.
-
-- **Parse diagnostics no longer echo credential-bearing config lines.** When a
-  TOML error's snippet line — or the line immediately before it, for
-  unterminated-quote spans — mentions `md5_password` or TCP-AO key material,
-  the rendered diagnostic replaces the source line with a redaction placeholder
-  and collapses the caret run (whose width would reveal the secret's length),
-  while keeping the file/line/column pointer. This covers the SIGHUP reload
-  log, daemon stderr, and the `DiffRuntimeConfig`/`PlanConfigTransaction` gRPC
-  statuses in one place. The runtime snapshot token also drops its
-  config-rendering byte-length component (the rendering includes plaintext
-  secrets); tokens stay process-local equality tokens under the same keyed
-  digest. `Neighbor`, `PeerGroupConfig`, and `RuntimeConfigSnapshotReply` gain
-  manual `Debug` impls that redact `md5_password` and the runtime TOML, and
-  management-plane credential reads (bearer token, TLS private key) plus
-  retired `BearerAuthSecret` generations are zeroized on drop.
-
-- **Shutdown GR marker publication and warm-bundle maintenance can no longer
-  wedge or wedge-loop.** GR restart marker publication, its generationless
-  fallback, and marker removal at coordinated shutdown now run on a detached
-  writer thread under a 5-second terminal deadline, so a hung filesystem
-  cannot stall daemon exit. Warm-bundle entry verification treats an entry
-  grown by a same-UID writer mid-read as a typed mismatch instead of
-  panicking in the shutdown thread. A cleanup pass over a bundle directory
-  holding more than 65,536 candidates now removes the first cap-worth in
-  deterministic name order before reporting the over-cap error, so the
-  directory shrinks on every pass instead of failing unchanged forever.
-
-- **Selection-deferral teardown, failback gating, and release accounting.**
-  Deleting a GR neighbor from configuration mid-deferral now removes its
-  waiters from the frozen roster, so the family releases when the remaining
-  waiters satisfy instead of freezing best-path selection until timer expiry.
-  Collision failback applies the same OPEN gating as ordinary classification:
-  a Restart-State, non-GR, or plain-refresh (no RFC 7313) survivor is excluded
-  instead of being parked in an unfulfillable `awaiting_refresh` that
-  convergence-holds the family for the whole window; the RFC 7313
-  `BoRR`/`EoRR` convergence proof is unchanged where negotiated. A family gate
-  that completes with zero completion markers consumed records the new
-  `all_excluded` release reason instead of claiming `all_eor`; simultaneous
-  identity-and-byte ledger exhaustion records `identities_and_logical_bytes`
-  instead of the identity cap always winning. A plain-refresh peer whose
-  deferred route-refresh response is delivered at release no longer receives a
-  second empty-UPDATE End-of-RIB after the genuine convergence EoR.
-
-- **Hot-applied export-affecting knobs now re-probe suppressed routes.** A
-  SIGHUP reload that hot-applies `local_ipv6_nexthop` or `remove_private_as`
-  to a live session issues a forced outbound refresh (like the
-  graceful-shutdown toggle and live policy apply), so routes the exact-export
-  preflight suppressed under the old knobs go back on the wire immediately —
-  and already-advertised AS_PATHs re-encode — instead of waiting for
-  unrelated churn or a session bounce. Export-inert hot applies issue no
-  refresh.
-
-- **Per-family Paths-Limit caps survive a collision failback.** The RIB's
-  live-session record now carries the session's per-family Add-Path
-  Paths-Limit map and restores it when an outbound registration fails over
-  to a surviving session, instead of clamping every family to the scalar
-  send limit.
-
-- **Unicast exact-export encode failures after RIB commit now fail closed.**
-  The IPv6 no-next-hop and Extended-Next-Hop IPv4 preparation arms tear the
-  session down with Cease/Out-of-Resources like the oversize branches,
-  instead of silently dropping the route and leaving Adj-RIB-Out ahead of
-  the wire. Both arms are unreachable while producers run the exact-export
-  preflight; this aligns them with the fail-closed convention.
-
-- **The route-server starter now applies documented dual-stack ingress
-  hygiene.** Its policy rejects both default routes and a dated 2025-10-09
-  snapshot of active IANA special-purpose rows marked non-globally reachable,
-  while preserving active globally reachable or N/A children of broader
-  rejected parents. Production-loader tests pin the complete snapshot, parent
-  exceptions, chain order, and later RPKI, ASPA, and prefix-length guards.
-  M83 retains an explicitly reduced IPv4 lab projection because its
-  deterministic probes use RFC 6598 and TEST-NET-3 space. (LAN-437)
-
-- **The committed July RIB rebaseline receipt is self-verifying again.** The
-  eight CPU derivatives now match the current classifier, and CI replays both
-  checksum envelopes plus every CPU, DHAT, and sanitized CSV derivative. No
-  benchmark was rerun and no measured value or performance claim changed.
-  (LAN-405)
-
-- **The v1 stable-surface gate now covers all inventoried contextual defaults.**
-  The dynamic-neighbor cap and address-/inheritance-dependent family set join
-  the existing resolver checks; the gate distinguishes their schema omission
-  representations from runtime values and pins `PeerManager` to the shared cap
-  resolver.
-
-- **RFC 1997 `NO_ADVERTISE` can no longer be bypassed or leaked by export
-  policy.** IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS
-  SAFI 71/72 check both the stored source route before export policy and the
-  modified route after policy across their supported export shapes. Unicast
-  also covers grouped/private, RFC
-  7947 per-client-best, and RFC 9107 ORR; VPN covers grouped/private, and
-  labeled-unicast covers RFC 9107 ORR. Policy cannot remove the community to
-  make a scoped route exportable, and a policy-added community suppresses the
-  resulting route before Adj-RIB-Out commit. Scoped replacements withdraw
-  existing state; candidate modes compact surviving siblings, while ORR
-  suppresses its selected winner without falling back.
-  For unicast and VPN, terminal export explain reports suppression and, for a
-  post-policy stop, shows the triggering modification; unicast Add-Path
-  best-path explain mirrors the compacted advertised ranks.
-
-- **Foreign-family Paths-Limit tuples cannot widen Add-Path state.** Received
-  limits outside the peer's negotiated Add-Path send families are ignored, so
-  they cannot activate Add-Path for another family or trigger an initial-table
-  replay. (#864)
-
-- **Pre-policy safety rejections withdraw prior accepted paths.** OTC rejects
-  retire exact accepted unicast `(prefix, path_id)` identities. AS_PATH-loop
-  and route-reflector-loop rejects also retire exact VPN, labeled-unicast, RTC,
-  and BGP-LS identities while preserving distinct explicit withdrawals and
-  Add-Path siblings. First-seen and repeated rejects remain filter-only.
-
-- **Import-policy-denied unicast, VPN, labeled-unicast, RTC, and BGP-LS replacements
-  withdraw prior accepted paths.** Classic and MP-unicast updates retire the
-  exact `(prefix, path_id)`; VPNv4/VPNv6 retire `(RD + prefix, path_id)`, and
-  labeled-unicast retires `(prefix, path_id)`, RTC retires `(NLRI, path_id)`,
-  and BGP-LS retires `(family, NLRI, path_id)` previously accepted from that
-  peer. The removal reaches the RIB immediately. First-seen denials remain
-  filter-only, explicit withdrawals are deduplicated, and Add-Path siblings
-  stay intact.
-
-- **Enhanced-refresh omissions no longer poison max-prefix accounting.**
-  Inbound RFC 7313 windows now mirror exact typed route identities across every
-  counted family, retire replayed or withdrawn identities only after ordered
-  RIB acceptance, and reconcile omitted routes at `EoRR` or the shared timeout.
-  Timeout closure is ordered ahead of later buffered UPDATEs, remains safe under
-  RIB backpressure or shutdown, and runs for quiet peers; Graceful Restart peers
-  cannot open a family refresh window before that family's initial End-of-RIB.
-
-- **Coordinated shutdown stays bounded at high peer counts.** Peer sessions now
-  drain with fixed cross-peer concurrency while preserving pending-before-primary
-  ordering and each session's existing timeout, abort, and reap guarantees. A
-  backpressured peer population can no longer multiply the per-session deadline
-  into a multi-minute daemon shutdown.
-
-- **Shutdown warm checkpoints retain one committed snapshot.** Only after the
-  new `manifest.json` rename and directory fsync establish the commit point,
-  publication removes superseded content-addressed snapshots and recognizable
-  crash-leaked temporary files through the pinned bundle directory. Cleanup
-  continues past entry-local unlink failures and preserves the primary
-  publication error when rollback also fails. Startup performs the same bounded
-  descriptor-relative scavenging without opening or adopting route snapshots:
-  absent manifests permit orphan cleanup, valid byte-stable manifests protect
-  their selection, and invalid or changed manifests delete nothing. Cleanup
-  failure is warned but cannot roll back or delete the manifest's current
-  snapshot or disable later publication. Concurrent daemons must use distinct
-  `runtime_state_dir` values.
-
-- **The v1 stable-surface release gate now supports patch and major releases.**
-  Upgrade exercises remain a contiguous, fail-closed chain of adjacent release
-  lines, while the latest exercise targets `vMAJOR.MINOR.0` and the inventory
-  separately pins the exact workspace patch version.
-
-- **TCP-AO passive accepts survive an add-only listener generation flip.**
-  Linux does not copy newly added listener MKTs into children that already
-  completed in the accept queue. rustbgpd now recognizes only the exact
-  immediately previous inventory, adds the missing successor suffix while it
-  still exclusively owns the child, verifies the exact current inventory, and
-  stamps the current generation. Partial inventories, generations outside the
-  applied/desired phase fence, and failed repairs remain fail-closed. The hosted
-  kernel receipt deterministically exercises the queued-child race, while M43
-  proves a live SIGHUP successor rotation against BIRD 3.3.1 without a session
-  flap.
-
-- **Runtime-owned BGP authentication secrets are zeroized on drop.** TCP-AO
-  MKT secrets and TCP-MD5 passwords use an immutable redacting wrapper across
-  the internal API, peer manager, and transport runtime, so each clone scrubs
-  its own allocation when replaced or dropped. The Linux `tcp_md5sig`
-  temporary also scrubs its key buffer and length after every socket-option
-  attempt. TOML parser, configuration snapshot, protobuf, compiler-created,
-  and kernel copies retain their separate lifetimes. The queued-child kernel
-  receipt now exercises a dynamic
-  `127.0.0.0/24` owner and proves its successor is installed on the accepted
-  child without changing Current/RNext or authenticated traffic.
-
-- **Planned-restart deferral remains bounded across backward clock steps.**
-  Marker-backed startup now clamps the persisted marker's remaining lifetime to
-  the maximum effective `gr_restart_time`, so a wall-clock correction cannot
-  extend restarting-speaker signaling or route-selection deferral beyond the
-  configured window. Expired markers, or markers without a positive effective
-  restart window, produce an immediate cold start.
-
-- **Collision failback no longer declares planned-restart convergence before
-  the survivor's routes are re-learned.** When an active collision replacement
-  drops, the exact nonzero, unambiguous survivor enters an `awaiting_refresh`
-  state. The current Loc-RIB is still staged as soon as ordinary waiters finish,
-  but downstream EoR and route-refresh responses remain held until a
-  post-failback BoRR/EoRR cycle completes. Ordinary EoR, stray EoRR, and the
-  local refresh timeout cannot release the hold; the original marker-bounded
-  selection timer remains the fallback when Enhanced Route Refresh is absent
-  or incomplete.
-
-- **The v1 config compatibility gate now pins stable object shape.** Stable
-  definition digests cover the complete required-field set and unknown-field
-  policy in addition to selected property schemas, while continuing to allow
-  unselected optional sibling fields and descriptive-prose changes.
-
-- **Planned-restart selection deferral now has a bounded identity ledger.**
-  At most one million affected route identities are retained across all gated
-  families, with an independent 64 MiB process-wide ceiling on deterministic
-  logical retained-key data. This byte accounting includes nested FlowSpec
-  terms and BGP-LS payload bytes; it is not RSS, allocator-capacity, or
-  hash-table-overhead accounting. If retaining a new identity would exceed
-  either process-wide bound, that identity's family enters overflow fallback
-  and release performs a complete Adj-RIB-In plus Loc-RIB sweep so withdrawals
-  received before EoR cannot leave stale selected or advertised routes. A
-  one-shot warning and
-  `bgp_selection_deferral_ledger_overflows_total{afi_safi}` expose the fallback.
-
-- **The v1 CLI inventory now covers the complete `rbgp diff` command tree and
-  every shipped ribsnap producer.** The BIRD, FRR, GoBGP, MRT, and BMP
-  byte-exact producer tests are linked to five pinned goldens; every real
-  golden record is checked against the required type floor and every complete
-  artifact must still pass the fail-closed parser. The gate also rejects lost
-  command-path, golden, and producer-test linkage.
-
-- **Unexportable routes now fail before Adj-RIB-Out commit.** Every
-  route-bearing envelope carries one immutable snapshot of the session's exact
-  encoder and negotiated message ceiling. The RIB probes the final one-route
-  wire form for all supported families after policy and next-hop preparation;
-  a rejected announcement is never recorded as advertised, while a route that
-  becomes unexportable is withdrawn. Update-group members retain the shared
-  staged table and apply a sparse per-member rejection overlay, so 4096-byte
-  and Extended Message peers can share policy work without sharing an
-  incorrect advertised view. Rejections are logged once per transition and
-  counted by `bgp_exact_export_rejections_total{peer,family,reason}`. A later
-  accepted recompute or resync retries the route; an ordinary source withdraw
-  retires the rejection without emitting a duplicate wire withdrawal. The
-  transport's Cease/8 overflow teardown remains a defense against invariant
-  violations and races, not the primary correctness mechanism. (LAN-361)
-
-- **Outbound transport hardening closes EVPN overflow and bounded-probe
-  gaps.** A single EVPN announcement or withdrawal that cannot fit the
-  negotiated message ceiling now invokes the established Cease/8 outbound
-  saturation teardown, so an Established stream cannot survive with logical
-  Adj-RIB-Out ahead of the wire. IPv6-unicast and FlowSpec Extended Message
-  batches start with a bounded 1,024-entry probe, grow through exactly built
-  candidates up to a 4,096-entry probe ceiling, and remember successful and
-  failed bounds without losing, duplicating, or reordering NLRI. The
-  transport's defense-only RFC 9234 OTC gate is test-pinned as family-neutral
-  for both IPv4 and IPv6; the primary pre-commit RIB policy is unchanged.
-  (LAN-375)
-
-- **ORR isolates its SPF graph to the RFC 9552 default topology.** BGP-LS
-  Node, Link, and Prefix inputs are classified before deduplication or graph
-  insertion: valid non-default MT-ID objects and malformed topology/Attribute
-  29 inputs are excluded fail-closed, so they cannot claim nodes, addresses,
-  links, or reachability. Flex-Algorithm data remains inert while the base
-  default object and classic IGP/Prefix Metric stay usable. `rbgp orr`, the
-  status API, aggregate transition logs, export explain, and five fixed-label
-  Prometheus series expose the bounded input diagnostics. (LAN-373)
-
-- **RFC 9234 OTC suppression now precedes Adj-RIB-Out commit.** IPv4/IPv6
-  unicast routes carrying OTC toward a Provider, Peer, or Route Server are
-  rejected while staging grouped and private export views, including ORR,
-  Add-Path, and per-client-best. A newly blocked route is never recorded as
-  advertised; a route that becomes blocked generates a withdrawal and is
-  removed from logical advertised state. Session-stamped local roles separate
-  update groups from the initial table onward, export explain reports the same
-  OTC gate, and the existing counter/event diagnostics remain emitted without
-  relying on a transport-only wire drop. (LAN-368, LAN-369)
-
-- **EVPN load generation validates unsafe workloads and honors exact event
-  budgets.** The development-only `evpn-tester` now rejects zero-sized batches,
-  zero-route or zero-rate churn, and hold times of 1-2 seconds before opening a
-  session. It also rejects out-of-range 24-bit VNIs, MAC/IP counts that would
-  reuse the synthetic MAC space, and initial/churn chunks that do not encode
-  within a standard 4096-byte BGP message. Hold time zero correctly disables
-  both periodic keepalives and the receive timer instead of constructing a
-  zero-duration Tokio interval. Initial injection and withdraw/re-advertise
-  churn now wait before sending against cumulative route events, avoiding both
-  an initial low-rate burst and integer batch-rate rounding. Configured rates
-  hold when a batch exceeds the per-second budget or a route-set chunk is
-  partial, and churn does not emit a pair scheduled beyond its duration.
-  Session-only `--count 0` and unlimited injection with `--rate 0` remain
-  supported. (LAN-84)
-
-- **Peer-supplied `LOCAL_PREF` is ignored on eBGP ingress.** Per RFC 4271,
-  external peers can no longer influence import policy, explain output,
-  Adj-RIB-In storage, or best-path selection by sending `LOCAL_PREF`. iBGP
-  values remain effective, import policy may still set a local value, and the
-  byte-exact pre-policy BMP view continues to expose the original wire UPDATE.
-
-- **Outbound unicast and FlowSpec UPDATEs are split by encoded message size.** A
-  same-attribute Adj-RIB-Out group larger than one BGP message (≈1000 /24s
-  ≈ 4114 bytes against the 4096-byte limit) was built as a single UPDATE; the
-  transport rejected it with `MessageTooLong`, logged, and abandoned the rest
-  of the batch — but never reported that partial delivery back across the
-  RIB/session boundary, so the RIB kept believing the whole group was
-  advertised. Affected peers were left silently under-advertised with no
-  dirty-resync recovery (surfaced most sharply after a changed-policy reload,
-  where every route is re-advertised at once). IPv4 body/MP_REACH,
-  IPv4 MP_UNREACH, IPv6 MP_REACH/MP_UNREACH, and IPv4/IPv6 FlowSpec
-  MP_REACH/MP_UNREACH now chunk to the negotiated maximum message size,
-  using bounded, exactly encoded probes that can grow beyond 1,024 entries
-  when Extended Messages are negotiated. FlowSpec uses fallible structured
-  encoding throughout. Its RIB and withdrawal identity now carries AFI
-  explicitly, so destination-less IPv4 and IPv6 rules can coexist and withdraw
-  independently. A lone entry that still cannot fit tears the session down so
-  Adj-RIB-Out is rebuilt on reconnect, rather than falsely reporting the route
-  advertised. (LAN-368, LAN-372)
-
-- **rpol cost passes guard against duplicate-name underflow.** The LAN-304
-  function-cost Kahn pass and the LAN-290 apply-bounds pass seed their
-  `pending`/`dependents` accounting by iterating `file.fns` / `file.policies`,
-  which holds every duplicate AST definition, while the `edges`/`defs` maps
-  they consume key by name and collapse duplicates to one entry. The reverse
-  edge was pushed once per duplicate while `pending.insert` kept only the last
-  count, so completing a shared callee or apply-target decremented a dependent's
-  pending count past zero — panicking in debug/fuzz builds and wrapping silently
-  in release. Names are now seeded at most once in both passes so the Kahn
-  counts stay consistent. Regression tests cover both the fn and policy passes;
-  found by the nightly `rpol_compile` fuzz target.
-
-- **Route-server fleets take the shared clean export-policy transition
-  again — ~150× reload-completion regression fixed.** The shared
-  transition's member-eligibility check blanket-excluded every
-  `rs_control_communities` session, a leftover from when the knob was
-  opt-in; with it defaulting on for `route_server_client` neighbors, an
-  entire IXP fleet fell back to serial per-member full-table resyncs on
-  every export-policy reload (200 members × 115k routes: ~28.6 s vs
-  0.22 s with the knob off; ~4.5 min at 700 × 400k). The transition's
-  single inventory walk now proves the diff carries no RFC 7947
-  control-form community for the cohort's RS ASNs — checking the
-  post-policy routes AND the captured source communities on both sides,
-  so a policy that strips or adds a control tag still rejects the
-  optimized plan — and untagged inventories (the overwhelming case) let
-  rs-control members ride the shared cohort and shared encode exactly
-  like ordinary members. Tagged inventories keep the whole cohort on
-  the authoritative per-peer path, whose emit seams apply the
-  per-target suppression/prepend/scrub.
+  subscription tests exercise plumbing, not outbox durability; the
+  per-commit fsyncs were the latency source), and the bounded wait is
+  now a hang guard rather than a latency assertion.
 
 ## [0.51.0] — 2026-07-11
 
