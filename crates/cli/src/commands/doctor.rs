@@ -63,6 +63,21 @@ const MAX_CRASH_BYTES: u64 = 64 * 1024;
 /// available (daemon down). Mirrors the config default.
 const DEFAULT_STATE_DIR: &str = "/var/lib/rustbgpd";
 
+/// Daemon config file default, mirrored from the daemon's CLI. Used as
+/// the probe-target source when the daemon (and thus its effective-config
+/// RPC) is down and no local daemon process names another path.
+const DEFAULT_CONFIG_PATH: &str = "/etc/rustbgpd/config.toml";
+
+/// Per-endpoint TCP probe budget. Every first-deploy probe is bounded by
+/// this so a config full of dead endpoints cannot hang doctor.
+const PROBE_TIMEOUT_SECS: u64 = 2;
+
+/// Free-space thresholds for `runtime_state_dir`: below WARN the check is
+/// yellow, below FAIL it is red (journal/MRT/crash/event-history writes
+/// are about to start failing).
+const STATE_DIR_DISK_WARN_BYTES: u64 = 1024 * 1024 * 1024;
+const STATE_DIR_DISK_FAIL_BYTES: u64 = 100 * 1024 * 1024;
+
 pub(crate) struct DoctorOptions<'a> {
     /// Bundle output path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`.
     pub output: Option<&'a Path>,
@@ -374,12 +389,21 @@ fn local_daemon_limits() -> Vec<(u32, String)> {
 }
 
 /// Pure rlimit check: red when the soft `nofile` limit is below
-/// [`NOFILE_SOFT_MIN`].
-fn nofile_check(pid: u32, soft: u64, hard: u64) -> Check {
+/// [`NOFILE_SOFT_MIN`]. The remediation line is tailored to the detected
+/// run context so "raise the limit" names the file to edit.
+fn nofile_check(pid: u32, soft: u64, hard: u64, run_context: &str) -> Check {
+    let remedy = match run_context {
+        "systemd" => "set LimitNOFILE= in the systemd unit and restart",
+        "container" => "raise the container runtime's nofile ulimit (e.g. docker --ulimit nofile=)",
+        _ => "raise the service's nofile ulimit",
+    };
     let (status, verdict) = if soft < NOFILE_SOFT_MIN {
-        (CheckStatus::Fail, "low — peers exhaust fds at scale")
+        (
+            CheckStatus::Fail,
+            format!("low — peers exhaust fds at scale; {remedy}"),
+        )
     } else {
-        (CheckStatus::Ok, "ok")
+        (CheckStatus::Ok, "ok".to_string())
     };
     Check {
         name: format!("daemon.rlimit.nofile.{pid}"),
@@ -507,6 +531,423 @@ fn sweep_crash_reports(crash_dir: &Path, bundle: &mut Bundle) -> Vec<String> {
     collected
 }
 
+// ---- first-deploy probes (LAN-482) ----------------------------------
+//
+// All probes are read-only: TCP connects that are immediately dropped, a
+// test-bind that is immediately released, statvfs/access, and /proc
+// reads. Each network touch is bounded by [`PROBE_TIMEOUT_SECS`].
+
+/// Probe endpoints parsed from a config TOML document (the daemon's
+/// effective dump or, daemon-down, the local config file — same schema).
+#[derive(Default)]
+struct DeployTargets {
+    listen_port: Option<u16>,
+    /// `[rpki] cache_servers[].address` (`host:port`).
+    rpki_caches: Vec<String>,
+    /// `[bmp] collectors[].address` (`host:port`).
+    bmp_collectors: Vec<String>,
+    /// `[gnmi_dialout] targets[]` as `(name, address)`.
+    gnmi_collectors: Vec<(String, String)>,
+}
+
+fn deploy_targets(toml_text: &str) -> DeployTargets {
+    let Ok(value) = toml::from_str::<toml::Value>(toml_text) else {
+        return DeployTargets::default();
+    };
+    let addresses = |section: &str, list: &str| -> Vec<String> {
+        value
+            .get(section)
+            .and_then(|s| s.get(list))
+            .and_then(toml::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("address").and_then(toml::Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    DeployTargets {
+        listen_port: value
+            .get("global")
+            .and_then(|g| g.get("listen_port"))
+            .and_then(toml::Value::as_integer)
+            .and_then(|p| u16::try_from(p).ok()),
+        rpki_caches: addresses("rpki", "cache_servers"),
+        bmp_collectors: addresses("bmp", "collectors"),
+        gnmi_collectors: value
+            .get("gnmi_dialout")
+            .and_then(|g| g.get("targets"))
+            .and_then(toml::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        Some((
+                            row.get("name")?.as_str()?.to_string(),
+                            row.get("address")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// One bounded TCP connect, immediately dropped on success.
+async fn probe_tcp(addr: String) -> Result<(), String> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
+        tokio::net::TcpStream::connect(addr.as_str()),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("timed out after {PROBE_TIMEOUT_SECS}s")),
+    }
+}
+
+struct ProbeSpec {
+    name: String,
+    label: String,
+    addr: String,
+    advice: &'static str,
+}
+
+async fn run_probe(spec: ProbeSpec) -> Check {
+    match probe_tcp(spec.addr.clone()).await {
+        Ok(()) => Check {
+            name: spec.name,
+            status: CheckStatus::Ok,
+            detail: format!("{} {} reachable", spec.label, spec.addr),
+        },
+        Err(e) => Check {
+            name: spec.name,
+            status: CheckStatus::Fail,
+            detail: format!(
+                "{} {} unreachable ({e}) — {}",
+                spec.label, spec.addr, spec.advice
+            ),
+        },
+    }
+}
+
+/// Host to probe for the daemon-up BGP listener check: the host doctor
+/// already reaches the daemon on. A unix-socket daemon is local.
+fn listener_probe_host(daemon_address: &str) -> String {
+    if daemon_address.starts_with("unix://") {
+        return "127.0.0.1".to_string();
+    }
+    let rest = daemon_address
+        .strip_prefix("http://")
+        .or_else(|| daemon_address.strip_prefix("https://"))
+        .unwrap_or(daemon_address);
+    let host = rest.rsplit_once(':').map_or(rest, |(h, _)| h);
+    if host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// TCP reachability probes for the BGP listener (daemon-up only) and
+/// every configured RTR cache / BMP collector / gNMI dial-out collector.
+/// Probes run concurrently; results keep config order.
+async fn reachability_checks(
+    daemon_reachable: bool,
+    daemon_address: &str,
+    targets: &DeployTargets,
+) -> Vec<Check> {
+    let mut specs = Vec::new();
+    if daemon_reachable && let Some(port) = targets.listen_port {
+        specs.push(ProbeSpec {
+            name: "bgp.listener".to_string(),
+            label: "BGP listener".to_string(),
+            addr: format!("{}:{port}", listener_probe_host(daemon_address)),
+            advice: "the daemon is up but nothing accepts on its BGP listen port; check the \
+                     daemon log for listener bind errors (a port below 1024 needs \
+                     CAP_NET_BIND_SERVICE)",
+        });
+    }
+    for addr in &targets.rpki_caches {
+        specs.push(ProbeSpec {
+            name: format!("rpki.cache.{addr}.reachable"),
+            label: "RTR cache".to_string(),
+            addr: addr.clone(),
+            advice: "origin validation stays degraded until the cache connects; verify the \
+                     cache address and reachability",
+        });
+    }
+    for addr in &targets.bmp_collectors {
+        specs.push(ProbeSpec {
+            name: format!("bmp.collector.{addr}.reachable"),
+            label: "BMP collector".to_string(),
+            addr: addr.clone(),
+            advice: "BMP monitoring data is not being exported; verify the collector address \
+                     and reachability (the daemon retries on its reconnect interval)",
+        });
+    }
+    for (name, addr) in &targets.gnmi_collectors {
+        specs.push(ProbeSpec {
+            name: format!("gnmi_dialout.{name}.reachable"),
+            label: format!("gNMI dial-out collector {name}"),
+            addr: addr.clone(),
+            advice: "dial-out telemetry backs off and retries; verify the collector address \
+                     and reachability",
+        });
+    }
+    let handles: Vec<_> = specs
+        .into_iter()
+        .map(|s| tokio::spawn(run_probe(s)))
+        .collect();
+    let mut checks = Vec::new();
+    for handle in handles {
+        if let Ok(check) = handle.await {
+            checks.push(check);
+        }
+    }
+    checks
+}
+
+/// Daemon-down listener check: test-bind the BGP listen port and release
+/// it, mapping bind errors to first-deploy advice.
+fn listener_bind_check(port: u16) -> Check {
+    bind_check_from_result(
+        port,
+        std::net::TcpListener::bind(("0.0.0.0", port)).map(drop),
+    )
+}
+
+fn bind_check_from_result(port: u16, result: std::io::Result<()>) -> Check {
+    let name = "bgp.listener".to_string();
+    let (status, detail) = match result {
+        Ok(()) => (
+            CheckStatus::Ok,
+            format!("BGP listen port {port} is bindable (daemon not running; test-bind released)"),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => (
+            CheckStatus::Warn,
+            format!(
+                "BGP listen port {port} is already in use — another process (possibly a \
+                 rustbgpd this doctor run could not reach) holds it"
+            ),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
+            CheckStatus::Fail,
+            format!(
+                "cannot bind BGP listen port {port}: permission denied — grant the daemon \
+                 CAP_NET_BIND_SERVICE (systemd: AmbientCapabilities=CAP_NET_BIND_SERVICE) \
+                 or use a port >= 1024"
+            ),
+        ),
+        Err(e) => (
+            CheckStatus::Fail,
+            format!("cannot bind BGP listen port {port}: {e}"),
+        ),
+    };
+    Check {
+        name,
+        status,
+        detail,
+    }
+}
+
+/// Free bytes available to unprivileged writers on the filesystem
+/// holding `path`.
+fn disk_free_bytes(path: &Path) -> Option<u64> {
+    let vfs = nix::sys::statvfs::statvfs(path).ok()?;
+    Some(vfs.blocks_available().saturating_mul(vfs.fragment_size()))
+}
+
+fn dir_writable(path: &Path) -> bool {
+    nix::unistd::access(path, nix::unistd::AccessFlags::W_OK).is_ok()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if gib >= 1.0 {
+        format!("{gib:.1} GiB")
+    } else {
+        format!("{} MiB", bytes / (1024 * 1024))
+    }
+}
+
+/// State-dir health: existence, writability (for the invoking user), and
+/// free disk space against the yellow/red thresholds.
+fn state_dir_checks(dir: &Path) -> Vec<Check> {
+    if !dir.is_dir() {
+        return vec![Check {
+            name: "state_dir.writable".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "runtime state dir {} does not exist yet — the daemon creates it at startup; \
+                 ensure the parent directory is writable by the daemon user",
+                dir.display()
+            ),
+        }];
+    }
+    let mut checks = Vec::new();
+    checks.push(if dir_writable(dir) {
+        Check {
+            name: "state_dir.writable".to_string(),
+            status: CheckStatus::Ok,
+            detail: format!("runtime state dir {} is writable", dir.display()),
+        }
+    } else {
+        Check {
+            name: "state_dir.writable".to_string(),
+            status: CheckStatus::Fail,
+            detail: format!(
+                "runtime state dir {} is not writable by this user — commit-confirm journal, \
+                 MRT dumps, crash reports, and event-history writes fail without it; check \
+                 ownership (and ReadWritePaths= under systemd)",
+                dir.display()
+            ),
+        }
+    });
+    checks.push(match disk_free_bytes(dir) {
+        None => Check {
+            name: "state_dir.disk".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("could not stat free space on {}", dir.display()),
+        },
+        Some(free) => {
+            let (status, verdict) = if free < STATE_DIR_DISK_FAIL_BYTES {
+                (
+                    CheckStatus::Fail,
+                    "critically low — state writes are about to fail; free space or move \
+                     runtime_state_dir",
+                )
+            } else if free < STATE_DIR_DISK_WARN_BYTES {
+                (
+                    CheckStatus::Warn,
+                    "low — journal, MRT dumps, crash reports, and the event-history DB write \
+                     here",
+                )
+            } else {
+                (CheckStatus::Ok, "ok")
+            };
+            Check {
+                name: "state_dir.disk".to_string(),
+                status,
+                detail: format!(
+                    "free space on {}: {} — {verdict}",
+                    dir.display(),
+                    human_bytes(free)
+                ),
+            }
+        }
+    });
+    checks
+}
+
+/// "systemd" / "container" / "unknown" from pid-1 facts. Container wins
+/// over systemd-inside-a-container: the remediation surface is the
+/// container runtime, not the inner unit.
+fn classify_run_context(pid1_comm: &str, in_container: bool) -> &'static str {
+    if in_container {
+        "container"
+    } else if pid1_comm == "systemd" {
+        "systemd"
+    } else {
+        "unknown"
+    }
+}
+
+fn detect_run_context() -> &'static str {
+    let pid1_comm = fs::read_to_string("/proc/1/comm").unwrap_or_default();
+    let cgroup = fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
+    let in_container = Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists()
+        || ["docker", "containerd", "kubepods", "lxc"]
+            .iter()
+            .any(|marker| cgroup.contains(marker));
+    classify_run_context(pid1_comm.trim_end(), in_container)
+}
+
+/// Config-file path from a daemon's `/proc/<pid>/cmdline`: the first
+/// non-flag argument after argv0, mirroring the daemon's own CLI.
+fn parse_cmdline_config_path(cmdline: &[u8]) -> Option<String> {
+    cmdline
+        .split(|b| *b == 0)
+        .skip(1)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).to_string())
+        .find(|arg| !arg.starts_with('-'))
+}
+
+fn proc_cmdline_config_path(pid: u32) -> Option<PathBuf> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        parse_cmdline_config_path(&bytes)
+            .map_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH), PathBuf::from),
+    )
+}
+
+/// Process start time (unix seconds) from `/proc/<pid>/stat` field 22
+/// plus the boot time; `stat` is the raw file contents.
+fn parse_proc_start_unix(stat: &str, btime: u64, clk_tck: u64) -> Option<u64> {
+    // The comm field (2) may contain spaces; fields 3+ follow the last ')'.
+    let after_comm = stat.rsplit_once(')')?.1;
+    let starttime: u64 = after_comm.split_whitespace().nth(19)?.parse().ok()?;
+    Some(btime + starttime / clk_tck.max(1))
+}
+
+fn proc_start_unix(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let btime = fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    // /proc/<pid>/stat starttime is in USER_HZ ticks, ABI-fixed at 100
+    // on Linux regardless of the kernel HZ.
+    parse_proc_start_unix(&stat, btime, 100)
+}
+
+fn mtime_unix(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Pure freshness verdict: the config file was modified after the daemon
+/// started, so on-disk edits are pending until a reload.
+fn config_freshness_check(
+    pid: u32,
+    config_path: &str,
+    config_mtime_unix: u64,
+    daemon_start_unix: u64,
+) -> Check {
+    let (status, detail) = if config_mtime_unix > daemon_start_unix {
+        (
+            CheckStatus::Warn,
+            format!(
+                "config {config_path} was modified after daemon pid {pid} started — on-disk \
+                 changes are not applied; validate with `rustbgpd --check {config_path}` and \
+                 reload with SIGHUP (systemctl reload rustbgpd)"
+            ),
+        )
+    } else {
+        (
+            CheckStatus::Ok,
+            format!("config {config_path} unchanged since daemon pid {pid} started"),
+        )
+    };
+    Check {
+        name: format!("daemon.config_freshness.{pid}"),
+        status,
+        detail,
+    }
+}
+
 pub(crate) async fn run(
     connection: Result<Connection, CliError>,
     opts: &DoctorOptions<'_>,
@@ -533,7 +974,9 @@ pub(crate) async fn run(
     let mut sections: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut daemon_version: Option<String> = None;
     let mut state_dir: Option<String> = None;
+    let mut effective_toml: Option<String> = None;
     let mut tcp_ao_support = crate::proto::TcpAoSupport::Unspecified.into();
+    let daemon_reachable = connection.is_ok();
 
     // ---- daemon-backed sections -------------------------------------
     match connection {
@@ -657,7 +1100,8 @@ pub(crate) async fn run(
                         reporter.record(check.name, check.status, check.detail);
                     }
                     state_dir = parse_state_dir(&toml_text);
-                    bundle.add("config/effective.toml", toml_text.into_bytes());
+                    bundle.add("config/effective.toml", toml_text.clone().into_bytes());
+                    effective_toml = Some(toml_text);
                     sections.insert(
                         "config",
                         "collected (daemon-redacted effective config)".to_string(),
@@ -804,6 +1248,14 @@ pub(crate) async fn run(
         },
     )?;
 
+    // ---- run context (informs remediation advice) ---------------------
+    let run_context = detect_run_context();
+    reporter.record(
+        "host.run_context",
+        CheckStatus::Ok,
+        format!("run context: {run_context}"),
+    );
+
     // ---- daemon rlimits (local processes only) ------------------------
     let daemon_limits = local_daemon_limits();
     if daemon_limits.is_empty() {
@@ -815,7 +1267,7 @@ pub(crate) async fn run(
         for (pid, limits) in &daemon_limits {
             match parse_max_open_files(limits) {
                 Some((soft, hard)) => {
-                    let check = nofile_check(*pid, soft, hard);
+                    let check = nofile_check(*pid, soft, hard, run_context);
                     reporter.record(check.name, check.status, check.detail);
                 }
                 None => reporter.record(
@@ -830,6 +1282,68 @@ pub(crate) async fn run(
             );
         }
         sections.insert("rlimits", "collected".to_string());
+    }
+
+    // ---- first-deploy probes (LAN-482) --------------------------------
+    // Target source: the daemon's effective config when it is up;
+    // otherwise the local config file (the path a local daemon process
+    // was started with, else the packaged default). The local file is
+    // only parsed for probe targets — it is never copied into the bundle.
+    let config_source: Option<(String, String)> = match &effective_toml {
+        Some(toml_text) => Some((toml_text.clone(), "effective config".to_string())),
+        None => {
+            let path = daemon_limits
+                .first()
+                .and_then(|(pid, _)| proc_cmdline_config_path(*pid))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+            fs::read_to_string(&path)
+                .ok()
+                .map(|text| (text, path.display().to_string()))
+        }
+    };
+    match &config_source {
+        Some((toml_text, source)) => {
+            let targets = deploy_targets(toml_text);
+            if !daemon_reachable && let Some(port) = targets.listen_port {
+                let check = listener_bind_check(port);
+                reporter.record(check.name, check.status, check.detail);
+            }
+            for check in reachability_checks(daemon_reachable, opts.daemon_address, &targets).await
+            {
+                reporter.record(check.name, check.status, check.detail);
+            }
+            if state_dir.is_none() {
+                state_dir = parse_state_dir(toml_text);
+            }
+            let dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
+            for check in state_dir_checks(&dir) {
+                reporter.record(check.name, check.status, check.detail);
+            }
+            sections.insert("probes", format!("collected (targets from {source})"));
+        }
+        None => {
+            reporter.record(
+                "deploy.config_source",
+                CheckStatus::Warn,
+                format!(
+                    "first-deploy probes skipped: daemon config unavailable and \
+                     {DEFAULT_CONFIG_PATH} is not readable"
+                ),
+            );
+            sections.insert("probes", "skipped: no config source".to_string());
+        }
+    }
+
+    // ---- config freshness (local daemon processes only) ---------------
+    for (pid, _) in &daemon_limits {
+        let Some(config_path) = proc_cmdline_config_path(*pid) else {
+            continue;
+        };
+        let (Some(mtime), Some(start)) = (mtime_unix(&config_path), proc_start_unix(*pid)) else {
+            continue;
+        };
+        let check = config_freshness_check(*pid, &config_path.display().to_string(), mtime, start);
+        reporter.record(check.name, check.status, check.detail);
     }
 
     // ---- crashes/ ------------------------------------------------------
@@ -1143,11 +1657,14 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     }
 
     #[test]
-    fn low_nofile_soft_limit_is_red() {
-        let check = nofile_check(42, 1024, 524_288);
+    fn low_nofile_soft_limit_is_red_with_context_advice() {
+        let check = nofile_check(42, 1024, 524_288, "systemd");
         assert!(check.status == CheckStatus::Fail);
         assert!(check.detail.contains("soft 1024"));
-        assert!(nofile_check(42, 4096, 524_288).status == CheckStatus::Ok);
+        assert!(check.detail.contains("LimitNOFILE"), "{}", check.detail);
+        let container = nofile_check(42, 1024, 524_288, "container");
+        assert!(container.detail.contains("ulimit"), "{}", container.detail);
+        assert!(nofile_check(42, 4096, 524_288, "unknown").status == CheckStatus::Ok);
     }
 
     #[test]
@@ -1191,6 +1708,195 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let map = last_transition_by_peer(&events);
         assert_eq!(map.get("10.0.0.2"), Some(&250));
         assert_eq!(map.get("10.0.0.3"), Some(&50));
+    }
+
+    // ---- first-deploy probes (LAN-482) --------------------------------
+
+    #[test]
+    fn deploy_targets_parses_all_probe_sections() {
+        let config = r#"
+[global]
+asn = 65000
+listen_port = 10179
+
+[rpki]
+[[rpki.cache_servers]]
+address = "rtr.example.net:8282"
+
+[bmp]
+[[bmp.collectors]]
+address = "127.0.0.1:11019"
+
+[gnmi_dialout]
+[[gnmi_dialout.targets]]
+name = "central"
+address = "collector.example.net:57400"
+paths = ["x"]
+"#;
+        let targets = deploy_targets(config);
+        assert_eq!(targets.listen_port, Some(10179));
+        assert_eq!(targets.rpki_caches, vec!["rtr.example.net:8282"]);
+        assert_eq!(targets.bmp_collectors, vec!["127.0.0.1:11019"]);
+        assert_eq!(
+            targets.gnmi_collectors,
+            vec![(
+                "central".to_string(),
+                "collector.example.net:57400".to_string()
+            )]
+        );
+
+        let empty = deploy_targets("[global]\nasn = 65000\n");
+        assert_eq!(empty.listen_port, None);
+        assert!(empty.rpki_caches.is_empty());
+        assert!(empty.bmp_collectors.is_empty());
+        assert!(empty.gnmi_collectors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reachability_probe_is_green_for_listening_and_red_for_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        // A port that was just bound and released: connecting is refused.
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let targets = DeployTargets {
+            listen_port: None,
+            rpki_caches: vec![live.to_string()],
+            bmp_collectors: vec![dead.to_string()],
+            gnmi_collectors: vec![("central".to_string(), dead.to_string())],
+        };
+        let checks = reachability_checks(false, "unix:///run/x.sock", &targets).await;
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].name, format!("rpki.cache.{live}.reachable"));
+        assert_eq!(checks[0].status, CheckStatus::Ok);
+        assert_eq!(checks[1].name, format!("bmp.collector.{dead}.reachable"));
+        assert_eq!(checks[1].status, CheckStatus::Fail);
+        assert!(
+            checks[1].detail.contains("unreachable"),
+            "{}",
+            checks[1].detail
+        );
+        assert_eq!(checks[2].name, "gnmi_dialout.central.reachable");
+        assert_eq!(checks[2].status, CheckStatus::Fail);
+        assert!(
+            checks[2].detail.contains("dial-out"),
+            "{}",
+            checks[2].detail
+        );
+    }
+
+    #[test]
+    fn listener_test_bind_maps_bind_errors_to_advice() {
+        // Free port: bindable.
+        let free = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let ok = listener_bind_check(free);
+        assert_eq!(ok.status, CheckStatus::Ok);
+        assert!(ok.detail.contains("bindable"), "{}", ok.detail);
+
+        // Held port: warn, not fail (a daemon we could not reach may hold it).
+        let held = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let busy = listener_bind_check(held.local_addr().unwrap().port());
+        assert_eq!(busy.status, CheckStatus::Warn);
+        assert!(busy.detail.contains("already in use"), "{}", busy.detail);
+
+        // Privileged-port EACCES carries the capability advice.
+        let denied = bind_check_from_result(
+            179,
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        );
+        assert_eq!(denied.status, CheckStatus::Fail);
+        assert!(
+            denied.detail.contains("CAP_NET_BIND_SERVICE"),
+            "{}",
+            denied.detail
+        );
+    }
+
+    #[test]
+    fn state_dir_checks_cover_ok_missing_and_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = state_dir_checks(dir.path());
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "state_dir.writable");
+        assert_eq!(checks[0].status, CheckStatus::Ok);
+        assert_eq!(checks[1].name, "state_dir.disk");
+        assert_ne!(checks[1].status, CheckStatus::Fail);
+
+        let missing = state_dir_checks(&dir.path().join("nope"));
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].status, CheckStatus::Warn);
+        assert!(missing[0].detail.contains("does not exist"));
+
+        // access(W_OK) always succeeds for root, so only assert the
+        // unwritable path as an unprivileged user.
+        if !nix::unistd::geteuid().is_root() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+            let unwritable = state_dir_checks(dir.path());
+            assert_eq!(unwritable[0].status, CheckStatus::Fail);
+            assert!(unwritable[0].detail.contains("not writable"));
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn listener_probe_host_follows_the_daemon_address() {
+        assert_eq!(
+            listener_probe_host("unix:///run/rustbgpd/grpc.sock"),
+            "127.0.0.1"
+        );
+        assert_eq!(listener_probe_host("http://10.0.0.5:50051"), "10.0.0.5");
+        assert_eq!(
+            listener_probe_host("https://rr1.example.net:50051"),
+            "rr1.example.net"
+        );
+        assert_eq!(listener_probe_host("10.0.0.5:50051"), "10.0.0.5");
+        assert_eq!(listener_probe_host("http://[::1]:50051"), "[::1]");
+    }
+
+    #[test]
+    fn run_context_classification() {
+        assert_eq!(classify_run_context("systemd", false), "systemd");
+        assert_eq!(classify_run_context("systemd", true), "container");
+        assert_eq!(classify_run_context("init", true), "container");
+        assert_eq!(classify_run_context("bash", false), "unknown");
+    }
+
+    #[test]
+    fn cmdline_config_path_takes_first_non_flag_argument() {
+        assert_eq!(
+            parse_cmdline_config_path(b"rustbgpd\0/etc/rustbgpd/prod.toml\0"),
+            Some("/etc/rustbgpd/prod.toml".to_string())
+        );
+        assert_eq!(
+            parse_cmdline_config_path(b"rustbgpd\0--check\0/n/c.toml\0"),
+            Some("/n/c.toml".to_string())
+        );
+        assert_eq!(parse_cmdline_config_path(b"rustbgpd\0"), None);
+    }
+
+    #[test]
+    fn proc_start_time_parses_stat_field_22_past_comm_spaces() {
+        // comm with spaces and parens: fields resume after the last ')'.
+        let stat = "1234 (rust bgpd (x)) S 1 0 0 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5000 0 0";
+        // starttime = 5000 ticks at 100 Hz = 50s after btime.
+        assert_eq!(parse_proc_start_unix(stat, 1_000_000, 100), Some(1_000_050));
+        assert_eq!(parse_proc_start_unix("garbage", 0, 100), None);
+    }
+
+    #[test]
+    fn config_modified_after_daemon_start_is_yellow_with_reload_advice() {
+        let stale = config_freshness_check(7, "/etc/rustbgpd/config.toml", 2_000, 1_000);
+        assert_eq!(stale.status, CheckStatus::Warn);
+        assert!(stale.detail.contains("SIGHUP"), "{}", stale.detail);
+        assert!(stale.detail.contains("--check"), "{}", stale.detail);
+        let fresh = config_freshness_check(7, "/etc/rustbgpd/config.toml", 1_000, 1_000);
+        assert_eq!(fresh.status, CheckStatus::Ok);
     }
 
     // ---- bundle integration ------------------------------------------
@@ -1321,6 +2027,107 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         // The effective config is the daemon dump, verbatim.
         assert!(find(&files, "config/effective.toml").contains("asn = 65000"));
         assert!(find(&files, "peers/neighbors.json").contains("10.0.0.2"));
+    }
+
+    /// LAN-482: one full daemon-up run with every first-deploy probe
+    /// active — listener reachable, one live and one dead RTR cache, a
+    /// dead BMP collector, a dead gNMI dial-out collector, and a healthy
+    /// state dir. Pins the emitted check-name set and statuses.
+    #[tokio::test]
+    async fn doctor_first_deploy_probes_daemon_up() {
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = live.local_addr().unwrap().port();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            r#"[global]
+asn = 65000
+router_id = "192.0.2.1"
+listen_port = {live_port}
+runtime_state_dir = "{state}"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:{live_port}"
+[[rpki.cache_servers]]
+address = "{dead}"
+
+[bmp]
+[[bmp.collectors]]
+address = "{dead}"
+
+[gnmi_dialout]
+[[gnmi_dialout.targets]]
+name = "central"
+address = "{dead}"
+paths = ["x"]
+"#,
+            state = state_dir.path().display()
+        ));
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let code = run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 2, "dead probe targets must exit red");
+
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert_eq!(
+            manifest["sections"]["probes"],
+            "collected (targets from effective config)"
+        );
+        let checks = manifest["checks"].as_array().unwrap();
+        let status_of = |name: &str| -> &str {
+            checks
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("missing check {name}"))["status"]
+                .as_str()
+                .unwrap()
+        };
+        assert_eq!(status_of("bgp.listener"), "ok");
+        assert_eq!(
+            status_of(&format!("rpki.cache.127.0.0.1:{live_port}.reachable")),
+            "ok"
+        );
+        assert_eq!(status_of(&format!("rpki.cache.{dead}.reachable")), "fail");
+        assert_eq!(
+            status_of(&format!("bmp.collector.{dead}.reachable")),
+            "fail"
+        );
+        assert_eq!(status_of("gnmi_dialout.central.reachable"), "fail");
+        assert_eq!(status_of("state_dir.writable"), "ok");
+        assert_eq!(status_of("host.run_context"), "ok");
+        assert_ne!(status_of("state_dir.disk"), "fail");
+        // Advice text is actionable, not just a status.
+        let bmp_detail = checks
+            .iter()
+            .find(|c| c["name"] == format!("bmp.collector.{dead}.reachable"))
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap();
+        assert!(
+            bmp_detail.contains("verify the collector address"),
+            "{bmp_detail}"
+        );
     }
 
     #[tokio::test]

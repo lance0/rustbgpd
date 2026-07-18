@@ -25,6 +25,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rbgp doctor`: first-deploy environment probes.** Doctor now checks
+  the classic silent first-30-minutes failures: BGP listener bound
+  (daemon up: TCP connect; daemon down: test-bind and release, with
+  `CAP_NET_BIND_SERVICE` advice on permission-denied), per-endpoint TCP
+  reachability of every configured RTR cache, BMP collector, and gNMI
+  dial-out collector (2s bound each, run concurrently),
+  `runtime_state_dir` writability and free-space thresholds (yellow
+  < 1 GiB, red < 100 MiB), run-context detection (systemd / container —
+  also tailors the `nofile` rlimit remediation line), and a
+  config-freshness warning when the config file was modified after the
+  local daemon started (SIGHUP-pending edits). Daemon-down runs source
+  probe targets from the local config file, so doctor is useful before
+  the first start.
+
 - **birdwatcher-adapter: filtered-route views.** The external looking
   glass adapter now serves `GET /routes/filtered/{id}` from
   `PolicyService.ListRejectedRoutes` and a real per-neighbor
