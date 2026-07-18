@@ -134,8 +134,10 @@ impl LocRib {
                     || old.attributes != new_best.attributes
             });
             if changed {
-                let was_absent = !self.routes.contains_key(&prefix);
-                self.routes.insert(prefix, (new_best, SystemTime::now()));
+                let was_absent = self
+                    .routes
+                    .insert(prefix, (new_best, SystemTime::now()))
+                    .is_none();
                 if was_absent {
                     self.note_membership_change(prefix);
                 }
@@ -154,6 +156,7 @@ impl LocRib {
     /// index update to the next listing. Once the journal would cost as much
     /// to replay as a rebuild, switch to the rebuild flag and drop it — this
     /// also bounds journal memory when no listing ever runs.
+    #[inline]
     fn note_membership_change(&mut self, prefix: Prefix) {
         if self.ordered_rebuild {
             return;
