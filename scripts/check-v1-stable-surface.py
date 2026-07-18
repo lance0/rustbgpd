@@ -688,7 +688,7 @@ def tagged_file(tag: str, path: str) -> bytes | None:
 
 
 ReleaseVersion = tuple[int, int, int]
-ReleaseTransition = tuple[ReleaseVersion, ReleaseVersion]
+ReleaseTransition = tuple[ReleaseVersion, ReleaseVersion, bool]
 
 
 def parse_release_tag(tag: str) -> ReleaseVersion:
@@ -710,16 +710,24 @@ def release_line_chain_error(
     if transitions[0][0] != V1_UPGRADE_HISTORY_ORIGIN:
         return "upgrade exercise history must retain the canonical v0.50.0 origin"
 
-    targets = [target for _, target in transitions]
+    targets = [target for _, target, _ in transitions]
     if targets != sorted(targets) or len(targets) != len(set(targets)):
         return "upgrade exercises must be ordered by unique target release"
 
-    for index, (source, target) in enumerate(transitions):
+    for index, (source, target, milestone_jump) in enumerate(transitions):
         if source[2] != 0 or target[2] != 0:
             return "upgrade exercise endpoints must be release-line anchors with patch zero"
         same_major_next_minor = target[0] == source[0] and target[1] == source[1] + 1
         next_major = target[0] == source[0] + 1 and target[1] == 0
-        if not (same_major_next_minor or next_major):
+        if milestone_jump:
+            if same_major_next_minor or next_major:
+                return (
+                    "declared milestone jump is between consecutive release lines; "
+                    "remove the annotation"
+                )
+            if target <= source:
+                return "declared milestone jump must advance to a later release line"
+        elif not (same_major_next_minor or next_major):
             return "upgrade exercise is not between consecutive release lines"
         if index == 0 and next_major:
             return "major-boundary exercise must retain its preceding release-line receipt"
@@ -735,59 +743,136 @@ def release_line_chain_error(
     return None
 
 
+def upgrade_exercise_milestone_jump(exercise: dict) -> bool:
+    milestone_jump = exercise.get("milestone_jump", False)
+    if not isinstance(milestone_jump, bool):
+        fail("upgrade exercise milestone_jump must be a boolean")
+    rationale = exercise.get("jump_rationale")
+    if milestone_jump and (not isinstance(rationale, str) or not rationale.strip()):
+        fail("declared milestone jump requires a non-empty jump_rationale")
+    if not milestone_jump and rationale is not None:
+        fail("jump_rationale requires a declared milestone jump")
+    return milestone_jump
+
+
 def check_release_line_selftests() -> None:
     v0_49 = (0, 49, 0)
     v0_50 = (0, 50, 0)
     v0_51 = (0, 51, 0)
     v0_52 = (0, 52, 0)
+    v0_60 = (0, 60, 0)
     v1_0 = (1, 0, 0)
     cases = [
-        ("patch baseline", [(v0_50, v0_51)], (0, 51, 1), True),
+        ("patch baseline", [(v0_50, v0_51, False)], (0, 51, 1), True),
         (
             "major baseline",
-            [(v0_50, v0_51), (v0_51, v1_0)],
+            [(v0_50, v0_51, False), (v0_51, v1_0, False)],
             (1, 0, 0),
             True,
         ),
         (
             "major patch baseline",
-            [(v0_50, v0_51), (v0_51, v1_0)],
+            [(v0_50, v0_51, False), (v0_51, v1_0, False)],
             (1, 0, 1),
             True,
         ),
-        ("lone major transition", [(v0_50, v1_0)], (1, 0, 0), False),
-        ("nonzero exercise patch", [(v0_50, (0, 51, 1))], (0, 51, 1), False),
-        ("skipped minor", [(v0_49, v0_51)], (0, 51, 0), False),
+        ("lone major transition", [(v0_50, v1_0, False)], (1, 0, 0), False),
+        ("nonzero exercise patch", [(v0_50, (0, 51, 1), False)], (0, 51, 1), False),
+        ("skipped minor", [(v0_49, v0_51, False)], (0, 51, 0), False),
         (
             "unordered chain",
-            [(v0_51, v0_52), (v0_50, v0_51)],
+            [(v0_51, v0_52, False), (v0_50, v0_51, False)],
             (0, 51, 0),
             False,
         ),
         (
             "duplicate target",
-            [(v0_50, v0_51), (v0_50, v0_51)],
+            [(v0_50, v0_51, False), (v0_50, v0_51, False)],
             (0, 51, 0),
             False,
         ),
         (
             "disconnected chain",
-            [(v0_49, v0_50), (v0_51, v0_52)],
+            [(v0_49, v0_50, False), (v0_51, v0_52, False)],
             (0, 52, 0),
             False,
         ),
         (
             "rewritten history origin",
-            [(v0_49, v0_50), (v0_50, v1_0)],
+            [(v0_49, v0_50, False), (v0_50, v1_0, False)],
             (1, 0, 0),
             False,
         ),
-        ("stale target", [(v0_50, v0_51)], (0, 52, 1), False),
+        ("stale target", [(v0_50, v0_51, False)], (0, 52, 1), False),
+        (
+            "declared milestone jump",
+            [(v0_50, v0_51, False), (v0_51, v0_60, True)],
+            (0, 60, 0),
+            True,
+        ),
+        (
+            "undeclared milestone gap",
+            [(v0_50, v0_51, False), (v0_51, v0_60, False)],
+            (0, 60, 0),
+            False,
+        ),
+        (
+            "consecutive declared jump",
+            [(v0_50, v0_51, True)],
+            (0, 51, 0),
+            False,
+        ),
+        (
+            "milestone jump breaks contiguity",
+            [(v0_50, v0_51, False), (v0_52, v0_60, True)],
+            (0, 60, 0),
+            False,
+        ),
     ]
     for label, transitions, baseline_version, expected_valid in cases:
         valid = release_line_chain_error(transitions, baseline_version) is None
         if valid != expected_valid:
             fail(f"internal release-line regression self-test failed: {label}")
+
+    undeclared_gap = release_line_chain_error(
+        [(v0_50, v0_51, False), (v0_51, v0_60, False)], v0_60
+    )
+    if undeclared_gap != "upgrade exercise is not between consecutive release lines":
+        fail(
+            "internal release-line regression self-test failed: "
+            "undeclared milestone gap message"
+        )
+
+    if upgrade_exercise_milestone_jump(
+        {"milestone_jump": True, "jump_rationale": "deliberate release-line jump"}
+    ) is not True:
+        fail(
+            "internal release-line regression self-test failed: "
+            "declared milestone jump annotation"
+        )
+    if upgrade_exercise_milestone_jump({}) is not False:
+        fail(
+            "internal release-line regression self-test failed: "
+            "unannotated exercise default"
+        )
+    for exercise, expected, label in (
+        ({"milestone_jump": True}, "non-empty jump_rationale", "jump without rationale"),
+        (
+            {"milestone_jump": True, "jump_rationale": " "},
+            "non-empty jump_rationale",
+            "jump with blank rationale",
+        ),
+        (
+            {"jump_rationale": "orphan"},
+            "requires a declared milestone jump",
+            "rationale without jump",
+        ),
+    ):
+        expect_checker_failure(
+            lambda exercise=exercise: upgrade_exercise_milestone_jump(exercise),
+            expected,
+            label,
+        )
 
 
 def check_upgrade_exercises(inventory: dict) -> None:
@@ -807,7 +892,9 @@ def check_upgrade_exercises(inventory: dict) -> None:
     for exercise in exercises:
         from_version = parse_release_tag(exercise["from_release"])
         to_version = parse_release_tag(exercise["to_release"])
-        transitions.append((from_version, to_version))
+        transitions.append(
+            (from_version, to_version, upgrade_exercise_milestone_jump(exercise))
+        )
         if exercise.get("result") not in {
             "accepted_without_config_migration",
             "accepted_with_documented_migration",

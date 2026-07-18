@@ -148,6 +148,14 @@ of adjacent minor release lines from the canonical `v0.50.0` history origin,
 with an explicit transition into a new major. Future stable-surface migrations
 add a new consecutive-release fixture rather than overwriting this receipt.
 
+A deliberate release-numbering milestone jump — a target line more than one
+step ahead, where the skipped intermediate lines never exist — may be recorded
+by annotating that single exercise with `"milestone_jump": true` and a
+non-empty `"jump_rationale"` string. The annotated exercise must still advance
+to a later release line, keep the chain contiguous, and end at the workspace
+anchor. An unannotated gap remains an error, and the annotation is rejected on
+an exercise that is actually between consecutive release lines.
+
 The v0.51.0 route-server example is also staged byte-for-byte under
 `tests/fixtures/v1-stable/v0.51.0/` and exercised by the current parser. This
 is only a current-parser proof: it is not yet an accepted v0.51.0-to-v0.52.0
