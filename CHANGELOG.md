@@ -20,29 +20,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edit-distance ranking. Garbage keys with no close match keep serde's
   full expected-key list; secret-bearing lines stay redacted.
 
-### Changed
-
-- **Docs: operator discoverability pass.** New `docs/explain.md` catalog
-  of every explain/introspection surface, an end-to-end IXP tutorial
-  (`docs/cookbook/ixp-filter-pipeline.md`: arouteserver →
-  `rs-config-render` → validated reload → Alice-LG), and a pre-built
-  tarball install path ahead of building from source in README and
-  QUICKSTART.
-
-- Docs: COMPARISON.md gains a "Why reload behavior decided this market"
-  positioning section — the OpenBGPD route-server reload history and
-  RIPE NCC funding rationale, the frr-reload.py blank-config failure
-  class vs the validate-then-apply transaction model, and the
-  inter-daemon config-converter vacuum, each with public citations and
-  framed against the published IXP receipt matrix.
-
-- Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
-  effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
-  zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
-  cargo-deny-action 2.1.1 in the audit workflow. `cargo audit` clean.
-
-### Added
-
 - **`rbgp doctor`: first-deploy environment probes.** Doctor now checks
   the classic silent first-30-minutes failures: BGP listener bound
   (daemon up: TCP connect; daemon down: test-bind and release, with
@@ -70,152 +47,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mapping table and an Alice-LG config snippet are in the adapter
   README.
 
-### Fixed
-
-- **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
-  malformed UPDATE from session reset.** The "no reachable NLRI"
-  escalation gate tested MP_REACH attribute *presence*, not content —
-  an UPDATE carrying a structurally valid MP_REACH with zero NLRI plus
-  a treat-as-withdraw-class attribute error stayed Established via the
-  treat-as-withdraw arm, which had nothing to withdraw. The gate now
-  inspects the parsed MP_REACH payload across every family's announced
-  vector; the attribute validator keeps its presence-based
-  mandatory-attribute semantics unchanged, and an MP_REACH that does
-  carry NLRI still takes treat-as-withdraw (no over-reset). Malformed
-  UPDATEs are additionally dumped at DEBUG per the §5.2 debugging
-  guidance: NLRI/withdrawn counts plus the raw message sections
-  hex-encoded, bounded at 512 bytes per section so an Extended-Messages
-  peer cannot spam the logs.
-
-- **Rejected-route retention now enforces its per-entry byte budget.**
-  The `[policy.reject_retention]` store was bounded in entry count
-  (LRU, 1024/peer) but each entry retained unbounded wire-derived data
-  — a hostile peer with a maximal AS_PATH and community lists (worse
-  under RFC 8654 Extended Messages) could push entries to multiple KB
-  across hundreds of peers, default-on. Entries are now truncated at
-  capture time: the rendered AS-path and detail strings are capped
-  (96 / 64 bytes, `…` marker appended), and the community vectors are
-  capped (16 standard / 8 large) with the dropped counts recorded and
-  surfaced (`ListRejectedRoutes` `communities_dropped` /
-  `large_communities_dropped`, and in `rbgp rib received --rejected`
-  JSON) so renderers can say "…and N more". The documented
-  ≤ 512 B/entry ⇒ ~0.5 MiB/peer bound is now an enforced fact, pinned
-  by a size-budget test against the real type sizes. One bounded
-  attribute summary is also built per UPDATE and shared across every
-  rejected identity, replacing the per-identity re-render and
-  deep-clone of the full attribute set.
-
-- **Post-flap re-announce latency: initial table dumps no longer
-  head-of-line block redistribution.** A peer's outbound registration at
-  `PeerUp` performed its full-table initial dump synchronously on the
-  RIB actor, so a mass reconnect (e.g. 50 route-server members
-  re-establishing after a flap) serialized N full-table passes ahead of
-  the re-announcements already queued behind the burst — survivors saw
-  the flapped prefixes only after the last dump finished (~9.5 s flat at
-  the 700x400k receipt shape, scaling with peers x table). When the
-  actor has queued work, the registration (and its dump) now defers to
-  the run loop, which completes one per iteration strictly after every
-  queued mutation batch has drained: imports and their fan-out to
-  established peers always preempt the reconnecting peers' full-table
-  catch-up. A quiet actor, or a table under 10k routes (whose dump is
-  sub-10-ms-class), still registers inline — registration-timing
-  semantics only change where deferring buys real latency back.
-  Session-semantic flags (eBGP / RR-client / RFC 9234 role /
-  per-client-best / RFC 1997 interpretation) always install immediately
-  at `PeerUp`, so inbound processing never runs with absent flags
-  during the deferral window. A session that drops, is superseded, or
-  fails over while
-  deferred resolves to its surviving live session, including the
-  inbound ROUTE-REFRESH re-solicitation on failover. GR/LLGR stale
-  retention, EoR emission, RFC 4724 selection deferral, and the RFC
-  5291 ORF gate are unchanged. Local flapstorm at 300 peers x 300k
-  prefixes, 30 flapped: survivor re-announce completion 4.43-4.56 s ->
-  0.32-0.33 s (first arrival 4.24-4.40 s -> 0.17 s), withdraws
-  unchanged at ~0.15 s. The flapstorm harness now also reports
-  per-survivor first re-announce arrival (`first_reann_s`), separating
-  delivery-start latency from fan-out completion.
-
-- **gNMI dial-out: a subscription error no longer strands the session on
-  a silent collector.** When the local subscription ended mid-session
-  (e.g. ON_CHANGE broadcast lag closing the stream with `DataLoss`), the
-  client ended its outbound stream but then kept waiting on the
-  collector's response stream for the disconnect signal — and the proto
-  reserves `PublishResponse` for future flow control, so a compliant
-  collector may never send anything and never close. The session hung
-  forever, the promised fresh-snapshot resync never happened, and
-  `gnmi_dialout_connected{target}` stayed at 1. Outbound-stream
-  completion is now a first-class disconnect signal: the session returns
-  to the reconnect loop immediately and resyncs from a fresh initial
-  snapshot + `sync_response`.
-
-- **Grouped route-server control decisions are now made on the source
-  route, matching the ungrouped path.** The update-groups emission path
-  evaluated RFC 7947 control communities (`0:PEER` suppression,
-  `RS:0:PEER` large-community forms, prepend requests) on the
-  post-export-policy route, so a policy that stripped a control
-  community could leak a route the source member prohibited, and
-  policy-added control communities could spuriously suppress or
-  prepend. Suppression and prepend are now decided from the source
-  route's communities captured at staging time; the egress scrub still
-  runs post-policy so policy-added control forms are removed without
-  acting. Tag-only transitions (policy strips or adds the tag while the
-  route is otherwise unchanged) now emit the exact per-member withdraw /
-  re-announce delta instead of being equality-suppressed.
-
-### Changed
-
-- **BREAKING (library API): registry-tracking wire/fsm enums are now
-  `#[non_exhaustive]`** — absorbed into the in-flight `rustbgpd-wire`
-  0.15.0 / `rustbgpd-fsm` 0.3.0 breaking cut. 22 wire enums
-  (`Capability`, `PathAttribute`, `Afi`, `Safi`, `Message`,
-  `MessageType`, `NotificationCode`, `RouteRefreshSubtype`, `EvpnRoute`,
-  `EvpnRouteKey`, `RouteDistinguisherParseError`, `BgpLsNlriType`,
-  `FlowSpecComponent`, `FlowSpecAction`, `OrfType`, `OrfEntries`,
-  `PmsiTunnelType`, `PmsiTunnelIdentifier`, `BgpRole`, `AspaValidation`,
-  `DecodeError`, `EncodeError`) and 2 fsm enums (`TimerType`,
-  `error::FsmError`) now require a wildcard arm in downstream exhaustive
-  matches. This breaks such matches once, in this release; every future
-  registry addition (the recurring `Capability::PathsLimit` shape from
-  0.14.x) then lands as a non-breaking minor instead of another major.
-  Closed-by-construction enums deliberately remain exhaustively
-  matchable: `Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`,
-  `OrfAction`, `OrfMatch`, `OrfSendReceive`, `WhenToRefresh`,
-  `Ipv4UnicastMode`, `ErrorDisposition`, `RpkiValidation`,
-  `EvpnIpPrefixValue`, `FlowSpecPrefix`, `VpnAddressFamily`,
-  `VpnPrefix`, `LabeledAddressFamily`, and fsm `SessionState`. In-tree
-  daemon fallout: every new wildcard arm fails safe (unknown message
-  kind → NOTIFICATION via the FSM decode-error path; unsupported
-  ROUTE-REFRESH subtype → ignored with a warning; unmodeled EVPN
-  withdrawal → export error, never silently dropped; unknown timer kind
-  → no slot, no expiry; unknown BGP Role → conservative upstream ASPA
-  procedure and omitted from config snapshots; display surfaces render
-  `unrecognized`/`unmodeled` labels).
-
-- **IXP route-server receipt matrix refreshed with post-fix flapstorm
-  numbers** (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd
-  cells rerun at the deferred-PeerUp-dump fix head — S3 re-announce
-  p50 9.5–9.8 s → 0.46–0.49 s, S1/S2/RSS moved only within run-to-run
-  spread — with a post-publication note documenting the plateau the
-  receipt itself exposed, the head-of-line mechanism, and the rerun;
-  committed raw artifacts swapped to the new runs (BIRD/OpenBGPD cells
-  unchanged).
-
-- **jemalloc is now the default allocator feature.** Shipped artifacts
-  (GHCR image, release tarballs) have built with jemalloc since
-  v0.50.0+; defaulting the feature makes plain `cargo build --release`
-  produce the same allocator configuration, so locally-built binaries
-  and receipts match the shipped product. Motivation: an 8-cycle
-  policy-reload probe (200 peers x 115k prefixes) showed stock-glibc
-  RSS ratcheting 301->555 / 295->639 MiB across reload cycles without
-  returning memory — allocator arena retention of reload transients,
-  with live bytes flat — while jemalloc oscillated at 270-330 MiB and
-  returned memory via background decay. Default builds also expose the
-  `jemalloc_*` allocated/active/resident gauges on `/metrics`. A
-  stock-glibc build remains available with `--no-default-features`
-  (kept compiling in CI).
-
-### Added
-
 - **Policy artifact freshness metrics (ADR-0110): alert when the
   filter-render pipeline is stuck instead of discovering it later.**
   `bgp_policy_generation_loaded_timestamp_seconds` stamps every
@@ -230,6 +61,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing `bgp_policy_dataset_refresh_errors_total`) are now reaped
   when a dataset is removed from config. Alert expressions documented
   in `OPERATIONS.md` ("Policy artifact freshness").
+
 - **`rs-config-render`: IRR/PeeringDB-driven route-server configuration
   from arouteserver data (ADR-0110 phase 1).** New standalone tool
   (`tools/rs-config-render/`) that consumes `arouteserver
@@ -274,6 +106,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a `bgp_rejected_routes_retained{peer}` gauge (peer-reaped) tracks
   occupancy. Docs: OPERATIONS.md runbook, route-server cookbook
   member-support section, CONFIGURATION.md.
+
 - **gNMI dial-out streaming telemetry (LAN-471).** New `[gnmi_dialout]`
   config section: the daemon opens a persistent gRPC connection OUT to
   each configured collector and pushes the same `SubscribeResponse`
@@ -383,6 +216,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `unscoped_link_local`). The RFC 7948 `same-AS` and
   `explicit-authorized` relationships remain deferred per the ADR.
   (LAN-473)
+
 - **RFC 7606 revised BGP UPDATE error handling** — a malformed path
   attribute no longer resets the session by default. The wire crate
   classifies every attribute error with an RFC 7606 disposition
@@ -610,6 +444,75 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected ranges and overlaps. (#158)
 
 ### Changed
+
+- **Docs: operator discoverability pass.** New `docs/explain.md` catalog
+  of every explain/introspection surface, an end-to-end IXP tutorial
+  (`docs/cookbook/ixp-filter-pipeline.md`: arouteserver →
+  `rs-config-render` → validated reload → Alice-LG), and a pre-built
+  tarball install path ahead of building from source in README and
+  QUICKSTART.
+
+- Docs: COMPARISON.md gains a "Why reload behavior decided this market"
+  positioning section — the OpenBGPD route-server reload history and
+  RIPE NCC funding rationale, the frr-reload.py blank-config failure
+  class vs the validate-then-apply transaction model, and the
+  inter-daemon config-converter vacuum, each with public citations and
+  framed against the published IXP receipt matrix.
+
+- Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
+  effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
+  zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
+  cargo-deny-action 2.1.1 in the audit workflow. `cargo audit` clean.
+
+- **BREAKING (library API): registry-tracking wire/fsm enums are now
+  `#[non_exhaustive]`** — absorbed into the in-flight `rustbgpd-wire`
+  0.15.0 / `rustbgpd-fsm` 0.3.0 breaking cut. 22 wire enums
+  (`Capability`, `PathAttribute`, `Afi`, `Safi`, `Message`,
+  `MessageType`, `NotificationCode`, `RouteRefreshSubtype`, `EvpnRoute`,
+  `EvpnRouteKey`, `RouteDistinguisherParseError`, `BgpLsNlriType`,
+  `FlowSpecComponent`, `FlowSpecAction`, `OrfType`, `OrfEntries`,
+  `PmsiTunnelType`, `PmsiTunnelIdentifier`, `BgpRole`, `AspaValidation`,
+  `DecodeError`, `EncodeError`) and 2 fsm enums (`TimerType`,
+  `error::FsmError`) now require a wildcard arm in downstream exhaustive
+  matches. This breaks such matches once, in this release; every future
+  registry addition (the recurring `Capability::PathsLimit` shape from
+  0.14.x) then lands as a non-breaking minor instead of another major.
+  Closed-by-construction enums deliberately remain exhaustively
+  matchable: `Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`,
+  `OrfAction`, `OrfMatch`, `OrfSendReceive`, `WhenToRefresh`,
+  `Ipv4UnicastMode`, `ErrorDisposition`, `RpkiValidation`,
+  `EvpnIpPrefixValue`, `FlowSpecPrefix`, `VpnAddressFamily`,
+  `VpnPrefix`, `LabeledAddressFamily`, and fsm `SessionState`. In-tree
+  daemon fallout: every new wildcard arm fails safe (unknown message
+  kind → NOTIFICATION via the FSM decode-error path; unsupported
+  ROUTE-REFRESH subtype → ignored with a warning; unmodeled EVPN
+  withdrawal → export error, never silently dropped; unknown timer kind
+  → no slot, no expiry; unknown BGP Role → conservative upstream ASPA
+  procedure and omitted from config snapshots; display surfaces render
+  `unrecognized`/`unmodeled` labels).
+
+- **IXP route-server receipt matrix refreshed with post-fix flapstorm
+  numbers** (`docs/perf/ixp-matrix-2026-07.md`): all four rustbgpd
+  cells rerun at the deferred-PeerUp-dump fix head — S3 re-announce
+  p50 9.5–9.8 s → 0.46–0.49 s, S1/S2/RSS moved only within run-to-run
+  spread — with a post-publication note documenting the plateau the
+  receipt itself exposed, the head-of-line mechanism, and the rerun;
+  committed raw artifacts swapped to the new runs (BIRD/OpenBGPD cells
+  unchanged).
+
+- **jemalloc is now the default allocator feature.** Shipped artifacts
+  (GHCR image, release tarballs) have built with jemalloc since
+  v0.50.0+; defaulting the feature makes plain `cargo build --release`
+  produce the same allocator configuration, so locally-built binaries
+  and receipts match the shipped product. Motivation: an 8-cycle
+  policy-reload probe (200 peers x 115k prefixes) showed stock-glibc
+  RSS ratcheting 301->555 / 295->639 MiB across reload cycles without
+  returning memory — allocator arena retention of reload transients,
+  with live bytes flat — while jemalloc oscillated at 270-330 MiB and
+  returned memory via background decay. Default builds also expose the
+  `jemalloc_*` allocated/active/resident gauges on `/metrics`. A
+  stock-glibc build remains available with `--no-default-features`
+  (kept compiling in CI).
 
 - Refreshed the `docs/BENCHMARKS.md` memory-footprint tables with fresh
   clean-build measurements (RIB structural memory dropped, not grew: the
@@ -915,6 +818,96 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
+  malformed UPDATE from session reset.** The "no reachable NLRI"
+  escalation gate tested MP_REACH attribute *presence*, not content —
+  an UPDATE carrying a structurally valid MP_REACH with zero NLRI plus
+  a treat-as-withdraw-class attribute error stayed Established via the
+  treat-as-withdraw arm, which had nothing to withdraw. The gate now
+  inspects the parsed MP_REACH payload across every family's announced
+  vector; the attribute validator keeps its presence-based
+  mandatory-attribute semantics unchanged, and an MP_REACH that does
+  carry NLRI still takes treat-as-withdraw (no over-reset). Malformed
+  UPDATEs are additionally dumped at DEBUG per the §5.2 debugging
+  guidance: NLRI/withdrawn counts plus the raw message sections
+  hex-encoded, bounded at 512 bytes per section so an Extended-Messages
+  peer cannot spam the logs.
+
+- **Rejected-route retention now enforces its per-entry byte budget.**
+  The `[policy.reject_retention]` store was bounded in entry count
+  (LRU, 1024/peer) but each entry retained unbounded wire-derived data
+  — a hostile peer with a maximal AS_PATH and community lists (worse
+  under RFC 8654 Extended Messages) could push entries to multiple KB
+  across hundreds of peers, default-on. Entries are now truncated at
+  capture time: the rendered AS-path and detail strings are capped
+  (96 / 64 bytes, `…` marker appended), and the community vectors are
+  capped (16 standard / 8 large) with the dropped counts recorded and
+  surfaced (`ListRejectedRoutes` `communities_dropped` /
+  `large_communities_dropped`, and in `rbgp rib received --rejected`
+  JSON) so renderers can say "…and N more". The documented
+  ≤ 512 B/entry ⇒ ~0.5 MiB/peer bound is now an enforced fact, pinned
+  by a size-budget test against the real type sizes. One bounded
+  attribute summary is also built per UPDATE and shared across every
+  rejected identity, replacing the per-identity re-render and
+  deep-clone of the full attribute set.
+
+- **Post-flap re-announce latency: initial table dumps no longer
+  head-of-line block redistribution.** A peer's outbound registration at
+  `PeerUp` performed its full-table initial dump synchronously on the
+  RIB actor, so a mass reconnect (e.g. 50 route-server members
+  re-establishing after a flap) serialized N full-table passes ahead of
+  the re-announcements already queued behind the burst — survivors saw
+  the flapped prefixes only after the last dump finished (~9.5 s flat at
+  the 700x400k receipt shape, scaling with peers x table). When the
+  actor has queued work, the registration (and its dump) now defers to
+  the run loop, which completes one per iteration strictly after every
+  queued mutation batch has drained: imports and their fan-out to
+  established peers always preempt the reconnecting peers' full-table
+  catch-up. A quiet actor, or a table under 10k routes (whose dump is
+  sub-10-ms-class), still registers inline — registration-timing
+  semantics only change where deferring buys real latency back.
+  Session-semantic flags (eBGP / RR-client / RFC 9234 role /
+  per-client-best / RFC 1997 interpretation) always install immediately
+  at `PeerUp`, so inbound processing never runs with absent flags
+  during the deferral window. A session that drops, is superseded, or
+  fails over while
+  deferred resolves to its surviving live session, including the
+  inbound ROUTE-REFRESH re-solicitation on failover. GR/LLGR stale
+  retention, EoR emission, RFC 4724 selection deferral, and the RFC
+  5291 ORF gate are unchanged. Local flapstorm at 300 peers x 300k
+  prefixes, 30 flapped: survivor re-announce completion 4.43-4.56 s ->
+  0.32-0.33 s (first arrival 4.24-4.40 s -> 0.17 s), withdraws
+  unchanged at ~0.15 s. The flapstorm harness now also reports
+  per-survivor first re-announce arrival (`first_reann_s`), separating
+  delivery-start latency from fan-out completion.
+
+- **gNMI dial-out: a subscription error no longer strands the session on
+  a silent collector.** When the local subscription ended mid-session
+  (e.g. ON_CHANGE broadcast lag closing the stream with `DataLoss`), the
+  client ended its outbound stream but then kept waiting on the
+  collector's response stream for the disconnect signal — and the proto
+  reserves `PublishResponse` for future flow control, so a compliant
+  collector may never send anything and never close. The session hung
+  forever, the promised fresh-snapshot resync never happened, and
+  `gnmi_dialout_connected{target}` stayed at 1. Outbound-stream
+  completion is now a first-class disconnect signal: the session returns
+  to the reconnect loop immediately and resyncs from a fresh initial
+  snapshot + `sync_response`.
+
+- **Grouped route-server control decisions are now made on the source
+  route, matching the ungrouped path.** The update-groups emission path
+  evaluated RFC 7947 control communities (`0:PEER` suppression,
+  `RS:0:PEER` large-community forms, prepend requests) on the
+  post-export-policy route, so a policy that stripped a control
+  community could leak a route the source member prohibited, and
+  policy-added control communities could spuriously suppress or
+  prepend. Suppression and prepend are now decided from the source
+  route's communities captured at staging time; the egress scrub still
+  runs post-policy so policy-added control forms are removed without
+  acting. Tag-only transitions (policy strips or adds the tag while the
+  route is otherwise unchanged) now emit the exact per-member withdraw /
+  re-announce delta instead of being equality-suppressed.
+
 - Membership changes during destination pre-staging now discard the
   partial group table, so joiners always see a fully staged group. A
   peer whose (attributes, policy) key equaled a mid-walk prestaged
@@ -930,6 +923,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cohort commit that resolved a different destination remove that
   recorded group instead of re-deriving one from current attributes
   (which could drift and leak the staged, memberless group).
+
 - A cohort export hot-apply failure on a member whose import delta was
   already acknowledged now reconciles the acked-import window after
   reasserting the member's prior import chain: routes the session
