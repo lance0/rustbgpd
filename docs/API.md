@@ -161,7 +161,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `GlobalService` | `GetGlobal` | — |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
-| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
+| `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
 | `EventService` | All RPCs | None |
@@ -703,6 +703,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |
 | `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
 | `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). For `.rpol` chain members the statement trace names the deciding term and carries per-term trace lines (ADR-0096). Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
+| `ListRejectedRoutes` | List every rejected inbound route a peer's session has retained, each tagged with its canonical reject-reason token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`, `as_path_loop`, `rr_loop`, `treat_as_withdraw`), a sub-reason detail, and a best-effort attribute summary. The enumeration complement to `ExplainImportPolicy`'s point lookup. Retention is a bounded per-peer LRU (`[policy.reject_retention]`); the response reports `retention_enabled` and `capacity` so an empty listing is distinguishable from retention being off. Side-effect-free; IPv4/IPv6 unicast only. CLI: `rbgp rib received <peer> --rejected`. `SensitiveRead` tier. |
 | `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled server-side) read-only over a live Adj-RIB-In / Loc-RIB snapshot: accepted/rejected/modified counts, per-term hit counters, before/after attribute diff samples. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
 | `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; direction `import`, `export`, or `both` — import chains also report their install generation). CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 
@@ -737,6 +738,27 @@ Each `matches` entry carries an outcome — `PERMIT` / `DENY` / `WITHDRAWN` /
 policy plus the modifications it applied. Compare a match's
 `policy_generation` to the response's `current_policy_generation` to spot a
 `STALE` decision recorded before a policy reload.
+
+### List a peer's rejected routes
+
+Answer "show me everything of mine you filtered, and why" without knowing a
+prefix in advance — the looking-glass filtered-route surface. Side-effect-free.
+Returns `NOT_FOUND` when the peer has no live session (the session-local
+retention store is gone, which is honestly distinct from "nothing rejected").
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"peer_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.PolicyService/ListRejectedRoutes
+```
+
+Each retained rejection carries the prefix identity, the canonical reason
+token with its sub-reason detail (e.g. the matched policy name for
+`policy_reject`), the announcement's next hop, AS_PATH, communities, RPKI/ASPA
+validation states, and the rejection timestamp. `retention_enabled: false`
+means the empty listing is a configuration fact; when the route count equals
+`capacity`, the listing shows the most recent rejections only. CLI:
+`rbgp rib received <peer> --rejected`.
 
 ### Create or replace a named policy
 

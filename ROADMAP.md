@@ -121,15 +121,22 @@ the data-driven filtering/tooling wrapper, not the daemon.
   blocker. **Direction decided (ADR-0110, 2026-07-17):** hybrid — an external
   renderer consuming `arouteserver template-context` output feeds the existing
   parse-then-swap reload seam (inherits the whole industry ingest pipeline, no
-  upstream gate); native ingestion demand-gated. Phase 1 = the renderer + the
-  a differential BIRD/rustbgpd interop lab (the origin-as accessor gap claimed at drafting was stale — already shipped)
-  (LAN-467, umbrella).
+  upstream gate); native ingestion demand-gated. The phase-1 renderer is
+  **Shipped (#986)** as `tools/rs-config-render` — template-context ingestion
+  is fingerprint-pinned with fail-stale refusal, and the emitted config is
+  verified by a real `rustbgpd --check`. Remaining phase 1 = the differential
+  BIRD/rustbgpd interop lab (the origin-as accessor gap claimed at drafting
+  was stale — already shipped) (LAN-467, umbrella).
 - ~~RFC 7947/8195 community-based announcement control~~ **Shipped (#968):**
   per-target announce / announce-only / announce-to-none / prepend via
   standard + large control communities, egress scrub, rs-client-default knob
   (LAN-466).
-- Reject-reason retention → Alice-LG looking glass — the member-support
-  surface; the reasons are already computed by the explain ladder (LAN-472).
+- ~~Reject-reason retention → Alice-LG looking glass~~ **Shipped (#981,
+  #984):** bounded per-peer reject-reason retention behind
+  `PolicyService.ListRejectedRoutes` and `rbgp rib received <peer> --rejected`,
+  and the birdwatcher adapter now serves its filtered-route views from it
+  (reject reasons mapped to large communities under `64496:65520:*`; the
+  noexport view remains) (LAN-472).
 - ~~Ship ADR-0107 NEXT_HOP self-consistency~~ **Shipped (#964):**
   `next_hop_ownership = "strict_peer"` fail-closed ingress gate; ADR-0107
   Accepted; same-AS mode stays deferred behind the fleet inventory (LAN-473).
@@ -144,14 +151,17 @@ the data-driven filtering/tooling wrapper, not the daemon.
   **Shipped (#962)** (`bgp_peer_outbound_queue_depth`, `bgp_peer_update_group`)
   → ~~slow-peer detection~~ **Shipped (#967)** (threshold+duration detector,
   `bgp_peer_slow`, neighbor-state flag, opt-in own-group isolation via a
-  `SlowPeer` membership) → gNMI dial-out still open (LAN-471). The operator
-  triage chain "which client is slow, which group is it in, is it isolated"
-  now exists end-to-end; dial-out streams it to a collector.
+  `SlowPeer` membership) → ~~gNMI dial-out~~ **Shipped (#982)**
+  (`[gnmi_dialout]` streaming push to central collectors, LAN-471). The
+  operator triage chain "which client is slow, which group is it in, is it
+  isolated" now exists end-to-end and streams to a collector.
 
-**3. Release hygiene (timing-critical).** Absorb `#[non_exhaustive]` onto the
-growing wire/fsm protocol enums into the in-flight 0.15.0 breaking cut, rather
-than trickle breaking bumps one variant at a time — the `Capability::PathsLimit`
-pattern will recur as IANA/RFC registries grow (LAN-468).
+**3. Release hygiene (timing-critical).** ~~Absorb `#[non_exhaustive]` onto
+the growing wire/fsm protocol enums~~ **Shipped (#983):** the
+registry-tracking enums are marked ahead of the in-flight 0.15.0 breaking cut,
+with fail-safe wildcard arms across consumers, so the
+`Capability::PathsLimit` pattern no longer forces a breaking bump per variant
+as IANA/RFC registries grow (LAN-468).
 
 Deliberately *not* on this frontier (verified already-shipped or hard-deferred):
 RPKI/ASPA, Roles/OTC, graceful-shutdown, blackhole, Prefix-ORF, the BMP trio,
@@ -171,18 +181,24 @@ config workflow, or span-and-suggestion config errors at all. **The gap is
 not features — it is discoverability, first-30-minutes friction, and
 migration-in.** Three tracks, ranked:
 
-**1. Discoverability of shipped differentiators.** A landing page for the
+**1. Discoverability of shipped differentiators.** ~~A landing page for the
 explain trilogy plus README positioning (LAN-478); an end-to-end
 arouteserver → rs-config-render → looking-glass tutorial and docs-index
-wiring for `tools/` (LAN-479).
+wiring for `tools/` (LAN-479).~~ **Shipped (#989):** `docs/explain.md`
+explain/introspection catalog with README positioning, and the
+`docs/cookbook/ixp-filter-pipeline.md` end-to-end tutorial with docs-index
+wiring for `tools/`.
 
-**2. First-30-minutes friction.** A pre-built-binary install path ahead of
-`cargo build` in the bare-metal quickstart (LAN-480); `rbgp doctor`
-first-deploy environment checks — BGP listener bound, RTR/BMP reachability,
-run-context detection, state-dir disk (LAN-482).
+**2. First-30-minutes friction.** ~~A pre-built-binary install path~~
+**Shipped (#989):** checksum-verified release-tarball install ahead of
+`cargo build` in the quickstart (LAN-480); ~~`rbgp doctor` first-deploy
+environment checks~~ **Shipped (#992):** BGP listener bound, RTR/BMP
+reachability, run-context detection, state-dir disk probes (LAN-482).
 
-**3. Fewer footguns, smoother migration in.** Did-you-mean suggestions for
-unknown config keys, reusing the `.rpol` suggestion machinery (LAN-481);
+**3. Fewer footguns, smoother migration in.** ~~Did-you-mean suggestions for
+unknown config keys~~ **Shipped (#993):** unknown-key config errors now carry
+a did-you-mean line inside the existing diagnostic frame, ranked by the same
+Levenshtein machinery as the `.rpol` suggestions (LAN-481);
 config version history + `rollback N`, completing the
 check/compare/confirm/rollback workflow no open-source daemon offers whole
 (LAN-483); a bounded BIRD/FRR/GoBGP config importer — structure only, with a
@@ -192,11 +208,12 @@ the existing shadow-trial runbook (LAN-484).
 Deliberately *not* here: a web UI, Terraform/Ansible providers (maintenance
 surface without demonstrated demand — revisit on operator pull), and
 BIRD-filter-language translation (the importer stops at structure).
-- Positioning: frame the published matrix receipt against the documented
-  market history (route servers were won and lost on reload behavior; the
-  validate-then-apply transaction model vs the blank-config reload failure
-  class; the config-converter vacuum) in COMPARISON.md — externally
-  verifiable, neutral-tone, citation-backed (LAN-485).
+- ~~Positioning: frame the published matrix receipt against the documented
+  market history in COMPARISON.md~~ **Shipped (#991):** "Why reload behavior
+  decided this market" — reload/convergence history, the blank-config reload
+  failure class vs the validate-then-apply transaction model, and the
+  config-converter vacuum, externally verifiable and citation-backed
+  (LAN-485).
 
 ### Immediate: post-v0.50 audit remediation (2026-07-09)
 
@@ -460,12 +477,13 @@ Details in the "Recently shipped" section below and ADR-0097.
   gRPC-added peers), ASPA/ROV/reject-AS_SET hygiene, RFC 8097 OV_* tagging,
   and a curated `examples/route-server` profile. The canonical semantic diff
   engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
-  are also shipped. Remaining demand-shaped work: a real shadow/canary receipt,
+  are also shipped, as is the ARouteServer target (`tools/rs-config-render`).
+  Remaining demand-shaped work: a real shadow/canary receipt,
   completion of the Alice-LG contract beyond the current Birdwatcher-shaped
-  status/peer/accepted-route subset (structured reject reasons now ship via
-  `PolicyService.ListRejectedRoutes`; the adapter's filtered/noexport views
-  remain), a 1000+-peer route-server scale receipt, and an
-  ARouteServer target.
+  status/peer/accepted-route/filtered-route subset (structured reject reasons
+  ship via `PolicyService.ListRejectedRoutes` and back the adapter's
+  filtered-route views; the noexport view remains), and a 1000+-peer
+  route-server scale receipt.
 - **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
   RFC, no open-source implementation found, drops onto the existing
   BGP-LS substrate; deepens the controller feed (TE controllers reading
@@ -477,13 +495,15 @@ Details in the "Recently shipped" section below and ADR-0097.
 adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 `per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
 multi-stack BIRD/GoBGP/FRR/StayRTR proof. Next useful slices are an Alice-LG
-contract completion for the adapter's filtered/noexport views (the structured
-reject reasons behind them now ship via `PolicyService.ListRejectedRoutes` and
-`rbgp rib received <peer> --rejected`), a 1000+-peer route-server scale
-receipt, shadow/canary RIB-diff
-tooling (`rbgp diff` against an incumbent's MRT/BMP feed), and an ARouteServer
-target once the pilot surface is stable. The current external adapter already
-serves the Birdwatcher-shaped status, peer, and accepted-route subset.
+contract completion for the adapter's noexport view (the structured
+reject reasons ship via `PolicyService.ListRejectedRoutes` and
+`rbgp rib received <peer> --rejected`, and the adapter serves filtered-route
+views from them, mapped to large communities under `64496:65520:*`), a
+1000+-peer route-server scale receipt, and shadow/canary RIB-diff
+tooling (`rbgp diff` against an incumbent's MRT/BMP feed). The ARouteServer
+target ships as `tools/rs-config-render`. The current external adapter already
+serves the Birdwatcher-shaped status, peer, accepted-route, and filtered-route
+subset.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
