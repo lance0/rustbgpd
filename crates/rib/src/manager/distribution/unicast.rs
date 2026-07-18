@@ -1605,8 +1605,10 @@ impl RibManager {
         // route (pre-policy, like the RFC 1997 gates above) decide
         // per-target announcement. Active only for sessions with
         // `rs_control_communities` (the RS-side local ASN arrives via
-        // `SetPeerRsControl` — enabled peers are always on the ungrouped
-        // per-peer path); every other session keeps full transparency.
+        // `SetPeerRsControl`); group staging passes `None` here and
+        // defers to the member-emit seams, which make the same
+        // source-based decision from the captured source attributes.
+        // Every other session keeps full transparency.
         if let (Some(rs_asn), (_, Some(peer_asn), _)) = (rs_control_asn, target.ctx_peer())
             && super::rs_control::rs_control_export_suppressed(
                 best.communities(),

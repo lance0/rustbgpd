@@ -3704,9 +3704,9 @@ impl RibManager {
                     } else if let Some(stage) = group_stage.get(&gid) {
                         // An rs-control member shares the pre-built
                         // emission unless this pass staged a tagged
-                        // route (memoized scan) — then its
-                        // announce/withdraw set can diverge per target
-                        // and it walks the matrix itself.
+                        // route or tag-only transition (memoized scan)
+                        // — then its announce/withdraw set can diverge
+                        // per target and it walks the matrix itself.
                         let rs_diverges = rs_control.is_some_and(|(rs_asn, _)| {
                             *rs_tagged_pass
                                 .entry((gid, rs_asn))
@@ -3721,6 +3721,14 @@ impl RibManager {
                         } else {
                             super::update_groups::emit_group_deltas_for_member(
                                 &stage.deltas,
+                                peer,
+                                rs_control,
+                                &mut announce,
+                                &mut withdraw,
+                                &mut nh_override_flags,
+                            );
+                            super::update_groups::emit_rs_tag_transitions(
+                                &stage.rs_transitions,
                                 peer,
                                 rs_control,
                                 &mut announce,

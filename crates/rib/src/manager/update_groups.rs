@@ -31,9 +31,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation};
-use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
+use rustbgpd_wire::{Afi, BgpRole, LargeCommunity, PathAttribute, Prefix, Safi};
 use rustc_hash::FxHashMap;
 use tracing::{debug, info, warn};
 
@@ -223,6 +224,67 @@ pub(in crate::manager) struct GroupDelta {
     /// no chain). Retained on the staged entry so a later join can
     /// replay the member's export counters without re-running policy.
     pub(in crate::manager) policy_label: Option<String>,
+    /// Pre-policy SOURCE attributes of an announce delta (`None` for a
+    /// withdrawal, or when the source carries no communities). RFC 7947
+    /// control decisions — per-target suppression and prepend — are
+    /// made on the source route, exactly like the ungrouped path's
+    /// pre-policy gate; only the scrub reads the post-policy `new`.
+    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+}
+
+/// Capture a source route's attributes for RFC 7947 decisions at the
+/// member-emit seams. `None` — no communities at all — keeps the
+/// common case allocation-free (the capture itself is an `Arc` clone).
+fn capture_source_attrs(source: &Route) -> Option<Arc<Vec<PathAttribute>>> {
+    (!source.communities().is_empty() || !source.large_communities().is_empty())
+        .then(|| Arc::clone(&source.attributes))
+}
+
+/// Communities and large communities carried by a captured source
+/// attribute list (empty slices when nothing was captured).
+pub(in crate::manager) fn source_control_input(
+    attrs: Option<&Arc<Vec<PathAttribute>>>,
+) -> (&[u32], &[LargeCommunity]) {
+    let Some(attrs) = attrs else {
+        return (&[], &[]);
+    };
+    let communities = attrs
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::Communities(values) => Some(values.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&[]);
+    let large_communities = attrs
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::LargeCommunities(values) => Some(values.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&[]);
+    (communities, large_communities)
+}
+
+/// A tag-only transition staged by a pass: the post-policy route was
+/// equality-suppressed against the group table (nothing changed on the
+/// shared wire) while the SOURCE control communities changed — a
+/// difference policy made invisible post-policy. Non-rs members see
+/// nothing (their wire form is the unchanged staged route), but an
+/// rs-control member's suppress/prepend verdict may flip, so these
+/// ride next to the deltas through the per-member emit seam.
+#[derive(Debug, Clone)]
+pub(in crate::manager) struct RsTagTransition {
+    pub(in crate::manager) prefix: Prefix,
+    pub(in crate::manager) path_id: u32,
+    /// The staged (post-policy) route, re-emitted toward members whose
+    /// verdict flips to announce.
+    pub(in crate::manager) route: Route,
+    /// Next-hop-override residue for the staged entry.
+    pub(in crate::manager) nh: Option<NextHopAction>,
+    /// Captured source attributes before this pass.
+    pub(in crate::manager) prior_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    /// Captured source attributes after this pass.
+    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
 }
 
 /// The `Arc`-shared unicast announce payload of one group staging pass:
@@ -297,6 +359,11 @@ pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) shared_nh: std::sync::Arc<[Option<NextHopAction>]>,
     /// Withdraw keys for non-exception members.
     pub(in crate::manager) shared_withdraw: Vec<(Prefix, u32)>,
+    /// Tag-only transitions of this pass ([`RsTagTransition`]): keys
+    /// whose staged route was equality-suppressed while the source
+    /// control communities changed. Deliberately outside the shared
+    /// emission — only rs-control members act on them.
+    pub(in crate::manager) rs_transitions: Vec<RsTagTransition>,
     /// Members whose emission differs from the shared one: the new
     /// source of an announce delta (announce → skip/withdraw) or the
     /// old source of a withdraw delta (withdraw → skip).
@@ -319,21 +386,32 @@ impl GroupStageOutput {
         !self.exceptions.contains(&member)
     }
 
-    /// Whether any announce delta of this pass carries a control-form
-    /// community for `rs_asn` (LAN-474). A pass with none — the
-    /// overwhelming majority — lets `rs_control_communities` members
-    /// ride the shared emission untouched; a tagged pass drops them to
-    /// the per-member matrix walk where suppression/prepend/scrub
-    /// diverge per target. Callers memoize per (group, `rs_asn`).
+    /// Whether this pass carries a control-form community for `rs_asn`
+    /// (LAN-474). A pass with none — the overwhelming majority — lets
+    /// `rs_control_communities` members ride the shared emission
+    /// untouched; a tagged pass drops them to the per-member matrix
+    /// walk where suppression/prepend/scrub diverge per target. Tagged
+    /// on EITHER side of policy: source tags drive suppress/prepend,
+    /// post-policy tags need scrubbing; a tag-only transition counts on
+    /// either side of the pass. Callers memoize per (group, `rs_asn`).
     pub(in crate::manager) fn has_tagged_route(&self, rs_asn: u32) -> bool {
+        use super::distribution::rs_control::rs_control_route_tagged;
+        let attrs_tagged = |attrs: Option<&Arc<Vec<PathAttribute>>>| {
+            let (communities, large_communities) = source_control_input(attrs);
+            rs_control_route_tagged(communities, large_communities, rs_asn)
+        };
         self.deltas.iter().any(|delta| {
             delta.new.as_ref().is_some_and(|(route, _)| {
-                super::distribution::rs_control::rs_control_route_tagged(
-                    route.communities(),
-                    route.large_communities(),
-                    rs_asn,
-                )
+                attrs_tagged(delta.source_attrs.as_ref())
+                    || rs_control_route_tagged(
+                        route.communities(),
+                        route.large_communities(),
+                        rs_asn,
+                    )
             })
+        }) || self.rs_transitions.iter().any(|transition| {
+            attrs_tagged(transition.prior_source_attrs.as_ref())
+                || attrs_tagged(transition.source_attrs.as_ref())
         })
     }
 
@@ -447,12 +525,14 @@ impl GroupEvalAccumulator {
 /// directly.
 ///
 /// `rs_control` is `(rs_asn, member_asn)` for an
-/// `rs_control_communities` member (LAN-474): a tagged route the
-/// control communities suppress toward this member emits a withdraw of
-/// whatever other-sourced entry the member may hold (over-withdraw is
-/// the safe direction), and an announced tagged route is rewritten
-/// (prepend + scrub) per target. `None` — or an untagged route — is
-/// byte-identical to the shared emission.
+/// `rs_control_communities` member (LAN-474): a route whose SOURCE
+/// control communities (`GroupDelta::source_attrs` — captured
+/// pre-policy, like the ungrouped path's gate) suppress it toward this
+/// member emits a withdraw of whatever other-sourced entry the member
+/// may hold (over-withdraw is the safe direction), and an announced
+/// route is rewritten per target — prepend decided on the source,
+/// scrub on the post-policy route. `None` — or an untagged source and
+/// route — is byte-identical to the shared emission.
 pub(in crate::manager) fn emit_group_deltas_for_member(
     deltas: &[GroupDelta],
     member: IpAddr,
@@ -461,10 +541,12 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
     withdraw: &mut Vec<(Prefix, u32)>,
     nh_override_flags: &mut Vec<Option<NextHopAction>>,
 ) {
-    use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_route_suppressed};
+    use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
     for delta in deltas {
         match &delta.new {
             Some((route, nh)) => {
+                let (source_communities, source_large_communities) =
+                    source_control_input(delta.source_attrs.as_ref());
                 if route.peer == member {
                     // Split horizon applied at emit: the new best is the
                     // member's own route. If the member previously held a
@@ -476,7 +558,11 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                     if delta.old_source.is_some_and(|source| source != member) {
                         withdraw.push((delta.prefix, delta.path_id));
                     }
-                } else if rs_control_route_suppressed(route, rs_control) {
+                } else if rs_control_suppressed(
+                    source_communities,
+                    source_large_communities,
+                    rs_control,
+                ) {
                     // RFC 7947 §2.3.2 per-target suppression: same
                     // matrix shape as the split-horizon arm — displace
                     // whatever other-sourced entry the member may hold.
@@ -485,7 +571,7 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                     }
                 } else {
                     let mut route = route.clone();
-                    rs_control_route_rewrite(&mut route, rs_control);
+                    rs_control_route_rewrite(&mut route, source_large_communities, rs_control);
                     nh_override_flags.push(nh.clone());
                     announce.push(route);
                 }
@@ -499,6 +585,53 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                     withdraw.push((delta.prefix, delta.path_id));
                 }
             }
+        }
+    }
+}
+
+/// Per-member emit for a pass's tag-only transitions
+/// ([`RsTagTransition`]): the old/new source verdicts decide the
+/// member's exact stream delta — withdraw when suppression turns on,
+/// re-announce (rewritten) when it turns off or the prepend count
+/// changes, nothing otherwise — matching what the per-peer path's
+/// restage + Adj-RIB-Out diff would emit. A no-op for members without
+/// `rs_control_communities`: their wire form is the unchanged staged
+/// route.
+pub(in crate::manager) fn emit_rs_tag_transitions(
+    transitions: &[RsTagTransition],
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+) {
+    use super::distribution::rs_control::{
+        rs_control_prepend_count, rs_control_route_rewrite, rs_control_suppressed,
+    };
+    let Some((rs_asn, member_asn)) = rs_control else {
+        return;
+    };
+    for transition in transitions {
+        if transition.route.peer == member {
+            continue;
+        }
+        let (old_communities, old_large) =
+            source_control_input(transition.prior_source_attrs.as_ref());
+        let (new_communities, new_large) = source_control_input(transition.source_attrs.as_ref());
+        let was = rs_control_suppressed(old_communities, old_large, rs_control);
+        let now = rs_control_suppressed(new_communities, new_large, rs_control);
+        if now {
+            if !was {
+                withdraw.push((transition.prefix, transition.path_id));
+            }
+        } else if was
+            || rs_control_prepend_count(old_large, rs_asn, member_asn)
+                != rs_control_prepend_count(new_large, rs_asn, member_asn)
+        {
+            let mut route = transition.route.clone();
+            rs_control_route_rewrite(&mut route, new_large, rs_control);
+            nh_override_flags.push(transition.nh.clone());
+            announce.push(route);
         }
     }
 }
@@ -656,6 +789,14 @@ pub(in crate::manager) struct GroupRibOut {
     /// Next-hop-override flags for staged entries (`Some` values only)
     /// so joins/replays don't re-run policy to recover them.
     nh_overrides: FxHashMap<(Prefix, u32), NextHopAction>,
+    /// Captured pre-policy SOURCE attributes per staged entry (entries
+    /// only for sources carrying communities; the `Arc` is shared with
+    /// the Adj-RIB-In/Loc-RIB copy). RFC 7947 decisions at the table
+    /// replay seams — resync, join, refresh, regroup baseline — read
+    /// these, never the staged (post-policy) route: policy may have
+    /// stripped a control community (deciding post-policy leaks a
+    /// source-prohibited route) or added one (spurious steering).
+    source_attrs: FxHashMap<(Prefix, u32), Arc<Vec<PathAttribute>>>,
     /// Staged-entry count per source peer — O(1) per-member advertised
     /// count synthesis (`len − own`), one slot per staged family
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
@@ -736,6 +877,7 @@ impl GroupRibOut {
         Self {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
             nh_overrides: FxHashMap::default(),
+            source_attrs: FxHashMap::default(),
             source_counts: FxHashMap::default(),
             tombstones: HashSet::new(),
             vpn_tombstones: HashSet::new(),
@@ -854,11 +996,20 @@ impl GroupRibOut {
                     self.nh_overrides.remove(&key);
                 }
             }
+            match &delta.source_attrs {
+                Some(attrs) => {
+                    self.source_attrs.insert(key, Arc::clone(attrs));
+                }
+                None => {
+                    self.source_attrs.remove(&key);
+                }
+            }
             self.staged_labels.insert(key, delta.policy_label.clone());
             self.table.insert(route.clone());
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
             self.nh_overrides.remove(&key);
+            self.source_attrs.remove(&key);
             self.staged_labels.remove(&key);
         }
     }
@@ -890,6 +1041,59 @@ impl GroupRibOut {
     /// The next-hop-override flag staged for a table entry.
     pub(in crate::manager) fn nh_override(&self, key: (Prefix, u32)) -> Option<NextHopAction> {
         self.nh_overrides.get(&key).cloned()
+    }
+
+    /// RFC 7947 control-decision input for a staged table entry: the
+    /// SOURCE route's communities as captured at staging (empty when
+    /// the source carried none). Table replay seams must decide
+    /// suppression/prepend on this, never on the post-policy entry.
+    pub(in crate::manager) fn source_control(
+        &self,
+        key: (Prefix, u32),
+    ) -> (&[u32], &[LargeCommunity]) {
+        source_control_input(self.source_attrs.get(&key))
+    }
+
+    /// Tag-only transition check for a pass that staged NO delta for
+    /// `prefix` (the post-policy route was equality-suppressed): if the
+    /// key stays staged while the SOURCE control communities changed —
+    /// a difference policy erased post-policy — rs-control members'
+    /// suppress/prepend verdicts may flip even though the shared wire
+    /// form did not, so the pass records an [`RsTagTransition`].
+    fn rs_tag_transition(
+        &self,
+        prefix: Prefix,
+        source_attrs: Option<&Arc<Vec<PathAttribute>>>,
+    ) -> Option<RsTagTransition> {
+        let staged = self.table.get(&prefix, 0)?;
+        let key = (prefix, 0);
+        let prior = self.source_attrs.get(&key);
+        (source_control_input(source_attrs) != source_control_input(prior)).then(|| {
+            RsTagTransition {
+                prefix,
+                path_id: 0,
+                route: staged.clone(),
+                nh: self.nh_override(key),
+                prior_source_attrs: prior.cloned(),
+                source_attrs: source_attrs.cloned(),
+            }
+        })
+    }
+
+    /// Commit a pass's tag-only transitions into the source-attribute
+    /// residue (the delta-borne updates ride [`Self::apply_delta`]).
+    fn commit_rs_transitions(&mut self, transitions: &[RsTagTransition]) {
+        for transition in transitions {
+            let key = (transition.prefix, transition.path_id);
+            match &transition.source_attrs {
+                Some(attrs) => {
+                    self.source_attrs.insert(key, Arc::clone(attrs));
+                }
+                None => {
+                    self.source_attrs.remove(&key);
+                }
+            }
+        }
     }
 
     /// Number of unicast routes `member` currently has advertised: the
@@ -1014,22 +1218,24 @@ impl GroupRibOut {
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FxHashMap<(Prefix, u32), Route> {
-        use super::distribution::rs_control::{
-            rs_control_route_rewrite, rs_control_route_suppressed,
-        };
+        use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         self.table
             .iter()
             .filter(|route| {
+                let (communities, large_communities) =
+                    self.source_control((route.prefix, route.path_id));
                 route.peer != member
                     && !rejected.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                    // LAN-474: a key suppressed toward the member was
-                    // never on its wire — the snapshot records true
-                    // wire state, not the shared table.
-                    && !rs_control_route_suppressed(route, rs_control)
+                    // LAN-474: a key whose SOURCE communities suppress
+                    // it toward the member was never on its wire — the
+                    // snapshot records true wire state, not the shared
+                    // table.
+                    && !rs_control_suppressed(communities, large_communities, rs_control)
             })
             .map(|route| {
+                let (_, large_communities) = self.source_control((route.prefix, route.path_id));
                 let mut route = route.clone();
-                rs_control_route_rewrite(&mut route, rs_control);
+                rs_control_route_rewrite(&mut route, large_communities, rs_control);
                 ((route.prefix, route.path_id), route)
             })
             .collect()
@@ -1408,6 +1614,12 @@ impl RibManager {
             let mut filtered: Vec<PolicyFilteredRouteKey> = Vec::new();
             for prefix in prefixes {
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
+                // RFC 7947 decisions at the member-emit seams are made
+                // on the pre-policy SOURCE (the Loc-RIB best this pass
+                // stages from); capture its attributes for the deltas
+                // and the table residue.
+                let source_attrs = self.loc_rib.get(prefix).and_then(capture_source_attrs);
+                let deltas_before = out.deltas.len();
                 let mut target = super::distribution::ExportTarget::Group {
                     evals: &mut out.evals,
                     local_role: group.local_role,
@@ -1451,6 +1663,7 @@ impl RibManager {
                         new: Some((route, nh)),
                         old_source,
                         policy_label: label.clone(),
+                        source_attrs: source_attrs.clone(),
                     });
                 }
                 for (p, path_id) in withdraw.drain(..) {
@@ -1460,7 +1673,14 @@ impl RibManager {
                         new: None,
                         old_source,
                         policy_label: None,
+                        source_attrs: None,
                     });
+                }
+                if out.deltas.len() == deltas_before
+                    && let Some(transition) =
+                        group.rs_tag_transition(*prefix, source_attrs.as_ref())
+                {
+                    out.rs_transitions.push(transition);
                 }
                 labeled_filtered.extend(filtered.drain(..).map(|key| (key, label.clone())));
             }
@@ -1472,6 +1692,7 @@ impl RibManager {
         for delta in &out.deltas {
             group.apply_delta(delta);
         }
+        group.commit_rs_transitions(&out.rs_transitions);
         group.record_otc_blocked(prefixes, &out.otc_blocked);
         group.record_policy_filtered(prefixes, &labeled_filtered);
         if !group.dirty_members.is_empty() {
@@ -1669,13 +1890,15 @@ impl RibManager {
     ///   bypassing the equality diff, withdraw nothing.
     ///
     /// `rs_control` is `(rs_asn, member_asn)` for an
-    /// `rs_control_communities` member (LAN-474): table entries the
-    /// control communities suppress toward this member are skipped —
-    /// and withdrawn when the member may have them on the wire (plain
-    /// dirty, or a baseline that records the key) — and announced
-    /// entries are rewritten (prepend + scrub) per target. Baselines
-    /// snapshot through the same filter ([`GroupRibOut::member_view_snapshot`]),
-    /// so the regroup one-shot diff compares wire state to wire state.
+    /// `rs_control_communities` member (LAN-474): table entries whose
+    /// captured SOURCE communities ([`GroupRibOut::source_control`])
+    /// suppress them toward this member are skipped — and withdrawn
+    /// when the member may have them on the wire (plain dirty, or a
+    /// baseline that records the key) — and announced entries are
+    /// rewritten (prepend from the source, scrub post-policy) per
+    /// target. Baselines snapshot through the same filter
+    /// ([`GroupRibOut::member_view_snapshot`]), so the regroup one-shot
+    /// diff compares wire state to wire state.
     #[expect(
         clippy::too_many_arguments,
         reason = "the resync assembly takes the member's full pending-withdraw context"
@@ -1692,16 +1915,15 @@ impl RibManager {
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
     ) {
-        use super::distribution::rs_control::{
-            rs_control_route_rewrite, rs_control_route_suppressed,
-        };
+        use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         let mut suppressed_withdraws: HashSet<(Prefix, u32)> = HashSet::new();
         for route in group.table.iter() {
             if route.peer == member {
                 continue;
             }
             let key = (route.prefix, route.path_id);
-            if rs_control_route_suppressed(route, rs_control) {
+            let (source_communities, source_large_communities) = group.source_control(key);
+            if rs_control_suppressed(source_communities, source_large_communities, rs_control) {
                 // Not on this member's wire going forward. Withdraw when
                 // it may be there now: always on a plain dirty resync
                 // (missed sends are unknown — over-withdraw is the safe
@@ -1714,7 +1936,7 @@ impl RibManager {
                 continue;
             }
             let mut route = route.clone();
-            rs_control_route_rewrite(&mut route, rs_control);
+            rs_control_route_rewrite(&mut route, source_large_communities, rs_control);
             if !is_force
                 && let Some(base) = baseline
                 && base.get(&key).is_some_and(|old| routes_equal(old, &route))
@@ -1725,11 +1947,14 @@ impl RibManager {
             announce.push(route);
         }
         // A key the member still retains (staged, not own-sourced, not
-        // suppressed toward it) must not be withdrawn — everything else
-        // in the candidate sets is a safe (possibly spurious) withdraw.
+        // source-suppressed toward it) must not be withdrawn —
+        // everything else in the candidate sets is a safe (possibly
+        // spurious) withdraw.
         let member_retains = |key: &(Prefix, u32)| {
             group.table.get(&key.0, key.1).is_some_and(|route| {
-                route.peer != member && !rs_control_route_suppressed(route, rs_control)
+                let (communities, large_communities) = group.source_control(*key);
+                route.peer != member
+                    && !rs_control_suppressed(communities, large_communities, rs_control)
             })
         };
         let mut keys: HashSet<(Prefix, u32)> = suppressed_withdraws;
@@ -3122,12 +3347,15 @@ mod tests {
     }
 
     fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
+        let new = route(p, src);
+        let source_attrs = capture_source_attrs(&new);
         GroupDelta {
             prefix: p,
             path_id: 0,
-            new: Some((route(p, src), None)),
+            new: Some((new, None)),
             old_source: old,
             policy_label: None,
+            source_attrs,
         }
     }
 
@@ -3138,6 +3366,7 @@ mod tests {
             new: None,
             old_source: old,
             policy_label: None,
+            source_attrs: None,
         }
     }
 
