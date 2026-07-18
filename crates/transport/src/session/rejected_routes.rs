@@ -35,7 +35,7 @@
 //! hundreds of peers. The rendered AS-path and detail strings are
 //! capped at [`MAX_RETAINED_AS_PATH_BYTES`] / [`MAX_RETAINED_DETAIL_BYTES`]
 //! (a `…` marker replaces the tail); the community vectors are capped
-//! at [`MAX_RETAINED_COMMUNITIES`] / [`MAX_RETAINED_LARGE_COMMUNITIES`]
+//! at `MAX_RETAINED_COMMUNITIES` / `MAX_RETAINED_LARGE_COMMUNITIES`
 //! with the dropped count recorded so the operator surface can render
 //! "…and N more". Memory math with the caps enforced: worst-case heap
 //! is 96 + 64 + 16×4 + 8×12 = 320 B, plus the inline key + entry
@@ -120,13 +120,13 @@ pub struct RejectedRouteEntry {
     /// when the UPDATE carried none or the attribute was not decodable.
     pub as_path: String,
     /// Standard communities from the rejected UPDATE, capped at
-    /// [`MAX_RETAINED_COMMUNITIES`].
+    /// `MAX_RETAINED_COMMUNITIES`.
     pub communities: Vec<u32>,
     /// Count of standard communities dropped by the retention cap;
     /// 0 means `communities` is complete.
     pub communities_dropped: u32,
     /// Large communities from the rejected UPDATE, capped at
-    /// [`MAX_RETAINED_LARGE_COMMUNITIES`].
+    /// `MAX_RETAINED_LARGE_COMMUNITIES`.
     pub large_communities: Vec<LargeCommunity>,
     /// Count of large communities dropped by the retention cap;
     /// 0 means `large_communities` is complete.
@@ -142,7 +142,7 @@ pub struct RejectedRouteEntry {
 impl RejectedRouteEntry {
     /// Enforce the per-entry byte bound: truncate the string fields
     /// (marker appended) and cap the community vectors, recording the
-    /// dropped counts. [`RejectedRouteStore::insert`] applies this to
+    /// dropped counts. `RejectedRouteStore::insert` applies this to
     /// every entry, so the documented ≤ 512 B budget is a property of
     /// the store, not an assumption about callers. Idempotent — an
     /// already-bounded entry is untouched. Callers that clone one
