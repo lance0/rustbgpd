@@ -127,9 +127,14 @@ Notes:
 
 ARouteServer-generated configs usually encode member inventory, max-prefix
 limits, bogon / hygiene / RPKI policy, route-server transparency, and
-path-hiding settings. There is no direct ARouteServer target in-tree yet.
-
-Practical migration path:
+path-hiding settings. Most of this does not need hand-migration:
+[`tools/rs-config-render/`](../../tools/rs-config-render/README.md) renders
+rustbgpd config and `.rpol` filters directly from `arouteserver
+template-context` output, keeping the existing `general.yml`/`clients.yml`
+workflow — the end-to-end walkthrough is
+[ixp-filter-pipeline.md](ixp-filter-pipeline.md). The renderer refuses knobs
+it cannot map faithfully (see its README); a site relying on those, or
+hand-tuned ARouteServer output, follows the manual path:
 
 1. Export member inventory to `[[neighbors]]` rows.
 2. Convert shared prefix/community lists to `.rpol` `prefix-set` /

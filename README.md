@@ -42,11 +42,12 @@ fabric use.
 ## Why rustbgpd
 
 - **API-first control plane** -- full gRPC control surface across 11 services plus a thin CLI (`rbgp`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, dynamic-neighbor and FIB-table CRUD, route injection, policy CRUD, peer groups, BFD inspection, EVPN instance queries, streaming events, and daemon control without restarts.
+- **Native route explainability** -- answers "why is this route (not) here?" from the live RIB in one command: import explain, best-path explain with decisive-comparison attribution, export explain that dry-runs the real per-peer gate ladder, and a retained rejected-route view with machine-readable reasons -- where incumbents need an external looking-glass stack for less. See [docs/explain.md](docs/explain.md).
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, receive-side Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
 - **Typed, compiled policy language** (`.rpol`, ADR-0096) -- named prefix/community sets compiled to indexed matchers, parameterized policies, policy composition, and in-language unit tests (`rbgp policy check`); candidate policies dry-run read-only against the live RIB (`rbgp policy test`), decisions explain themselves per term (`rbgp policy explain`), and installed chains expose live per-term hit counters (`rbgp policy stats`). Mixes freely with the existing TOML policy chains; FRR route-map parity proven route-for-route in interop (M80). See [docs/rpol-language.md](docs/rpol-language.md).
 - **Full BMP monitoring trio** (RFC 7854/8671/9069, ADR-0097) -- per-collector selectable Adj-RIB-In (pre-policy), Adj-RIB-Out (post-policy, byte-exact wire PDUs), and Loc-RIB views on one exporter. Loc-RIB collectors get a chunked table dump + End-of-RIB when they connect; Adj-RIB-In/Out are live streams by design. Optional per-collector BMPv4 TLV framing plus the Path Marking TLV (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv, pre-IANA -- code points may renumber; default stays BMP v3). Validated against pmacct, gobmp, and tshark at once (M81).
-- **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a Birdwatcher-shaped status/peer/accepted-route REST subset via the external `examples/birdwatcher-adapter`, structured JSON logging, per-peer counters, and the explain trilogy: import explain (per-session decision cache), best-path explain (decisive-comparison attribution), and export explain (the full per-peer gate ladder — split horizon, RFC 4456 reflection, family, LLGR, ORF, RT membership, policy per-term verdict, advertised-state diff — produced by a dry run of the live export body, update groups included).
+- **Operational visibility** -- Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` / `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed `Set` subset for static numbered-neighbor config, BMP export to collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a Birdwatcher-shaped status/peer/accepted-route REST subset via the external `examples/birdwatcher-adapter`, structured JSON logging, and per-peer counters. The explain surfaces have their own catalog: [docs/explain.md](docs/explain.md).
 - **Update-group fanout** (ADR-0098, ADR-0099) -- peers whose staged output is provably identical automatically share one outbound staging pass and one Arc-shared announce payload; measured ~28x faster 100k-route convergence at 256 uniform RR clients (15.1 s to 0.54 s), and 1.8 s wire-measured convergence / 419 MiB process RSS at 1,000 uniform RR clients x 100k routes ([scale receipt](docs/perf/scale-receipt-2026-07.md)), with a structural per-peer fallback (no knob) and a differential oracle pinning identical wire behavior. v2 extends the sharing to VPNv4/VPNv6 with the RFC 4684 RT filter applied per member at emit: 1,000 clients x 100k VPNv4 converge in 12.6 s / 625 MiB uniform and 3.9 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB and ~12.5 s / ~5.7 GiB extrapolated per-peer), and a member's RT-membership flip at 100k staged routes hits the wire in ~15 ms with zero policy evaluations.
 - **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop primarily against FRR plus GoBGP / StayRTR and documented BIRD coverage, extensive workspace tests, architecture decision records for every protocol and design choice.
 - **Reusable wire codec and FSM** -- `rustbgpd-wire` has zero internal dependencies and `rustbgpd-fsm` depends only on `wire`; both are published as daemon-independent crates for Rust BGP tooling that does not need the full router.
@@ -131,11 +132,23 @@ Press `q` to exit the TUI. When you're done: `docker compose down`.
 
 ## Install
 
-### Pre-built tarball
+### Pre-built tarball (no toolchain required)
 
-Tagged releases publish per-arch tarballs (binaries, man pages, and
-bash/zsh/fish completions under `share/`) — see the
-[install walkthrough](docs/deployment.md#install).
+Every tagged release ships static-named per-arch tarballs, so
+`releases/latest/download/` always fetches the current version:
+
+```bash
+SUFFIX=linux-amd64   # or linux-arm64
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-${SUFFIX}.tar.gz"
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
+sha256sum -c "checksums-${SUFFIX}.txt"
+tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
+sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+```
+
+The tarball also carries man pages and bash/zsh/fish completions under
+`share/` — the [install walkthrough](docs/deployment.md#install) covers
+installing those and pinning a specific version.
 
 ### From source
 
@@ -148,6 +161,9 @@ cargo build --release -p rustbgpd -p rustbgpctl
 ```
 
 ### Docker
+
+Release images are published to GHCR (versioned tags, e.g.
+`ghcr.io/lance0/rustbgpd:0.51.0`), or build locally:
 
 ```bash
 docker build -t rustbgpd .                    # lean runtime: daemon + rbgp, nonroot
@@ -164,7 +180,10 @@ remote mTLS access, standalone Docker, and systemd.
 The [cookbook](docs/cookbook/README.md) has complete receipt-proven recipes for
 the common deployment shapes: iBGP route reflector at scale, L3VPN reflection,
 IXP route server, BMP/event/MRT monitoring feed, EVPN fabric RR, and `.rpol`
-policy.
+policy. IXPs running arouteserver can render rustbgpd configuration from their
+existing `general.yml`/`clients.yml` and wire up an Alice-LG looking glass —
+the [IXP filter-pipeline tutorial](docs/cookbook/ixp-filter-pipeline.md) walks
+it end to end.
 
 For operators coming from FRR, BIRD, or ARouteServer, the CLI keeps familiar
 entry points for the daily checks: `rbgp summary`, `rbgp rib recv <peer>`,
@@ -297,6 +316,7 @@ evolving API.**
 | [docs/deployment.md](docs/deployment.md) | End-to-end install + lifecycle walkthrough: systemd, Docker, containerlab quick-start, upgrade, sample profiles |
 | [docs/reload-matrix.md](docs/reload-matrix.md) | Per-field reload classification: which keys hot-apply, which need a restart, which are rejected at parse time |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |
+| [docs/explain.md](docs/explain.md) | The explain surfaces: why a route was selected, advertised, imported, or rejected |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md) | Consolidated operational proof receipts: CI interop, dataplane, benchmarks, memory, soak |

@@ -1254,6 +1254,10 @@ the session.
 
 ### Explain an import decision (ADR-0073)
 
+The task-oriented catalog of every explain surface — which question
+maps to which command, plus the member-support workflow — is
+[explain.md](explain.md); the sections here carry the full semantics.
+
 Answer "why didn't this prefix come in?" — or "what did the chain do to
 it when it did?" — from the per-session import-decision cache:
 

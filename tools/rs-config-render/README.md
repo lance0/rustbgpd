@@ -21,6 +21,10 @@ $ rustbgpd --check /var/lib/rs/candidate/config.toml
 
 [arouteserver]: https://github.com/pierky/arouteserver
 
+The end-to-end operator walkthrough — arouteserver through the
+Alice-LG looking glass — is
+[`docs/cookbook/ixp-filter-pipeline.md`](../../docs/cookbook/ixp-filter-pipeline.md).
+
 ## What it emits
 
 | File | Contents |
