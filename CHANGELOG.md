@@ -102,6 +102,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-survivor first re-announce arrival (`first_reann_s`), separating
   delivery-start latency from fan-out completion.
 
+- **gNMI dial-out: a subscription error no longer strands the session on
+  a silent collector.** When the local subscription ended mid-session
+  (e.g. ON_CHANGE broadcast lag closing the stream with `DataLoss`), the
+  client ended its outbound stream but then kept waiting on the
+  collector's response stream for the disconnect signal — and the proto
+  reserves `PublishResponse` for future flow control, so a compliant
+  collector may never send anything and never close. The session hung
+  forever, the promised fresh-snapshot resync never happened, and
+  `gnmi_dialout_connected{target}` stayed at 1. Outbound-stream
+  completion is now a first-class disconnect signal: the session returns
+  to the reconnect loop immediately and resyncs from a fresh initial
+  snapshot + `sync_response`.
+
 ### Changed
 
 - **BREAKING (library API): registry-tracking wire/fsm enums are now
