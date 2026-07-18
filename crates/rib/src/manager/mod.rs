@@ -2800,11 +2800,10 @@ impl RibManager {
                         .collect();
                     page_merged_ordered_routes(iterators, total, page_size)
                 }
-                RouteQueryScope::Best => page_ordered_routes(
-                    self.loc_rib.iter_ordered_from(after),
-                    self.loc_rib.len(),
-                    page_size,
-                ),
+                RouteQueryScope::Best => {
+                    let total = self.loc_rib.len();
+                    page_ordered_routes(self.loc_rib.iter_ordered_from(after), total, page_size)
+                }
                 RouteQueryScope::Advertised { peer } => {
                     // A grouped member holds no per-peer unicast Adj-RIB-Out;
                     // its view is group table − own-sourced − exact-export

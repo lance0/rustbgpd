@@ -648,6 +648,93 @@ fn ordered_table_indices_match_full_sort_across_add_path_and_replacement() {
     }
 }
 
+/// Ordered keys the Loc-RIB's lazily synced index must produce: the
+/// authoritative hash table's keys, fully sorted.
+fn loc_rib_sorted_keys(loc: &LocRib) -> Vec<RouteQueryKey> {
+    let mut expected: Vec<_> = loc.iter().map(route_query_key).collect();
+    expected.sort_unstable();
+    expected
+}
+
+#[test]
+fn loc_rib_ordered_listing_replays_journaled_membership_changes() {
+    let peer = Ipv4Addr::new(192, 0, 2, 1);
+    let prefix_at = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24);
+    let route_at = |octet: u8| make_route(prefix_at(octet), peer);
+
+    let mut loc = LocRib::new();
+    for octet in 0..5u8 {
+        let route = route_at(octet);
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+    }
+    // Force a sync so the later mutations exercise journal replay, not the
+    // initial population.
+    assert_eq!(
+        loc.iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        loc_rib_sorted_keys(&loc)
+    );
+
+    // Without listing in between: remove one prefix, remove-then-readd
+    // another (two journal entries resolving to present), add a new one.
+    assert!(loc.recompute(Prefix::V4(prefix_at(1)), std::iter::empty()));
+    assert!(loc.recompute(Prefix::V4(prefix_at(3)), std::iter::empty()));
+    let readded = route_at(3);
+    assert!(loc.recompute(readded.prefix, std::iter::once(&readded)));
+    let fresh = route_at(9);
+    assert!(loc.recompute(fresh.prefix, std::iter::once(&fresh)));
+
+    let listed: Vec<_> = loc.iter_ordered_from(None).map(route_query_key).collect();
+    assert_eq!(listed, loc_rib_sorted_keys(&loc));
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|(prefix, _, _)| *prefix == Prefix::V4(prefix_at(3)))
+            .count(),
+        1,
+        "removed-then-readded prefix must appear exactly once"
+    );
+}
+
+#[test]
+fn loc_rib_ordered_listing_rebuilds_after_journal_cap_and_resyncs() {
+    let peer = Ipv4Addr::new(192, 0, 2, 1);
+    let prefix_at = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24);
+    let route_at = |octet: u8| make_route(prefix_at(octet), peer);
+
+    let mut loc = LocRib::new();
+    for octet in 0..4u8 {
+        let route = route_at(octet);
+        assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+    }
+    // Flap one prefix's membership past the journal floor (64 entries) with
+    // no listing running, tripping the full-rebuild path.
+    let flapper = route_at(0);
+    for _ in 0..40 {
+        assert!(loc.recompute(flapper.prefix, std::iter::empty()));
+        assert!(loc.recompute(flapper.prefix, std::iter::once(&flapper)));
+    }
+    assert_eq!(
+        loc.iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        loc_rib_sorted_keys(&loc)
+    );
+
+    // The index must keep tracking mutations after a rebuild consumed the
+    // flag: mutate again and list a second time.
+    assert!(loc.recompute(Prefix::V4(prefix_at(2)), std::iter::empty()));
+    let fresh = route_at(7);
+    assert!(loc.recompute(fresh.prefix, std::iter::once(&fresh)));
+    assert_eq!(
+        loc.iter_ordered_from(None)
+            .map(route_query_key)
+            .collect::<Vec<_>>(),
+        loc_rib_sorted_keys(&loc)
+    );
+}
+
 #[test]
 fn randomized_mixed_family_add_path_continuations_match_full_key_sort() {
     let mut outbound = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)));
