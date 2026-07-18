@@ -1,0 +1,55 @@
+# M90 differential lab — arouteserver site policy (general.yml).
+#
+# This one file (plus clients.yml) drives BOTH route servers in the lab:
+#   - BIRD:      rendered by arouteserver proper (`arouteserver bird`);
+#   - rustbgpd:  rendered by tools/rs-config-render from the
+#                `arouteserver template-context` dump of the same site
+#                (checked in as context.yml, see the README).
+#
+# All ASNs are RFC 5398 documentation ASNs and all prefixes are
+# RFC 5737 documentation prefixes. Because the documentation ASN block
+# (64496-64511, 65536-65551) sits inside the invalid-ASN range both
+# pipelines reject by default, `reject_invalid_as_in_as_path` is
+# explicitly disabled — otherwise every member announcement would be
+# rejected for carrying its own (documentation) origin ASN. The same
+# reasoning requires the lab's own bogons.yml: arouteserver's default
+# bogons list correctly treats the RFC 5737 prefixes as bogons.
+cfg:
+  rs_as: 64496
+  router_id: "192.0.2.10"
+  passive: True
+  path_hiding: True
+  gtsm: False
+  add_path: False
+  filtering:
+    next_hop:
+      policy: "strict"
+    ipv4_pref_len:
+      min: 8
+      max: 28
+    global_black_list_pref:
+      # The lab's own peering LAN — announcing it is the classic
+      # member misconfiguration both stacks must reject.
+      - prefix: "192.0.2.0"
+        length: 24
+        comment: "IXP peering LAN"
+    max_as_path_len: 32
+    # Disabled deliberately: member ASNs are RFC 5398 documentation
+    # ASNs, which fall inside the invalid-ASN block (see header).
+    reject_invalid_as_in_as_path: False
+    irrdb:
+      enforce_origin_in_as_set: True
+      enforce_prefix_in_as_set: True
+      allow_longer_prefixes: False
+    rpki_bgp_origin_validation:
+      # Off: the differential under test is the IRR/hygiene pipeline;
+      # ROV interop already has its own labs (M83).
+      enabled: False
+    never_via_route_servers:
+      peering_db: False
+      asns:
+        - 65551
+    max_prefix:
+      action: "shutdown"
+      peering_db:
+        enabled: False

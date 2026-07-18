@@ -1,0 +1,42 @@
+# M90 differential lab — arouteserver member roster (clients.yml).
+#
+# Three members with deliberately distinct filtering outcomes:
+#   - AS64500 member1 (192.0.2.11): IRR-clean; its announcements pass.
+#   - AS64501 member2 (192.0.2.12): announces prefixes outside its own
+#     IRR set (another member's prefix + an unregistered more-specific).
+#   - AS64502 member3 (192.0.2.13): hygiene violator (bogon, too-long
+#     and default prefixes, never-via-route-servers ASN in the path).
+#
+# The AS-SET names resolve through the lab's canned bgpq4 stub
+# (bgpq4-stub.sh) — documentation ASNs have no real IRR objects.
+clients:
+  - asn: 64500
+    ip: "192.0.2.11"
+    description: "member1 - IRR-clean member"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-ONE"
+        max_prefix:
+          limit_ipv4: 100
+  - asn: 64501
+    ip: "192.0.2.12"
+    description: "member2 - announces outside its IRR set"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-TWO"
+        max_prefix:
+          limit_ipv4: 100
+  - asn: 64502
+    ip: "192.0.2.13"
+    description: "member3 - hygiene violator"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-THREE"
+        max_prefix:
+          limit_ipv4: 100

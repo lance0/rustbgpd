@@ -1,0 +1,25 @@
+# M90 member3 (AS64502, 192.0.2.13) — announces the same canned set to
+# both route servers: rustbgpd (192.0.2.9) and BIRD (192.0.2.10).
+[global.config]
+as = 64502
+router-id = "192.0.2.13"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.9"
+peer-as = 64496
+description = "rustbgpd-rs"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.10"
+peer-as = 64496
+description = "bird-rs"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"

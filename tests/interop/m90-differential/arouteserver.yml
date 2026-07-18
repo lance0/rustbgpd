@@ -1,0 +1,16 @@
+# M90 differential lab — arouteserver program configuration.
+#
+# Consumed inside the pierky/arouteserver container with the lab
+# directory mounted at /site (see scripts/test-m90-differential.sh).
+# The bgpq4 stub replaces real IRR resolution: the site's AS-SETs are
+# RFC 5398 documentation objects with no live registry data.
+cfg_general: /site/general.yml
+cfg_clients: /site/clients.yml
+cfg_bogons: /site/bogons.yml
+cache_dir: /site/cache
+cache_expiry: 3600
+bgpq3_path: /site/bgpq4-stub.sh
+# Without these, arouteserver looks for log.ini and templates/ next to
+# this file and aborts; the image ships both at the standard path.
+logging_config_file: /etc/arouteserver/log.ini
+templates_dir: /etc/arouteserver/templates
