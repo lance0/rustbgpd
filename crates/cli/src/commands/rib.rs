@@ -1691,13 +1691,24 @@ struct JsonRejectedRoute<'a> {
     as_path: &'a str,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     communities: &'a [u32],
+    // Retention truncates community lists under a per-entry byte
+    // budget; a non-zero count means "…and N more" were dropped.
+    #[serde(skip_serializing_if = "dropped_count_is_zero")]
+    communities_dropped: u32,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     large_communities: &'a [String],
+    #[serde(skip_serializing_if = "dropped_count_is_zero")]
+    large_communities_dropped: u32,
     #[serde(skip_serializing_if = "str::is_empty")]
     rpki_validation: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     aspa_validation: &'a str,
     rejected_at_unix_ns: i64,
+}
+
+// serde's skip_serializing_if requires a fn(&T) -> bool.
+fn dropped_count_is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Serialize)]
@@ -1721,7 +1732,9 @@ fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Resul
                 next_hop: &r.next_hop,
                 as_path: &r.as_path,
                 communities: &r.communities,
+                communities_dropped: r.communities_dropped,
                 large_communities: &r.large_communities,
+                large_communities_dropped: r.large_communities_dropped,
                 rpki_validation: &r.rpki_validation,
                 aspa_validation: &r.aspa_validation,
                 rejected_at_unix_ns: r.rejected_at_unix_ns,

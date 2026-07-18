@@ -72,6 +72,39 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 7606 §5.2: an empty-NLRI `MP_REACH_NLRI` no longer shields a
+  malformed UPDATE from session reset.** The "no reachable NLRI"
+  escalation gate tested MP_REACH attribute *presence*, not content —
+  an UPDATE carrying a structurally valid MP_REACH with zero NLRI plus
+  a treat-as-withdraw-class attribute error stayed Established via the
+  treat-as-withdraw arm, which had nothing to withdraw. The gate now
+  inspects the parsed MP_REACH payload across every family's announced
+  vector; the attribute validator keeps its presence-based
+  mandatory-attribute semantics unchanged, and an MP_REACH that does
+  carry NLRI still takes treat-as-withdraw (no over-reset). Malformed
+  UPDATEs are additionally dumped at DEBUG per the §5.2 debugging
+  guidance: NLRI/withdrawn counts plus the raw message sections
+  hex-encoded, bounded at 512 bytes per section so an Extended-Messages
+  peer cannot spam the logs.
+
+- **Rejected-route retention now enforces its per-entry byte budget.**
+  The `[policy.reject_retention]` store was bounded in entry count
+  (LRU, 1024/peer) but each entry retained unbounded wire-derived data
+  — a hostile peer with a maximal AS_PATH and community lists (worse
+  under RFC 8654 Extended Messages) could push entries to multiple KB
+  across hundreds of peers, default-on. Entries are now truncated at
+  capture time: the rendered AS-path and detail strings are capped
+  (96 / 64 bytes, `…` marker appended), and the community vectors are
+  capped (16 standard / 8 large) with the dropped counts recorded and
+  surfaced (`ListRejectedRoutes` `communities_dropped` /
+  `large_communities_dropped`, and in `rbgp rib received --rejected`
+  JSON) so renderers can say "…and N more". The documented
+  ≤ 512 B/entry ⇒ ~0.5 MiB/peer bound is now an enforced fact, pinned
+  by a size-budget test against the real type sizes. One bounded
+  attribute summary is also built per UPDATE and shared across every
+  rejected identity, replacing the per-identity re-render and
+  deep-clone of the full attribute set.
+
 - **Post-flap re-announce latency: initial table dumps no longer
   head-of-line block redistribution.** A peer's outbound registration at
   `PeerUp` performed its full-table initial dump synchronously on the
