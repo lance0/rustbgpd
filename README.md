@@ -225,7 +225,7 @@ cargo build --release -p rustbgpd -p rustbgpctl
 ### Docker
 
 Release images are published to GHCR (versioned tags, e.g.
-`ghcr.io/lance0/rustbgpd:0.51.0`), or build locally:
+`ghcr.io/lance0/rustbgpd:0.60.0`), or build locally:
 
 ```bash
 docker build -t rustbgpd .                    # lean runtime: daemon + rbgp, nonroot
@@ -388,7 +388,7 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.51.0) |
+| **Maturity** | Public alpha (v0.60.0) |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
 | **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |

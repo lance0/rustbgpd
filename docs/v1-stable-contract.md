@@ -156,10 +156,11 @@ to a later release line, keep the chain contiguous, and end at the workspace
 anchor. An unannotated gap remains an error, and the annotation is rejected on
 an exercise that is actually between consecutive release lines.
 
-The v0.51.0 route-server example is also staged byte-for-byte under
-`tests/fixtures/v1-stable/v0.51.0/` and exercised by the current parser. This
-is only a current-parser proof: it is not yet an accepted v0.51.0-to-v0.52.0
-upgrade exercise and does not extend the inventory's accepted release chain.
+The v0.51.0 route-server example is staged byte-for-byte under
+`tests/fixtures/v1-stable/v0.51.0/` and exercised by the current parser. The
+v0.60.0 release records that fixture as the accepted v0.51.0-to-v0.60.0
+milestone-jump upgrade exercise, extending the inventory's accepted release
+chain to the v0.60.0 anchor.
 
 ## Release gate
 

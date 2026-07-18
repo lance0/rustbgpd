@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.60.0] — 2026-07-18
+
 > **Release framing — why this is v0.60.0.** This release marks the
 > route-server stabilization line, a deliberate milestone jump from
 > v0.51.0. Every finding from an external release review is closed and

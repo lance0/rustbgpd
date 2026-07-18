@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
-  "baseline_release": "v0.51.0",
+  "baseline_release": "v0.60.0",
   "scope": "Narrow route-server and route-reflector product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {
@@ -260,6 +260,22 @@
       "semantic_toml_sha256": "064865a2dd6cf266d674a62f2f1dec70bf08b7cc01e81e742878a44440621626",
       "validation_source": "src/config/tests.rs",
       "validation_test": "config::tests::v1_stable_v0_50_route_server_fixture_parses",
+      "result": "accepted_without_config_migration"
+    },
+    {
+      "from_release": "v0.51.0",
+      "to_release": "v0.60.0",
+      "milestone_jump": true,
+      "jump_rationale": "v0.52 through v0.59 were never released: v0.60.0 is the route-server stabilization milestone, so the only real upgrade path from v0.51.0 jumps directly to it.",
+      "fixture_directory": "tests/fixtures/v1-stable/v0.51.0/route-server",
+      "source_directory": "examples/route-server",
+      "files": [
+        {"path": "config.toml", "sha256": "fe68f301616b52385ea6460ba6642eb63fae099e3d1de6fdc1d15af9e81de044"},
+        {"path": "hygiene.rpol", "sha256": "c1aea02c9c11810971ade843876d673f75045a9ce094f144f1833206215a4d96"}
+      ],
+      "semantic_toml_sha256": "064865a2dd6cf266d674a62f2f1dec70bf08b7cc01e81e742878a44440621626",
+      "validation_source": "src/config/tests.rs",
+      "validation_test": "config::tests::v1_stable_v0_51_route_server_fixture_parses",
       "result": "accepted_without_config_migration"
     }
   ]
