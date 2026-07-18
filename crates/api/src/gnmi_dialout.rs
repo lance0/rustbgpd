@@ -383,6 +383,21 @@ async fn publish_session(
             None
         }
     });
+    // A compliant collector may never send a PublishResponse (the proto
+    // reserves it for future flow control) and never close its response
+    // stream, so the outbound stream ending must itself count as a
+    // disconnect. Chain a terminal probe that trips a oneshot when the
+    // stream completes — or drops it unfired if the transport tears the
+    // stream down early, which resolves the receiver just the same — so
+    // the drain loop below can return instead of waiting forever.
+    let (ended_tx, mut ended_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut ended_tx = Some(ended_tx);
+    let outbound = outbound.chain(tokio_stream::iter(std::iter::from_fn(move || {
+        if let Some(ended) = ended_tx.take() {
+            let _ = ended.send(());
+        }
+        None::<gnmi::SubscribeResponse>
+    })));
 
     let mut inbound = client
         .publish(outbound)
@@ -398,16 +413,28 @@ async fn publish_session(
     metrics.set_gnmi_dialout_connected(&target.name, true);
 
     // Drain the collector's response stream. Nothing is expected on it
-    // today (PublishResponse is reserved for future flow control); its end
-    // or error is the disconnect signal.
+    // today (PublishResponse is reserved for future flow control); the
+    // disconnect signal is its end or error — or the outbound stream
+    // finishing (e.g. a subscription error above), on which returning
+    // immediately hands control to the caller's reconnect loop for the
+    // fresh-snapshot resync.
     loop {
-        match inbound.message().await {
-            Ok(Some(_flow_control)) => {}
-            Ok(None) => return Ok(()),
-            Err(status) => {
-                debug!(target = %target.name, error = %status, "gNMI dial-out stream error");
+        tokio::select! {
+            _ = &mut ended_rx => {
+                debug!(
+                    target = %target.name,
+                    "gNMI dial-out outbound stream ended; reconnecting to resync"
+                );
                 return Ok(());
             }
+            message = inbound.message() => match message {
+                Ok(Some(_flow_control)) => {}
+                Ok(None) => return Ok(()),
+                Err(status) => {
+                    debug!(target = %target.name, error = %status, "gNMI dial-out stream error");
+                    return Ok(());
+                }
+            },
         }
     }
 }
@@ -714,6 +741,50 @@ mod tests {
         }
     }
 
+    // A collector that reads the Publish stream but never sends a
+    // PublishResponse and never closes its response stream. The proto
+    // reserves PublishResponse for future flow control ("collectors need
+    // not send anything"), so this is a fully compliant collector — the
+    // client must not depend on inbound traffic to notice its own
+    // outbound stream ending.
+    struct SilentCollector {
+        received: mpsc::Sender<gnmi::SubscribeResponse>,
+    }
+
+    #[tonic::async_trait]
+    impl GnmiDialout for SilentCollector {
+        type PublishStream =
+            Pin<Box<dyn Stream<Item = Result<PublishResponse, Status>> + Send + 'static>>;
+
+        async fn publish(
+            &self,
+            request: Request<Streaming<gnmi::SubscribeResponse>>,
+        ) -> Result<Response<Self::PublishStream>, Status> {
+            let mut inbound = request.into_inner();
+            let received = self.received.clone();
+            tokio::spawn(async move {
+                while let Ok(Some(response)) = inbound.message().await {
+                    let _ = received.send(response).await;
+                }
+            });
+            Ok(Response::new(Box::pin(futures::stream::pending())))
+        }
+    }
+
+    async fn expect_sync(rx: &mut mpsc::Receiver<gnmi::SubscribeResponse>) {
+        let deadline = Duration::from_secs(10);
+        loop {
+            let response = tokio::time::timeout(deadline, rx.recv())
+                .await
+                .expect("timed out waiting for a dial-out sync_response")
+                .expect("stub collector channel closed");
+            if let Some(gnmi::subscribe_response::Response::SyncResponse(true)) = response.response
+            {
+                return;
+            }
+        }
+    }
+
     // ── integration: dial out, stream, reconnect ──────────────────────
 
     #[tokio::test(flavor = "multi_thread")]
@@ -740,6 +811,79 @@ mod tests {
         wait_for_gauge(&metrics, "collector-a", 1).await;
 
         server2.abort();
+        manager.apply(&[]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscription_error_reconnects_even_when_collector_stays_silent() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::peer_types::PeerManagerCommand;
+
+        let metrics = BgpMetrics::new();
+
+        // Serve the silent collector: accepts Publish, forwards what it
+        // receives, never sends or closes its response stream.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx, mut received) = mpsc::channel(64);
+        let server = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(GnmiDialoutServer::new(SilentCollector { received: tx }))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await;
+        });
+
+        // Peer manager that drops the ListPeers reply exactly once on
+        // demand: the next sample snapshot then fails with an internal
+        // Status, ending the outbound stream mid-session — the same
+        // stream-ending error shape as ON_CHANGE broadcast DataLoss.
+        let fail_next = Arc::new(AtomicBool::new(false));
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let fail = fail_next.clone();
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                if let PeerManagerCommand::ListPeers { reply } = command {
+                    if fail.swap(false, Ordering::SeqCst) {
+                        drop(reply);
+                    } else {
+                        let _ = reply.send(Vec::new());
+                    }
+                }
+            }
+        });
+        let service = GnmiService::new(65000, "192.0.2.1".to_string(), peer_tx);
+
+        // Global + neighbor paths: the snapshot both carries a real leaf
+        // update and requires the (failable) peer snapshot.
+        let mut target = test_target("collector-silent", addr);
+        target.subscriptions = build_subscription_list(
+            &[GLOBAL_AS_PATH.to_string(), SESSION_STATE_PATH.to_string()],
+            DialoutMode::Sample,
+            Duration::from_secs(1),
+        )
+        .expect("valid subscription");
+
+        let mut manager = DialoutManager::new(service, metrics.clone());
+        manager.apply(&[target]);
+
+        // First connection: initial snapshot + sync_response.
+        expect_update_with_as(&mut received).await;
+        expect_sync(&mut received).await;
+        wait_for_gauge(&metrics, "collector-silent", 1).await;
+
+        // Fail the next sample tick. The subscription errors and the
+        // outbound stream ends; since the collector stays silent forever,
+        // only outbound-end-as-disconnect gets the session torn down. The
+        // client must reconnect and resync — a fresh initial snapshot and
+        // a SECOND sync_response (sent once per subscription) prove it.
+        fail_next.store(true, Ordering::SeqCst);
+        expect_update_with_as(&mut received).await;
+        expect_sync(&mut received).await;
+        wait_for_gauge(&metrics, "collector-silent", 1).await;
+
+        server.abort();
         manager.apply(&[]);
     }
 
