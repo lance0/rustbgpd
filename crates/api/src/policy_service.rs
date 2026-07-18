@@ -1455,11 +1455,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     next_hop: entry.next_hop.map(|nh| nh.to_string()).unwrap_or_default(),
                     as_path: entry.as_path,
                     communities: entry.communities,
+                    communities_dropped: entry.communities_dropped,
                     large_communities: entry
                         .large_communities
                         .iter()
                         .map(ToString::to_string)
                         .collect(),
+                    large_communities_dropped: entry.large_communities_dropped,
                     rpki_validation: entry.rpki.to_string(),
                     aspa_validation: entry.aspa.to_string(),
                     rejected_at_unix_ns: entry
@@ -2156,7 +2158,9 @@ mod tests {
             next_hop: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))),
             as_path: "65002 65010".to_string(),
             communities: vec![999],
+            communities_dropped: 3,
             large_communities: Vec::new(),
+            large_communities_dropped: 0,
             rpki: rustbgpd_wire::RpkiValidation::Invalid,
             aspa: rustbgpd_wire::AspaValidation::Unknown,
             rejected_at: std::time::UNIX_EPOCH + Duration::from_secs(1),
@@ -2180,6 +2184,8 @@ mod tests {
         assert_eq!(r.next_hop, "10.0.0.2");
         assert_eq!(r.as_path, "65002 65010");
         assert_eq!(r.communities, vec![999]);
+        assert_eq!(r.communities_dropped, 3);
+        assert_eq!(r.large_communities_dropped, 0);
         assert_eq!(r.rpki_validation, "invalid");
         assert_eq!(r.rejected_at_unix_ns, 1_000_000_000);
     }

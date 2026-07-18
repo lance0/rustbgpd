@@ -1236,13 +1236,19 @@ message RejectedRoute {
   // was not decodable or not meaningful for the gate.
   string next_hop = 7;
 
-  // Lossless AS_PATH rendering (AS_SET / confed segments survive);
-  // empty when the UPDATE carried none.
+  // AS_PATH rendering (AS_SET / confed segments survive); empty when
+  // the UPDATE carried none. Retention enforces a per-entry byte
+  // budget, so a maximal path is truncated with a trailing "…".
   string as_path = 8;
 
+  // Communities are capped at retention time under the same per-entry
+  // byte budget; the *_dropped counters carry how many were cut so a
+  // renderer can say "…and N more". 0 means the list is complete.
   repeated uint32 communities = 9;
   // Large communities as "asn:local1:local2" strings.
   repeated string large_communities = 10;
+  uint32 communities_dropped = 14;
+  uint32 large_communities_dropped = 15;
 
   // RPKI origin-validation state at rejection time, as a stable
   // snake_case string: "valid", "invalid", "not_found", "unknown".

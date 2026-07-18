@@ -15369,6 +15369,89 @@ async fn reject_retention_clears_when_route_is_later_accepted() {
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
 }
 
+/// A hostile UPDATE with maximal attributes — a long `AS_PATH` and
+/// hundreds of (large) communities — must produce a bounded retained
+/// entry: the AS-path string is truncated with the marker and the
+/// community vectors are capped with the dropped counts recorded, so
+/// the per-entry byte budget holds at capture time regardless of what
+/// the peer sends.
+#[tokio::test]
+async fn reject_retention_bounds_maximal_attribute_entry() {
+    use super::rejected_routes::{
+        MAX_RETAINED_AS_PATH_BYTES, MAX_RETAINED_COMMUNITIES, MAX_RETAINED_LARGE_COMMUNITIES,
+        RETENTION_TRUNCATION_MARKER,
+    };
+    use rustbgpd_wire::LargeCommunity;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, _metrics) = retention_session_with_chain(Some(chain), |_| {});
+    // Two 250-ASN AS_SEQUENCE segments (255 is the per-segment wire
+    // max), 200 standard and 100 large communities.
+    let segment: Vec<u32> = (0..250).map(|i| 4_200_000_000 + i).collect();
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![
+                    AsPathSegment::AsSequence(segment.clone()),
+                    AsPathSegment::AsSequence(segment),
+                ],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities((0..200).collect()),
+            PathAttribute::LargeCommunities(
+                (0..100)
+                    .map(|i| LargeCommunity {
+                        global_admin: 65001,
+                        local_data1: i,
+                        local_data2: 0,
+                    })
+                    .collect(),
+            ),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1, "the denied prefix is retained");
+    let entry = &entries[0].1;
+    assert!(
+        entry.as_path.len() <= MAX_RETAINED_AS_PATH_BYTES,
+        "AS-path string must be capped, got {} bytes",
+        entry.as_path.len()
+    );
+    assert!(
+        entry.as_path.ends_with(RETENTION_TRUNCATION_MARKER),
+        "truncated AS-path must carry the marker"
+    );
+    assert!(
+        entry.as_path.starts_with("4200000000 "),
+        "the leading hops survive truncation"
+    );
+    assert_eq!(entry.communities.len(), MAX_RETAINED_COMMUNITIES);
+    assert_eq!(
+        entry.communities_dropped as usize,
+        200 - MAX_RETAINED_COMMUNITIES,
+        "dropped standard communities are counted for the surface"
+    );
+    assert_eq!(
+        entry.large_communities.len(),
+        MAX_RETAINED_LARGE_COMMUNITIES
+    );
+    assert_eq!(
+        entry.large_communities_dropped as usize,
+        100 - MAX_RETAINED_LARGE_COMMUNITIES,
+        "dropped large communities are counted for the surface"
+    );
+}
+
 /// LAN-472 pin: the store is bounded by the configured capacity — a
 /// reject storm converges on the most recent rejections instead of
 /// growing without bound (this repo's reload-stall week was exactly
