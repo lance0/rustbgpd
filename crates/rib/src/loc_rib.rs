@@ -161,7 +161,11 @@ impl LocRib {
         if self.ordered_rebuild {
             return;
         }
-        if self.ordered_journal.len() >= self.routes.len().max(ORDERED_JOURNAL_MIN_CAP) {
+        // Count the entry about to be pushed: once the journal would match
+        // the table size, replay costs the same as a rebuild — and during
+        // bulk table growth the journal otherwise chases the table from one
+        // entry behind, duplicating every prefix for nothing.
+        if self.ordered_journal.len() + 1 >= self.routes.len().max(ORDERED_JOURNAL_MIN_CAP) {
             self.ordered_rebuild = true;
             // Release the outgrown buffer but keep the floor warm: the next
             // notes after the rebuild must not re-pay the first allocation.
