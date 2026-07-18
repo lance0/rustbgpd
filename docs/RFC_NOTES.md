@@ -414,8 +414,13 @@ Interpretation decisions:
   mistaken for an End-of-RIB marker (RFC 4724 §2 detection requires a clean
   decode).
 - Malformed attributes are logged at `warn` with peer, attribute type, and
-  disposition (§6 debugging facility). Per-disposition counters are a
-  follow-up.
+  disposition. The §6 debugging facility is a DEBUG-level dump emitted on
+  every malformed event: the entire UPDATE message as hex (untruncated —
+  message size is protocol-bounded at 4096 bytes, or 65535 with Extended
+  Messages) plus an explicit enumeration of the NLRI involved (prefixes and
+  Add-Path path IDs, per family, announcements and withdrawals). DEBUG-only
+  so a hostile peer cannot spam operators at info/warn; nothing is rendered
+  when DEBUG is disabled. Per-disposition counters are a follow-up.
 - AS4_PATH / AS4_AGGREGATOR are not decoded as typed attributes (they pass
   through opaquely), so no malformation can be detected for them today.
 

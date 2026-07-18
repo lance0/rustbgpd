@@ -198,22 +198,126 @@ fn strict_peer_next_hop_violation(
     }
     (next_hop != session_addr).then_some(NextHopOwnershipBlockReason::ForeignNextHop)
 }
-/// Bounded hex rendering of one raw UPDATE section for the
-/// malformed-UPDATE debug dump. Truncated output states how many bytes
-/// were omitted so the log is honest about what it shows.
-fn bounded_hex(bytes: &[u8]) -> String {
+/// Hex rendering of the ENTIRE malformed UPDATE for the RFC 7606 §6
+/// debug dump. Never truncated: the message came off the wire, so its
+/// size is protocol-bounded (4096 bytes, or 65535 with Extended
+/// Messages). Re-encodes the decoded sections — a byte-for-byte
+/// reconstruction, since the header is fixed-form and the sections are
+/// verbatim copies of the received body.
+pub(crate) fn full_update_hex(update: &rustbgpd_wire::UpdateMessage) -> String {
     use std::fmt::Write as _;
-    /// Per-section cap: enough to reconstruct any ordinary UPDATE in
-    /// full while keeping an Extended-Messages-sized dump out of the
-    /// logs.
-    const MAX_HEX_DUMP_BYTES: usize = 512;
-    let shown = &bytes[..bytes.len().min(MAX_HEX_DUMP_BYTES)];
-    let mut out = String::with_capacity(shown.len() * 2 + 24);
-    for byte in shown {
+    let mut wire = bytes::BytesMut::with_capacity(update.encoded_len());
+    // A received message always fits the Extended-Messages bound, so
+    // this cannot fail; an empty dump beats a panic on an error path.
+    if update.encode_with_limit(&mut wire, u16::MAX).is_err() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(wire.len() * 2);
+    for byte in &wire {
         let _ = write!(out, "{byte:02x}");
     }
-    if bytes.len() > MAX_HEX_DUMP_BYTES {
-        let _ = write!(out, "…(+{} bytes)", bytes.len() - MAX_HEX_DUMP_BYTES);
+    out
+}
+/// Enumerate every NLRI the revised parse recovered from a malformed
+/// UPDATE — body IPv4 and each MP family, announcements and
+/// withdrawals, with Add-Path path IDs where present — per the
+/// RFC 7606 §6 guidance to list the NLRI involved. Renders only what
+/// the parse already produced: an MP attribute that was itself
+/// malformed is absent here and covered by the full-message hex.
+pub(crate) fn involved_nlri(parsed: &ParsedUpdate) -> String {
+    fn with_path_id(path_id: u32, rendered: String) -> String {
+        if path_id == 0 {
+            rendered
+        } else {
+            format!("{rendered} path-id {path_id}")
+        }
+    }
+    fn section(out: &mut String, label: &str, items: &[String]) {
+        if items.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push_str("; ");
+        }
+        out.push_str(label);
+        out.push_str("=[");
+        out.push_str(&items.join(", "));
+        out.push(']');
+    }
+    let mut out = String::new();
+    section(
+        &mut out,
+        "ipv4_unicast_announced",
+        &parsed
+            .announced
+            .iter()
+            .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+            .collect::<Vec<_>>(),
+    );
+    section(
+        &mut out,
+        "ipv4_unicast_withdrawn",
+        &parsed
+            .withdrawn
+            .iter()
+            .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+            .collect::<Vec<_>>(),
+    );
+    for attr in &parsed.attributes {
+        let (direction, afi, safi, items) = match attr {
+            PathAttribute::MpReachNlri(mp) => (
+                "announced",
+                mp.afi,
+                mp.safi,
+                mp.announced
+                    .iter()
+                    .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+                    .chain(mp.flowspec_announced.iter().map(ToString::to_string))
+                    .chain(mp.evpn_announced.iter().map(|r| format!("{r:?}")))
+                    .chain(mp.bgpls_announced.iter().map(|r| format!("{r:?}")))
+                    .chain(
+                        mp.vpn_announced
+                            .iter()
+                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+                    )
+                    .chain(
+                        mp.labeled_announced
+                            .iter()
+                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+                    )
+                    .chain(mp.rtc_announced.iter().map(ToString::to_string))
+                    .collect::<Vec<_>>(),
+            ),
+            PathAttribute::MpUnreachNlri(mp) => (
+                "withdrawn",
+                mp.afi,
+                mp.safi,
+                mp.withdrawn
+                    .iter()
+                    .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+                    .chain(mp.flowspec_withdrawn.iter().map(ToString::to_string))
+                    .chain(mp.evpn_withdrawn.iter().map(|r| format!("{r:?}")))
+                    .chain(mp.bgpls_withdrawn.iter().map(|r| format!("{r:?}")))
+                    .chain(
+                        mp.vpn_withdrawn
+                            .iter()
+                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+                    )
+                    .chain(
+                        mp.labeled_withdrawn
+                            .iter()
+                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+                    )
+                    .chain(mp.rtc_withdrawn.iter().map(ToString::to_string))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => continue,
+        };
+        let family = format!("{afi:?}_{safi:?}").to_lowercase();
+        section(&mut out, &format!("{family}_{direction}"), &items);
+    }
+    if out.is_empty() {
+        out.push_str("none");
     }
     out
 }
@@ -978,14 +1082,13 @@ impl PeerSession {
         }
         self.drive_fsm(Event::UpdateReceived).await;
     }
-    /// RFC 7606 §5.2 minimum debugging guidance: retain enough of a
-    /// malformed UPDATE — the NLRI involved and the complete message —
-    /// for offline analysis. DEBUG-only by design: a hostile peer can
-    /// trigger this once per UPDATE, so it must never land at
-    /// info/warn where it would spam operators; the per-section hex is
-    /// byte-bounded for the same reason (Extended Messages reach
-    /// 65535 B). The `tracing` macro skips the hex rendering entirely
-    /// when DEBUG is disabled.
+    /// RFC 7606 §6 debugging facility: capture the entire malformed
+    /// UPDATE message and list the NLRI involved, for offline analysis.
+    /// DEBUG-only by design: a hostile peer can trigger this once per
+    /// UPDATE, so it must never land at info/warn where it would spam
+    /// operators. The full-message hex is protocol-bounded (4096 bytes,
+    /// or 65535 with Extended Messages), so it needs no artificial cap.
+    /// The `tracing` macro skips all rendering when DEBUG is disabled.
     fn debug_dump_malformed_update(
         &self,
         update: &rustbgpd_wire::UpdateMessage,
@@ -993,12 +1096,9 @@ impl PeerSession {
     ) {
         debug!(
             peer = %self.peer_label,
-            announced = parsed.announced.len(),
-            withdrawn = parsed.withdrawn.len(),
-            nlri_hex = %bounded_hex(&update.nlri),
-            withdrawn_routes_hex = %bounded_hex(&update.withdrawn_routes),
-            path_attributes_hex = %bounded_hex(&update.path_attributes),
-            "malformed UPDATE raw sections (RFC 7606 §5.2 debugging guidance)"
+            nlri_involved = %involved_nlri(parsed),
+            update_message_hex = %full_update_hex(update),
+            "malformed UPDATE captured in full (RFC 7606 §6 debugging facility)"
         );
     }
     /// Parse an UPDATE message, validate attributes, apply import policy,

@@ -836,6 +836,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 7606 §6: the malformed-UPDATE debug dump is now complete.** The
+  DEBUG-level diagnostic emitted on treat-as-withdraw and
+  attribute-discard events previously hex-dumped each raw UPDATE
+  section with a 512-byte cap and reported only NLRI counts. It now
+  captures the ENTIRE malformed UPDATE message as hex — untruncated,
+  since message size is already protocol-bounded (4096 bytes, or 65535
+  with Extended Messages) — and enumerates the NLRI involved explicitly
+  (prefixes with Add-Path path IDs, per family, announcements and
+  withdrawals), rendered from what the revised parse already produced.
+  Still DEBUG-gated and lazily built, so the clean path and log-spam
+  posture are unchanged; routing dispositions are untouched. The
+  rejected-route retention store keeps its separate, deliberate byte
+  caps.
+
 - **Interop: FRR zebra startup race pinned out of M10 and M89.** On a
   loaded runner FRR can send its initial IPv6 UPDATE before zebra
   reports a global address on the peering interface; the

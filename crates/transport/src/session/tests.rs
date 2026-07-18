@@ -15733,3 +15733,88 @@ async fn list_rejected_routes_command_returns_sorted_snapshot() {
         "the query is a read — the store is untouched"
     );
 }
+
+/// RFC 7606 §6: the malformed-UPDATE debug dump must capture the ENTIRE
+/// UPDATE message (no truncation — the message is protocol-bounded) and
+/// list the NLRI involved explicitly, with Add-Path path IDs and per
+/// family, not just counts.
+#[test]
+fn malformed_update_dump_is_untruncated_and_enumerates_nlri() {
+    // Body NLRI: 80 Add-Path IPv4 announcements (8 bytes each = 640 B,
+    // past the old 512-byte per-section hex cap).
+    let mut nlri = Vec::new();
+    for i in 0..80u32 {
+        nlri.extend_from_slice(&(i + 1).to_be_bytes()); // path ID
+        nlri.push(24);
+        #[expect(clippy::cast_possible_truncation, reason = "i < 80")]
+        nlri.extend_from_slice(&[10, 0, i as u8]);
+    }
+    // One Add-Path withdrawn route: path ID 7, 192.0.2.0/24.
+    let mut withdrawn = Vec::new();
+    withdrawn.extend_from_slice(&7u32.to_be_bytes());
+    withdrawn.push(24);
+    withdrawn.extend_from_slice(&[192, 0, 2]);
+    // Attributes: a malformed ORIGIN (length 2 — §7.1 treat-as-withdraw),
+    // a valid AS_PATH and NEXT_HOP, and a valid MP_UNREACH_NLRI carrying
+    // an IPv6 withdrawal so a second family is involved.
+    let attrs: Vec<u8> = [
+        &[0x40, 0x01, 0x02, 0x00, 0x00][..], // ORIGIN, bad length
+        &[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xFD, 0xE8], // AS_PATH seq [65000]
+        &[0x40, 0x03, 0x04, 192, 0, 2, 1],   // NEXT_HOP
+        &[
+            0x80, 0x0F, 0x08, 0x00, 0x02, 0x01, 32, 0x20, 0x01, 0x0D, 0xB8,
+        ], // MP_UNREACH 2001:db8::/32
+    ]
+    .concat();
+    let update = rustbgpd_wire::UpdateMessage {
+        withdrawn_routes: Bytes::from(withdrawn),
+        path_attributes: Bytes::from(attrs),
+        nlri: Bytes::from(nlri),
+    };
+    let revised = update
+        .parse_revised(true, false, true, &[])
+        .expect("revised parse recovers the malformed ORIGIN");
+    assert!(
+        !revised.malformed.is_empty(),
+        "the malformed ORIGIN must be recovered, not dropped silently"
+    );
+
+    // (a) The full-message hex covers every byte and carries no
+    // truncation marker.
+    let hex = super::inbound::full_update_hex(&update);
+    assert_eq!(
+        hex.len(),
+        update.encoded_len() * 2,
+        "every byte of the UPDATE is hex-dumped"
+    );
+    assert!(!hex.contains('…'), "no truncation marker");
+    assert!(
+        hex.ends_with("00000050180a004f"),
+        "the final NLRI entry (path ID 80, 10.0.79.0/24) is present past \
+         the old 512-byte cap; got tail {}",
+        &hex[hex.len() - 20..]
+    );
+
+    // (b) Every involved NLRI is enumerated: per family, with path IDs.
+    let listed = super::inbound::involved_nlri(&revised.update);
+    assert!(
+        listed.contains("ipv4_unicast_announced"),
+        "family label present: {listed}"
+    );
+    assert!(
+        listed.contains("10.0.0.0/24 path-id 1"),
+        "first announcement with path ID: {listed}"
+    );
+    assert!(
+        listed.contains("10.0.79.0/24 path-id 80"),
+        "last announcement (beyond the old cap) with path ID: {listed}"
+    );
+    assert!(
+        listed.contains("ipv4_unicast_withdrawn") && listed.contains("192.0.2.0/24 path-id 7"),
+        "withdrawal enumerated: {listed}"
+    );
+    assert!(
+        listed.contains("ipv6_unicast_withdrawn") && listed.contains("2001:db8::/32"),
+        "MP family withdrawal enumerated: {listed}"
+    );
+}
