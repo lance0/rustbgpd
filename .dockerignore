@@ -1,6 +1,9 @@
 target/
+**/target/
 .git/
+.claude/
 clab-*/
+bench/scale/matrix/artifacts-*/
 
 # Test/operational artifacts that bloat the build context without being
 # referenced by the Dockerfile. None of these affect the cooked deps
