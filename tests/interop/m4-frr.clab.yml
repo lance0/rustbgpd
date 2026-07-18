@@ -25,9 +25,13 @@ topology:
       image: rustbgpd:dev
       cmd: sleep infinity
       binds:
-        - ./configs/rustbgpd-m4-frr.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/rustbgpd-m4-frr.toml:/etc/rustbgpd/config.template.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
+        # Copy the read-only template to a writable container-local path so the
+        # atomic config persist (temp + rename) that AddNeighbor performs works;
+        # a single-file :ro bind makes the rename fail with EBUSY.
+        - cp /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
         - ip addr add 10.0.10.1/24 dev eth1
         - ip link set eth1 up
         - ip addr add 10.0.11.1/24 dev eth2
