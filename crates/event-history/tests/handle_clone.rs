@@ -102,30 +102,51 @@ async fn oldest_retained_event_id_none_on_empty_db() {
 
 #[tokio::test]
 async fn oldest_retained_event_id_matches_min_after_retention() {
-    // Tight retention so the eviction observably moves the floor.
+    // Deterministic retention (LAN-476): the actor's interval timer
+    // stays out of the picture (config_at's 60s never fires in-test).
+    // Instead we observe all 50 commits on the live broadcast, then
+    // drive one eviction pass explicitly via `run_retention_pass()`,
+    // which is FIFO-ordered behind the appends on the storage thread.
+    // No wall-clock sleeps, so host load cannot race the eviction.
     let dir = tempdir().unwrap();
     let mut cfg = config_at(dir.path().join("events.db"));
     cfg.max_events = 10;
-    cfg.retention_interval = Duration::from_millis(100);
     cfg.batch_size = 4;
 
     let manager = EventHistoryManager::start(cfg).await.expect("EHM start");
     let handle = manager.handle();
 
-    // Fill past the cap (50 events, cap=10).
+    // Subscribe BEFORE sending so every commit is observed (50 events
+    // fit the broadcast capacity of 64 — no Lagged possible).
+    let mut live = handle.subscribe_live();
+
+    // Fill past the cap (50 events, cap=10). queue_capacity is 64, so
+    // all 50 enqueue without the actor needing to drain first.
     for i in 0..50u32 {
-        // try_send may need a moment if the actor is committing.
-        loop {
-            match handle.sender().try_send(make_envelope(i)) {
-                Ok(()) => break,
-                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
-            }
-        }
+        handle
+            .sender()
+            .try_send(make_envelope(i))
+            .expect("queue holds all 50 events");
     }
 
-    // Wait long enough for the actor + retention pass to drain.
-    // Two retention intervals (200ms) + a margin.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Await all 50 commits — event-driven, not wall-clock. The
+    // timeout is a hang backstop, not a race margin.
+    for n in 0..50u32 {
+        tokio::time::timeout(Duration::from_secs(30), live.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for commit {n}"))
+            .expect("broadcast sender alive");
+    }
+
+    // One explicit retention pass evicts down to max_events.
+    let outcome = manager
+        .run_retention_pass()
+        .await
+        .expect("retention pass OK");
+    assert!(
+        outcome.evicted_count_cap > 0,
+        "count-cap eviction evicted nothing with 50 events over cap 10"
+    );
 
     let oldest = handle
         .oldest_retained_event_id()
