@@ -33,10 +33,10 @@ longer describes the common grouped path. That path remains inside
 `distribute_changes`, so the old “29.4% Arc clone + try_send tail” attribution
 is not valid on current code. Raw-stack inspection shows exact message
 construction is a low-single-digit bucket; successful rejection-overlay and
-prior-advertisement bookkeeping are the next measured target. LAN-395 records
-the bounded fast-path experiment and a 15% pre-committed gate. LAN-348 was
-canceled by its own gate rather than adding an actor boundary around the wrong
-work.
+prior-advertisement bookkeeping are the next measured target. The bounded
+grouped fast-path experiment carries a 15% pre-committed gate. The earlier
+distribution actor-boundary proposal was canceled by its own gate rather than
+adding an actor boundary around the wrong work.
 
 The large throughput difference from the historical July table is not a
 regression introduced by this receipt. The older harness did not install the
@@ -97,7 +97,7 @@ the offline verification commands.
   raw addresses, paths, and source locations.
 - The current CPU classifier intentionally reports exact-precommit work as
   `distribute residual` rather than inventing attribution from unstable closure
-  numbers. LAN-395 requires stable named helpers and classifier fixtures before
-  publishing a finer phase split.
+  numbers. The grouped fast-path continuation requires stable named helpers
+  and classifier fixtures before publishing a finer phase split.
 - The bgperf2 run is a DHAT-instrumented receipt for attribution, not a release
   performance comparison against BIRD or GoBGP.

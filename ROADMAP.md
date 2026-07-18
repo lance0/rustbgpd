@@ -215,15 +215,16 @@ BIRD-filter-language translation (the importer stops at structure).
   config-converter vacuum, externally verifiable and citation-backed
   (LAN-485).
 
-### Immediate: post-v0.50 audit remediation (2026-07-09)
+### Completed: post-v0.50 audit remediation (2026-07-09)
 
 A repository-wide read-only audit at `155b24c2` found the workspace test,
 Clippy, formatting, and doc gates green, but adversarial lifecycle and
-failure-path review exposed correctness gaps that the happy-path suites do not
-exercise. This remediation tranche takes priority over new protocol breadth
-and the research-shaped queue below.
+failure-path review exposed correctness gaps that the happy-path suites did
+not exercise. This remediation tranche took priority over new protocol
+breadth and the research-shaped queue below; every item below has since
+landed. The section stays as the audit-finding record.
 
-**Release blockers — finish before the next tag:**
+**Release blockers (all landed):**
 
 - [x] **Commit-confirm recovery state machine.** Preserve the pre-transaction
   journal whenever apply completion is ambiguous (post-persist finalization,
