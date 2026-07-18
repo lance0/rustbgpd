@@ -20,6 +20,10 @@ use crate::route::{
 };
 use crate::update::{RouteQueryKey, route_query_key};
 
+/// Floor for the ordered-index journal cap: below this table size, replaying
+/// a short journal always beats a rebuild, so don't thrash the rebuild flag.
+const ORDERED_JOURNAL_MIN_CAP: usize = 64;
+
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     /// Best route per prefix, paired with its wall-clock install time —
@@ -39,7 +43,20 @@ pub struct LocRib {
     /// Compact ordered prefix index used only by resumable route listings.
     /// The lookup-hot best-path table stays hash-backed; this second index
     /// adds ordered continuation without retaining per-walk snapshots.
+    ///
+    /// Maintained lazily: `recompute` only journals membership changes
+    /// (trie inserts on this lookup-hot path regressed `loc_rib_recompute`
+    /// by ~45-180%, the same reason `routes` is not trie-backed), and the
+    /// journal is replayed the next time a listing runs.
     ordered_prefixes: FamilyPrefixMap<()>,
+    /// Prefixes whose `routes` membership changed since `ordered_prefixes`
+    /// was last synced. Replayed against the live table on the next listing,
+    /// so stale entries (re-added, re-removed) resolve to the final state.
+    ordered_journal: Vec<Prefix>,
+    /// Set when the journal outgrew the table (replay would cost more than
+    /// rebuilding, and an unqueried flapping table must not grow the journal
+    /// without bound). The next listing rebuilds the index from scratch.
+    ordered_rebuild: bool,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
@@ -74,6 +91,10 @@ impl LocRib {
         Self {
             routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
             ordered_prefixes: FamilyPrefixMap::default(),
+            // Pre-reserve the journal floor so recompute's membership note
+            // never allocates on the hot path.
+            ordered_journal: Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP),
+            ordered_rebuild: false,
             flowspec_routes: HashMap::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),
@@ -113,19 +134,69 @@ impl LocRib {
                     || old.attributes != new_best.attributes
             });
             if changed {
-                let was_absent = !self.routes.contains_key(&prefix);
-                self.routes.insert(prefix, (new_best, SystemTime::now()));
+                let was_absent = self
+                    .routes
+                    .insert(prefix, (new_best, SystemTime::now()))
+                    .is_none();
                 if was_absent {
-                    self.ordered_prefixes.entry_or_default(prefix);
+                    self.note_membership_change(prefix);
                 }
             }
             changed
         } else {
             let removed = self.routes.remove(&prefix).is_some();
             if removed {
-                self.ordered_prefixes.remove(&prefix);
+                self.note_membership_change(prefix);
             }
             removed
+        }
+    }
+
+    /// Record that `prefix` entered or left `routes`, deferring the ordered
+    /// index update to the next listing. Once the journal would cost as much
+    /// to replay as a rebuild, switch to the rebuild flag and drop it — this
+    /// also bounds journal memory when no listing ever runs.
+    #[inline]
+    fn note_membership_change(&mut self, prefix: Prefix) {
+        if self.ordered_rebuild {
+            return;
+        }
+        // Count the entry about to be pushed: once the journal would match
+        // the table size, replay costs the same as a rebuild — and during
+        // bulk table growth the journal otherwise chases the table from one
+        // entry behind, duplicating every prefix for nothing.
+        if self.ordered_journal.len() + 1 >= self.routes.len().max(ORDERED_JOURNAL_MIN_CAP) {
+            self.ordered_rebuild = true;
+            // Release the outgrown buffer but keep the floor warm: the next
+            // notes after the rebuild must not re-pay the first allocation.
+            self.ordered_journal = Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP);
+            return;
+        }
+        self.ordered_journal.push(prefix);
+    }
+
+    /// Bring `ordered_prefixes` back in sync with `routes` membership.
+    fn sync_ordered_index(&mut self) {
+        if self.ordered_rebuild {
+            self.ordered_prefixes.clear();
+            for prefix in self.routes.keys() {
+                self.ordered_prefixes.entry_or_default(*prefix);
+            }
+            self.ordered_rebuild = false;
+        } else {
+            let Self {
+                routes,
+                ordered_prefixes,
+                ordered_journal,
+                ..
+            } = self;
+            for prefix in ordered_journal.drain(..) {
+                if routes.contains_key(&prefix) {
+                    ordered_prefixes.entry_or_default(prefix);
+                } else {
+                    ordered_prefixes.remove(&prefix);
+                }
+            }
         }
     }
 
@@ -138,7 +209,15 @@ impl LocRib {
     /// or before `after`. There is one best per prefix, so the compact prefix
     /// index supplies the full ordering and the hash map remains authoritative
     /// for route bodies.
-    pub fn iter_ordered_from(&self, after: Option<RouteQueryKey>) -> impl Iterator<Item = &Route> {
+    ///
+    /// Takes `&mut self` to fold journaled membership changes into the
+    /// ordered index before walking it — the index is only guaranteed to
+    /// mirror `routes` while a listing runs.
+    pub fn iter_ordered_from(
+        &mut self,
+        after: Option<RouteQueryKey>,
+    ) -> impl Iterator<Item = &Route> {
+        self.sync_ordered_index();
         self.ordered_prefixes
             .iter_from(after.map(|cursor| cursor.0))
             .filter_map(|(prefix, ())| self.routes.get(&prefix).map(|(route, _)| route))
