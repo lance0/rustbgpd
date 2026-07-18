@@ -330,3 +330,61 @@ Best as an SDN controller or route injector rather than a high-performance route
 Deployed at major IXPs (LINX, Netnod). Lean, reliable, and standards-compliant
 with strong RFC coverage including BGP Roles and Extended Messages. No
 programmatic API beyond the CLI socket.
+
+### Why reload behavior decided this market
+
+The route-server segment has historically been won and lost on config-reload
+behavior, not feature checklists. The published account of OpenBGPD's
+route-server revival records both halves of that history. On the performance
+half: the ruleset OpenBGPD needed for correct per-member filtering "negatively
+impacted service performance during configuration reloads," and at YYCIX (the
+Calgary IXP) a 370,000-rule configuration took over an hour to converge —
+brought under two minutes only after the 2018 filter-performance overhaul and
+an arouteserver ruleset reduction to under 6,000 rules
+([RIPE Labs, 2018](https://labs.ripe.net/author/claudio_jeker/openbgpd-adding-diversity-to-the-route-server-landscape/);
+[APNIC blog, 2019](https://blog.apnic.net/2019/01/28/openbgpd-adding-diversity-to-the-route-server-landscape/)).
+On the diversity half: the same account states there was "effectively only a
+single solution in the Route Server vendor market: the BIRD Internet routing
+daemon," and that the RIPE NCC Community Projects Fund financed OpenBGPD's
+revival because that monoculture was considered unhealthy for the IXP
+ecosystem. Reload stall and completion under live churn is therefore the
+metric this market has actually selected on — and it is exactly what the
+[IXP receipt matrix](perf/ixp-matrix-2026-07.md) measures head-to-head at
+700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
+that holds both sub-second median UPDATE stall and single-digit-seconds
+policy-reload completion (p50 1.5–2.2 s, vs ~80 s for BIRD 3.3.1 and ~250 s
+for OpenBGPD 9.1 on the same host and wire inputs), with per-daemon wins and
+losses — including OpenBGPD's smaller raw stall — published in the receipt.
+
+Reload speed is only half the operator concern; the other half is what an
+invalid config does to a running router. FRR's reload driver
+(`frr-reload.py`, a text-diff over vtysh) at one point responded to an
+invalid candidate file by applying a blank configuration — removing every
+line of running config — as reported against FRR 8.1 in
+[FRR issue #10453](https://github.com/FRRouting/frr/issues/10453) (January
+2022) and addressed by
+[FRR PR #10187](https://github.com/FRRouting/frr/pull/10187) (merged
+December 2021, in releases after the reporter's). rustbgpd's
+reload path makes that failure class structurally unreachable rather than
+patched: a candidate config is parsed and validated in full before anything
+is applied ([`rustbgpd --check`](CONFIGURATION.md), the `rejected` class in
+the [reload matrix](reload-matrix.md)), a file that fails validation leaves
+the running daemon untouched by construction, and
+[commit-confirmed transactions](OPERATIONS.md) add an explicit
+operator-confirmation window with automatic boot-revert if confirmation
+never arrives.
+
+Migration between daemons remains the segment's unsolved problem: no
+open-source BGP daemon ships a config converter from any of the others, and
+IXP practice sidesteps conversion by generating configs for each daemon from
+a higher-level source such as
+[arouteserver](https://github.com/pierky/arouteserver). Tooling *around* the
+incumbents fills gaps the daemons leave open — native JSON output for
+`birdc` was requested on
+[bird-users in April 2020](https://bird.network.cz/pipermail/bird-users/2020-April/014524.html)
+with a list of regex-based parser projects standing in for it, and BIRD
+still has no JSON CLI output (see API & Programmability above). rustbgpd
+ships JSON CLI output and a gRPC API today; a bounded BIRD/FRR/GoBGP
+configuration importer — structure only, with a fail-stop report of
+everything left for hand-translation — is planned on the
+[ROADMAP](../ROADMAP.md) operator-experience track and has not shipped.

@@ -18,6 +18,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tarball install path ahead of building from source in README and
   QUICKSTART.
 
+- Docs: COMPARISON.md gains a "Why reload behavior decided this market"
+  positioning section — the OpenBGPD route-server reload history and
+  RIPE NCC funding rationale, the frr-reload.py blank-config failure
+  class vs the validate-then-apply transaction model, and the
+  inter-daemon config-converter vacuum, each with public citations and
+  framed against the published IXP receipt matrix.
+
 - Dependency refresh: sha2 0.10 → 0.11 (digest 0.11 migration — the
   effective-config hash renders hex pairwise now), clap_mangen 0.2 → 0.3,
   zeroize 1.9, uuid 1.24, regex 1.13.1, socket2 0.6.5, and
