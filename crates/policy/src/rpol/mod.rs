@@ -34,7 +34,7 @@ mod typeck;
 pub use coverage::{
     CoverageReport, Lint, LintKind, PolicyCoverage, PolicyTestStatus, TermCoverage,
 };
-pub use diag::{Diagnostic, Diagnostics, Span, Spanned};
+pub use diag::{Diagnostic, Diagnostics, Span, Spanned, closest_matches};
 pub use fmt::{FmtError, format_rpol};
 pub use modules::{
     LoadError, MAX_FILE_BYTES, MAX_GRAPH_BYTES, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,

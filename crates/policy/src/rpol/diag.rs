@@ -218,13 +218,30 @@ pub(crate) fn closest<'a>(
     name: &str,
     candidates: impl IntoIterator<Item = &'a str>,
 ) -> Option<&'a str> {
+    closest_matches(name, candidates, 1).into_iter().next()
+}
+
+/// Up to `max` candidates to `name` within a small edit distance, closest
+/// first, for "did you mean" suggestions. Candidates further than 1/3 of
+/// the name's length (minimum 2) away are not suggested. Shared by the
+/// `.rpol` frontend and the TOML config diagnostics.
+pub fn closest_matches<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    max: usize,
+) -> Vec<&'a str> {
     let budget = (name.len() / 3).max(2);
-    candidates
+    let mut ranked: Vec<(usize, &str)> = candidates
         .into_iter()
         .map(|candidate| (edit_distance(name, candidate), candidate))
         .filter(|&(distance, _)| distance <= budget)
-        .min_by_key(|&(distance, _)| distance)
+        .collect();
+    ranked.sort_by_key(|&(distance, _)| distance);
+    ranked
+        .into_iter()
+        .take(max)
         .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 #[cfg(test)]

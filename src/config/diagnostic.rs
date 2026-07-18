@@ -29,7 +29,9 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
     match error {
         ConfigError::Parse(e) => {
             let span = e.span()?;
-            Some((span, e.message().to_string()))
+            let label = unknown_field_label(source, span.start, e.message())
+                .unwrap_or_else(|| e.message().to_string());
+            Some((span, label))
         }
         ConfigError::InvalidRouterId { .. } => {
             lookup_value_span(source, &["global", "router_id"], "not a valid IPv4 address")
@@ -112,6 +114,58 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
         ),
         _ => None,
     }
+}
+
+/// For serde `deny_unknown_fields` messages ("unknown field `x`, expected
+/// one of `a`, `b`, ..."), rewrite the label as a did-you-mean suggestion.
+/// The candidate set is parsed out of serde's own expected-field list, which
+/// is generated from the schema structs — so it can never drift from the
+/// actual fields. Returns `None` for other messages, or when no candidate is
+/// within the edit-distance budget (garbage keys keep serde's full list).
+fn unknown_field_label(source: &str, offset: usize, message: &str) -> Option<String> {
+    let rest = message.strip_prefix("unknown field `")?;
+    let (name, rest) = rest.split_once('`')?;
+    // Every backtick-quoted token after the field name is a valid key.
+    // "there are no fields" carries none and falls through to None.
+    let candidates = rest.split('`').skip(1).step_by(2).filter(|c| !c.is_empty());
+    let suggestions = rustbgpd_policy::rpol::closest_matches(name, candidates, 3);
+    let (last, head) = suggestions.split_last()?;
+    let alternatives = if head.is_empty() {
+        format!("`{last}`")
+    } else {
+        let head = head
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{head} or `{last}`")
+    };
+    let table = enclosing_table(source, offset)
+        .map(|t| format!(" in {t}"))
+        .unwrap_or_default();
+    Some(format!(
+        "unknown field `{name}`{table}; did you mean {alternatives}?"
+    ))
+}
+
+/// The nearest TOML table header (`[global]`, `[[neighbors]]`, ...) above
+/// `offset`, for naming which table an unknown key sits in. `None` for keys
+/// at the document root.
+fn enclosing_table(source: &str, offset: usize) -> Option<&str> {
+    let upto = offset.min(source.len());
+    // A typo'd table name puts the span on a header line ([[neighbours]]);
+    // scanning upward from there would name the wrong (preceding) table.
+    let line_start = source[..upto].rfind('\n').map_or(0, |i| i + 1);
+    if source[line_start..].trim_start().starts_with('[') {
+        return None;
+    }
+    source[..upto]
+        .lines()
+        .rev()
+        // Drop trailing comments (`[global] # core settings`); a '#' inside
+        // a header would require a quoted key, which no schema key uses.
+        .map(|line| line.split('#').next().unwrap_or(line).trim())
+        .find(|line| line.starts_with('[') && line.ends_with(']'))
 }
 
 /// True when a source line may carry secret material and must not be echoed
@@ -588,6 +642,146 @@ holdtime = 90
         let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
         assert!(rendered.contains("holdtime = 90"), "got: {rendered}");
         assert!(!rendered.contains("redacted"), "got: {rendered}");
+    }
+
+    #[test]
+    fn unknown_neighbor_field_full_message_golden() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9090\"
+log_format = \"text\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+route_server_clint = true
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert_eq!(
+            rendered,
+            "\
+error: failed to parse config
+   --> config.toml:13:1
+   |
+13 | route_server_clint = true
+   | ^^^^^^^^^^^^^^^^^^ unknown field `route_server_clint` in [[neighbors]]; \
+did you mean `route_server_client`?"
+        );
+    }
+
+    #[test]
+    fn unknown_root_table_gets_suggestion_without_table_path() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9090\"
+log_format = \"text\"
+
+[[neighbours]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(
+            rendered.contains("did you mean `neighbors`?"),
+            "got: {rendered}"
+        );
+        // The typo'd key IS the table header; it must not be attributed to
+        // the preceding table.
+        assert!(!rendered.contains("` in ["), "got: {rendered}");
+    }
+
+    #[test]
+    fn unknown_nested_field_names_enclosing_table() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+
+[global.telemetry]
+prometheus_adr = \"0.0.0.0:9090\"
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(
+            rendered.contains(
+                "unknown field `prometheus_adr` in [global.telemetry]; \
+did you mean `prometheus_addr`?"
+            ),
+            "got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn garbage_key_gets_no_false_suggestion() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9090\"
+log_format = \"text\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+zzzqqqxxw = 1
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(!rendered.contains("did you mean"), "got: {rendered}");
+        // Serde's own expected-field list is preserved as the fallback.
+        assert!(rendered.contains("expected"), "got: {rendered}");
+    }
+
+    #[test]
+    fn typod_secret_key_gets_suggestion_with_value_redacted() {
+        let source = "\
+[global]
+asn = 65000
+router_id = \"1.2.3.4\"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = \"0.0.0.0:9090\"
+log_format = \"text\"
+
+[[neighbors]]
+address = \"10.0.0.1\"
+remote_asn = 65001
+md5password = \"hunter2-typo-secret\"
+";
+        let err: ConfigError = toml::from_str::<super::super::Config>(source)
+            .unwrap_err()
+            .into();
+        let rendered = render_diagnostic(source, "config.toml", &err).unwrap();
+        assert!(
+            rendered.contains("did you mean `md5_password`?"),
+            "got: {rendered}"
+        );
+        assert!(!rendered.contains("hunter2-typo-secret"), "got: {rendered}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
     }
 
     #[test]
