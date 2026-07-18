@@ -25,6 +25,28 @@ The end-to-end operator walkthrough — arouteserver through the
 Alice-LG looking glass — is
 [`docs/cookbook/ixp-filter-pipeline.md`](../../docs/cookbook/ixp-filter-pipeline.md).
 
+## Input formats
+
+The renderer auto-detects and ingests both on-disk forms of
+`template-context` output:
+
+- **The sectioned report** — what `arouteserver template-context`
+  actually emits (pinned against 1.23.2): one section per context key,
+  each a heading line plus a dash underline followed by a YAML
+  fragment. Ingestion normalizes the report's quirks into the internal
+  model: the `*_whois_db_records` section names, `irrdb_info` as a
+  list of hash-keyed bundles, and per-client `as_set_bundle_ids` as a
+  YAML `!!set`. Overlapping bundles (arouteserver resolves both a
+  client's AS-SET and its bare origin-ASN object) dedupe in the union.
+- **A single YAML document** with the context's top-level keys — the
+  form the test fixtures use and the shape the fingerprint below pins.
+
+Both forms of the same site render identical output — proven per
+commit against a checked-in real dump
+([`tests/interop/m90-differential/context-sectioned.yml`](../../tests/interop/m90-differential/context-sectioned.yml)),
+and against a live run of the pinned arouteserver image by
+[`tests/interop/m90-differential/prove-context-ingestion.sh`](../../tests/interop/m90-differential/prove-context-ingestion.sh).
+
 ## What it emits
 
 | File | Contents |
@@ -75,7 +97,7 @@ from "fix the data":
 | 1 | unreadable/unparseable context |
 | 2 | **refused** — the context uses a knob the renderer will not silently drop |
 | 3 | **aborted** — a generated set is empty or under the plausibility floor |
-| 4 | **shape mismatch** — the context's top-level key structure drifted from the pinned fingerprint |
+| 4 | **shape mismatch** — the context's top-level structure (document keys or report sections) drifted from the pinned fingerprint |
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
 has no RTT source; permanent), `next_hop.policy` other than `strict`
@@ -84,8 +106,11 @@ has no RTT source; permanent), `next_hop.policy` other than `strict`
 follow-up; the daemon retains rejected routes with reasons natively —
 see the route-server cookbook's filtered-route view), `prepend_rs_as`,
 `perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
-and disabling both IRR enforcement knobs. `max_prefix.action:
-restart` renders as teardown-only with a warning.
+per-client `black_list_pref` and IRR `white_list_*` entries (dropping
+a black list would fail open; dropping a white list would reject
+routes the site intends to accept), and disabling both IRR
+enforcement knobs. `max_prefix.action: restart` renders as
+teardown-only with a warning.
 
 An empty per-client prefix or origin set aborts the whole render: an
 empty set under the default-reject tail is fail-closed for that client,
@@ -94,9 +119,11 @@ member that deregistered everything. Raise the floor with
 `--min-prefixes`/`--min-origins` to also catch implausible shrinkage.
 
 The context shape is not a semver-stable API. The renderer fingerprints
-the top-level key structure and refuses on drift, naming the added and
-missing keys; `--allow-shape-drift` proceeds after review. The
-supported shape is pinned in `EXPECTED_TOP_LEVEL_KEYS` (`src/lib.rs`).
+the top-level structure — document keys for the single-document form,
+section names for the sectioned report — and refuses on drift, naming
+the added and missing entries; `--allow-shape-drift` proceeds after
+review. The supported shapes are pinned in `EXPECTED_TOP_LEVEL_KEYS`
+and `EXPECTED_SECTION_NAMES` (`src/lib.rs`).
 
 ## Options
 

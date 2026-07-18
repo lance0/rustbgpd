@@ -1,13 +1,16 @@
 # M90 differential lab — hand-authored `arouteserver template-context`
-# fixture for the site described by general.yml + clients.yml.
+# fixture for the site described by general.yml + clients.yml, in the
+# renderer's single-document form.
 #
-# CANONICAL PATH: this file is what
-#     arouteserver template-context --cfg arouteserver.yml --output context.yml
-# dumps for the same general.yml/clients.yml (with the lab's bogons.yml
-# and bgpq4 stub in place). It is checked in by hand so the rustbgpd
-# side renders deterministically offline; regenerating it via
-# arouteserver is the canonical refresh path, and the M90 driver ALWAYS
-# runs arouteserver proper for the BIRD side, so drift between this
+# The REAL dump of the same site is checked in verbatim next to this
+# file as context-sectioned.yml (captured from the pinned
+# pierky/arouteserver image via
+#     arouteserver template-context --cfg arouteserver.yml --output ...
+# with the lab's bogons.yml and bgpq4 stub in place); rs-config-render
+# ingests both forms and must render them identically — the renderer's
+# test suite and prove-context-ingestion.sh assert exactly that, so
+# the two fixtures cannot drift apart silently. The M90 driver ALWAYS
+# runs arouteserver proper for the BIRD side, so drift between either
 # fixture and the site files shows up as a verdict mismatch.
 #
 # Shape: top-level keys pinned by rs-config-render's
@@ -89,7 +92,7 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64500_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 0, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
   - id: AS64501_1
     asn: 64501
     ip: "192.0.2.12"
@@ -98,7 +101,7 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64501_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 0, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
   - id: AS64502_1
     asn: 64502
     ip: "192.0.2.13"
@@ -107,18 +110,18 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64502_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 0, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
 irrdb_info:
   AS64500_bundle:
     asns: [64500]
     prefixes:
-      - {prefix: "198.51.100.0", length: 24, exact: true, comment: "route object 198.51.100.0/24"}
-      - {prefix: "203.0.113.0", length: 26, le: 28, comment: "route object 203.0.113.0/26 le 28"}
+      - {prefix: "198.51.100.0", length: 24, exact: true}
+      - {prefix: "203.0.113.0", length: 26, le: 28}
   AS64501_bundle:
     asns: [64501]
     prefixes:
-      - {prefix: "203.0.113.128", length: 25, exact: true, comment: "route object 203.0.113.128/25"}
+      - {prefix: "203.0.113.128", length: 25, exact: true}
   AS64502_bundle:
     asns: [64502]
     prefixes:
-      - {prefix: "203.0.113.64", length: 26, exact: true, comment: "route object 203.0.113.64/26"}
+      - {prefix: "203.0.113.64", length: 26, exact: true}

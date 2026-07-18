@@ -11,13 +11,15 @@
 #   - rustbgpd: config rendered by tools/rs-config-render from the
 #     site's template-context model. The checked-in
 #     m90-differential/context.yml is hand-authored against the
-#     renderer's fingerprint-pinned shape; arouteserver 1.23.2's own
-#     `template-context` emits a sectioned report that is NOT a
-#     drop-in for it (see the lab README), so the fixture is
-#     hand-maintained with its data verified against a real dump.
-#     Because the BIRD side ALWAYS re-runs arouteserver proper at lab
-#     runtime, drift between context.yml and the site files surfaces
-#     as a verdict mismatch — the differential is the guard.
+#     renderer's fingerprint-pinned single-document shape so this lab
+#     renders deterministically offline; the renderer equally ingests
+#     the sectioned report arouteserver 1.23.2 emits (a real dump is
+#     checked in as context-sectioned.yml, and the lab's
+#     prove-context-ingestion.sh proves both forms render
+#     identically against the pinned image). Because the BIRD side
+#     ALWAYS re-runs arouteserver proper at lab runtime, drift
+#     between context.yml and the site files surfaces as a verdict
+#     mismatch — the differential is the guard.
 #
 # Three GoBGP members then announce the canned set from
 # announcements.json, and every entry is asserted on BOTH daemons:

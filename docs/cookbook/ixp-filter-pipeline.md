@@ -47,6 +47,15 @@ Install and configure arouteserver itself per its
 [documentation][arouteserver] (`arouteserver setup`, then your
 `general.yml` / `clients.yml`).
 
+The command's output format is arouteserver's, not ours: 1.23.2 emits
+a *sectioned report* (per-key heading plus a YAML fragment). The
+renderer auto-detects and ingests that form directly, alongside the
+single-document YAML equivalent its fixtures use — no conversion step.
+This exact pipeline runs for real against the pinned official
+arouteserver image in
+[`tests/interop/m90-differential/prove-context-ingestion.sh`](../../tests/interop/m90-differential/prove-context-ingestion.sh),
+which asserts both input forms render identical configuration.
+
 ## 2. Render rustbgpd configuration
 
 ```bash
