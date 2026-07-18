@@ -401,6 +401,8 @@ When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and
 prefer `Valid`, leaving `NotFound` as a neutral fallback.
+`rbgp doctor` probes every configured cache
+(`rpki.cache.<addr>.reachable`) and goes red on an unreachable one.
 
 ### BMP collector unreachable
 
@@ -1086,8 +1088,25 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 `rbgp doctor` runs red/green triage checks live (daemon reachable and
 healthy, peers stuck outside Established with time-in-state, flap loops,
 TCP-AO configuration against the daemon's kernel capability probe, daemon
-`nofile` rlimits, recent panic reports) and writes one redacted
-`rustbgpd-doctor-<ts>.tar.gz`:
+`nofile` rlimits, recent panic reports) plus first-deploy environment
+probes, and writes one redacted `rustbgpd-doctor-<ts>.tar.gz`:
+
+First-deploy probes (each bounded to a 2s timeout, read-only):
+
+| Check | What it probes | Red/yellow advice |
+|-------|----------------|-------------------|
+| `bgp.listener` | Daemon up: TCP connect to the BGP listen port. Daemon down: test-bind the port and release it | `CAP_NET_BIND_SERVICE` for ports below 1024; port-in-use is yellow (an unreachable daemon may hold it) |
+| `rpki.cache.<addr>.reachable` | TCP connect to each `[rpki] cache_servers` entry | origin validation stays degraded until the cache connects |
+| `bmp.collector.<addr>.reachable` | TCP connect to each `[bmp] collectors` entry | monitoring export is down; the daemon retries on its reconnect interval |
+| `gnmi_dialout.<name>.reachable` | TCP connect to each `[gnmi_dialout] targets` entry | dial-out telemetry backs off and retries |
+| `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |
+| `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
+| `daemon.config_freshness.<pid>` | config file mtime vs. local daemon start time | yellow when on-disk edits are pending; validate with `rustbgpd --check` then reload with SIGHUP |
+
+Probe targets come from the daemon's effective config when it is up; when
+it is down, from the local config file (the path a local daemon process
+was started with, else `/etc/rustbgpd/config.toml`) — parsed for
+addresses only, never copied into the bundle.
 
 ```
 rustbgpd-doctor-<ts>/
