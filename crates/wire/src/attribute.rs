@@ -7,6 +7,10 @@ use crate::validate::{ErrorDisposition, malformed_attr_disposition};
 use bytes::Bytes;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// `AS4_PATH` path-attribute type code (RFC 6793).
+const AS4_PATH_TYPE_CODE: u8 = 17;
+
 /// Origin attribute values per RFC 4271 §5.1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -948,7 +952,7 @@ pub fn decode_path_attributes_revised(
         // treat-as-withdraw rather than being reduced to attribute-discard.
         let prohibited_segment = match type_code {
             attr_type::AS_PATH => prohibited_as_set(value, if four_octet_as { 4 } else { 2 }),
-            17 => prohibited_as_set(value, 4), // AS4_PATH (RFC 6793)
+            AS4_PATH_TYPE_CODE => prohibited_as_set(value, 4),
             _ => None,
         };
         if let Some(segment_type) = prohibited_segment {
@@ -1939,8 +1943,10 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
 /// Build the attribute-triplet (flags + type + length + value) used as
 /// NOTIFICATION data in UPDATE error subcodes per RFC 4271 §6.3.
 pub(crate) fn attr_error_data(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(3 + value.len());
-    if flags & attr_flags::EXTENDED_LENGTH != 0 || value.len() > 255 {
+    let extended_length = flags & attr_flags::EXTENDED_LENGTH != 0 || value.len() > 255;
+    let header_len = if extended_length { 4 } else { 3 };
+    let mut buf = Vec::with_capacity(header_len + value.len());
+    if extended_length {
         buf.push(flags | attr_flags::EXTENDED_LENGTH);
         buf.push(type_code);
         #[expect(
@@ -5330,7 +5336,6 @@ mod tests {
     /// either AS width makes a later set disappear from one matrix row.
     #[test]
     fn revised_rfc9774_prohibits_set_segments_in_as_path_and_as4_path() {
-        const AS4_PATH: u8 = 17;
         let cases = [
             (
                 "four-octet AS_PATH AS_SET",
@@ -5350,7 +5355,7 @@ mod tests {
             ),
             (
                 "AS4_PATH AS_SET",
-                AS4_PATH,
+                AS4_PATH_TYPE_CODE,
                 1,
                 1,
                 false,
@@ -5358,7 +5363,7 @@ mod tests {
             ),
             (
                 "AS4_PATH AS_CONFED_SET",
-                AS4_PATH,
+                AS4_PATH_TYPE_CODE,
                 4,
                 2,
                 false,
@@ -5396,7 +5401,7 @@ mod tests {
 
         let has_rfc9774_taw = |decoded: &RevisedAttributeDecode| {
             decoded.malformed.iter().any(|malformed| {
-                malformed.type_code == AS4_PATH
+                malformed.type_code == AS4_PATH_TYPE_CODE
                     && malformed.disposition == ErrorDisposition::TreatAsWithdraw
             })
         };
@@ -5407,7 +5412,7 @@ mod tests {
         ] {
             let bytes = attr_bytes(
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                AS4_PATH,
+                AS4_PATH_TYPE_CODE,
                 value,
             );
             let decoded = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();

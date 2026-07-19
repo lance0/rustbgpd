@@ -320,7 +320,9 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 - The revised inbound attribute decoder inspects raw AS_PATH and opaque
   AS4_PATH segment framing for AS_SET and AS_CONFED_SET before duplicate
-  discard, and applies RFC 7606 treat-as-withdraw on every session and family.
+  discard, and assigns RFC 7606 treat-as-withdraw on every session and family.
+  When the UPDATE carries no reachable NLRI, the existing RFC 7606 §5.2
+  composition escalates that disposition to a session reset.
 - This targeted inspection does not add general AS4_PATH parsing or RFC 6793
   path reconstruction.
 
