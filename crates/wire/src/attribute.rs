@@ -912,6 +912,10 @@ pub struct RevisedAttributeDecode {
 /// Returns `Err` only for session-reset-class problems: a malformed or
 /// duplicated `MP_REACH_NLRI`/`MP_UNREACH_NLRI` (§7.11 — the NLRI cannot be
 /// reliably located).
+#[expect(
+    clippy::too_many_lines,
+    reason = "framing inspection, duplicate ordering, and disposition accumulation must stay ordered"
+)]
 pub fn decode_path_attributes_revised(
     mut buf: &[u8],
     four_octet_as: bool,
@@ -938,6 +942,28 @@ pub fn decode_path_attributes_revised(
                 break;
             }
         };
+        // RFC 9774 §3 prohibits AS_SET and AS_CONFED_SET in both AS_PATH
+        // and AS4_PATH. Inspect the raw segment framing before duplicate
+        // handling: a prohibited segment in a later duplicate must retain
+        // treat-as-withdraw rather than being reduced to attribute-discard.
+        let prohibited_segment = match type_code {
+            attr_type::AS_PATH => prohibited_as_set(value, if four_octet_as { 4 } else { 2 }),
+            17 => prohibited_as_set(value, 4), // AS4_PATH (RFC 6793)
+            _ => None,
+        };
+        if let Some(segment_type) = prohibited_segment {
+            malformed.push(MalformedAttribute {
+                type_code,
+                disposition: ErrorDisposition::TreatAsWithdraw,
+                error: DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::MALFORMED_AS_PATH,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!(
+                        "RFC 9774 prohibits AS path segment type {segment_type} in attribute type {type_code}"
+                    ),
+                },
+            });
+        }
         if !seen.insert(type_code) {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal; any
             // other duplicate keeps the first occurrence and discards the
@@ -1029,6 +1055,24 @@ pub fn decode_path_attributes_revised(
         bgpls_nlri_discarded: bgpls_discarded,
         malformed,
     })
+}
+
+/// Return the first RFC 9774-prohibited set segment in a raw AS path.
+fn prohibited_as_set(mut value: &[u8], asn_width: usize) -> Option<u8> {
+    while value.len() >= 2 {
+        let segment_type = value[0];
+        let count = usize::from(value[1]);
+        if count == 0 || !matches!(segment_type, 1..=4) {
+            return None;
+        }
+        let segment_len = count.checked_mul(asn_width)?;
+        let next = value.get(2_usize.checked_add(segment_len)?..)?;
+        if matches!(segment_type, 1 | 4) {
+            return Some(segment_type);
+        }
+        value = next;
+    }
+    None
 }
 /// Decode a single attribute value given its flags, type code, and raw bytes.
 #[expect(
@@ -1896,7 +1940,7 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
 /// NOTIFICATION data in UPDATE error subcodes per RFC 4271 §6.3.
 pub(crate) fn attr_error_data(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(3 + value.len());
-    if value.len() > 255 {
+    if flags & attr_flags::EXTENDED_LENGTH != 0 || value.len() > 255 {
         buf.push(flags | attr_flags::EXTENDED_LENGTH);
         buf.push(type_code);
         #[expect(
@@ -5281,6 +5325,123 @@ mod tests {
             ErrorDisposition::TreatAsWithdraw
         );
     }
+    /// Load-bearing RFC 9774 matrix: deleting the raw segment inspection
+    /// makes every prohibited case clean/attribute-discard, while hard-coding
+    /// either AS width makes a later set disappear from one matrix row.
+    #[test]
+    fn revised_rfc9774_prohibits_set_segments_in_as_path_and_as4_path() {
+        const AS4_PATH: u8 = 17;
+        let cases = [
+            (
+                "four-octet AS_PATH AS_SET",
+                attr_type::AS_PATH,
+                1,
+                1,
+                true,
+                &[0, 0, 0xFD, 0xE9][..],
+            ),
+            (
+                "two-octet AS_PATH AS_SET",
+                attr_type::AS_PATH,
+                1,
+                1,
+                false,
+                &[0xFD, 0xE9],
+            ),
+            (
+                "AS4_PATH AS_SET",
+                AS4_PATH,
+                1,
+                1,
+                false,
+                &[0, 0, 0xFD, 0xE9],
+            ),
+            (
+                "AS4_PATH AS_CONFED_SET",
+                AS4_PATH,
+                4,
+                2,
+                false,
+                &[0, 0, 0xFD, 0xE9],
+            ),
+        ];
+        for (name, type_code, segment_type, preceding_sequences, four_octet_as, asn) in cases {
+            let mut value = Vec::new();
+            for _ in 0..preceding_sequences {
+                value.extend([2, 1]);
+                value.extend(asn);
+            }
+            value.extend([segment_type, 1]);
+            value.extend(asn);
+            let flags = if type_code == attr_type::AS_PATH {
+                attr_flags::TRANSITIVE
+            } else {
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE
+            };
+            let decoded = decode_path_attributes_revised(
+                &attr_bytes(flags, type_code, &value),
+                four_octet_as,
+                false,
+                &[],
+            )
+            .unwrap();
+            assert!(
+                decoded.malformed.iter().any(|malformed| {
+                    malformed.type_code == type_code
+                        && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+                }),
+                "{name} must be treat-as-withdraw"
+            );
+        }
+
+        let has_rfc9774_taw = |decoded: &RevisedAttributeDecode| {
+            decoded.malformed.iter().any(|malformed| {
+                malformed.type_code == AS4_PATH
+                    && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+            })
+        };
+        for (name, value) in [
+            ("AS_SEQUENCE", &[2, 1, 0, 0, 0xFD, 0xE9][..]),
+            ("truncated AS_SET", &[1, 2, 0, 0, 0xFD, 0xE9][..]),
+            ("zero-length AS_SET", &[1, 0][..]),
+        ] {
+            let bytes = attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                AS4_PATH,
+                value,
+            );
+            let decoded = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
+            assert!(
+                !has_rfc9774_taw(&decoded),
+                "{name} must not acquire an RFC 9774 verdict"
+            );
+        }
+    }
+    /// Load-bearing duplicate proof: moving the RFC 9774 inspection below
+    /// duplicate discard leaves only `AttributeDiscard` and fails this test.
+    #[test]
+    fn revised_rfc9774_prohibited_later_duplicate_keeps_treat_as_withdraw() {
+        let mut attrs = valid_as_path_bytes();
+        attrs.extend(attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[1, 1, 0, 0, 0xFD, 0xEA],
+        ));
+        let decoded = decode_path_attributes_revised(&attrs, true, false, &[]).unwrap();
+        assert_eq!(decoded.malformed.len(), 2);
+        assert!(
+            decoded
+                .malformed
+                .iter()
+                .any(|malformed| { malformed.disposition == ErrorDisposition::TreatAsWithdraw })
+        );
+        assert!(
+            decoded
+                .malformed
+                .iter()
+                .any(|malformed| { malformed.disposition == ErrorDisposition::AttributeDiscard })
+        );
+    }
     #[test]
     fn revised_malformed_aggregator_is_attribute_discard() {
         // RFC 7606 §7.7: AGGREGATOR length must be 8 under 4-octet-AS
@@ -5325,6 +5486,28 @@ mod tests {
             decoded.malformed[0].disposition,
             ErrorDisposition::AttributeDiscard
         );
+    }
+    /// Load-bearing error-context proof: reverting `attr_error_data` to choose
+    /// width from value length emits `0x50, 2, 6, ...` and fails this equality.
+    #[test]
+    fn revised_rfc9774_extended_length_preserves_complete_attribute_header() {
+        let bytes = vec![
+            attr_flags::TRANSITIVE | attr_flags::EXTENDED_LENGTH,
+            attr_type::AS_PATH,
+            0,
+            6,
+            1,
+            1,
+            0,
+            0,
+            0xFD,
+            0xE9,
+        ];
+        let decoded = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+        let DecodeError::UpdateAttributeError { data, .. } = &decoded.malformed[0].error else {
+            panic!("expected RFC 9774 attribute error");
+        };
+        assert_eq!(data, &bytes);
     }
     #[test]
     fn revised_flag_conflict_on_aggregator_is_treat_as_withdraw() {
