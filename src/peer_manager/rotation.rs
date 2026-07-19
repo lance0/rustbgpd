@@ -706,6 +706,7 @@ mod tests {
                 enabled: true,
                 hold_time: Some(90),
                 max_prefixes: None,
+                max_prefix_restart_seconds: None,
                 transport_config: transport,
                 import_policy: None,
                 export_policy: None,

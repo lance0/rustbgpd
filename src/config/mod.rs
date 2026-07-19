@@ -1299,6 +1299,10 @@ impl Config {
 
         Ok(ResolvedNeighbor {
             transport_config: transport,
+            max_prefix_restart_seconds: neighbor
+                .max_prefix_restart_seconds
+                .or_else(|| group.and_then(|group| group.max_prefix_restart_seconds))
+                .map(std::num::NonZeroU32::get),
             label: neighbor
                 .description
                 .clone()
@@ -1335,6 +1339,7 @@ impl Config {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: None,
             bfd: None,
@@ -1879,6 +1884,7 @@ impl Config {
 #[derive(Clone)]
 pub struct ResolvedNeighbor {
     pub transport_config: TransportConfig,
+    pub max_prefix_restart_seconds: Option<u32>,
     pub label: String,
     pub import_policy: Option<PolicyChain>,
     pub export_policy: Option<PolicyChain>,
@@ -2089,6 +2095,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes"
         | "max_prefixes_ipv4"
         | "max_prefixes_ipv6"
+        | "max_prefix_restart_seconds"
         | "gr_stale_routes_time"
         | "local_ipv6_nexthop"
         | "remove_private_as"
@@ -2256,6 +2263,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
     cmp_field!(max_prefixes_ipv6);
+    cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);
     cmp_field!(graceful_restart);
@@ -2376,6 +2384,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes == new.max_prefixes
         && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
         && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
+        && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
         && old.families == new.families
@@ -3065,6 +3074,9 @@ impl Config {
             neighbor.max_prefixes_ipv6 = neighbor
                 .max_prefixes_ipv6
                 .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
+            neighbor.max_prefix_restart_seconds = neighbor
+                .max_prefix_restart_seconds
+                .or_else(|| group.and_then(|g| g.max_prefix_restart_seconds));
             neighbor.route_reflector_client = Some(
                 neighbor
                     .route_reflector_client
@@ -5477,6 +5489,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
     cmp_field!(max_prefixes_ipv6);
+    cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);
     cmp_field!(graceful_restart);

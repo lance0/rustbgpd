@@ -142,6 +142,7 @@ impl PeerManager {
                 enabled: true,
                 hold_time: Some(hold_time),
                 max_prefixes,
+                max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
                 transport_config: resolved.transport_config,
                 import_policy: resolved.import_policy,
                 export_policy: resolved.export_policy,

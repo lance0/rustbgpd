@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -800,6 +801,9 @@ pub struct Neighbor {
     /// before the session is torn down with Cease/1. Enforced
     /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
     pub max_prefixes_ipv6: Option<u32>,
+    /// Optional hold-down before one automatic restart attempt after any
+    /// max-prefix shutdown. Unset preserves the fail-closed operator latch.
+    pub max_prefix_restart_seconds: Option<NonZeroU32>,
     /// TCP MD5 signature password (RFC 2385).
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
@@ -942,6 +946,10 @@ impl fmt::Debug for Neighbor {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "max_prefix_restart_seconds",
+                &self.max_prefix_restart_seconds,
+            )
             .field(
                 "md5_password",
                 &self.md5_password.as_ref().map(|_| "<redacted>"),
@@ -1124,6 +1132,9 @@ pub struct PeerGroupConfig {
     /// IPv6-unicast prefix limit inherited by neighbors in this group.
     /// See the neighbor-level `max_prefixes_ipv6`.
     pub max_prefixes_ipv6: Option<u32>,
+    /// Max-prefix restart hold-down inherited by neighbors in this group.
+    /// See the neighbor-level `max_prefix_restart_seconds`.
+    pub max_prefix_restart_seconds: Option<NonZeroU32>,
     /// TCP MD5 signature password (RFC 2385) inherited by neighbors in
     /// this group.
     pub md5_password: Option<String>,
@@ -1214,6 +1225,10 @@ impl fmt::Debug for PeerGroupConfig {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "max_prefix_restart_seconds",
+                &self.max_prefix_restart_seconds,
+            )
             .field(
                 "md5_password",
                 &self.md5_password.as_ref().map(|_| "<redacted>"),

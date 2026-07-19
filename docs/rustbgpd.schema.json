@@ -1831,6 +1831,15 @@
             "null"
           ]
         },
+        "max_prefix_restart_seconds": {
+          "description": "Optional hold-down before one automatic restart attempt after any\nmax-prefix shutdown. Unset preserves the fail-closed operator latch.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
         "max_prefixes": {
           "description": "Maximum prefixes accepted from this peer before the session is\ntorn down. Unset = unlimited.",
           "type": [
@@ -2216,6 +2225,15 @@
             "string",
             "null"
           ]
+        },
+        "max_prefix_restart_seconds": {
+          "description": "Max-prefix restart hold-down inherited by neighbors in this group.\nSee the neighbor-level `max_prefix_restart_seconds`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
         },
         "max_prefixes": {
           "description": "Prefix limit inherited by neighbors in this group. See the\nneighbor-level `max_prefixes`.",

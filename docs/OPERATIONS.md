@@ -490,9 +490,18 @@ NOTIFICATION and tears down the session. Without negotiated Notification GR
 this is Cease/1 (Maximum Number of Prefixes Reached). With the RFC 8538 N-bit,
 the daemon sends outer Cease/9 (Hard Reset) whose data encapsulates the same
 Cease/1 reason and RFC 4486 data, preventing the over-limit routes from being
-retained as stale. The peer is not automatically re-enabled — use
-`rbgp neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to
-restart it.
+retained as stale. By default the peer is not automatically re-enabled — use
+`rbgp neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to restart it.
+Setting the inheritable, non-zero `max_prefix_restart_seconds` opts that peer
+into exactly one restart attempt after the hold-down. A second breach creates a
+new hold-down; a failed attempt remains latched off until explicit enable.
+A restart-duration change, session-generation replacement, explicit disable,
+neighbor removal, or dynamic-range replacement invalidates an existing
+countdown rather than carrying it into new policy.
+
+`rbgp neighbor <addr>` reports the effective current action (`shutdown` or
+`restart`), configured restart duration, and live hold-down milliseconds. The
+same fields are available in JSON and the neighbor gRPC response.
 
 ---
 

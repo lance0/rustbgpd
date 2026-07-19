@@ -2170,6 +2170,7 @@ fn resolve_peer_session_reshape_targets(
             .static_targets
             .push(crate::reload::build_peer_mgr_config(
                 &resolved.transport_config,
+                resolved.max_prefix_restart_seconds,
                 &resolved.label,
                 resolved.import_policy.as_ref(),
                 resolved.export_policy.as_ref(),
@@ -2316,6 +2317,7 @@ fn resolve_static_neighbors(
                 .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
             Ok(crate::reload::build_peer_mgr_config(
                 &resolved.transport_config,
+                resolved.max_prefix_restart_seconds,
                 &resolved.label,
                 resolved.import_policy.as_ref(),
                 resolved.export_policy.as_ref(),
@@ -2871,6 +2873,7 @@ remote_asn = 65002
             .expect("neighbor must exist");
         crate::reload::build_peer_mgr_config(
             &neighbor.transport_config,
+            neighbor.max_prefix_restart_seconds,
             &neighbor.label,
             neighbor.import_policy.as_ref(),
             neighbor.export_policy.as_ref(),

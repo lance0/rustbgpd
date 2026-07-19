@@ -1502,6 +1502,8 @@ pub struct PeerGroupDefinition {
     pub send_hold_time: Option<u32>,
     /// Override max prefixes.
     pub max_prefixes: Option<u32>,
+    /// Optional timed max-prefix restart inherited by group members.
+    pub max_prefix_restart_seconds: Option<u32>,
     /// Optional TCP MD5 password.
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional TTL-security override.
@@ -1590,6 +1592,9 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes_ipv4: Option<u32>,
     /// Independent IPv6-unicast prefix limit (ADR-0108; None = unlimited).
     pub max_prefixes_ipv6: Option<u32>,
+    /// Non-zero hold-down before one automatic max-prefix restart attempt.
+    /// `None` preserves the fail-closed shutdown latch.
+    pub max_prefix_restart_seconds: Option<u32>,
     /// Optional TCP MD5 password.
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.
@@ -1919,6 +1924,12 @@ pub struct PeerInfo {
     pub send_hold_time: u32,
     /// Maximum prefix limit (None = unlimited).
     pub max_prefixes: Option<u32>,
+    /// Effective current max-prefix action: `shutdown` or `restart`.
+    pub max_prefix_action: String,
+    /// Configured hold-down for the `restart` action.
+    pub max_prefix_restart_seconds: Option<u32>,
+    /// Remaining hold-down while a max-prefix restart is pending.
+    pub max_prefix_restart_remaining_millis: Option<u64>,
     /// Configured address families.
     pub families: Vec<(Afi, Safi)>,
     /// Private AS removal mode.

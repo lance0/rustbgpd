@@ -408,6 +408,10 @@ gRPC consumer gains from the recent proto additions
   validation as the config path; `ListNeighbors` reports the
   effective value. Automation that provisions peers can now manage
   the wedged-peer teardown timer instead of inheriting the default.
+- **`max_prefix_restart_seconds`** — settable in `AddNeighbor`'s
+  `NeighborConfig` and in `PeerGroupDefinition`; zero is rejected on both
+  surfaces. Omit it to retain the fail-closed max-prefix shutdown until an
+  explicit enable.
 
 **The event-replay contract** (`EventService.SubscribeFromEvent`,
 ADR-0072) is the durable half of the event surface and the one an

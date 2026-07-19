@@ -395,6 +395,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         // default); 0 = disabled.
         send_hold_time: Some(info.send_hold_time),
         max_prefixes: info.max_prefixes.unwrap_or(0),
+        max_prefix_restart_seconds: info.max_prefix_restart_seconds,
         families,
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
         peer_group: info.peer_group.clone().unwrap_or_default(),
@@ -585,6 +586,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
         slow_peer: info.slow_peer,
         graceful_shutdown_advertise_intent: Some(info.graceful_shutdown_advertise_intent),
+        max_prefix_action: info.max_prefix_action.clone(),
+        max_prefix_restart_remaining_millis: info.max_prefix_restart_remaining_millis,
     }
 }
 
@@ -737,6 +740,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(Status::invalid_argument("strict_role requires role"));
         }
 
+        if config.max_prefix_restart_seconds == Some(0) {
+            return Err(Status::invalid_argument(
+                "max_prefix_restart_seconds must be greater than zero when set",
+            ));
+        }
         let peer_config = PeerManagerNeighborConfig {
             address,
             interface,
@@ -764,6 +772,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             },
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefix_restart_seconds: config.max_prefix_restart_seconds,
             md5_password: None,
             tcp_ao: None,
             ttl_security: false,
@@ -1328,6 +1337,9 @@ mod tests {
         assert!(source.contains("repeated SelectionDeferralFamilyState selection_deferral = 31;"));
         assert!(source.contains("message SelectionDeferralFamilyState {"));
         assert!(source.contains("optional uint32 effective_send_limit = 6;"));
+        assert!(source.contains("optional uint32 max_prefix_restart_seconds = 19;"));
+        assert!(source.contains("string max_prefix_action = 38;"));
+        assert!(source.contains("optional uint64 max_prefix_restart_remaining_millis = 39;"));
     }
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {
@@ -1343,6 +1355,7 @@ mod tests {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: None,
             ttl_security: false,
@@ -2140,6 +2153,20 @@ mod tests {
             peer_info_to_proto(&info).graceful_shutdown_advertise_intent,
             Some(true)
         );
+    }
+
+    /// Load-bearing: omitting any mapping at the API boundary leaves the
+    /// protobuf defaults (`None`, empty, `None`) despite truthful manager state.
+    #[test]
+    fn peer_info_to_proto_preserves_max_prefix_restart_state() {
+        let mut info = peer_info("10.0.0.2".parse().unwrap());
+        info.max_prefix_action = "restart".to_string();
+        info.max_prefix_restart_seconds = Some(30);
+        info.max_prefix_restart_remaining_millis = Some(12_345);
+        let state = peer_info_to_proto(&info);
+        assert_eq!(state.config.unwrap().max_prefix_restart_seconds, Some(30));
+        assert_eq!(state.max_prefix_action, "restart");
+        assert_eq!(state.max_prefix_restart_remaining_millis, Some(12_345));
     }
 
     #[test]

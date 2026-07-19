@@ -247,6 +247,11 @@ pub struct JsonNeighborDetail {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    pub max_prefix_action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prefix_restart_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prefix_restart_remaining_millis: Option<u64>,
     pub authentication: String,
     pub tcp_ao_health: String,
     pub tcp_ao_desired_generation: u64,
@@ -1168,6 +1173,9 @@ mod tests {
             messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
+            max_prefix_action: "restart".to_string(),
+            max_prefix_restart_seconds: Some(30),
+            max_prefix_restart_remaining_millis: Some(15_000),
             authentication: "tcp_ao".to_string(),
             tcp_ao_health: "unavailable".to_string(),
             tcp_ao_desired_generation: 2,
@@ -1262,6 +1270,9 @@ mod tests {
         assert_eq!(value["tcp_ao_desired_generation"], 2);
         assert_eq!(value["tcp_ao_applied_generation"], 1);
         assert_eq!(value["tcp_ao_rotation_phase"], "add_only");
+        assert_eq!(value["max_prefix_action"], "restart");
+        assert_eq!(value["max_prefix_restart_seconds"], 30);
+        assert_eq!(value["max_prefix_restart_remaining_millis"], 15_000);
         assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
         // Load-bearing: additive fields at either redacted TCP-AO boundary
         // must be reviewed rather than silently expanding secret exposure.

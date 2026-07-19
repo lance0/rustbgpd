@@ -761,6 +761,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 add_path_send: true,
                 add_path_send_max: 4,
                 paths_limit_receive_max: 0,
+                max_prefix_restart_seconds: None,
             }),
             state: server_proto::SessionState::Established as i32,
             uptime_seconds: 30,
@@ -798,6 +799,8 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             tcp_ao_rotation_error: String::new(),
             slow_peer: false,
             graceful_shutdown_advertise_intent: Some(true),
+            max_prefix_action: "shutdown".to_string(),
+            max_prefix_restart_remaining_millis: None,
         }))
     }
 
