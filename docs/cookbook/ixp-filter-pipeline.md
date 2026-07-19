@@ -194,8 +194,10 @@ workflow; the full explain surface catalog is in
 The external
 [`examples/birdwatcher-adapter`](../../examples/birdwatcher-adapter/README.md)
 serves a Birdwatcher-shaped REST subset from the daemon's gRPC API —
-status, peers, a member's accepted routes, and the filtered-route view
-above. For the filtered view it synthesizes one reject-reason large
+status, peers, a member's accepted routes, the filtered-route view
+above, and a noexport view (routes withheld from a member, each named
+by the export gate that stopped it, tagged `64496:65521:<id>`). For the
+filtered view it synthesizes one reject-reason large
 community (`64496:65520:<id>`, one stable id per reason token) on each
 route, matchable by Alice-LG's `[rejection_reasons]` config exactly
 like arouteserver's reject-reason tagging on BIRD; the adapter README
@@ -208,9 +210,11 @@ cargo run --release -p birdwatcher-adapter -- \
 ```
 
 The adapter needs a (read-only) gRPC TCP listener on the daemon, and
-`[policy.reject_retention]` enabled for the filtered view. Honest
-boundary: this is a maintained subset, not yet a complete Alice-LG
-backend — there is no noexport view, and a few Birdwatcher fields are
-served as sentinels (the adapter README lists every gap).
+`[policy.reject_retention]` enabled for the filtered view. The noexport
+view is served from the export-explain surface (best-routes-minus-
+advertised, one export-ladder dry run per suppressed prefix). Honest
+boundary: this is a maintained single-table unicast subset — a few
+Birdwatcher fields are served as sentinels (the adapter README lists
+every gap).
 
 [arouteserver]: https://github.com/pierky/arouteserver

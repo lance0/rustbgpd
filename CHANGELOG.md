@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Birdwatcher adapter serves the Alice-LG noexport views.**
+  `GET /routes/noexport/{id}` completes the adapter's looking-glass
+  contract: Loc-RIB best routes not advertised to the peer
+  (`RibService.ListBestRoutes` minus `ListAdvertisedRoutes`), each
+  explained by a live-ladder dry run (`ExplainAdvertisedRoute`) and
+  tagged with a synthesized `64496:65521:<gate id>` noexport-reason
+  large community plus human-readable `noexport_reason` /
+  `noexport_reason_detail` keys. The view covers every export-ladder
+  suppression (split horizon, RFC 4456 reflection, family, RFC 9494
+  LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy), is
+  prefix-granular, and serves an empty view for peers with no live
+  session. All backing RPCs are `sensitive_read`-tier — no
+  authorization change for existing adapter deployments.
+
 ### Fixed
 
 - **Release tarballs ship `rs-config-render`.** The route-server

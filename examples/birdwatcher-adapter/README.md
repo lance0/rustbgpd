@@ -2,12 +2,14 @@
 
 Standalone HTTP server that exposes a **Birdwatcher-shaped read-only subset**
 for [Alice-LG](https://github.com/alice-lg/alice-lg) and similar looking glass
-frontends. It serves status, peer, accepted-route, and filtered-route views
-from a running rustbgpd over gRPC. The status/peer/accepted endpoint paths and
-response shapes match the removed in-daemon
+frontends. It serves status, peer, accepted-route, filtered-route, and
+noexport views from a running rustbgpd over gRPC. The status/peer/accepted
+endpoint paths and response shapes match the removed in-daemon
 `[global.telemetry.looking_glass]` server this adapter replaces; the filtered
-view is served from the daemon's reject-retention store. This is not a
-complete Alice-LG backend (no noexport view).
+view is served from the daemon's reject-retention store and the noexport view
+from a live-ladder dry run of the export decision. Coverage is honest, not
+complete: IPv4/IPv6 unicast single-table only (no VPN/EVPN views, no
+`/routes/dump`).
 
 Rationale: the daemon's durable API identity is **gRPC + `rbgp`**.
 Partial compatibility with someone else's REST API inside daemon core
@@ -45,12 +47,11 @@ every RPC the adapter calls is a read.
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/peer/{peer}`    | `RibService.ListReceivedRoutes` (paged, all unicast families)  |
 | `GET /routes/filtered/{id}`  | `PolicyService.ListRejectedRoutes` (unpaged — the store is bounded at the `[policy.reject_retention]` capacity, default 1024/peer) |
+| `GET /routes/noexport/{id}`  | `RibService.ListBestRoutes` − `RibService.ListAdvertisedRoutes` (both paged), each missing prefix explained by `RibService.ExplainAdvertisedRoute` |
 
 There are no placeholder 501 responses. Route `age` is served from the
 `Route.received_at_epoch_seconds` proto field (RIB receive time) on the
 accepted view and from the rejection wall-clock time on the filtered view.
-Alice-LG's noexport view is not implemented (the daemon does not retain a
-NO_EXPORT-excluded route set).
 
 ## Filtered routes and reject reasons
 
@@ -109,6 +110,74 @@ reject_id = 65520
 6 = Malformed attributes (treat-as-withdraw, RFC 7606)
 ```
 
+## Noexport routes and reasons
+
+`/routes/noexport/{id}` (accepts `bgp_<addr>` protocol ids and bare peer IPs)
+serves every Loc-RIB best route that is **not** in the peer's Adj-RIB-Out,
+each explained by `RibService.ExplainAdvertisedRoute` — a dry run of the same
+export staging body the live path executes, so the reason cannot drift from
+the real decision. Precisely what the view contains:
+
+- **All export-ladder suppressions**, not only NO_EXPORT-community routes:
+  split horizon, iBGP/RFC 4456 reflection rules, family negotiation,
+  RFC 9494 LLGR-stale handling, RFC 5291 ORF, RFC 4684 RT membership, and
+  export-policy denial. Each route names its stopping gate.
+- **Prefix-granular**: a prefix with any advertised path is "exported" —
+  an Add-Path peer's partially-suppressed extra paths are not reported.
+- **IPv4/IPv6 unicast, single-best candidates only** (Loc-RIB best routes
+  are the export candidate set), matching the rest of the adapter.
+- **No live session ⇒ empty view** with a log line — nothing is being
+  exported *or* withheld, same posture as the filtered view.
+- If the snapshot diff races an in-flight advertisement (the explain says
+  the route *would* be advertised), the route is dropped from the view —
+  it never fabricates a "not exported" claim.
+
+**Cost:** one `ExplainAdvertisedRoute` call per suppressed prefix on every
+request. Alice-LG's `[noexport] load_on_demand` (its default) fits this —
+the view is only computed when an operator opens it. For very large
+Loc-RIBs, consider fronting the adapter with a caching proxy.
+
+### Noexport-reason → large-community mapping
+
+Same edge-synthesis convention as the reject reasons: one appended triplet
+`64496:65521:<id>` per route — function `65521` (adjacent to the
+reject-reason function `65520`, distinct so the `[rejection]` and
+`[noexport]` matchers never overlap), and a stable id per stopping gate:
+
+| Stopping gate    | Large community  | Meaning                                          |
+|------------------|------------------|--------------------------------------------------|
+| `split_horizon`  | `64496:65521:1`  | Route originated from the target peer            |
+| `rr_reflection`  | `64496:65521:2`  | iBGP split-horizon / RFC 4456 reflection rules   |
+| `family`         | `64496:65521:3`  | Peer did not negotiate the route's AFI/SAFI      |
+| `llgr`           | `64496:65521:4`  | RFC 9494 LLGR-stale suppression                  |
+| `orf`            | `64496:65521:5`  | RFC 5291 outbound route filter                   |
+| `rt_membership`  | `64496:65521:6`  | RFC 4684 RT-Constrain membership gate            |
+| `export_policy`  | `64496:65521:7`  | Denied by export policy (detail = deciding term) |
+| *(unrecognized)* | `64496:65521:0`  | Future gate this adapter build predates          |
+
+The ids are append-only. Each noexport route also carries human-readable
+`noexport_reason` (the gate name) / `noexport_reason_detail` extra JSON
+keys, ignored by parsers that don't know them.
+
+Alice-LG config to render the reasons:
+
+```ini
+[noexport]
+asn = 64496
+noexport_id = 65521
+load_on_demand = true
+
+[noexport_reasons]
+0 = Route was not exported
+1 = Route originated from this peer (split horizon)
+2 = Route reflection rules (RFC 4456)
+3 = Address family not negotiated
+4 = Long-lived stale route (RFC 9494)
+5 = Outbound route filter (RFC 5291)
+6 = RT membership (RFC 4684)
+7 = Denied by export policy
+```
+
 ### Field-level gaps
 
 | Field | Adapter value | Limitation |
@@ -128,7 +197,10 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
 ## Testing
 
 - Unit tests: `cargo test -p birdwatcher-adapter`
-- End-to-end smoke test of the status/peer/accepted/filtered-route subset:
-  `cargo test --test birdwatcher_adapter_smoke` (root package; spawns a real
-  daemon plus this adapter, announces a clean route and a loop-poisoned one,
-  and asserts both the accepted and filtered views).
+- End-to-end smoke test of the status/peer/accepted/filtered/noexport
+  subset: `cargo test --test birdwatcher_adapter_smoke` (root package;
+  spawns a real daemon plus this adapter, announces a clean route and a
+  loop-poisoned one from one live peer plus an announce-nothing receiver
+  peer, and asserts the accepted, filtered, and both sides of the noexport
+  views — suppressed route present for the announcer, exported route absent
+  for the receiver).

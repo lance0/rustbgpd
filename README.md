@@ -158,8 +158,8 @@ fanout numbers — is the [feature tour](docs/feature-tour.md).
 - **Hosting provider prefix management** — API-driven customer prefix announcements
 - **SDN / network automation controllers** — programmable BGP control plane
 - **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP,
-  plus a Birdwatcher-shaped status/peer/accepted-route subset via the external
-  `examples/birdwatcher-adapter` (not yet a complete Alice-LG backend)
+  plus a Birdwatcher-shaped status/peer/accepted/filtered/noexport subset via
+  the external `examples/birdwatcher-adapter`
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
 See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with

@@ -423,11 +423,13 @@ that is the signal to fall back to the durable cursor.
 **Reference consumers in-tree:** `examples/event-bridge/` (gRPC →
 JSON-lines event bridge, the minimal Shape-A skeleton) and
 `examples/birdwatcher-adapter/` (a Birdwatcher-shaped status, peer,
-accepted-route, and filtered-route REST subset sourced entirely from the
-public gRPC API, including per-route `age` from `received_at_epoch_seconds`
-and `GET /routes/filtered/{id}` served from
-`PolicyService.ListRejectedRoutes` with structured reject reasons). It is
-not a complete Alice-LG backend: noexport views are not wired. The adapter
+accepted-route, filtered-route, and noexport REST subset sourced entirely
+from the public gRPC API, including per-route `age` from
+`received_at_epoch_seconds`, `GET /routes/filtered/{id}` served from
+`PolicyService.ListRejectedRoutes` with structured reject reasons, and
+`GET /routes/noexport/{id}` served from the `ListBestRoutes` −
+`ListAdvertisedRoutes` diff with each suppression explained by
+`RibService.ExplainAdvertisedRoute`). The adapter
 is the honest template: if
 the public API is missing a field an external tool needs, the fix is an
 additive proto field, not a daemon-internal shortcut — that is how
