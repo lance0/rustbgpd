@@ -233,6 +233,27 @@ pub enum SessionNotification {
         /// IP address of the remote peer.
         peer_addr: IpAddr,
     },
+    /// The session crossed a configured inbound max-prefix bound.
+    ///
+    /// This uses the lossless collision-coordination lane because the peer
+    /// manager must latch every breached session administratively down before
+    /// any passive or collision path can re-establish it. `session_id` fences
+    /// a delayed notification; `role` is diagnostic because a promoted
+    /// candidate retains its original spawn role.
+    MaxPrefixExceeded {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when the bound was crossed.
+        role: SessionRole,
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+        /// Accepted route count that crossed the bound.
+        count: usize,
+        /// Configured maximum that was crossed.
+        bound: u32,
+        /// Violating family for a per-family limit; `None` for the aggregate.
+        family: Option<(Afi, Safi)>,
+    },
 }
 
 /// Bounded lifecycle notification sent from a peer session to `PeerManager`.
@@ -552,6 +573,16 @@ impl PeerHandle {
     #[doc(hidden)]
     pub fn abort_for_transport_safety(&self) {
         self.task.abort();
+    }
+
+    /// Abort the owned session task and wait until cancellation has completed.
+    ///
+    /// This consuming variant is for ownership-fence paths that must prove the
+    /// old actor can no longer publish before transferring its RIB generation.
+    #[doc(hidden)]
+    pub async fn abort_for_transport_safety_and_wait(self) {
+        self.task.abort();
+        let _ = self.task.await;
     }
 
     async fn send_simple_command_timeout(

@@ -595,8 +595,50 @@ impl PeerSession {
             }
         };
         self.metrics.record_max_prefix_exceeded(&self.peer_label);
-        let notif =
-            NotificationMessage::new(NotificationCode::Cease, cease_subcode::MAX_PREFIXES, data);
+        // A max-prefix shutdown is operator-latched, not a transient session
+        // failure. Suppress this session actor's normal deferred reconnect
+        // before driving the FSM to Idle; PeerManager owns the durable latch,
+        // passive/collision fencing, and explicit-enable recovery.
+        self.stop_requested = true;
+        self.reconnect_timer = None;
+        if let Some(ref notify_tx) = self.session_notify_tx
+            && let Err(error) = notify_tx.send(SessionNotification::MaxPrefixExceeded {
+                session_id: self.session_identity.id,
+                role: self.session_identity.role,
+                peer_addr: self.peer_ip,
+                count: violation.count,
+                bound: violation.bound,
+                family: violation.family,
+            })
+        {
+            warn!(
+                peer = %self.peer_label,
+                %error,
+                "failed to send lossless max-prefix latch notification"
+            );
+        }
+
+        // RFC 8538 §5.1 recommends a Hard Reset for max-prefix shutdown when
+        // Notification GR was negotiated; otherwise Cease/1 would retain the
+        // offending routes as stale. The Hard Reset data encapsulates the
+        // original Cease/1 and its RFC 4486 AFI/SAFI/bound payload (§3.1).
+        let notif = if self
+            .negotiated
+            .as_ref()
+            .is_some_and(|negotiated| negotiated.peer_notification_gr)
+        {
+            let mut hard_reset_data = Vec::with_capacity(data.len() + 2);
+            hard_reset_data.push(NotificationCode::Cease.as_u8());
+            hard_reset_data.push(cease_subcode::MAX_PREFIXES);
+            hard_reset_data.extend_from_slice(&data);
+            NotificationMessage::new(
+                NotificationCode::Cease,
+                cease_subcode::HARD_RESET,
+                Bytes::from(hard_reset_data),
+            )
+        } else {
+            NotificationMessage::new(NotificationCode::Cease, cease_subcode::MAX_PREFIXES, data)
+        };
         self.drive_fsm(Event::UpdateValidationError(notif)).await;
         true
     }

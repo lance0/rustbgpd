@@ -228,6 +228,16 @@ struct PendingInbound {
 /// Same single-task ownership pattern as `RibManager`.
 pub struct PeerManager {
     peers: HashMap<PeerKey, ManagedPeer>,
+    /// Max-prefix shutdowns owned by the manager rather than a disposable
+    /// session task. Presence keeps the peer administratively disabled across
+    /// passive accepts, collision handling, and config reconciliation until
+    /// the operator explicitly enables it.
+    max_prefix_latches: HashMap<PeerKey, String>,
+    /// Session generations being joined before an ownership transfer or
+    /// deletion completes. A terminal max-prefix signal emitted during that
+    /// barrier still belongs to the peer; entries are removed only after the
+    /// actor is gone and the lossless notification lane has been drained.
+    retiring_sessions: HashMap<u64, PeerKey>,
     /// Reverse lookup from transport session id to configured peer identity.
     /// Session lifecycle notifications are keyed by session id, and scoped
     /// link-local peers can share the same address on different interfaces.
@@ -518,6 +528,8 @@ impl PeerManager {
         }
         Self {
             peers: HashMap::new(),
+            max_prefix_latches: HashMap::new(),
+            retiring_sessions: HashMap::new(),
             session_index: HashMap::new(),
             rx,
             readiness_rx: None,
@@ -973,7 +985,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info, tcp_ao_generation } => {
-                            self.handle_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
+                            self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
                         }
                         PeerManagerCommand::ApplyTcpAoAddOnly { generation, listener_keys, static_keyrings, reply } => {
                             let result = self.apply_tcp_ao_add_only(generation, &listener_keys, &static_keyrings).await;

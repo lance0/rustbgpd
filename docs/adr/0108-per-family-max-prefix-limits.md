@@ -34,10 +34,14 @@ same compacted accounting (`known_plain_prefixes` / `known_prefix_refcounts`)
 as two incrementally maintained per-family totals; withdrawals decrement,
 duplicates are free, ERR/EoRR sweeps reconcile, and a session reset clears.
 
-**Teardown.** A per-family violation sends Cease/1 whose data field carries
-the RFC 4486 optional encoding — AFI (2 octets), SAFI (1 octet), upper bound
-(4 octets) — and logs the AFI, SAFI, and bound. The aggregate keeps its
-historical empty data field.
+**Teardown and recovery.** A violation latches the peer administratively down
+until explicit enable, fencing active reconnect, passive accept, collision,
+dynamic-peer, and config-reconcile paths. Without negotiated Notification GR,
+a per-family violation sends Cease/1 whose data carries the RFC 4486 optional
+encoding — AFI (2 octets), SAFI (1 octet), upper bound (4 octets); the
+aggregate keeps its historical empty data. When the RFC 8538 N-bit was
+negotiated, outer Cease/9 (Hard Reset) encapsulates that complete Cease/1 so
+the receiver does not retain the over-limit routes as stale.
 
 **Runtime lowering.** Hot-applying a per-family limit below the family's
 current count enforces immediately on apply. The aggregate keeps its
@@ -49,8 +53,9 @@ rejected-route counting, outbound limits, and non-unicast families.
 
 ## Consequences
 
-- Legacy configs (aggregate only, or no limit) are unchanged, pinned by a
-  regression test asserting identical teardown point and empty Cease data.
+- Configs with no max-prefix limit remain unchanged. For aggregate-only
+  configs, the threshold and empty inner Cease/1 data remain unchanged when
+  Notification GR is absent; recovery now uses the explicit-enable latch.
 - Per-UPDATE enforcement stays O(1); the two per-family counters are
   maintained at the same mutation seams as the existing refcount compaction.
 - Operators translating arouteserver/BIRD per-family `import limit` policies

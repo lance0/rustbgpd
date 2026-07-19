@@ -33,6 +33,18 @@ fn tcp_ao_accept_generation_valid(
 }
 
 impl PeerManager {
+    pub(super) async fn accept_inbound(
+        &mut self,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        tcp_ao_info: Option<TcpAoInfoSnapshot>,
+        tcp_ao_generation: Option<TcpAoRotationGeneration>,
+    ) {
+        self.drain_ready_session_notifications().await;
+        self.handle_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation)
+            .await;
+    }
+
     pub(super) async fn spawn_pending_inbound(
         &mut self,
         peer_key: PeerKey,
@@ -375,6 +387,7 @@ impl PeerManager {
             info!(%peer_addr, "inbound connection for disabled peer, dropping");
             return;
         }
+        let queried_session_id = managed.session_id;
 
         // Bounded so an inbound TCP arriving during a TCP-back-pressure
         // wedge on the existing session can't park the peer-manager actor
@@ -412,6 +425,22 @@ impl PeerManager {
 
         match fsm_state {
             SessionState::Idle => {
+                // MaxPrefixExceeded is sent before the session drives itself
+                // to Idle, but it crosses a different manager channel than
+                // AcceptInbound. Drain that lossless lane after the bounded
+                // state query, then re-check both ownership and admin state:
+                // otherwise an inbound reconnect can replace the breached
+                // generation in the narrow query/notification race.
+                self.drain_ready_session_notifications().await;
+                if !self.peers.get(&peer_key).is_some_and(|managed| {
+                    managed.enabled && managed.session_id == queried_session_id
+                }) {
+                    info!(
+                        %peer_addr,
+                        "peer ownership or admin state changed during inbound Idle query; dropping connection"
+                    );
+                    return;
+                }
                 // Accept immediately — no collision possible
                 self.replace_with_inbound(
                     peer_key.clone(),
@@ -486,11 +515,14 @@ impl PeerManager {
                     .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
-                    self.unregister_session(pending.session_id);
-                    let _ = pending
-                        .handle
-                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await;
+                    self.quiesce_retiring_session(
+                        &peer_key,
+                        pending.session_id,
+                        pending.handle,
+                        "local-wins collision loser",
+                        true,
+                    )
+                    .await;
                 }
             }
             std::cmp::Ordering::Less => {
@@ -501,10 +533,26 @@ impl PeerManager {
                     remote_id = %remote_router_id,
                     "collision: remote wins, replacing with inbound"
                 );
-                if let Some(old_handle) = self.promote_pending_inbound_handle(&peer_key) {
-                    let _ = old_handle
-                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await;
+                let promoted = {
+                    let managed = self.peers.get_mut(&peer_key);
+                    managed.and_then(|managed| {
+                        let pending = managed.pending_inbound.take()?;
+                        let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
+                        let old_session_id = managed.session_id;
+                        managed.session_id = pending.session_id;
+                        Some((old_handle, old_session_id, pending.session_id))
+                    })
+                };
+                if let Some((old_handle, old_session_id, new_session_id)) = promoted {
+                    self.register_session(new_session_id, &peer_key);
+                    self.quiesce_retiring_session(
+                        &peer_key,
+                        old_session_id,
+                        old_handle,
+                        "remote-wins collision loser",
+                        true,
+                    )
+                    .await;
                 }
             }
             std::cmp::Ordering::Equal => {
@@ -519,11 +567,14 @@ impl PeerManager {
                     .get_mut(&peer_key)
                     .and_then(|m| m.pending_inbound.take())
                 {
-                    self.unregister_session(pending.session_id);
-                    let _ = pending
-                        .handle
-                        .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await;
+                    self.quiesce_retiring_session(
+                        &peer_key,
+                        pending.session_id,
+                        pending.handle,
+                        "equal-router-id collision loser",
+                        true,
+                    )
+                    .await;
                 }
             }
         }
@@ -532,7 +583,7 @@ impl PeerManager {
     pub(super) fn promote_pending_inbound_handle(
         &mut self,
         peer_key: &PeerKey,
-    ) -> Option<PeerHandle> {
+    ) -> Option<(PeerHandle, u64)> {
         let (old_handle, old_session_id, new_session_id) = {
             let managed = self.peers.get_mut(peer_key)?;
             let pending = managed.pending_inbound.take()?;
@@ -541,18 +592,23 @@ impl PeerManager {
             managed.session_id = pending.session_id;
             (old_handle, old_session_id, pending.session_id)
         };
-        self.unregister_session(old_session_id);
         self.register_session(new_session_id, peer_key);
-        Some(old_handle)
+        Some((old_handle, old_session_id))
     }
 
     pub(super) async fn promote_pending_inbound(&mut self, peer_key: &PeerKey) -> bool {
-        let Some(old_handle) = self.promote_pending_inbound_handle(peer_key) else {
+        let Some((old_handle, old_session_id)) = self.promote_pending_inbound_handle(peer_key)
+        else {
             return false;
         };
-        let address = peer_key.address;
         let _ = self
-            .shutdown_handle_bounded(address, "promote pending inbound old primary", old_handle)
+            .quiesce_retiring_session(
+                peer_key,
+                old_session_id,
+                old_handle,
+                "promote pending inbound old primary",
+                false,
+            )
             .await;
         true
     }
@@ -602,18 +658,27 @@ impl PeerManager {
         }) else {
             return;
         };
-        self.unregister_session(old_session_id);
         self.register_session(session_id, &peer_key);
 
         // Shut down the old session
         let _ = self
-            .shutdown_handle_bounded(peer_addr, "replace with inbound old primary", old_handle)
+            .quiesce_retiring_session(
+                &peer_key,
+                old_session_id,
+                old_handle,
+                "replace with inbound old primary",
+                false,
+            )
             .await;
 
         // Start the new inbound session — trigger TcpConnectionConfirmed
         let Some(managed) = self.peers.get(&peer_key) else {
             return;
         };
+        if !managed.enabled {
+            info!(%peer_addr, "inbound replacement remains stopped by terminal peer latch");
+            return;
+        }
         if let Err(e) = managed
             .handle
             .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)

@@ -10824,6 +10824,98 @@ async fn per_family_max_prefix_limits_enforce_independently() {
     assert_eq!(session.known_prefix_count(), 0);
 }
 
+/// Load-bearing proof for the max-prefix shutdown contract:
+///
+/// - removing `stop_requested = true` arms the reconnect timer on Idle;
+/// - removing the lossless notification leaves the manager without the exact
+///   generation/family/count/bound needed to latch passive paths;
+/// - emitting bare Cease/1 with the N-bit retains the offending routes through
+///   Notification GR instead of producing `PeerDown`;
+/// - dropping RFC 8538 encapsulation loses the original Cease/1 reason/data.
+#[tokio::test]
+async fn max_prefix_with_notification_gr_latches_and_sends_encapsulated_hard_reset() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 1;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.graceful_restart = true;
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.max_prefixes_ipv4 = Some(1);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+    let mut session = PeerSession::new_with_identity_and_lifecycle(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::primary(77),
+    );
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    while notify_rx.try_recv().is_ok() {}
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_notification_gr = true;
+    negotiated.peer_restart_time = 120;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    install_test_negotiated_session(&mut session, negotiated);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    while rib_rx.try_recv().is_ok() {}
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+
+    assert!(
+        session.stop_requested,
+        "max-prefix must latch local restart off"
+    );
+    assert!(
+        session.reconnect_timer.is_none(),
+        "Idle transition must not arm deferred reconnect after max-prefix"
+    );
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixExceeded {
+            session_id: 77,
+            role: crate::SessionRole::Primary,
+            count: 2,
+            bound: 1,
+            family: Some((Afi::Ipv4, Safi::Unicast)),
+            ..
+        })
+    ));
+
+    let notification = read_until_notification(&mut server).await;
+    assert_eq!(notification.code, NotificationCode::Cease);
+    assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+    let mut encapsulated = vec![NotificationCode::Cease.as_u8(), cease_subcode::MAX_PREFIXES];
+    encapsulated.extend_from_slice(&max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 1));
+    assert_eq!(notification.data.as_ref(), encapsulated.as_slice());
+    assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })));
+    assert!(
+        !matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerGracefulRestart { .. })),
+        "Hard Reset must not retain over-limit routes through GR"
+    );
+}
+
 /// Mutant: charging v6 unicast routes against `max_prefixes_ipv4` (a single
 /// shared counter) tears down before the v4 family used any of its budget.
 #[tokio::test]

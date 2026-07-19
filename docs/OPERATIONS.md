@@ -486,8 +486,11 @@ daemon does not crash on MRT failures.
 ### Peer max-prefix exceeded
 
 When a peer sends more prefixes than `max_prefixes`, the daemon sends a
-NOTIFICATION (Cease / Maximum Number of Prefixes Reached) and tears down the
-session. The peer is not automatically re-enabled — use
+NOTIFICATION and tears down the session. Without negotiated Notification GR
+this is Cease/1 (Maximum Number of Prefixes Reached). With the RFC 8538 N-bit,
+the daemon sends outer Cease/9 (Hard Reset) whose data encapsulates the same
+Cease/1 reason and RFC 4486 data, preventing the over-limit routes from being
+retained as stale. The peer is not automatically re-enabled — use
 `rbgp neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to
 restart it.
 
@@ -652,7 +655,7 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
-| `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by a Cease / Maximum Number of Prefixes Reached NOTIFICATION and session teardown (see "Peer max-prefix exceeded" above) |
+| `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
 
 ### Event Streams
 
