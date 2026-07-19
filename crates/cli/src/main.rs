@@ -60,7 +60,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
     config diff, plan    0 no changes / 1 error / 2 changes present\n  \
-    config import        0 clean translation / 1 error / 2 translated with skips / 3 nothing translatable\n  \
+    config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below --coverage-min\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
@@ -543,9 +543,9 @@ enum ConfigAction {
     /// follow docs/cookbook/route-server-migration.md (shadow trial,
     /// `rbgp diff advertised`) before carrying traffic.
     #[command(after_help = "Exit codes:\n  \
-        0  clean full structural translation (nothing skipped)\n  \
+        0  clean full structural translation (no warnings or skips)\n  \
         1  error (unreadable source, unrecognized format, parse failure)\n  \
-        2  translated with skips (config written; the report lists every skipped stanza)\n  \
+        2  translated with warnings or skips (config written; review the report)\n  \
         3  refused (no translatable BGP structure in the source)")]
     Import {
         /// Source config: BIRD 2 (.conf), FRR running-config (.conf), or GoBGP (.toml)

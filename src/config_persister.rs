@@ -63,9 +63,10 @@ impl ConfigPersister {
         // Record the boot-time config as the newest history entry so the
         // first-ever rollback can restore what was running before the first
         // apply. Content-hash dedup keeps restarts from growing history.
-        if let Ok(toml_str) = toml::to_string_pretty(&self.current) {
-            self.record_history(&toml_str);
-        }
+        // Serialize the already-validated runtime snapshot. Re-reading the
+        // source here would create a validation-to-read race if an operator
+        // edits the file between startup validation and this task starting.
+        self.record_current_history();
         while let Some(mutation) = self.rx.recv().await {
             if let ConfigMutation::ReplaceConfigAck(new_config, ack) = mutation {
                 let previous = self.current.clone();
@@ -136,6 +137,11 @@ impl ConfigPersister {
             ConfigMutation::RefreshSnapshotNoPersist(new_config) => {
                 info!("refreshing persister config snapshot without writing to disk");
                 self.current = *new_config;
+                // The operator already persisted and successfully reloaded
+                // this desired config. Record the validated snapshot without
+                // writing it back: otherwise history index 0 still names the
+                // pre-SIGHUP config and `rollback 1` cannot restore it.
+                self.record_current_history();
                 false
             }
         }
@@ -167,6 +173,16 @@ impl ConfigPersister {
                 error = %error,
                 "failed to record applied config in the config history"
             );
+        }
+    }
+
+    fn record_current_history(&self) {
+        match toml::to_string_pretty(&self.current) {
+            Ok(toml_str) => self.record_history(&toml_str),
+            Err(error) => warn!(
+                error = %error,
+                "failed to serialize the applied config for config history"
+            ),
         }
     }
 }
@@ -380,6 +396,36 @@ log_format = "json"
         drop(tx);
         handle.await.unwrap();
         assert_eq!(crate::config_history::list(&history).unwrap().len(), 2);
+    }
+
+    /// Load-bearing SIGHUP-history proof: refreshing the validated desired
+    /// snapshot without a daemon write must still make that snapshot the
+    /// newest rollback entry. Removing the history record from
+    /// `RefreshSnapshotNoPersist` leaves this list at one entry.
+    #[test]
+    fn refresh_snapshot_no_persist_records_validated_config_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let history = dir.path().join("config-history");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (_tx, rx) = mpsc::channel(1);
+        let mut persister = ConfigPersister::new(rx, path, config, Some(history.clone()));
+        persister.record_current_history();
+
+        let mut refreshed = minimal_config();
+        refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        assert!(
+            !persister.apply(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
+                refreshed.clone()
+            ),))
+        );
+
+        let entries = crate::config_history::list(&history).unwrap();
+        assert_eq!(entries.len(), 2);
+        let newest = crate::config_history::read(&entries[0]).unwrap();
+        assert_eq!(newest, toml::to_string_pretty(&refreshed).unwrap());
     }
 
     #[tokio::test]

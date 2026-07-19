@@ -132,10 +132,14 @@ the real decision. Precisely what the view contains:
   the route *would* be advertised), the route is dropped from the view —
   it never fabricates a "not exported" claim.
 
-**Cost:** one `ExplainAdvertisedRoute` call per suppressed prefix on every
-request. Alice-LG's `[noexport] load_on_demand` (its default) fits this —
-the view is only computed when an operator opens it. For very large
-Loc-RIBs, consider fronting the adapter with a caching proxy.
+**Cost:** each request pages the complete Loc-RIB and peer Adj-RIB-Out, then
+makes one `ExplainAdvertisedRoute` call per suppressed prefix. Both paged
+snapshots are version-fenced: concurrent table churn can fail the request
+rather than return a mixed-generation answer, so clients should retry a 502.
+Alice-LG's `[noexport] load_on_demand` (its default) fits this — the view is
+only computed when an operator opens it. Do not poll it as a metrics endpoint;
+for very large or fast-changing Loc-RIBs, use a caching proxy and expect the
+current per-request implementation to be expensive until a bulk RPC exists.
 
 ### Noexport-reason → large-community mapping
 

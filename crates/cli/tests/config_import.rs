@@ -271,6 +271,18 @@ fn exit_2_translated_with_skips() {
     }
 }
 
+/// Load-bearing exit-contract proof: a placeholder-bearing translation must
+/// require review even when no stanza was skipped. Reverting `Report::exit_code`
+/// to inspect only `skipped` makes this return zero.
+#[test]
+fn exit_2_translated_with_warning_only() {
+    let source = "router bgp 64500\n neighbor 192.0.2.1 remote-as 64496\n!\n";
+    let imported = import_source(SourceFormat::Frr, "warning.conf", source).expect("translates");
+    assert!(imported.report.skipped.is_empty());
+    assert!(!imported.report.warnings.is_empty());
+    assert_eq!(imported.report.exit_code, 2);
+}
+
 #[test]
 fn exit_3_refused_when_nothing_translatable() {
     // Valid FRR shape, but no BGP instance at all.
@@ -330,6 +342,77 @@ fn group_remote_as_resolves_onto_members() {
             .config_toml
             .contains("address = \"192.0.2.200\"\nremote_asn = 64499")
     );
+}
+
+/// Load-bearing FRR-default proof: removing the additive default-IPv4
+/// post-pass leaves this explicitly IPv6-activated peer with IPv6 only,
+/// contrary to FRR's default AF semantics.
+#[test]
+fn frr_default_ipv4_is_additive_to_explicit_ipv6() {
+    let source = "\
+router bgp 64500
+ bgp router-id 192.0.2.10
+ neighbor 192.0.2.1 remote-as 64496
+ address-family ipv6 unicast
+  neighbor 192.0.2.1 activate
+ exit-address-family
+!
+";
+    let imported = import_source(SourceFormat::Frr, "dual.conf", source).expect("translates");
+    assert!(
+        imported
+            .config_toml
+            .contains("families = [\"ipv6_unicast\", \"ipv4_unicast\"]"),
+        "{}",
+        imported.config_toml
+    );
+}
+
+/// Load-bearing instance-boundary proof: accepting suffix tokens on the first
+/// `router bgp` line imports a VRF as rustbgpd's global instance and causes the
+/// real global instance below it to be discarded.
+#[test]
+fn frr_vrf_instance_is_not_imported_as_global() {
+    let source = "\
+router bgp 65100 vrf BLUE
+ bgp router-id 198.51.100.1
+ neighbor 198.51.100.2 remote-as 65101
+!
+router bgp 64500
+ bgp router-id 192.0.2.10
+ neighbor 192.0.2.1 remote-as 64496
+!
+";
+    let imported = import_source(SourceFormat::Frr, "vrf.conf", source).expect("translates");
+    assert_eq!(imported.report.local_asn, 64500);
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(imported.config_toml.contains("address = \"192.0.2.1\""));
+    assert!(!imported.config_toml.contains("198.51.100.2"));
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .any(|skip| skip.stanza == "router bgp 65100 vrf BLUE")
+    );
+}
+
+/// Load-bearing numeric-boundary proof: Rust's float-to-integer cast saturates,
+/// so removing the explicit upper bound silently turns this invalid GoBGP AS
+/// into 4294967295 instead of refusing the source.
+#[test]
+fn gobgp_rejects_out_of_range_float_asn() {
+    let source = "\
+[global.config]
+as = 1e100
+router-id = \"192.0.2.10\"
+[[neighbors]]
+[neighbors.config]
+neighbor-address = \"192.0.2.1\"
+peer-as = 64496
+";
+    let error = import_source(SourceFormat::Gobgp, "overflow.toml", source).unwrap_err();
+    assert!(matches!(error, ImportError::Empty(_)), "{error:?}");
 }
 
 #[test]

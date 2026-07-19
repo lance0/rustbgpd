@@ -20,8 +20,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   policy-definitions are listed — with source line numbers — in an
   import report for hand-translation to `.rpol`. Secrets are never
   imported (MD5/auth presence is flagged instead). Distinct exit codes:
-  0 clean full translation, 1 error, 2 translated-with-skips, 3 nothing
-  translatable; the emitted config for every checked-in fixture is
+  0 clean full translation, 1 error, 2 translated-with-warnings-or-skips,
+  3 nothing translatable; the emitted config for every checked-in fixture is
   gate-tested against `rustbgpd --check`. The route-server migration
   cookbook now opens with the mechanical importer → `--check` → shadow
   trial → `rbgp diff advertised` flow.
@@ -60,8 +60,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   presence and non-emptiness.
 - Applied-config history and `rollback N`, completing the Junos-style
   transactional quartet (check / compare / commit confirmed / rollback).
-  Every durable config write — transaction applies, gRPC config CRUD, and
-  the boot-time config — is recorded in a bounded on-disk history under
+  Every applied config — transaction applies, gRPC config CRUD,
+  successful SIGHUP reloads, and the boot-time config — is recorded in a
+  bounded on-disk history under
   `<runtime_state_dir>/config-history/` (last 20 distinct configs,
   content-hash-deduplicated, timestamped, restart-safe). `rbgp config
   history` lists index / timestamp / SHA-256 / one-line summary; `rbgp
@@ -69,7 +70,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   executor — same plan classification, reload-impact and update-group
   annotations, receipts, and optional `--confirm-id`/`--confirm-timeout`
   confirmed-commit window (timeout auto-revert and boot revert included).
-  Rolling back past the retained history fails cleanly. New
+  Entry reads verify the content digest embedded in the file name and
+  reject non-regular or corrupt snapshots. Rolling back past the retained
+  history fails cleanly. New
   `ConfigService.ListConfigHistory` (`sensitive_read`) and
   `ConfigService.RollbackConfigTransaction` (`operator_only`, same tier as
   apply) RPCs; history responses carry metadata only, never config

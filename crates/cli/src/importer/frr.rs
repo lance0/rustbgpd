@@ -121,6 +121,18 @@ pub fn parse(input: &str) -> Model {
         }
 
         if let Some(rest) = text.strip_prefix("router bgp ") {
+            let mut instance = rest.split_whitespace();
+            let asn = instance.next().and_then(|word| word.parse().ok());
+            if instance.next().is_some() {
+                skip(
+                    &mut model,
+                    line,
+                    text.to_owned(),
+                    "BGP VRF/view instance: rustbgpd runs one global instance per daemon",
+                );
+                swallow_top = true;
+                continue;
+            }
             if model.local_asn.is_some() {
                 skip(
                     &mut model,
@@ -131,7 +143,7 @@ pub fn parse(input: &str) -> Model {
                 swallow_top = true;
                 continue;
             }
-            match rest.split_whitespace().next().and_then(|w| w.parse().ok()) {
+            match asn {
                 Some(asn) => {
                     model.local_asn = Some(asn);
                     in_bgp = true;
@@ -174,10 +186,17 @@ pub fn parse(input: &str) -> Model {
         skip(&mut model, line, text.to_owned(), GENERIC_GUIDANCE);
     }
 
-    // Post-pass: default IPv4-unicast activation for neighbors with no
-    // explicit activation anywhere (and no group families to inherit),
-    // and the `timers bgp` instance-default hold time for neighbors
+    // Post-pass: FRR's default IPv4-unicast activation is additive to
+    // explicit AF activation and applies to peer groups as well as peers.
+    // Also apply the `timers bgp` instance-default hold time to neighbors
     // without their own timers (group timers inherit at daemon level).
+    if default_ipv4 {
+        for group in &mut model.groups {
+            if !group.families.iter().any(|family| family == "ipv4_unicast") {
+                group.families.push("ipv4_unicast".to_owned());
+            }
+        }
+    }
     let groups = &model.groups;
     for neighbor in &mut model.neighbors {
         let group = neighbor
@@ -185,7 +204,13 @@ pub fn parse(input: &str) -> Model {
             .as_ref()
             .and_then(|name| groups.iter().find(|group| &group.name == name));
         let inherits_families = group.is_some_and(|g| !g.families.is_empty());
-        if neighbor.families.is_empty() && !inherits_families && default_ipv4 {
+        if default_ipv4
+            && !neighbor
+                .families
+                .iter()
+                .any(|family| family == "ipv4_unicast")
+            && (!neighbor.families.is_empty() || !inherits_families)
+        {
             neighbor.families.push("ipv4_unicast".to_owned());
         }
         if neighbor.hold_time.is_none() && group.and_then(|g| g.hold_time).is_none() {

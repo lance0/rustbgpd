@@ -1,9 +1,9 @@
 //! Bounded on-disk history of applied configs (Junos-style `rollback N`).
 //!
-//! Every durable config write funnels through [`crate::config_persister`]'s
-//! atomic persist step, which records the written document here — one entry
-//! per distinct config, content-hash-deduplicated against the newest entry
-//! and bounded to [`HISTORY_LIMIT`] snapshots under
+//! [`crate::config_persister`] records each validated applied config here —
+//! durable mutations, the boot snapshot, and successful SIGHUP refreshes —
+//! one entry per distinct config, content-hash-deduplicated against the newest
+//! entry and bounded to [`HISTORY_LIMIT`] snapshots under
 //! `<runtime_state_dir>/config-history/`. Rollback resolves an entry by
 //! index and routes it through the ordinary config transaction path (see
 //! `config_transaction_control`); this module only stores and lists.
@@ -11,8 +11,8 @@
 //! Entries are individual files named `<seq>-<unix_ts>-<sha256>.toml`,
 //! written with the commit-confirm journal's fsync'd atomic-write primitive.
 //! The monotonic sequence number orders entries (newest = highest); the
-//! content hash lives in the file name so recording and dedup never need to
-//! re-read old entries.
+//! content hash lives in the file name and is verified against the retained
+//! bytes before deduplication or rollback.
 
 #![deny(unsafe_code)]
 
@@ -45,7 +45,7 @@ pub struct HistoryEntry {
     pub sequence: u64,
     /// Unix seconds at record time.
     pub timestamp_unix_seconds: u64,
-    /// Hex-encoded SHA-256 of the persisted TOML document.
+    /// Hex-encoded SHA-256 of the applied TOML document.
     pub sha256: String,
     /// Entry file path.
     pub path: PathBuf,
@@ -82,10 +82,20 @@ pub fn record(dir: &Path, toml_str: &str) -> io::Result<bool> {
     fs::create_dir_all(dir)?;
     let hash = sha256_hex(toml_str);
     let entries = list(dir)?;
-    if entries.first().is_some_and(|newest| newest.sha256 == hash) {
+    if let Some(newest) = entries.first()
+        && newest.sha256 == hash
+        && read(newest).is_ok_and(|contents| contents == toml_str)
+    {
         return Ok(false);
     }
-    let sequence = entries.first().map_or(1, |newest| newest.sequence + 1);
+    let sequence = entries.first().map_or(Ok(1), |newest| {
+        newest.sequence.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "config history sequence is exhausted",
+            )
+        })
+    })?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
@@ -155,6 +165,42 @@ pub fn read_entry(dir: &Path, index: usize) -> io::Result<(HistoryEntry, String)
             ),
         ));
     };
+    let toml_str = read(&entry)?;
+    Ok((entry, toml_str))
+}
+
+/// Load and integrity-check one exact history entry returned by [`list`].
+///
+/// Reading by entry rather than re-resolving its index keeps a concurrent
+/// append from pairing one snapshot's metadata with another snapshot's
+/// contents. The file name is only metadata until the retained bytes hash to
+/// the embedded digest; a corrupt or replaced entry is never eligible for a
+/// rollback.
+///
+/// # Errors
+///
+/// Returns `InvalidData` for a non-regular, oversized, non-UTF-8, or
+/// digest-mismatched entry, plus ordinary filesystem errors.
+pub fn read(entry: &HistoryEntry) -> io::Result<String> {
+    let metadata = fs::symlink_metadata(&entry.path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "config history entry {} is not a regular file",
+                entry.path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_ENTRY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "config history entry {} exceeds the {MAX_ENTRY_BYTES}-byte sanity limit",
+                entry.path.display()
+            ),
+        ));
+    }
     let mut reader = fs::File::open(&entry.path)?.take(MAX_ENTRY_BYTES + 1);
     let mut toml_str = String::new();
     reader.read_to_string(&mut toml_str)?;
@@ -167,7 +213,18 @@ pub fn read_entry(dir: &Path, index: usize) -> io::Result<(HistoryEntry, String)
             ),
         ));
     }
-    Ok((entry, toml_str))
+    let actual_hash = sha256_hex(&toml_str);
+    if actual_hash != entry.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "config history entry {} failed its SHA-256 integrity check (expected {}, got {actual_hash})",
+                entry.path.display(),
+                entry.sha256
+            ),
+        ));
+    }
+    Ok(toml_str)
 }
 
 /// One-line redacted summary of a retained config document: identity and
@@ -214,7 +271,7 @@ fn parse_entry_name(name: &str) -> Option<(u64, u64, String)> {
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    Some((sequence, timestamp, hash.to_string()))
+    Some((sequence, timestamp, hash.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -330,6 +387,82 @@ mod tests {
         let empty = dir.path().join("empty");
         let error = read_entry(&empty, 1).unwrap_err();
         assert!(error.to_string().contains("0 retained entries"));
+    }
+
+    /// Load-bearing integrity proof: changing retained bytes without changing
+    /// the digest-bearing file name must make the entry unreadable. Removing
+    /// the digest comparison in `read` makes this test green-light a tampered
+    /// rollback candidate.
+    #[test]
+    fn read_entry_refuses_digest_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(record(dir.path(), &config_toml(65001)).unwrap());
+        let entry = list(dir.path()).unwrap().remove(0);
+        fs::write(&entry.path, config_toml(65002)).unwrap();
+
+        let error = read_entry(dir.path(), 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("integrity check"), "{error}");
+    }
+
+    /// Load-bearing dedup proof: a corrupt newest file that merely retains the
+    /// expected hash in its name must not suppress a fresh good snapshot.
+    /// Restoring the old filename-only dedup makes `record` return false.
+    #[test]
+    fn record_repairs_filename_only_dedup_after_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = config_toml(65001);
+        assert!(record(dir.path(), &original).unwrap());
+        let entry = list(dir.path()).unwrap().remove(0);
+        fs::write(&entry.path, config_toml(65002)).unwrap();
+
+        assert!(record(dir.path(), &original).unwrap());
+        let entries = list(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(read(&entries[0]).unwrap(), original);
+        assert!(read(&entries[1]).is_err(), "corrupt prior stays ineligible");
+    }
+
+    /// Load-bearing sequence-boundary proof: a corrupt maximum sequence must
+    /// fail closed instead of panicking in debug builds or wrapping to zero in
+    /// release builds. Restoring unchecked `newest.sequence + 1` breaks this.
+    #[test]
+    fn record_refuses_sequence_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        let prior = config_toml(65001);
+        let path = dir
+            .path()
+            .join(format!("{}-1-{}.toml", u64::MAX, sha256_hex(&prior)));
+        fs::write(path, prior).unwrap();
+
+        let error = record(dir.path(), &config_toml(65002)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("sequence is exhausted"),
+            "{error}"
+        );
+    }
+
+    /// Load-bearing file-type proof: a digest-shaped symlink must not turn the
+    /// rollback store into an arbitrary file reader. Replacing
+    /// `symlink_metadata` with an unchecked `File::open` makes this pass as a
+    /// valid snapshot.
+    #[cfg(unix)]
+    #[test]
+    fn read_refuses_symlink_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let contents = config_toml(65001);
+        let target = dir.path().join("target.toml");
+        fs::write(&target, &contents).unwrap();
+        let path = dir
+            .path()
+            .join(format!("0000000001-1-{}.toml", sha256_hex(&contents)));
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let entry = list(dir.path()).unwrap().remove(0);
+        let error = read(&entry).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not a regular file"), "{error}");
     }
 
     #[test]
