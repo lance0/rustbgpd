@@ -100,6 +100,16 @@ structured `FlowSpecAction` messages and converts them to the
 appropriate extended community encoding. Existing extended community
 wire codec and RIB storage handle these transparently.
 
+FlowSpec routes also retain ordinary BGP path attributes used by selection and
+policy, including `AS_PATH`, `LOCAL_PREF`, `MED`, and standard, extended, and
+large communities. Export policy applies those generic modifications while
+existing extended-community edits remain opaque path-attribute edits and can
+alter or remove the already-supported FlowSpec action communities. This adds
+no new action syntax, interpretation, or dataplane behavior. A configured
+`set_next_hop` is intentionally ignored for FlowSpec: RFC 8955/8956 MP_REACH
+uses NH-Len 0, so neither a route next-hop nor a legacy IPv4 `NEXT_HOP` path
+attribute is synthesized.
+
 ### Reuse of existing infrastructure
 
 FlowSpec routes flow through the same infrastructure as unicast:

@@ -175,7 +175,8 @@ impl RibManager {
     /// for initial table dump and ROUTE-REFRESH responses.
     #[expect(
         clippy::too_many_arguments,
-        reason = "FlowSpec staging mirrors unicast distribution context"
+        clippy::too_many_lines,
+        reason = "FlowSpec staging keeps the family-local export ladder together"
     )]
     pub(in crate::manager) fn stage_flowspec_rules(
         loc_rib: &LocRib,
@@ -202,6 +203,15 @@ impl RibManager {
             if let Some(best) = loc_rib.get_flowspec(key) {
                 let fs_family = (best.afi, Safi::FlowSpec);
                 if !sendable.is_some_and(|f| f.contains(&fs_family)) {
+                    if rib_out.get_flowspec(key).is_some() {
+                        fs_withdraw.push(key.clone());
+                    }
+                    continue;
+                }
+
+                // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
+                // A permit policy cannot remove it to make the rule eligible.
+                if super::no_advertise_export_suppressed(best.communities()) {
                     if rib_out.get_flowspec(key).is_some() {
                         fs_withdraw.push(key.clone());
                     }
@@ -294,7 +304,28 @@ impl RibManager {
                     rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
                 record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
-                    fs_announce.push(best.clone());
+                    let mut modified = best.clone();
+                    if !result.modifications.is_empty() {
+                        let mut modifications = result.modifications.clone();
+                        // RFC 8955/8956 FlowSpec MP_REACH carries NH-Len 0.
+                        // The shared helper's IPv4 next-hop support would
+                        // otherwise insert a legacy NEXT_HOP path attribute.
+                        modifications.set_next_hop = None;
+                        if !modifications.is_empty() {
+                            let next_hop = rustbgpd_policy::apply_modifications(
+                                &mut modified.attributes,
+                                &modifications,
+                            );
+                            debug_assert!(next_hop.is_none());
+                        }
+                    }
+                    if super::no_advertise_export_suppressed(modified.communities()) {
+                        if rib_out.get_flowspec(key).is_some() {
+                            fs_withdraw.push(key.clone());
+                        }
+                        continue;
+                    }
+                    fs_announce.push(modified);
                 } else if rib_out.get_flowspec(key).is_some() {
                     fs_withdraw.push(key.clone());
                 }

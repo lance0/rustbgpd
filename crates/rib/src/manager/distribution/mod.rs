@@ -692,8 +692,8 @@ fn llgr_stale_export_suppressed(
 /// source route is ineligible before export policy can remove the community,
 /// and a modified route is ineligible when policy adds it. This predicate is
 /// deliberately target-independent: every supported unicast, VPN,
-/// labeled-unicast, RT-Constrain, and BGP-LS selection shape applies both
-/// checks.
+/// labeled-unicast, `FlowSpec`, EVPN, RT-Constrain, and BGP-LS selection shape
+/// applies both checks.
 pub(super) fn no_advertise_export_suppressed(communities: &[u32]) -> bool {
     communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
 }
