@@ -91,6 +91,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             state: output::format_state_with_stale(n.state, n.stale).to_string(),
             stale: n.stale,
             slow_peer: n.slow_peer,
+            graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
             uptime_seconds: n.uptime_seconds,
             prefixes_received: n.prefixes_received,
             prefixes_sent: n.prefixes_sent,
@@ -285,6 +286,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             println!("Slow Peer:             true (outbound queue persistently backlogged)");
         }
         println!(
+            "GShut Advertise Intent: {}",
+            graceful_shutdown_advertise_intent_label(n.graceful_shutdown_advertise_intent)
+        );
+        println!(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)
         );
@@ -398,6 +403,14 @@ fn authentication_label(value: i32) -> &'static str {
         Ok(crate::proto::AuthenticationMode::Md5) => "md5",
         Ok(crate::proto::AuthenticationMode::Plaintext) => "plaintext",
         Ok(crate::proto::AuthenticationMode::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn graceful_shutdown_advertise_intent_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "enabled",
+        Some(false) => "disabled",
+        None => "unknown",
     }
 }
 
@@ -706,6 +719,21 @@ mod tests {
         assert_eq!(paths_limit_effective_send_label(false, 0), "inactive");
         assert_eq!(paths_limit_effective_send_label(true, 0), "unlimited");
         assert_eq!(paths_limit_effective_send_label(true, 4), "4");
+    }
+
+    /// Load-bearing: inversion or collapsing rolling-upgrade absence into
+    /// disabled changes one of these exact operator-facing labels.
+    #[test]
+    fn graceful_shutdown_advertise_intent_is_presence_aware() {
+        assert_eq!(
+            graceful_shutdown_advertise_intent_label(Some(true)),
+            "enabled"
+        );
+        assert_eq!(
+            graceful_shutdown_advertise_intent_label(Some(false)),
+            "disabled"
+        );
+        assert_eq!(graceful_shutdown_advertise_intent_label(None), "unknown");
     }
 
     #[test]

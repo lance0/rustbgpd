@@ -1908,6 +1908,8 @@ pub struct PeerInfo {
     pub state: SessionState,
     /// Whether the peer is administratively enabled.
     pub enabled: bool,
+    /// Local RFC 8326 graceful-shutdown advertisement intent.
+    pub graceful_shutdown_advertise_intent: bool,
     /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
     /// Configured hold time override (None = default).

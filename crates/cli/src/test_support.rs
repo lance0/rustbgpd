@@ -797,6 +797,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             tcp_ao_rotation_phase: "idle".to_string(),
             tcp_ao_rotation_error: String::new(),
             slow_peer: false,
+            graceful_shutdown_advertise_intent: Some(true),
         }))
     }
 

@@ -231,6 +231,10 @@ pub struct JsonNeighborDetail {
     /// outbound queue (LAN-470). Omitted while false.
     #[serde(skip_serializing_if = "is_false")]
     pub slow_peer: bool,
+    /// Local desired RFC 8326 advertisement state. `None` means the daemon is
+    /// too old to expose it, not that the intent is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graceful_shutdown_advertise_intent: Option<bool>,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
@@ -1145,13 +1149,14 @@ mod tests {
 
     #[test]
     fn test_json_neighbor_detail_serializes_dynamic_peer_fields() {
-        let detail = JsonNeighborDetail {
+        let mut detail = JsonNeighborDetail {
             address: "10.0.0.2".to_string(),
             interface: "eth0".to_string(),
             remote_asn: 65002,
             state: "Established".to_string(),
             stale: true,
             slow_peer: true,
+            graceful_shutdown_advertise_intent: Some(true),
             uptime_seconds: 42,
             prefixes_received: 1,
             prefixes_sent: 2,
@@ -1313,6 +1318,7 @@ mod tests {
         assert_eq!(value["messages_received"], 20);
         assert_eq!(value["messages_sent"], 21);
         assert_eq!(value["route_reflector_client"], false);
+        assert_eq!(value["graceful_shutdown_advertise_intent"], true);
         assert_eq!(value["selection_deferral"][0]["afi"], 1);
         assert_eq!(
             value["selection_deferral"][0]["waiter_state"],
@@ -1320,6 +1326,15 @@ mod tests {
         );
         assert_eq!(value["selection_deferral"][0]["waiter_session_id"], 42);
         assert_eq!(value["selection_deferral"][0]["blocking_waiters"], 2);
+
+        // Load-bearing: false remains an explicit operator answer while None
+        // is the rolling-upgrade unknown. Collapsing either state makes this red.
+        detail.graceful_shutdown_advertise_intent = Some(false);
+        let value = serde_json::to_value(&detail).expect("JSON serialize");
+        assert_eq!(value["graceful_shutdown_advertise_intent"], false);
+        detail.graceful_shutdown_advertise_intent = None;
+        let value = serde_json::to_value(&detail).expect("JSON serialize");
+        assert!(value.get("graceful_shutdown_advertise_intent").is_none());
     }
 
     fn table_fixture() -> Vec<proto::NeighborState> {

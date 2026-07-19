@@ -1923,6 +1923,31 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
     managed.handle.shutdown().await.unwrap().unwrap();
 }
 
+/// Load-bearing: sourcing this from unavailable session state, or omitting the
+/// `ManagedPeer` copy, makes the asserted true intent disappear.
+#[tokio::test]
+async fn unavailable_session_preserves_graceful_shutdown_advertise_intent() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.45".parse().unwrap();
+    let handle = fake_peer_handle(
+        addr,
+        SessionState::Idle,
+        None,
+        Arc::new(FakePeerCounters::default()),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let peer_key = key(addr);
+    let managed = mgr.peers.get_mut(&peer_key).unwrap();
+    managed.advertise_graceful_shutdown = true;
+
+    let info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    assert!(info.graceful_shutdown_advertise_intent);
+    assert!(info.stale);
+
+    let managed = mgr.peers.remove(&peer_key).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
 fn attach_test_pending_inbound(
     mgr: &mut PeerManager,
     peer_addr: IpAddr,

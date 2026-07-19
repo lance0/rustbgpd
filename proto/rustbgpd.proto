@@ -543,6 +543,10 @@ message NeighborState {
   // duration (slow_peer_threshold_pct / slow_peer_duration). Clears
   // when the queue drains and on session teardown.
   bool slow_peer = 36;
+  // Local operator intent to attach RFC 8326 GRACEFUL_SHUTDOWN to
+  // announcements sent to this peer. Presence distinguishes an older daemon
+  // that does not expose this state from an explicit disabled value.
+  optional bool graceful_shutdown_advertise_intent = 37;
 }
 
 message SelectionDeferralFamilyState {
