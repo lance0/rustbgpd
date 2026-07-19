@@ -10407,6 +10407,261 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
     }
 }
 
+/// A denied `FlowSpec` replacement retires only an accepted `(AFI, rule)`
+/// identity. Explicit overlap is emitted once, first-seen/repeated denials stay
+/// silent, and the same destinationless rule in the other AFI remains live.
+///
+/// Break-to-red: deleting denied-key collection, or hard-coding either AFI,
+/// leaves the opposite-family deny-only identity accepted; removing the
+/// known-set gate emits first-seen/repeated withdrawals and duplicates overlap.
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one ordered dual-AFI scenario")]
+async fn denied_flowspec_replacements_retire_exact_afi_rule_identity() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let rule = |protocol: u8| FlowSpecRule {
+        components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: u64::from(protocol),
+        }])],
+    };
+    let shared = rule(6);
+    let explicit = rule(17);
+    let overlap = rule(41);
+    let sibling = rule(47);
+    let first_seen = rule(132);
+    let update = |afi, announced: Vec<FlowSpecRule>, withdrawn: Vec<FlowSpecRule>| {
+        let mut reach =
+            empty_nonunicast_reach(afi, Safi::FlowSpec, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        reach.flowspec_announced = announced;
+        let mut unreach = empty_nonunicast_unreach(afi, Safi::FlowSpec);
+        unreach.flowspec_withdrawn = withdrawn;
+        nonunicast_update(
+            nonunicast_accepted_attrs(),
+            reach,
+            (!unreach.flowspec_withdrawn.is_empty()).then_some(unreach),
+            false,
+        )
+    };
+    let key = |afi, rule: &FlowSpecRule| FlowSpecKey {
+        afi,
+        rule: rule.clone(),
+    };
+
+    session
+        .process_update(update(
+            Afi::Ipv4,
+            vec![shared.clone(), explicit.clone(), overlap.clone()],
+            vec![],
+        ))
+        .await;
+    session
+        .process_update(update(
+            Afi::Ipv6,
+            vec![shared.clone(), sibling.clone()],
+            vec![],
+        ))
+        .await;
+    for expected in [3, 2] {
+        let RibUpdate::RoutesReceived {
+            flowspec_announced,
+            flowspec_withdrawn,
+            ..
+        } = rib_rx.try_recv().expect("accepted FlowSpec reaches RIB")
+        else {
+            panic!("expected RoutesReceived");
+        };
+        assert_eq!(flowspec_announced.len(), expected);
+        assert!(flowspec_withdrawn.is_empty());
+    }
+    assert_eq!(session.known_prefix_count(), 5);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])));
+
+    session
+        .process_update(update(Afi::Ipv6, vec![shared.clone()], vec![]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_withdrawn, ..
+    } = rib_rx.try_recv().expect("denied replacement reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_withdrawn, vec![key(Afi::Ipv6, &shared)]);
+    assert!(session.known_flowspec.contains(&key(Afi::Ipv4, &shared)));
+
+    session
+        .process_update(update(Afi::Ipv4, vec![shared.clone()], vec![]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_withdrawn, ..
+    } = rib_rx.try_recv().expect("opposite-AFI denial reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_withdrawn, vec![key(Afi::Ipv4, &shared)]);
+
+    session
+        .process_update(update(Afi::Ipv4, vec![], vec![explicit.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_withdrawn, ..
+    } = rib_rx.try_recv().expect("explicit withdrawal reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_withdrawn, vec![key(Afi::Ipv4, &explicit)]);
+
+    session
+        .process_update(update(
+            Afi::Ipv4,
+            vec![overlap.clone()],
+            vec![overlap.clone()],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        flowspec_withdrawn, ..
+    } = rib_rx.try_recv().expect("overlap reaches RIB once")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(flowspec_withdrawn, vec![key(Afi::Ipv4, &overlap)]);
+
+    for _ in 0..2 {
+        session
+            .process_update(update(Afi::Ipv4, vec![first_seen.clone()], vec![]))
+            .await;
+        assert!(rib_rx.try_recv().is_err(), "unknown denial stays silent");
+    }
+    assert!(session.known_flowspec.contains(&key(Afi::Ipv6, &sibling)));
+    assert_eq!(session.known_prefix_count(), 1);
+}
+
+/// A denied EVPN Type-2 replacement retires its exact accepted key. Explicit
+/// overlap is emitted once, first-seen/repeated denials stay silent, and an
+/// untouched sibling remains accepted.
+///
+/// Break-to-red: deleting denied-key collection leaves the deny-only key live;
+/// removing the known-set membership gate emits unknown/repeated withdrawals
+/// and duplicates the explicit overlap.
+#[tokio::test]
+async fn denied_evpn_replacements_retire_exact_known_type2_key() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+    };
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let route = |suffix: u8| {
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0x02, 0, 0, 0, 0, suffix]),
+            ip: None,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        })
+    };
+    let deny_only = route(11);
+    let explicit = route(22);
+    let overlap = route(33);
+    let sibling = route(44);
+    let first_seen = route(55);
+    let update = |announced: Vec<EvpnRoute>, withdrawn: Vec<EvpnRoute>| {
+        let mut reach = empty_nonunicast_reach(
+            Afi::L2Vpn,
+            Safi::Evpn,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        reach.evpn_announced = announced;
+        let mut unreach = empty_nonunicast_unreach(Afi::L2Vpn, Safi::Evpn);
+        unreach.evpn_withdrawn = withdrawn;
+        nonunicast_update(
+            nonunicast_accepted_attrs(),
+            reach,
+            (!unreach.evpn_withdrawn.is_empty()).then_some(unreach),
+            false,
+        )
+    };
+
+    session
+        .process_update(update(
+            vec![
+                deny_only.clone(),
+                explicit.clone(),
+                overlap.clone(),
+                sibling.clone(),
+            ],
+            vec![],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("accepted EVPN reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(evpn_announced.len(), 4);
+    assert!(evpn_withdrawn.is_empty());
+    assert_eq!(session.known_prefix_count(), 4);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])));
+
+    session
+        .process_update(update(vec![deny_only.clone()], vec![]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_withdrawn, .. } =
+        rib_rx.try_recv().expect("denied replacement reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(evpn_withdrawn, vec![deny_only.key()]);
+
+    session
+        .process_update(update(vec![], vec![explicit.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_withdrawn, .. } =
+        rib_rx.try_recv().expect("explicit withdrawal reaches RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(evpn_withdrawn, vec![explicit.key()]);
+
+    session
+        .process_update(update(vec![overlap.clone()], vec![overlap.clone()]))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_withdrawn, .. } =
+        rib_rx.try_recv().expect("overlap reaches RIB once")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(evpn_withdrawn, vec![overlap.key()]);
+
+    for _ in 0..2 {
+        session
+            .process_update(update(vec![first_seen.clone()], vec![]))
+            .await;
+        assert!(rib_rx.try_recv().is_err(), "unknown denial stays silent");
+    }
+    assert!(session.known_evpn.contains(&sibling.key()));
+    assert_eq!(session.known_prefix_count(), 1);
+}
+
 /// End-to-end ERR/GR + import-policy interaction: a denied replacement must
 /// remove the accepted route immediately, before `EoRR`, so neither refresh nor
 /// subsequent graceful-restart retention can keep it alive.

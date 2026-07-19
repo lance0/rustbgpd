@@ -58,6 +58,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Import-policy-denied FlowSpec and EVPN replacements now withdraw the exact accepted identity.
 - **Release tarballs ship `rs-config-render`.** The route-server
   config renderer was built by the release workflow but never staged
   into `rustbgpd-<arch>.tar.gz` — v0.60.0 tarballs contain only
