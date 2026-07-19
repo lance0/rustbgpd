@@ -199,6 +199,15 @@ impl RibManager {
                 continue;
             };
 
+            // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
+            // A permit policy cannot remove it to make the route eligible.
+            if super::no_advertise_export_suppressed(best.communities()) {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
+
             // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
             //
@@ -334,6 +343,16 @@ impl RibManager {
                     modified.next_hop = addr;
                 }
             }
+
+            // Export policy may scope an otherwise eligible route by adding
+            // NO_ADVERTISE. Stop it before the Adj-RIB-Out commit.
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
+
             // Skip the announce if rib_out already holds the same route —
             // the dirty-resync path in particular re-evaluates every
             // advertised key and would otherwise re-emit no-op announces

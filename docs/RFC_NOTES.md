@@ -18,7 +18,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | Core BGP | RFC 4271, RFC 6793 (4-byte ASN), RFC 7606 (revised error handling) | FSM + UPDATE validation with treat-as-withdraw / attribute-discard, dual-stack IPv4/IPv6 unicast (SAFI 1) |
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
-| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` and `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS |
+| Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, BGP-LS, and EVPN; `NO_EXPORT`/`NO_EXPORT_SUBCONFED` enforcement for the same set except EVPN |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
@@ -35,14 +35,16 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ## RFC 1997 — well-known community export coverage
 
-- IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and BGP-LS SAFI 71/72
-  routes carrying `NO_ADVERTISE` are ineligible before export policy, and the
-  post-policy route is checked again before Adj-RIB-Out commit. A permit policy
-  cannot remove the community to bypass the restriction; a policy that adds it
-  suppresses the modified route.
+- IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, BGP-LS SAFI 71/72,
+  and EVPN routes carrying `NO_ADVERTISE` in their stored route attributes are
+  ineligible toward every target before export policy, and the post-policy
+  route is checked again before Adj-RIB-Out commit. A permit policy cannot
+  remove the community to bypass the restriction; rustbgpd also conservatively
+  suppresses a modified route when export policy adds it.
 - `NO_EXPORT` (0xFFFFFF01) and `NO_EXPORT_SUBCONFED` (0xFFFFFF03) are enforced
-  at eBGP egress across the same family set: a route received with either
-  community is suppressed at staging toward every eBGP peer whose
+  at eBGP egress for IPv4/IPv6 unicast, VPNv4/VPNv6, labeled-unicast, RTC, and
+  BGP-LS: a route received with either community is suppressed at staging
+  toward every eBGP peer whose
   `interpret_rfc1997` knob is on (the default for plain eBGP and iBGP peers;
   route-server clients default to transparent pass-through, matching common
   IXP route-server practice — set `interpret_rfc1997 = true` on an RS client
@@ -67,9 +69,9 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 - The same predicate covers single-best plus Add-Path for unicast, VPN, and
   labeled routes; grouped/private and RFC 7947 per-client-best shapes apply to
   unicast, grouped/private applies to VPN, and RFC 9107 ORR applies to unicast
-  and labeled-unicast. RTC and both BGP-LS SAFIs use their single-best export
-  paths. Existing advertisements are withdrawn and logical Adj-RIB-Out state is
-  cleared.
+  and labeled-unicast. RTC, both BGP-LS SAFIs, and EVPN use their single-best
+  export paths. Existing advertisements are withdrawn and logical Adj-RIB-Out
+  state is cleared.
 - Add-Path and per-client-best remove scoped candidates before ranking, so
   surviving siblings compact normally. They also skip policy-modified
   candidates whose result carries `NO_ADVERTISE`. ORR single-best first
@@ -88,8 +90,8 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   mechanics are correct and fail-closed — the amplification is inherent to
   SAFI 132, where one NLRI stands for the whole class of VPN routes carrying
   that RT.
-- `NO_ADVERTISE` and `NO_EXPORT` enforcement for EVPN and FlowSpec remains
-  deferred.
+- `NO_EXPORT` enforcement for EVPN, and `NO_ADVERTISE` / `NO_EXPORT`
+  enforcement for FlowSpec, remain deferred.
 
 ---
 

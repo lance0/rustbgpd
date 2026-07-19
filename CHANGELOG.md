@@ -73,6 +73,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN exports now enforce stored-route `NO_ADVERTISE` before policy and
+  policy-added `NO_ADVERTISE` before Adj-RIB-Out commit, withdrawing only the
+  exact prior advertisement and remaining silent for first-seen suppression.
 - Outbound RFC 9234 OTC diagnostics now emit once per transition into a blocked disposition, rather than repeating on unchanged refresh/resync retries; permit, withdrawal, or session reset re-arms the edge.
 - Import-policy-denied FlowSpec and EVPN replacements now withdraw the exact accepted identity.
 - **Release tarballs ship `rs-config-render`.** The route-server
