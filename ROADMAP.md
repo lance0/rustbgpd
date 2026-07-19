@@ -124,9 +124,12 @@ the data-driven filtering/tooling wrapper, not the daemon.
   upstream gate); native ingestion demand-gated. The phase-1 renderer is
   **Shipped (#986)** as `tools/rs-config-render` — template-context ingestion
   is fingerprint-pinned with fail-stale refusal, and the emitted config is
-  verified by a real `rustbgpd --check`. Remaining phase 1 = the differential
-  BIRD/rustbgpd interop lab (the origin-as accessor gap claimed at drafting
-  was stale — already shipped) (LAN-467, umbrella).
+  verified by a real `rustbgpd --check`. The phase-1 differential is also
+  **shipped (M90):** one site input produces arouteserver/BIRD and
+  `rs-config-render`/rustbgpd policy, with 11/11 accept/reject parity, generated
+  explain-term attribution, and a policy mutation proven to make the lab red.
+  The origin-as accessor gap claimed at drafting was stale — already shipped
+  (LAN-467, umbrella).
 - ~~RFC 7947/8195 community-based announcement control~~ **Shipped (#968):**
   per-target announce / announce-only / announce-to-none / prepend via
   standard + large control communities, egress scrub, rs-client-default knob

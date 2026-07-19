@@ -103,3 +103,67 @@ diverge and the lab fails.
 - Both route servers carry the same BGP identifier (the one
   `router_id` in `general.yml` renders into both configs); they never
   peer with each other, so this is harmless.
+
+## Verified M90 receipt — 2026-07-19
+
+The lab was run from source revision
+`f7ccc133e91c035df1f9536b1b6d6ad4e287ca63` with these immutable
+runtime identities:
+
+| Component | Version | Image identity |
+|-----------|---------|----------------|
+| arouteserver | 1.23.2 | `pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66` |
+| BIRD | 2.0.12 | `bird:2-bookworm`, image ID `sha256:5658f128964bce8aabe96703307aceff2d5fc883fbd86151c9b32d19b3559bcf` |
+| GoBGP | 3.37.0 | `gobgp:interop`, image ID `sha256:a6d73539911988d9525930030a748019a584abfc5684986eeb9dd0d4d3c80f9a` |
+| rustbgpd | 0.60.0 | `rustbgpd:dev`, image ID `sha256:b6bb41cbc2e008c7798fd5b7ed5a50a0474969a21d51fe0ee1272801363c7dfc` |
+
+The exact fixture set was:
+
+| Input | SHA-256 |
+|-------|---------|
+| `general.yml` | `cb718ea5bba676ddf0183e959d6479718b02e0ebe01428d5fce2d919d8f28306` |
+| `clients.yml` | `08ceca5f9bafb13139538096a94595d075b7a7dae9342deb26d7f5adfc337e1e` |
+| `context.yml` | `0af51e2ca17b1a9cd5556e7cddbf3549f658dcafc69ab2de9dd2240ec0e57c5c` |
+| `context-sectioned.yml` | `66eb0765f3226359b28b83f891df0d3019339e5089f9664d60d377543fa55390` |
+| `announcements.json` | `5e2050c0e5f758d8b4691af873fc618c03bc3ce3eb25d5c522306df908e1dd3d` |
+| `bogons.yml` | `26e7c313a41fd7a854f73c656a77415fd9c2bb9057b625a7592bd436ee26dfe5` |
+| `arouteserver.yml` | `c3b85f1af54c437ae50b0d4e1502b3a6e95cb2c4b12c255ac1c90cfc9eec5b19` |
+| `bgpq4-stub.sh` | `cebb06da5c9adff5184652bca877ab7956f137c5d9cd425b7c449ad0e950bb84` |
+
+Run commands were the six commands in [Running it](#running-it), plus:
+
+```bash
+bash tests/interop/m90-differential/prove-context-ingestion.sh
+```
+
+The context proof passed 15/15 checks: the fresh pinned-image sectioned
+dump matched `context-sectioned.yml` byte for byte, both context shapes
+rendered identical files, `rustbgpd --check` passed, and all four generated
+policies passed `rbgp policy check`. The full differential passed 65/65
+checks. All 11 manifest rows were accounted for (4 accepts, 7 rejects), with
+per-member import counters exactly 2/1, 1/2, and 1/4 permitted/denied. All
+three sessions remained Established with zero flaps. rustbgpd logged one
+IPv4-unicast End-of-RIB toward each member before the announcement injection,
+so the verdict matrix was evaluated after initial table completion.
+
+| Member | Prefix | Verdict on both | rustbgpd deciding policy / term |
+|--------|--------|-----------------|----------------------------------|
+| AS64500 | `198.51.100.0/24` | accept | — |
+| AS64500 | `203.0.113.0/27` | accept | — |
+| AS64500 | `192.0.2.0/24` | reject | `rs-hygiene` / `reject-black-list-prefix` |
+| AS64501 | `203.0.113.128/25` | accept | — |
+| AS64501 | `198.51.100.0/24` | reject | `client-as64501-1` / `rest` |
+| AS64501 | `203.0.113.192/26` | reject | `client-as64501-1` / `rest` |
+| AS64502 | `203.0.113.64/26` | accept | — |
+| AS64502 | `10.64.0.0/16` | reject | `rs-hygiene` / `reject-bogon-prefix` |
+| AS64502 | `203.0.113.64/30` | reject | `rs-hygiene` / `reject-v4-len-outside-window` |
+| AS64502 | `0.0.0.0/0` | reject | `rs-hygiene` / `reject-v4-len-outside-window` |
+| AS64502 | `198.51.100.128/25` | reject | `rs-hygiene` / `reject-never-via-rs` |
+
+Load-bearing proof: a temporary rust-side-only mutation authorized
+`198.51.100.0/24` in `AS64501_bundle` in `context.yml`, while the BIRD input
+remained unchanged. The driver exited 1 at
+`rustbgpd retains rejected 198.51.100.0/24 from member2 ... timed out after
+30s`; BIRD still rejected it. The mutation was removed byte for byte before
+the final 65/65 green run. Removing either daemon's policy parity therefore
+makes this receipt red instead of producing a false green.
