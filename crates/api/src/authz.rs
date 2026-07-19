@@ -185,6 +185,18 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::SensitiveRead,
     ),
     method(
+        "rustbgpd.v1.ConfigService",
+        "ListConfigHistory",
+        "/rustbgpd.v1.ConfigService/ListConfigHistory",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.ConfigService",
+        "RollbackConfigTransaction",
+        "/rustbgpd.v1.ConfigService/RollbackConfigTransaction",
+        AuthTier::OperatorOnly,
+    ),
+    method(
         "rustbgpd.v1.NeighborService",
         "AddNeighbor",
         "/rustbgpd.v1.NeighborService/AddNeighbor",
@@ -850,7 +862,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 99);
+        assert_eq!(METHODS.len(), 101);
     }
 
     #[test]
@@ -891,9 +903,9 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 58);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 59);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 22);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
 
     #[test]
@@ -976,6 +988,20 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/GetEffectiveConfig").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
+        );
+        // History listing is metadata-only (timestamps, hashes, count
+        // summaries), but it still discloses config-change cadence and
+        // identity facts — full-config-adjacent reads pin at sensitive_read.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/ListConfigHistory").map(|m| m.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        // Rollback IS an apply: it routes a retained snapshot through the
+        // same transaction executor, so it carries the same tier as
+        // ApplyConfigTransaction.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/RollbackConfigTransaction").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/GetEvpnRuntime").map(|m| m.tier),

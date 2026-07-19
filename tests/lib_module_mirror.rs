@@ -20,6 +20,7 @@ use std::path::Path;
 const NOT_MIRRORED: &[&str] = &[
     "bfd_runtime",
     "blackhole",
+    "config_history",
     "config_persister",
     "config_transaction_control",
     "confirm_journal",

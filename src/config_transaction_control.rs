@@ -17,9 +17,9 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::proto;
 use rustbgpd_api::server::{
-    ConfigMutationGateFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
-    GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
+    ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
+    ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
+    ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
@@ -158,6 +158,24 @@ impl ConfigTransactionController {
         Arc::new(move |_request| {
             let controller = controller.clone();
             Box::pin(async move { controller.status().await })
+        })
+    }
+
+    #[must_use]
+    pub fn history_fn(&self) -> ConfigHistoryListFn {
+        let controller = self.clone();
+        Arc::new(move |_request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.history() })
+        })
+    }
+
+    #[must_use]
+    pub fn rollback_fn(&self) -> ConfigRollbackFn {
+        let controller = self.clone();
+        Arc::new(move |request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.rollback(request).await })
         })
     }
 
@@ -673,6 +691,119 @@ impl ConfigTransactionController {
                 human_text: "No confirmed config transaction is pending.".to_string(),
             }),
             human_text: "No confirmed config transaction is pending.\n".to_string(),
+        })
+    }
+
+    fn history(&self) -> Result<proto::ListConfigHistoryResponse, ConfigTransactionApplyError> {
+        let dir = self.history_dir()?;
+        let entries = crate::config_history::list(dir).map_err(|error| {
+            ConfigTransactionApplyError::Internal(format!(
+                "failed to read the applied-config history at {}: {error}",
+                dir.display()
+            ))
+        })?;
+        let mut proto_entries = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            // Summaries come from the entry contents; a per-entry read
+            // failure degrades that one summary instead of failing the list.
+            let summary = crate::config_history::read_entry(dir, entry.index).map_or_else(
+                |error| format!("(unreadable entry: {error})"),
+                |(_, toml_str)| crate::config_history::summarize(&toml_str),
+            );
+            proto_entries.push(proto::ConfigHistoryEntry {
+                index: u32::try_from(entry.index).unwrap_or(u32::MAX),
+                timestamp_unix_seconds: entry.timestamp_unix_seconds,
+                sha256: entry.sha256.clone(),
+                summary,
+            });
+        }
+        let human_text = if proto_entries.is_empty() {
+            "No applied configs recorded yet.\n".to_string()
+        } else {
+            format!(
+                "{} applied config(s) retained; index 0 is the currently persisted config. Restore one with RollbackConfigTransaction (rbgp config rollback N).\n",
+                proto_entries.len()
+            )
+        };
+        Ok(proto::ListConfigHistoryResponse {
+            entries: proto_entries,
+            human_text,
+        })
+    }
+
+    /// Junos-style `rollback N`: resolve history entry N and push it through
+    /// the SAME apply path as `ApplyConfigTransaction` — `apply_locked` does
+    /// the plan/impact classification, commit, receipts, and (when a confirm
+    /// handle is given) the whole confirmed-commit lifecycle. There is
+    /// deliberately no second apply route here.
+    async fn rollback(
+        self,
+        request: proto::RollbackConfigTransactionRequest,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        self.history_dir()?;
+        if request.index == 0 {
+            return Err(ConfigTransactionApplyError::InvalidArgument(
+                "rollback index must be >= 1: index 0 is the currently persisted config"
+                    .to_string(),
+            ));
+        }
+        if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
+            return Err(ConfigTransactionApplyError::InvalidArgument(
+                "confirm_id is required when confirm_timeout_seconds is set".to_string(),
+            ));
+        }
+        let join = tokio::spawn(async move {
+            let _guard = self.deps.lock.lock().await;
+            // Resolve the entry under the coordinator lock so a concurrent
+            // commit cannot shift indexes between resolution and apply.
+            let dir = self.history_dir()?;
+            let index = usize::try_from(request.index).unwrap_or(usize::MAX);
+            let (entry, candidate_toml) =
+                crate::config_history::read_entry(dir, index).map_err(|error| {
+                    ConfigTransactionApplyError::FailedPrecondition(format!(
+                        "cannot roll back: {error}"
+                    ))
+                })?;
+            let client_request_id = if request.client_request_id.is_empty() {
+                format!("config-rollback:{index}")
+            } else {
+                request.client_request_id
+            };
+            let apply_request = proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: request.expected_runtime_snapshot_token,
+                client_request_id,
+                comment: request.comment,
+                confirm_id: request.confirm_id,
+                confirm_timeout_seconds: request.confirm_timeout_seconds,
+            };
+            let confirmed = parse_confirmed_apply_mode(&apply_request)?;
+            let mut response = self.apply_locked(apply_request, confirmed).await?;
+            // Name the restored entry only when something actually committed;
+            // a noop ("already running that config") or rejected plan keeps
+            // the executor's own receipt text.
+            if response.status == proto::ConfigTransactionPlanStatus::Committable as i32 {
+                let _ = writeln!(
+                    response.human_text,
+                    "Rolled back to applied config {index} (recorded {}, sha256 {}).",
+                    entry.timestamp_unix_seconds, entry.sha256
+                );
+            }
+            Ok(response)
+        });
+        join.await.map_err(|_| {
+            ConfigTransactionApplyError::Internal(
+                "config rollback task did not complete".to_string(),
+            )
+        })?
+    }
+
+    fn history_dir(&self) -> Result<&std::path::Path, ConfigTransactionApplyError> {
+        self.deps.config_history_dir.as_deref().ok_or_else(|| {
+            ConfigTransactionApplyError::FailedPrecondition(
+                "config history requires a persisted config (start rustbgpd with --config)"
+                    .to_string(),
+            )
         })
     }
 
@@ -3739,6 +3870,7 @@ peer_group = "{group}"
             config_mutation_gate: None,
             startup_tables,
             confirm_journal_path: None,
+            config_history_dir: None,
         }
     }
 
@@ -7617,5 +7749,317 @@ peer_group = "ge"
         drop(rib_tx);
         rib_task.await.unwrap();
         drop(outbound_receivers);
+    }
+    // -----------------------------------------------------------------
+    // Applied-config history + rollback (Junos `rollback N`)
+    // -----------------------------------------------------------------
+
+    /// Controller wired with a real on-disk history dir and the dynamic
+    /// snapshot harness. Returns (controller, live runtime snapshot).
+    fn rollback_controller(
+        history_dir: &std::path::Path,
+        journal_path: Option<std::path::PathBuf>,
+        current_toml: String,
+    ) -> (
+        ConfigTransactionController,
+        Arc<Mutex<String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let snapshot_toml = Arc::new(Mutex::new(current_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let (config_tx, config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: journal_path,
+                config_history_dir: Some(history_dir.to_path_buf()),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+        (controller, snapshot_toml, ack_task)
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_the_previous_applied_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let previous_toml = base_toml("");
+        let current_toml = dynamic_candidate_toml();
+        // History as the persister would have recorded it: previous apply,
+        // then the currently running config.
+        crate::config_history::record(dir.path(), &previous_toml).unwrap();
+        crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let (controller, snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml.clone());
+        assert_eq!(*snapshot_toml.lock().await, current_toml);
+
+        let response = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect("rollback must succeed");
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        // MUTATION PROOF: the live runtime snapshot now holds the previous
+        // config byte-for-byte — a silently no-opped rollback would leave the
+        // current candidate in place and fail this.
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        let expected_hash = crate::config_history::sha256_hex(&previous_toml);
+        assert!(
+            response
+                .human_text
+                .contains("Rolled back to applied config 1"),
+            "{}",
+            response.human_text
+        );
+        assert!(
+            response.human_text.contains(&expected_hash),
+            "receipt must name the restored entry hash: {}",
+            response.human_text
+        );
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rollback_beyond_history_errors_cleanly_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let (controller, snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml.clone());
+
+        let err = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 5,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect_err("out-of-range rollback must fail");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("index 5 is out of range") && message.contains("1 retained entry")),
+            "{err:?}"
+        );
+        // MUTATION PROOF: nothing was applied.
+        assert_eq!(*snapshot_toml.lock().await, current_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn rollback_rejects_index_zero_and_timeout_without_confirm_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let (controller, snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml.clone());
+
+        let err = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 0,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect_err("rollback 0 must be rejected");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::InvalidArgument(ref message)
+                if message.contains("index must be >= 1")),
+            "{err:?}"
+        );
+
+        let err = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 60,
+            })
+            .await
+            .expect_err("timeout without confirm_id must be rejected");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::InvalidArgument(ref message)
+                if message.contains("confirm_id is required")),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, current_toml);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn history_and_rollback_fail_closed_without_history_dir() {
+        let snapshot_toml = Arc::new(Mutex::new(base_toml("")));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(
+                RuntimeConfigTransactionStatus::Committable,
+                vec!["[[dynamic_neighbors]]".to_string()],
+            ),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, None, Vec::new()),
+            BgpMetrics::new(),
+        );
+
+        let err = controller
+            .history()
+            .expect_err("history without a state dir must fail closed");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("--config")),
+            "{err:?}"
+        );
+        let err = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect_err("rollback without a state dir must fail closed");
+        assert!(
+            matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("--config")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_lists_entries_newest_first_with_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let previous_toml = base_toml("");
+        let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &previous_toml).unwrap();
+        crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let (controller, _snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml.clone());
+
+        let response = controller.history().expect("history must succeed");
+
+        assert_eq!(response.entries.len(), 2);
+        assert_eq!(response.entries[0].index, 0);
+        assert_eq!(
+            response.entries[0].sha256,
+            crate::config_history::sha256_hex(&current_toml)
+        );
+        assert_eq!(
+            response.entries[1].sha256,
+            crate::config_history::sha256_hex(&previous_toml)
+        );
+        // Summaries carry identity + counts, never document contents.
+        assert!(
+            response.entries[0].summary.contains("asn 65001"),
+            "{}",
+            response.entries[0].summary
+        );
+        assert!(
+            response.entries[0].summary.contains("1 dynamic range(s)"),
+            "{}",
+            response.entries[0].summary
+        );
+        assert!(response.human_text.contains("2 applied config(s)"));
+        ack_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_rollback_times_out_and_auto_reverts_the_rollback() {
+        // rollback N + confirm-id + timeout: the rollback commits, opens a
+        // confirm window (journal included), and when never confirmed the
+        // timeout auto-revert restores the pre-rollback config — the whole
+        // confirmed-commit lifecycle applies to rollback because rollback IS
+        // an apply.
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("commit-confirm-journal.json");
+        let history_dir = dir.path().join("config-history");
+        let previous_toml = base_toml("");
+        let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(&history_dir, &previous_toml).unwrap();
+        crate::config_history::record(&history_dir, &current_toml).unwrap();
+        let (controller, snapshot_toml, ack_task) = rollback_controller(
+            &history_dir,
+            Some(journal_path.clone()),
+            current_toml.clone(),
+        );
+
+        let response = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: "rollback-1".to_string(),
+                confirm_timeout_seconds: 1,
+            })
+            .await
+            .expect("confirmed rollback must succeed");
+        let confirmation = response
+            .confirmation
+            .expect("confirmed rollback must open a confirm window");
+        assert_eq!(
+            confirmation.status,
+            proto::ConfigTransactionConfirmationStatus::Pending as i32
+        );
+        assert_eq!(confirmation.confirm_id, "rollback-1");
+        // The rollback is live (runtime = previous config) and journaled.
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        assert!(journal_path.exists(), "confirmed rollback must journal");
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        // MUTATION PROOF: the unconfirmed rollback auto-reverted — the
+        // runtime is back on the pre-rollback config. (The auto-revert
+        // re-applies the captured snapshot, which serializes normalized, so
+        // compare as parsed configs, not raw bytes.)
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &current_toml);
+        let status = controller.status().await.expect("status must succeed");
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+        );
+        assert!(
+            !journal_path.exists(),
+            "auto-revert must consume the rollback journal"
+        );
+        ack_task.abort();
     }
 }

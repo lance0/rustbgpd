@@ -139,6 +139,60 @@ service ConfigService {
   // config validation rejects the placeholder loudly, so a dump taken from a
   // secret-bearing config cannot silently boot as-is.
   rpc GetEffectiveConfig(GetEffectiveConfigRequest) returns (GetEffectiveConfigResponse);
+
+  // List the daemon's bounded on-disk history of previously applied configs
+  // (newest first; index 0 is the currently persisted config). The response
+  // carries timestamps, content hashes, and one-line summaries only — never
+  // config document contents.
+  rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
+
+  // Roll back to a retained history entry (index >= 1). The daemon resolves
+  // the entry's config snapshot server-side and routes it through the exact
+  // same transaction executor as ApplyConfigTransaction — same plan/impact
+  // classification, same receipts, and the same optional confirmed-commit
+  // window (confirm_id / confirm_timeout_seconds), so a rollback can itself
+  // auto-revert unless confirmed.
+  rpc RollbackConfigTransaction(RollbackConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
+}
+
+message ListConfigHistoryRequest {}
+
+message ConfigHistoryEntry {
+  // 0 = the currently persisted config, 1 = the previous one, and so on.
+  uint32 index = 1;
+  // When this config was recorded (unix seconds).
+  uint64 timestamp_unix_seconds = 2;
+  // SHA-256 of the persisted TOML document, hex-encoded.
+  string sha256 = 3;
+  // One-line redacted summary (ASN, router id, object counts) — never the
+  // config document itself.
+  string summary = 4;
+}
+
+message ListConfigHistoryResponse {
+  // Newest first; entries[0] is the currently persisted config.
+  repeated ConfigHistoryEntry entries = 1;
+  string human_text = 2;
+}
+
+message RollbackConfigTransactionRequest {
+  // History entry to restore; must be >= 1 (index 0 is already running).
+  uint32 index = 1;
+  // Optional optimistic-concurrency token from PlanConfigTransaction /
+  // ListConfigHistory-time planning. Empty skips the stale-snapshot guard —
+  // the candidate is resolved server-side from proven history, not supplied
+  // by the caller.
+  string expected_runtime_snapshot_token = 2;
+  // Optional audit/correlation identifier supplied by automation.
+  string client_request_id = 3;
+  // Optional human change note. The daemon does not log this field verbatim.
+  string comment = 4;
+  // Optional confirmed-commit handle, same semantics as
+  // ApplyConfigTransactionRequest.confirm_id.
+  string confirm_id = 5;
+  // Optional confirmed-commit timeout in seconds, same semantics as
+  // ApplyConfigTransactionRequest.confirm_timeout_seconds.
+  uint32 confirm_timeout_seconds = 6;
 }
 
 message GetEffectiveConfigRequest {}

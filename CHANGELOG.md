@@ -58,6 +58,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpd` and `rbgp`. The binary is now packed alongside them, and
   the tarball content assertion checks all three binaries for
   presence and non-emptiness.
+- Applied-config history and `rollback N`, completing the Junos-style
+  transactional quartet (check / compare / commit confirmed / rollback).
+  Every durable config write — transaction applies, gRPC config CRUD, and
+  the boot-time config — is recorded in a bounded on-disk history under
+  `<runtime_state_dir>/config-history/` (last 20 distinct configs,
+  content-hash-deduplicated, timestamped, restart-safe). `rbgp config
+  history` lists index / timestamp / SHA-256 / one-line summary; `rbgp
+  config rollback N` restores entry N through the existing transaction
+  executor — same plan classification, reload-impact and update-group
+  annotations, receipts, and optional `--confirm-id`/`--confirm-timeout`
+  confirmed-commit window (timeout auto-revert and boot revert included).
+  Rolling back past the retained history fails cleanly. New
+  `ConfigService.ListConfigHistory` (`sensitive_read`) and
+  `ConfigService.RollbackConfigTransaction` (`operator_only`, same tier as
+  apply) RPCs; history responses carry metadata only, never config
+  documents.
 
 ## [0.60.0] — 2026-07-18
 

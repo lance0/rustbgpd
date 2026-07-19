@@ -392,3 +392,116 @@ fn torn_journal_refuses_boot_naming_both_files() {
             .contains("[peer_groups.ix-members]")
     );
 }
+
+#[test]
+fn history_and_rollback_restore_previous_config_across_restart() {
+    // End-to-end quartet proof over the real binary: apply a config, restart
+    // the daemon (history must survive and not grow via dedup), then
+    // `config rollback 1` must restore the pre-apply config — proven on the
+    // on-disk config AND the daemon's runtime state, not just the receipt.
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let lab = lab(temp.path());
+
+    let daemon = lab.spawn("first.stderr.log");
+    // Plain (unconfirmed) apply of the dynamic-neighbor candidate.
+    let plan = rbgp_json(
+        &lab.grpc_addr,
+        &[
+            "--json",
+            "config",
+            "plan",
+            "--from-file",
+            lab.candidate_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(plan["status"], "committable", "plan: {plan}");
+    let token = plan["runtime_snapshot_token"].as_str().unwrap();
+    let apply = rbgp_json(
+        &lab.grpc_addr,
+        &[
+            "--json",
+            "config",
+            "apply",
+            "--from-file",
+            lab.candidate_path.to_str().unwrap(),
+            "--expected-runtime-snapshot-token",
+            token,
+        ],
+    );
+    assert_eq!(apply["status"], "committable", "apply: {apply}");
+
+    // History: boot config + applied candidate, newest first.
+    let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
+    let entries = history["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2, "boot + apply must be recorded: {history}");
+    assert_ne!(
+        entries[0]["sha256"], entries[1]["sha256"],
+        "distinct configs must have distinct hashes: {history}"
+    );
+    let boot_hash = entries[1]["sha256"].as_str().unwrap().to_string();
+
+    // Restart: history survives on disk, and the boot-time re-record of the
+    // unchanged running config deduplicates instead of growing history.
+    daemon.sigkill();
+    let mut daemon = lab.spawn("second.stderr.log");
+    let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
+    assert_eq!(
+        history["entries"].as_array().map(Vec::len),
+        Some(2),
+        "history must survive a restart without duplicate boot entries: {history}"
+    );
+
+    // Rolling back past the retained history fails cleanly.
+    let out_of_range = rbgp(&lab.grpc_addr, &["--json", "config", "rollback", "5"]);
+    assert!(
+        !out_of_range.status.success(),
+        "rollback past history must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out_of_range.stderr);
+    assert!(
+        stderr.contains("out of range"),
+        "out-of-range rollback must say so:\n{stderr}"
+    );
+    // ...and must not have changed anything.
+    assert!(
+        std::fs::read_to_string(&lab.config_path)
+            .unwrap()
+            .contains("192.0.2.0/24"),
+        "failed rollback must not touch the config"
+    );
+
+    // rollback 1 restores the pre-apply (boot) config through the
+    // transaction path.
+    let rollback = rbgp_json(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
+    assert_eq!(rollback["status"], "committable", "rollback: {rollback}");
+    // MUTATION PROOF (disk): the candidate's dynamic-neighbor range is gone
+    // from the persisted config.
+    let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
+    assert!(
+        !on_disk.contains("192.0.2.0/24"),
+        "rollback must restore the pre-apply config on disk:\n{on_disk}"
+    );
+    // MUTATION PROOF (runtime): the daemon no longer runs the candidate's
+    // dynamic-neighbor range.
+    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
+    assert_eq!(
+        ranges.as_array().map(Vec::len),
+        Some(0),
+        "rolled-back daemon must not run the candidate's dynamic neighbors: {ranges}"
+    );
+    // The rollback commit is itself recorded as the newest history entry,
+    // with the boot config's content hash.
+    let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
+    let entries = history["entries"].as_array().expect("entries array");
+    assert_eq!(
+        entries.len(),
+        3,
+        "rollback commit is a new entry: {history}"
+    );
+    assert_eq!(
+        entries[0]["sha256"].as_str().unwrap(),
+        boot_hash,
+        "newest entry must be the restored boot config: {history}"
+    );
+    daemon.assert_still_running();
+}

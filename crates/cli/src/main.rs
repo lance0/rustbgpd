@@ -473,6 +473,50 @@ enum ConfigAction {
     /// Show pending or last confirmed-transaction lifecycle state
     Status,
 
+    /// List retained previously applied configs (newest first)
+    ///
+    /// The daemon keeps a bounded, content-deduplicated on-disk history of
+    /// applied configs under its runtime state directory. Each line shows
+    /// the rollback index (0 = currently running), timestamp, content
+    /// hash, and a one-line summary. Restore one with `config rollback N`.
+    History,
+
+    /// Roll back to a previously applied config (Junos `rollback N`)
+    ///
+    /// Restores history entry N (see `config history`; N >= 1) through the
+    /// same transaction path as `config apply`: same plan classification,
+    /// reload-impact annotations, and receipts. Pass --confirm-id /
+    /// --confirm-timeout to make the rollback itself auto-revert unless
+    /// confirmed.
+    Rollback {
+        /// History entry to restore (1 = previous applied config)
+        index: u32,
+
+        /// Optional runtime snapshot token to guard against concurrent changes
+        #[arg(long, value_name = "TOKEN")]
+        expected_runtime_snapshot_token: Option<String>,
+
+        /// Optional audit/correlation identifier
+        #[arg(long, value_name = "ID")]
+        client_request_id: Option<String>,
+
+        /// Optional human change note; not logged verbatim by the daemon
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+
+        /// Optional confirmed-commit handle; requires explicit confirm/abort
+        #[arg(long, value_name = "ID")]
+        confirm_id: Option<String>,
+
+        /// Confirmed-commit timeout in seconds; daemon default is 600, max is 86400
+        #[arg(
+            long = "confirm-timeout",
+            value_name = "SECONDS",
+            requires = "confirm_id"
+        )]
+        confirm_timeout_seconds: Option<u32>,
+    },
+
     /// Dump the daemon's effective running config (defaults materialized)
     ///
     /// Prints the live post-defaults config as normalized TOML: peer-group
@@ -1970,6 +2014,29 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 commands::config::abort(connection, &confirm_id, json).await
             }
             ConfigAction::Status => commands::config::status(connection, json).await,
+            ConfigAction::History => commands::config::history(connection, json).await,
+            ConfigAction::Rollback {
+                index,
+                expected_runtime_snapshot_token,
+                client_request_id,
+                comment,
+                confirm_id,
+                confirm_timeout_seconds,
+            } => {
+                commands::config::rollback(
+                    connection,
+                    commands::config::RollbackOptions {
+                        index,
+                        expected_runtime_snapshot_token: expected_runtime_snapshot_token.as_deref(),
+                        client_request_id: client_request_id.as_deref(),
+                        comment: comment.as_deref(),
+                        confirm_id: confirm_id.as_deref(),
+                        confirm_timeout_seconds,
+                    },
+                    json,
+                )
+                .await
+            }
             ConfigAction::Effective => commands::config::effective(connection, json).await,
             ConfigAction::Import { .. } => unreachable!("handled before connect"),
         },

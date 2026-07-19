@@ -38,6 +38,10 @@ pub(crate) struct MockState {
     pub(crate) config_confirm_calls: AtomicUsize,
     pub(crate) config_abort_calls: AtomicUsize,
     pub(crate) config_status_calls: AtomicUsize,
+    pub(crate) config_history_calls: AtomicUsize,
+    pub(crate) config_rollback_calls: AtomicUsize,
+    pub(crate) config_rollback_error: Mutex<Option<(Code, String)>>,
+    pub(crate) last_config_rollback: Mutex<Option<server_proto::RollbackConfigTransactionRequest>>,
     pub(crate) config_effective_calls: AtomicUsize,
     pub(crate) config_effective_error: Mutex<Option<(Code, String)>>,
     // Doctor-bundle overrides: canned effective-config TOML, metrics
@@ -521,6 +525,55 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                     human_text: "No confirmed config transaction is pending.".to_string(),
                 }),
                 human_text: "No confirmed config transaction is pending.\n".to_string(),
+            },
+        ))
+    }
+
+    async fn list_config_history(
+        &self,
+        _request: Request<server_proto::ListConfigHistoryRequest>,
+    ) -> Result<Response<server_proto::ListConfigHistoryResponse>, Status> {
+        self.state
+            .config_history_calls
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::ListConfigHistoryResponse {
+            entries: vec![
+                server_proto::ConfigHistoryEntry {
+                    index: 0,
+                    timestamp_unix_seconds: 1_787_000_000,
+                    sha256: "aa".repeat(32),
+                    summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
+                },
+                server_proto::ConfigHistoryEntry {
+                    index: 1,
+                    timestamp_unix_seconds: 1_786_000_000,
+                    sha256: "bb".repeat(32),
+                    summary: "asn 65001, router-id 10.0.0.1, 1 neighbor(s)".to_string(),
+                },
+            ],
+            human_text: "2 applied config(s) retained.\n".to_string(),
+        }))
+    }
+
+    async fn rollback_config_transaction(
+        &self,
+        request: Request<server_proto::RollbackConfigTransactionRequest>,
+    ) -> Result<Response<server_proto::ConfigTransactionApplyResponse>, Status> {
+        self.state
+            .config_rollback_calls
+            .fetch_add(1, Ordering::SeqCst);
+        *self.state.last_config_rollback.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.config_rollback_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            server_proto::ConfigTransactionApplyResponse {
+                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                runtime_snapshot_token: "kv1:rolledback:3".to_string(),
+                committed_sections: vec!["[[neighbors]] modify".to_string()],
+                human_text: "Rolled back to applied config 1.\n".to_string(),
+                confirmation: None,
+                update_group_impact: None,
             },
         ))
     }

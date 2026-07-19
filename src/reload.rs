@@ -6796,8 +6796,9 @@ remote_asn = 65002
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
         let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(8);
-        let persister =
-            tokio::spawn(ConfigPersister::new(mutation_rx, path.clone(), initial.clone()).run());
+        let persister = tokio::spawn(
+            ConfigPersister::new(mutation_rx, path.clone(), initial.clone(), None).run(),
+        );
         let bridge = tokio::spawn(run_config_bridge(
             event_rx,
             replace_rx,

@@ -6,7 +6,8 @@ use crate::proto::{
     ConfigTransactionConfirmation, ConfigTransactionConfirmationStatus,
     ConfigTransactionPlanResponse, ConfigTransactionPlanStatus, ConfigTransactionStatusResponse,
     ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
-    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, PlanConfigTransactionRequest,
+    GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, ListConfigHistoryRequest,
+    ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
     UpdateGroupImpactPlan,
 };
 
@@ -16,6 +17,15 @@ const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
 pub struct ApplyOptions<'a> {
     pub from_file: &'a str,
     pub expected_runtime_snapshot_token: &'a str,
+    pub client_request_id: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub confirm_id: Option<&'a str>,
+    pub confirm_timeout_seconds: Option<u32>,
+}
+
+pub struct RollbackOptions<'a> {
+    pub index: u32,
+    pub expected_runtime_snapshot_token: Option<&'a str>,
     pub client_request_id: Option<&'a str>,
     pub comment: Option<&'a str>,
     pub confirm_id: Option<&'a str>,
@@ -216,6 +226,135 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
         print_confirmation(resp.confirmation.as_ref());
     }
     Ok(())
+}
+
+/// List the daemon's bounded on-disk applied-config history: index,
+/// timestamp, content hash, and a one-line summary per retained entry
+/// (never config document contents).
+pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_config_history(ListConfigHistoryRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        print_json(history_to_json(&resp))?;
+    } else {
+        print_history_human(&resp);
+    }
+    Ok(())
+}
+
+/// Junos-style `rollback N`: the daemon resolves history entry N and routes
+/// it through the same transaction path as apply — same receipts, and the
+/// rollback itself can be commit-confirmed.
+pub async fn rollback(
+    connection: Connection,
+    options: RollbackOptions<'_>,
+    json: bool,
+) -> Result<(), CliError> {
+    if options.index == 0 {
+        return Err(CliError::Argument(
+            "rollback index must be >= 1 (index 0 is the currently running config)".to_string(),
+        ));
+    }
+    if options.confirm_id.is_none() && options.confirm_timeout_seconds.is_some() {
+        return Err(CliError::Argument(
+            "--confirm-timeout requires --confirm-id".to_string(),
+        ));
+    }
+    if let Some(confirm_id) = options.confirm_id {
+        validate_confirm_id(confirm_id)?;
+    }
+    if matches!(
+        options.confirm_timeout_seconds,
+        Some(timeout_seconds) if timeout_seconds > MAX_CONFIRM_TIMEOUT_SECONDS
+    ) {
+        return Err(CliError::Argument(format!(
+            "--confirm-timeout must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
+        )));
+    }
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .rollback_config_transaction(RollbackConfigTransactionRequest {
+            index: options.index,
+            expected_runtime_snapshot_token: options
+                .expected_runtime_snapshot_token
+                .unwrap_or_default()
+                .to_string(),
+            client_request_id: options.client_request_id.unwrap_or_default().to_string(),
+            comment: options.comment.unwrap_or_default().to_string(),
+            confirm_id: options.confirm_id.unwrap_or_default().to_string(),
+            confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
+        })
+        .await?
+        .into_inner();
+
+    // A rollback receipt is an apply receipt — same shape, same printers.
+    if json {
+        print_json(apply_to_json(&resp))?;
+    } else {
+        print_apply_human(&resp);
+    }
+    if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
+        crate::output::print_next_step(json, &footer);
+    }
+    Ok(())
+}
+
+fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
+    serde_json::json!({
+        "entries": resp.entries.iter().map(|entry| serde_json::json!({
+            "index": entry.index,
+            "timestamp_unix_seconds": entry.timestamp_unix_seconds,
+            "timestamp": format_unix_utc(entry.timestamp_unix_seconds),
+            "sha256": entry.sha256,
+            "summary": entry.summary,
+        })).collect::<Vec<_>>(),
+        "human_text": resp.human_text,
+    })
+}
+
+fn print_history_human(resp: &ListConfigHistoryResponse) {
+    for entry in &resp.entries {
+        let short_hash = entry.sha256.get(..12).unwrap_or(&entry.sha256);
+        let marker = if entry.index == 0 { " (running)" } else { "" };
+        println!(
+            "{:>3}  {}  {}  {}{}",
+            entry.index,
+            format_unix_utc(entry.timestamp_unix_seconds),
+            short_hash,
+            entry.summary,
+            marker,
+        );
+    }
+    print!("{}", resp.human_text);
+}
+
+/// Render unix seconds as `YYYY-MM-DDTHH:MM:SSZ` without a date dependency
+/// (Howard Hinnant's civil-from-days algorithm).
+fn format_unix_utc(unix_seconds: u64) -> String {
+    let days = i64::try_from(unix_seconds / 86_400).unwrap_or(i64::MAX);
+    let secs_of_day = unix_seconds % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs_of_day / 3_600,
+        (secs_of_day % 3_600) / 60,
+        secs_of_day % 60,
+    )
 }
 
 /// Dump the daemon's effective running config: normalized TOML with
@@ -1193,6 +1332,168 @@ mod tests {
             value["confirmation"]["runtime_snapshot_token"],
             "kv1:committed:2"
         );
+    }
+
+    #[tokio::test]
+    async fn history_calls_list_config_history_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        history(connection, true).await.unwrap();
+
+        assert_eq!(server.state.config_history_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn history_json_shape_is_stable() {
+        let value = history_to_json(&ListConfigHistoryResponse {
+            entries: vec![crate::proto::ConfigHistoryEntry {
+                index: 0,
+                timestamp_unix_seconds: 1_787_000_000,
+                sha256: "ab".repeat(32),
+                summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
+            }],
+            human_text: "1 applied config(s) retained.\n".to_string(),
+        });
+
+        assert_eq!(value["entries"][0]["index"], 0);
+        assert_eq!(value["entries"][0]["timestamp_unix_seconds"], 1_787_000_000);
+        assert_eq!(value["entries"][0]["timestamp"], "2026-08-17T20:53:20Z");
+        assert_eq!(value["entries"][0]["sha256"], "ab".repeat(32));
+        assert_eq!(
+            value["entries"][0]["summary"],
+            "asn 65001, router-id 10.0.0.1, 2 neighbor(s)"
+        );
+        assert_eq!(value["human_text"], "1 applied config(s) retained.\n");
+    }
+
+    #[test]
+    fn format_unix_utc_renders_known_instants() {
+        assert_eq!(format_unix_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_unix_utc(1_787_000_000), "2026-08-17T20:53:20Z");
+        // Leap-year day.
+        assert_eq!(format_unix_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn rollback_sends_index_and_metadata() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        rollback(
+            connection,
+            RollbackOptions {
+                index: 2,
+                expected_runtime_snapshot_token: Some("kv1:old:1"),
+                client_request_id: Some("deploy-99"),
+                comment: Some("undo bad change"),
+                confirm_id: Some("rollback-1"),
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(server.state.config_rollback_calls.load(Ordering::SeqCst), 1);
+        let request = server
+            .state
+            .last_config_rollback
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.index, 2);
+        assert_eq!(request.expected_runtime_snapshot_token, "kv1:old:1");
+        assert_eq!(request.client_request_id, "deploy-99");
+        assert_eq!(request.comment, "undo bad change");
+        assert_eq!(request.confirm_id, "rollback-1");
+        assert_eq!(request.confirm_timeout_seconds, 120);
+    }
+
+    #[tokio::test]
+    async fn rollback_rejects_index_zero_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = rollback(
+            connection,
+            RollbackOptions {
+                index: 0,
+                expected_runtime_snapshot_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: None,
+            },
+            true,
+        )
+        .await
+        .expect_err("rollback 0 must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message.contains("index must be >= 1")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_rollback_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rollback_rejects_confirm_timeout_without_confirm_id_before_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = rollback(
+            connection,
+            RollbackOptions {
+                index: 1,
+                expected_runtime_snapshot_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("confirm timeout without confirm_id must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message) if message == "--confirm-timeout requires --confirm-id"),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_rollback_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rollback_rpc_error_maps_to_cli_error() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_rollback_error.lock().await = Some((
+            tonic::Code::FailedPrecondition,
+            "cannot roll back: config history has 1 retained entry".to_string(),
+        ));
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = rollback(
+            connection,
+            RollbackOptions {
+                index: 5,
+                expected_runtime_snapshot_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: None,
+            },
+            true,
+        )
+        .await
+        .expect_err("daemon rejection must surface as CLI error");
+
+        assert!(
+            matches!(err, CliError::Rpc(ref message) if message.contains("cannot roll back")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_rollback_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

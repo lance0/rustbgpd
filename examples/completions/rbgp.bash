@@ -136,11 +136,17 @@ _rbgp() {
             rbgp__subcmd__config,help)
                 cmd="rbgp__subcmd__config__subcmd__help"
                 ;;
+            rbgp__subcmd__config,history)
+                cmd="rbgp__subcmd__config__subcmd__history"
+                ;;
             rbgp__subcmd__config,import)
                 cmd="rbgp__subcmd__config__subcmd__import"
                 ;;
             rbgp__subcmd__config,plan)
                 cmd="rbgp__subcmd__config__subcmd__plan"
+                ;;
+            rbgp__subcmd__config,rollback)
+                cmd="rbgp__subcmd__config__subcmd__rollback"
                 ;;
             rbgp__subcmd__config,status)
                 cmd="rbgp__subcmd__config__subcmd__status"
@@ -163,11 +169,17 @@ _rbgp() {
             rbgp__subcmd__config__subcmd__help,help)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__help"
                 ;;
+            rbgp__subcmd__config__subcmd__help,history)
+                cmd="rbgp__subcmd__config__subcmd__help__subcmd__history"
+                ;;
             rbgp__subcmd__config__subcmd__help,import)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__import"
                 ;;
             rbgp__subcmd__config__subcmd__help,plan)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__plan"
+                ;;
+            rbgp__subcmd__config__subcmd__help,rollback)
+                cmd="rbgp__subcmd__config__subcmd__help__subcmd__rollback"
                 ;;
             rbgp__subcmd__config__subcmd__help,status)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__status"
@@ -541,11 +553,17 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__config,effective)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__effective"
                 ;;
+            rbgp__subcmd__help__subcmd__config,history)
+                cmd="rbgp__subcmd__help__subcmd__config__subcmd__history"
+                ;;
             rbgp__subcmd__help__subcmd__config,import)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__import"
                 ;;
             rbgp__subcmd__help__subcmd__config,plan)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__plan"
+                ;;
+            rbgp__subcmd__help__subcmd__config,rollback)
+                cmd="rbgp__subcmd__help__subcmd__config__subcmd__rollback"
                 ;;
             rbgp__subcmd__help__subcmd__config,status)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__status"
@@ -1292,7 +1310,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config)
-            opts="-s -j -h --addr --token-file --json --no-color --help diff plan apply confirm abort status effective import help"
+            opts="-s -j -h --addr --token-file --json --no-color --help diff plan apply confirm abort status history rollback effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1476,7 +1494,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__help)
-            opts="diff plan apply confirm abort status effective import help"
+            opts="diff plan apply confirm abort status history rollback effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1573,6 +1591,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__config__subcmd__help__subcmd__history)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__config__subcmd__help__subcmd__import)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1601,6 +1633,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__config__subcmd__help__subcmd__rollback)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__config__subcmd__help__subcmd__status)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1608,6 +1654,32 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__config__subcmd__history)
+            opts="-s -j -h --addr --token-file --json --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1661,6 +1733,52 @@ _rbgp() {
                     return 0
                     ;;
                 --expected-runtime-snapshot-token)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__config__subcmd__rollback)
+            opts="-s -j -h --expected-runtime-snapshot-token --client-request-id --comment --confirm-id --confirm-timeout --addr --token-file --json --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --expected-runtime-snapshot-token)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --client-request-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --comment)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --confirm-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --confirm-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -4146,7 +4264,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config)
-            opts="diff plan apply confirm abort status effective import"
+            opts="diff plan apply confirm abort status history rollback effective import"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4229,6 +4347,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__help__subcmd__config__subcmd__history)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__help__subcmd__config__subcmd__import)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -4244,6 +4376,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config__subcmd__plan)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__config__subcmd__rollback)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

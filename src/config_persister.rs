@@ -39,18 +39,33 @@ pub struct ConfigPersister {
     rx: mpsc::Receiver<ConfigMutation>,
     config_path: PathBuf,
     current: Config,
+    /// Applied-config history directory (`config_history` module). `None`
+    /// disables recording (unit tests, embedders without a state dir).
+    history_dir: Option<PathBuf>,
 }
 
 impl ConfigPersister {
-    pub fn new(rx: mpsc::Receiver<ConfigMutation>, config_path: PathBuf, current: Config) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<ConfigMutation>,
+        config_path: PathBuf,
+        current: Config,
+        history_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             rx,
             config_path,
             current,
+            history_dir,
         }
     }
 
     pub async fn run(mut self) {
+        // Record the boot-time config as the newest history entry so the
+        // first-ever rollback can restore what was running before the first
+        // apply. Content-hash dedup keeps restarts from growing history.
+        if let Ok(toml_str) = toml::to_string_pretty(&self.current) {
+            self.record_history(&toml_str);
+        }
         while let Some(mutation) = self.rx.recv().await {
             if let ConfigMutation::ReplaceConfigAck(new_config, ack) = mutation {
                 let previous = self.current.clone();
@@ -132,7 +147,27 @@ impl ConfigPersister {
         // Durable atomic write: temp file → fsync → rename → fsync parent dir.
         // Reuses the commit-confirm journal's proven primitive so a crash in the
         // settle window can never leave a torn/zero-length config (LAN-206).
-        crate::confirm_journal::write_atomic(&self.config_path, toml_str.as_bytes())
+        crate::confirm_journal::write_atomic(&self.config_path, toml_str.as_bytes())?;
+        // Every durable config write funnels through this method, so recording
+        // here gives the applied-config history exactly one choke point:
+        // transaction commits, gRPC CRUD mutations, and boot all land in it.
+        self.record_history(&toml_str);
+        Ok(())
+    }
+
+    /// Best-effort applied-config history recording. A history failure must
+    /// never fail the persist that already succeeded — the config on disk is
+    /// authoritative; history is the rollback convenience layer.
+    fn record_history(&self, toml_str: &str) {
+        if let Some(dir) = &self.history_dir
+            && let Err(error) = crate::config_history::record(dir, toml_str)
+        {
+            warn!(
+                dir = %dir.display(),
+                error = %error,
+                "failed to record applied config in the config history"
+            );
+        }
     }
 }
 
@@ -208,7 +243,7 @@ log_format = "json"
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
@@ -235,7 +270,7 @@ log_format = "json"
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
         tx.send(ConfigMutation::DeleteNeighbor("10.0.0.2".parse().unwrap()))
@@ -257,7 +292,7 @@ log_format = "json"
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
@@ -285,7 +320,7 @@ log_format = "json"
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
             "10.0.0.2", 65002,
@@ -308,6 +343,46 @@ log_format = "json"
     }
 
     #[tokio::test]
+    async fn persister_records_history_at_boot_and_on_every_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let history = dir.path().join("config-history");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister =
+            ConfigPersister::new(rx, path.clone(), config.clone(), Some(history.clone()));
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.2", 65002,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        // Boot config + mutated config = two entries, newest first, and the
+        // newest entry is byte-for-byte the config the persister wrote.
+        let entries = crate::config_history::list(&history).unwrap();
+        assert_eq!(entries.len(), 2);
+        let (_, newest) = crate::config_history::read_entry(&history, 0).unwrap();
+        assert_eq!(newest, std::fs::read_to_string(&path).unwrap());
+        let (_, previous) = crate::config_history::read_entry(&history, 1).unwrap();
+        assert_eq!(previous, toml::to_string_pretty(&config).unwrap());
+
+        // "Restart": a fresh persister over the same state boot-records the
+        // unchanged config — dedup keeps history from growing.
+        let restarted: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), restarted, Some(history.clone()));
+        let handle = tokio::spawn(persister.run());
+        drop(tx);
+        handle.await.unwrap();
+        assert_eq!(crate::config_history::list(&history).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn refresh_snapshot_no_persist_updates_base_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -318,7 +393,7 @@ log_format = "json"
         refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
 
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
         tx.send(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
