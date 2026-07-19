@@ -69,6 +69,23 @@ groups:
             {{ $labels.instance }} left Established
             {{ $value | printf "%.0f" }} times in the last 15 minutes.
 
+      - alert: BgpPeerSlow
+        # Session metrics label `peer` as the transport endpoint
+        # (IPv4 addr:port or bracketed-IPv6 addr:port), not the bare
+        # configured neighbor address used by RIB metrics.
+        expr: bgp_peer_slow == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BGP peer endpoint {{ $labels.peer }} is slow"
+          description: >-
+            The Established session endpoint {{ $labels.peer }} on
+            {{ $labels.instance }} has remained slow for 5 minutes because
+            its outbound coalesced-frame queue is not draining. Updates are
+            still buffered; inspect bgp_peer_outbound_queue_depth and the
+            remote receiver before the backlog reaches its bound.
+
       - alert: BgpPeerAdjRibInEmpty
         # Established (established > flaps) but zero prefixes in
         # Adj-RIB-In across all families (afi_safi="all" is the
@@ -176,6 +193,29 @@ groups:
             Check the poll_kind histogram and the daemon's policy-transition
             warning; bgp_rib_policy_transition_last_duration_milliseconds is
             the previous terminal sample until this transition completes.
+
+      - alert: BgpPolicyTransitionActorPollExceededReadinessBudget
+        # Histogram subtraction classifies observations above the exact
+        # 200ms bucket boundary. `ignoring(le)` is required to match the
+        # histogram count and bucket series while retaining bounded
+        # instance/job/poll_kind identity.
+        expr: >-
+          increase(bgp_rib_policy_transition_actor_poll_duration_seconds_count[15m])
+          - ignoring(le)
+          increase(bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{le="0.2"}[15m])
+          > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            RIB actor poll exceeded readiness budget ({{ $labels.poll_kind }})
+          description: >-
+            The {{ $labels.poll_kind }} export-policy transition path on
+            {{ $labels.instance }} exceeded the 200ms actor-poll budget in
+            the last 15 minutes. A long single-threaded poll could delay a
+            concurrent readiness probe and other RIB work; inspect the
+            dashboard p99 and transition state before retrying a reload.
 
       - alert: BgpPolicyEvalErrors
         # An evaluation error makes the policy engine treat the

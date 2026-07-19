@@ -1,18 +1,22 @@
-name: Alert rules
+name: Observability assets
 
-# Validates the shipped Prometheus alert-rule pack with promtool:
-# `check rules` for syntax/shape, `test rules` for the per-rule unit
-# tests (every rule has a firing and a non-firing case). Path-scoped
-# to the pack so it costs nothing on unrelated changes.
+# Validates the shipped Grafana dashboard structurally, then checks the
+# Prometheus alert-rule pack with promtool (`check rules` for syntax/shape,
+# `test rules` for per-rule behavior). Path-scoped to those assets so it
+# costs nothing on unrelated changes.
 
 on:
   push:
     paths:
       - "examples/prometheus/**"
+      - "docs/grafana/rustbgpd-overview.json"
+      - "scripts/check-grafana-dashboard.py"
       - ".github/workflows/alert-rules.yml"
   pull_request:
     paths:
       - "examples/prometheus/**"
+      - "docs/grafana/rustbgpd-overview.json"
+      - "scripts/check-grafana-dashboard.py"
       - ".github/workflows/alert-rules.yml"
 
 jobs:
@@ -21,6 +25,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+      - name: Check Grafana dashboard
+        run: python3 scripts/check-grafana-dashboard.py
       - name: Install promtool (pinned)
         run: |
           set -euo pipefail

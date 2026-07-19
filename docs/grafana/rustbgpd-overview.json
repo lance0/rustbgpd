@@ -45,13 +45,29 @@
       },
       {
         "name": "peer",
-        "label": "Peer",
+        "label": "Peer endpoint",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
         "query": "label_values(bgp_session_state_transitions_total{instance=~\"$instance\"}, peer)",
+        "current": {},
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "neighbor",
+        "label": "Neighbor address",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(bgp_peer_update_group{instance=~\"$instance\"}, peer)",
         "current": {},
         "includeAll": true,
         "multi": true,
@@ -2347,6 +2363,156 @@
           "expr": "jemalloc_resident_bytes{instance=~\"$instance\"}",
           "legendFormat": "resident",
           "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "row",
+      "title": "Operator signals",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 123 },
+      "panels": []
+    },
+    {
+      "id": 47,
+      "type": "timeseries",
+      "title": "Outbound queue by peer endpoint",
+      "description": "Absolute coalesced UPDATE frames buffered for each transport endpoint. A sustained backlog is stronger evidence than a short convergence burst.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 124 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_peer_outbound_queue_depth{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "timeseries",
+      "title": "Slow peer endpoints",
+      "description": "1 while an Established transport endpoint has persistently failed to drain its outbound queue; 0 after recovery or teardown.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 124 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1, "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_peer_slow{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "type": "table",
+      "title": "Update group by neighbor address",
+      "description": "Current stable update-group ID for each bare configured neighbor address. -1 is a legitimate value: that neighbor uses the per-peer fallback path.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 124 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_peer_update_group{instance=~\"$instance\",peer=~\"$neighbor\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "type": "stat",
+      "title": "Policy transition in progress",
+      "description": "Current ownership state only: 1 while the RIB actor owns an export-policy transition, otherwise 0.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 132 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_rib_policy_transition_in_progress{instance=~\"$instance\"}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "type": "stat",
+      "title": "Last completed policy transition",
+      "description": "Terminal duration of the most recently completed transition. This retained sample is not the live elapsed time of an in-progress transition.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 132 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_rib_policy_transition_last_duration_milliseconds{instance=~\"$instance\"}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Policy-transition actor poll p99",
+      "description": "Fifteen-minute p99 by instance, scrape job, and bounded poll kind. This is actor occupancy per poll, not total transition duration.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 132 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum by (instance, job, poll_kind, le) (rate(bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance=~\"$instance\"}[15m])))",
+          "legendFormat": "{{instance}} {{job}} {{poll_kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "Policy-transition actor polls over 200ms",
+      "description": "Fifteen-minute increase estimate for actor polls above the exact 200ms bucket boundary, preserving instance, scrape job, and poll kind.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 132 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "increase(bgp_rib_policy_transition_actor_poll_duration_seconds_count{instance=~\"$instance\"}[15m]) - ignoring(le) increase(bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance=~\"$instance\",le=\"0.2\"}[15m])",
+          "legendFormat": "{{instance}} {{job}} {{poll_kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "type": "stat",
+      "title": "Accepted policy generation age",
+      "description": "Informational age of the last successfully accepted full policy generation. It is not an alert threshold; rejected reloads intentionally leave the timestamp unchanged.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 138 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "clamp_min(time() - bgp_policy_generation_loaded_timestamp_seconds{instance=~\"$instance\"}, 0)",
+          "refId": "A"
         }
       ]
     }
