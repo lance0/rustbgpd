@@ -201,6 +201,7 @@ render_rustbgpd_config() {
     else
         fail "render receipt/config missing exact 3-member 100/12000 max-prefix limits"
         cat "$RENDER_DIR/render-receipt.json" >&2 || true
+        return 1
     fi
 
     docker cp "$RENDER_DIR/config.toml" "$RUSTBGPD":/etc/rustbgpd/config.toml
