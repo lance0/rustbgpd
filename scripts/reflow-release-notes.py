@@ -17,6 +17,9 @@ preserving everything that carries meaning across line breaks:
   - fenced code blocks (``` ``` ``` / ``~~~``), every line verbatim;
   - table rows (lines starting with ``|``), verbatim;
   - list-item boundaries, including nested bullets (indentation preserved);
+  - blockquote paragraphs: consecutive ``> `` lines at the same nesting
+    depth join into one line with a single leading marker (inner ``> ``
+    stripped); a blank ``>`` line separates quote paragraphs;
   - joining ONLY continuation lines within the same paragraph / list item.
 
 It does not touch `CHANGELOG.md`; it runs at publish time on the already
@@ -40,6 +43,10 @@ LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 HEADING = re.compile(r"^#{1,6}\s")
 TABLE_ROW = re.compile(r"^\s*\|")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+# A blockquote prefix: one or more `>` markers, each with an optional space
+# (`> `, `>`, `> > `). Nesting depth = number of `>` in the prefix; only
+# same-depth lines join, so nested quotes never merge into their parent.
+BLOCKQUOTE = re.compile(r"^\s*((?:>\s?)+)")
 
 
 def reflow(text: str) -> str:
@@ -47,12 +54,14 @@ def reflow(text: str) -> str:
     lines = text.split("\n")
     out: list[str] = []
     buf: str | None = None  # current logical (joined) line being built
+    buf_quote_depth = 0  # blockquote nesting depth of `buf` (0 = not a quote)
 
     def flush() -> None:
-        nonlocal buf
+        nonlocal buf, buf_quote_depth
         if buf is not None:
             out.append(buf)
             buf = None
+        buf_quote_depth = 0
 
     in_fence = False
     fence_token = ""
@@ -87,6 +96,25 @@ def reflow(text: str) -> str:
         if HEADING.match(line) or TABLE_ROW.match(line):
             flush()
             out.append(line)
+            continue
+
+        quote = BLOCKQUOTE.match(line)
+        if quote:
+            depth = quote.group(1).count(">")
+            content = line[quote.end() :].strip()
+            if not content:
+                # A blank `>` line separates blockquote paragraphs; verbatim.
+                flush()
+                out.append(line.rstrip())
+                continue
+            if buf is not None and buf_quote_depth == depth:
+                # Continuation of the same blockquote paragraph: join with the
+                # inner `> ` marker stripped.
+                buf = f"{buf} {content}"
+            else:
+                flush()
+                buf = line.rstrip()
+                buf_quote_depth = depth
             continue
 
         if LIST_ITEM.match(line):
