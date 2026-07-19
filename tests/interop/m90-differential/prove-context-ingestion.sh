@@ -87,7 +87,20 @@ done
 diff <(jq -S '{clients, warnings}' "$WORK/render-real/render-receipt.json") \
      <(jq -S '{clients, warnings}' "$WORK/render-hand/render-receipt.json") \
     || die "render receipts diverge"
-ok "receipts carry identical clients + warnings"
+# Load-bearing proof: suppressing shutdown-gated limit emission makes an exact
+# receipt/config count below fail; drifting the site
+# fixture makes the earlier byte-for-byte pinned-image comparison fail.
+for render in render-real render-hand; do
+    jq -e \
+        '.clients | length == 3 and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        "$WORK/$render/render-receipt.json" >/dev/null \
+        || die "$render receipt does not carry all three exact 100/12000 limits"
+    [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$WORK/$render/config.toml")" -eq 3 ] \
+        || die "$render config does not emit exactly three IPv4 limits of 100"
+    [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$WORK/$render/config.toml")" -eq 3 ] \
+        || die "$render config does not emit exactly three IPv6 limits of 12000"
+done
+ok "receipts and configs carry identical exact per-client limits"
 
 step "pipeline gates on the real-dump render"
 cargo run -q -p rustbgpd --manifest-path "$REPO_DIR/Cargo.toml" -- \

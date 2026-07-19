@@ -189,11 +189,19 @@ render_rustbgpd_config() {
         exit 1
     fi
 
-    if jq -e '.clients | length == 3' "$RENDER_DIR/render-receipt.json" >/dev/null 2>&1; then
-        ok "render receipt lists all 3 members"
+    # Load-bearing proof: suppressing shutdown-gated limit emission makes this
+    # exact receipt/config assertion fail before either
+    # daemon starts.
+    if jq -e \
+        '.clients | length == 3 and ([.[].id] | sort == ["AS64500_1", "AS64501_1", "AS64502_1"]) and all(.[]; .max_prefixes_ipv4 == 100 and .max_prefixes_ipv6 == 12000)' \
+        "$RENDER_DIR/render-receipt.json" >/dev/null 2>&1 \
+        && [ "$(grep -c '^max_prefixes_ipv4 = 100$' "$RENDER_DIR/config.toml")" -eq 3 ] \
+        && [ "$(grep -c '^max_prefixes_ipv6 = 12000$' "$RENDER_DIR/config.toml")" -eq 3 ]; then
+        ok "render receipt and config carry all 3 members with exact 100/12000 limits"
     else
-        fail "render receipt missing or does not list 3 members"
+        fail "render receipt/config missing exact 3-member 100/12000 max-prefix limits"
         cat "$RENDER_DIR/render-receipt.json" >&2 || true
+        return 1
     fi
 
     docker cp "$RENDER_DIR/config.toml" "$RUSTBGPD":/etc/rustbgpd/config.toml

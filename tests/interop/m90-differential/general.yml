@@ -51,5 +51,8 @@ cfg:
         - 65551
     max_prefix:
       action: "shutdown"
+      # rustbgpd counts routes accepted by import policy; keep the BIRD
+      # side on the same post-filter accounting model.
+      count_rejected_routes: False
       peering_db:
         enabled: False

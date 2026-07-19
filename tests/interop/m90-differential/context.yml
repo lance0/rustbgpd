@@ -76,6 +76,7 @@ cfg:
       reject_invalid: true
     max_prefix:
       action: shutdown
+      count_rejected_routes: false
       peering_db: {enabled: false}
     reject_policy:
       policy: reject
@@ -92,7 +93,7 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64500_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
   - id: AS64501_1
     asn: 64501
     ip: "192.0.2.12"
@@ -101,7 +102,7 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64501_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
   - id: AS64502_1
     asn: 64502
     ip: "192.0.2.13"
@@ -110,7 +111,7 @@ clients:
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS64502_bundle"]
-        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
 irrdb_info:
   AS64500_bundle:
     asns: [64500]

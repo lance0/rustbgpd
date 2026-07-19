@@ -367,7 +367,7 @@ cfg:
     max_as_path_len: 32
     max_prefix:
       action: shutdown
-      count_rejected_routes: true
+      count_rejected_routes: false
       general_limit_ipv4: 170000
       general_limit_ipv6: 12000
       peering_db:
@@ -487,7 +487,7 @@ clients:
       max_as_path_len: 32
       max_prefix:
         action: shutdown
-        count_rejected_routes: true
+        count_rejected_routes: false
         limit_ipv4: 100
         limit_ipv6: 12000
         peering_db:
@@ -548,7 +548,7 @@ clients:
       max_as_path_len: 32
       max_prefix:
         action: shutdown
-        count_rejected_routes: true
+        count_rejected_routes: false
         limit_ipv4: 100
         limit_ipv6: 12000
         peering_db:
@@ -609,7 +609,7 @@ clients:
       max_as_path_len: 32
       max_prefix:
         action: shutdown
-        count_rejected_routes: true
+        count_rejected_routes: false
         limit_ipv4: 100
         limit_ipv6: 12000
         peering_db:

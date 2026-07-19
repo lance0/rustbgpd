@@ -47,6 +47,25 @@ Install and configure arouteserver itself per its
 [documentation][arouteserver] (`arouteserver setup`, then your
 `general.yml` / `clients.yml`).
 
+rustbgpd currently implements ARouteServer's shutdown action with
+post-import-policy prefix accounting. Configure that model explicitly;
+the renderer refuses `restart`, `block`, `warning`, or rejected-route
+counting instead of silently changing their behavior:
+
+```yaml
+cfg:
+  filtering:
+    max_prefix:
+      action: shutdown
+      count_rejected_routes: false
+```
+
+An absent effective action disables max-prefix enforcement even when
+ARouteServer leaves resolved limit values in the context; a zero family
+limit is likewise treated as unset. ARouteServer 1.23.2 defaults
+`count_rejected_routes` to `true`, so an active positive shutdown limit must
+set it explicitly to `false` for rustbgpd's accepted-route accounting model.
+
 The command's output format is arouteserver's, not ours: 1.23.2 emits
 a *sectioned report* (per-key heading plus a YAML fragment). The
 renderer auto-detects and ingests that form directly, alongside the

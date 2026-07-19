@@ -454,20 +454,244 @@ fn client_black_and_white_lists_are_refused() {
 }
 
 #[test]
-fn restart_max_prefix_action_degrades_with_a_warning() {
+/// Load-bearing proof: removing the effective-action gate, client-to-general
+/// fallback, or zero-limit filter emits or suppresses an asserted config or
+/// receipt field.
+fn effective_max_prefix_action_controls_limit_emission() {
+    let mut value = healthy_value();
+    // ARouteServer can leave resolved limits populated while disabling
+    // enforcement with an absent action. Neither the config nor receipt may
+    // imply an active ceiling in that state.
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    let mut clients = value["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    set_path(&mut value, &["clients"], clients);
+    let disabled = render(&to_yaml(&value), &rtr_options()).expect("no-action render");
+    assert!(
+        !disabled.files["config.toml"].contains("max_prefixes_"),
+        "{}",
+        disabled.files["config.toml"]
+    );
+    for client in disabled.receipt["clients"].as_array().unwrap() {
+        assert!(client["max_prefixes_ipv4"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv6"].is_null(), "{client}");
+    }
+
+    // The same clients inherit an enabled general shutdown action. Positive
+    // limits emit, while ARouteServer's zero sentinel remains unset.
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("shutdown".into()),
+    );
+    let enabled = render(&to_yaml(&value), &rtr_options()).expect("inherited shutdown render");
+    let toml = &enabled.files["config.toml"];
+    assert!(toml.contains("max_prefixes_ipv4 = 5000"), "{toml}");
+    assert!(toml.contains("max_prefixes_ipv6 = 1000"), "{toml}");
+    assert!(!toml.contains("max_prefixes_ipv4 = 0"), "{toml}");
+    assert!(!toml.contains("max_prefixes_ipv6 = 0"), "{toml}");
+}
+
+#[test]
+/// Load-bearing proof: validating the raw general action instead of the
+/// client-effective action makes this render refuse `block`.
+fn client_shutdown_overrides_unsupported_general_max_prefix_action() {
+    let mut value = healthy_value();
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("block".into()),
+    );
+    let mut clients = value["clients"].clone();
+    for client in clients.as_sequence_mut().unwrap() {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "action"],
+            serde_yaml::Value::String("shutdown".into()),
+        );
+    }
+    set_path(&mut value, &["clients"], clients);
+    let rendered = render(&to_yaml(&value), &rtr_options()).expect("client override render");
+    assert!(
+        rendered.files["config.toml"].contains("max_prefixes_ipv4 = 5000"),
+        "{}",
+        rendered.files["config.toml"]
+    );
+}
+
+#[test]
+/// Load-bearing proof: accepting any listed action, dropping `restart_after`
+/// parsing, or dropping general-action inheritance misses an asserted refusal.
+fn unsupported_effective_max_prefix_actions_are_refused() {
+    for action in ["restart", "block", "warning"] {
+        let mut value = healthy_value();
+        let mut clients = value["clients"].clone();
+        set_path(
+            &mut clients[0],
+            &["cfg", "filtering", "max_prefix", "action"],
+            serde_yaml::Value::String(action.into()),
+        );
+        if action == "restart" {
+            set_path(
+                &mut clients[0],
+                &["cfg", "filtering", "max_prefix", "restart_after"],
+                serde_yaml::Value::Number(37.into()),
+            );
+        }
+        set_path(&mut value, &["clients"], clients);
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items.iter().any(|item| item.contains("client AS4242_1")
+                && item.contains(&format!("action `{action}`"))),
+            "{action}: {items:?}"
+        );
+        if action == "restart" {
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.contains("restart_after=37 minutes")),
+                "{items:?}"
+            );
+        }
+    }
+
+    // An absent client action inherits the general action.
     let mut value = healthy_value();
     set_path(
         &mut value,
         &["cfg", "filtering", "max_prefix", "action"],
         serde_yaml::Value::String("restart".into()),
     );
-    let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
     assert!(
-        rendered
-            .warnings
+        items
             .iter()
-            .any(|w| w.contains("teardown-only")),
-        "{:?}",
-        rendered.warnings
+            .any(|item| item.contains("client AS197000_1") && item.contains("action `restart`")),
+        "{items:?}"
     );
+}
+
+#[test]
+/// Load-bearing proof: defaulting an omitted value to false, checking the
+/// value without an active shutdown/positive limit, deleting the true-value
+/// refusal, or reversing client-over-general precedence breaks an asserted
+/// success or refusal below.
+fn rejected_route_counting_is_checked_only_for_an_active_limit() {
+    // ARouteServer 1.23.2 defaults an omitted value to true. Silently treating
+    // this context as accepted-only would change when shutdown happens.
+    let mut omitted = healthy_value();
+    omitted["cfg"]["filtering"]["max_prefix"]
+        .as_mapping_mut()
+        .expect("max_prefix mapping")
+        .remove(serde_yaml::Value::String(
+            "count_rejected_routes".to_owned(),
+        ));
+    let items = refusals(render(&to_yaml(&omitted), &rtr_options()));
+    assert!(
+        items.iter().any(|item| item.contains("client AS4242_1")
+            && item.contains("defaults this option to true")),
+        "{items:?}"
+    );
+
+    let mut inherited = healthy_value();
+    set_path(
+        &mut inherited,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let items = refusals(render(&to_yaml(&inherited), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.contains("client AS197000_1") && item.contains("=true")),
+        "{items:?}"
+    );
+
+    let mut overridden = healthy_value();
+    let mut clients = overridden["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    set_path(&mut overridden, &["clients"], clients);
+    let items = refusals(render(&to_yaml(&overridden), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.contains("client AS4242_1") && item.contains("=true")),
+        "{items:?}"
+    );
+
+    // A client can explicitly select rustbgpd's accepted-route model over an
+    // inherited general true value.
+    let mut allowed_override = healthy_value();
+    set_path(
+        &mut allowed_override,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = allowed_override["clients"].clone();
+    for client in clients.as_sequence_mut().expect("clients list") {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+            serde_yaml::Value::Bool(false),
+        );
+    }
+    set_path(&mut allowed_override, &["clients"], clients);
+    render(&to_yaml(&allowed_override), &rtr_options()).expect("explicit false override");
+
+    // Counting semantics are irrelevant when no shutdown action is active,
+    // even if ARouteServer leaves resolved positive limits in the context.
+    let mut disabled = healthy_value();
+    set_path(
+        &mut disabled,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    set_path(
+        &mut disabled,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = disabled["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    set_path(&mut disabled, &["clients"], clients);
+    render(&to_yaml(&disabled), &rtr_options()).expect("disabled max-prefix counting");
+
+    // A shutdown action with only zero/unset family limits is also inactive.
+    let mut zero_limits = healthy_value();
+    set_path(
+        &mut zero_limits,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = zero_limits["clients"].clone();
+    for client in clients.as_sequence_mut().expect("clients list") {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "limit_ipv4"],
+            serde_yaml::Value::Number(0.into()),
+        );
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "limit_ipv6"],
+            serde_yaml::Value::Number(0.into()),
+        );
+    }
+    set_path(&mut zero_limits, &["clients"], clients);
+    render(&to_yaml(&zero_limits), &rtr_options()).expect("zero limits disable enforcement");
 }

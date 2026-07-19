@@ -107,24 +107,24 @@ diverge and the lab fails.
 ## Verified M90 receipt — 2026-07-19
 
 The lab was run from source revision
-`f7ccc133e91c035df1f9536b1b6d6ad4e287ca63` with these immutable
+`dfb03c1cfcaaed90543124d57fd1913abd63d73a` with these immutable
 runtime identities:
 
 | Component | Version | Image identity |
 |-----------|---------|----------------|
 | arouteserver | 1.23.2 | `pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66` |
-| BIRD | 2.0.12 | `bird:2-bookworm`, image ID `sha256:5658f128964bce8aabe96703307aceff2d5fc883fbd86151c9b32d19b3559bcf` |
-| GoBGP | 3.37.0 | `gobgp:interop`, image ID `sha256:a6d73539911988d9525930030a748019a584abfc5684986eeb9dd0d4d3c80f9a` |
-| rustbgpd | 0.60.0 | `rustbgpd:dev`, image ID `sha256:b6bb41cbc2e008c7798fd5b7ed5a50a0474969a21d51fe0ee1272801363c7dfc` |
+| BIRD | 2.0.12 | `bird:2-bookworm`, image ID `sha256:0a10365bbd587a4bf12c9324bdcf414cef611eed7cafbefe907d5d704bb1b7ca` |
+| GoBGP | 3.37.0 | `gobgp:interop`, image ID `sha256:d0eb050bb1e6a959d83a254a6024b2c0673407c124b3b63c8f850778b018442a` |
+| rustbgpd | 0.60.0 | `rustbgpd:dev`, image ID `sha256:e2fb168ecd31ff9656a428268cd9bf5ba5c7e2952e68b5f37b7d577476b1d8b2` |
 
 The exact fixture set was:
 
 | Input | SHA-256 |
 |-------|---------|
-| `general.yml` | `cb718ea5bba676ddf0183e959d6479718b02e0ebe01428d5fce2d919d8f28306` |
+| `general.yml` | `f755a6da50080a566c10710f093e94f26d7399aa51ae8e61b32406f8ba6c717d` |
 | `clients.yml` | `08ceca5f9bafb13139538096a94595d075b7a7dae9342deb26d7f5adfc337e1e` |
-| `context.yml` | `0af51e2ca17b1a9cd5556e7cddbf3549f658dcafc69ab2de9dd2240ec0e57c5c` |
-| `context-sectioned.yml` | `66eb0765f3226359b28b83f891df0d3019339e5089f9664d60d377543fa55390` |
+| `context.yml` | `8ec17fed99fa16163d262a18ad5b43e1de0cd2c64f3ab1a03f42ed63cbfadf19` |
+| `context-sectioned.yml` | `21005ae0e7e9b50aea702d62dcb923d074f2f975b8e16762c0ca4e992c6ead8f` |
 | `announcements.json` | `5e2050c0e5f758d8b4691af873fc618c03bc3ce3eb25d5c522306df908e1dd3d` |
 | `bogons.yml` | `26e7c313a41fd7a854f73c656a77415fd9c2bb9057b625a7592bd436ee26dfe5` |
 | `arouteserver.yml` | `c3b85f1af54c437ae50b0d4e1502b3a6e95cb2c4b12c255ac1c90cfc9eec5b19` |
@@ -138,13 +138,11 @@ bash tests/interop/m90-differential/prove-context-ingestion.sh
 
 The context proof passed 15/15 checks: the fresh pinned-image sectioned
 dump matched `context-sectioned.yml` byte for byte, both context shapes
-rendered identical files, `rustbgpd --check` passed, and all four generated
-policies passed `rbgp policy check`. The full differential passed 65/65
-checks. All 11 manifest rows were accounted for (4 accepts, 7 rejects), with
-per-member import counters exactly 2/1, 1/2, and 1/4 permitted/denied. All
-three sessions remained Established with zero flaps. rustbgpd logged one
-IPv4-unicast End-of-RIB toward each member before the announcement injection,
-so the verdict matrix was evaluated after initial table completion.
+rendered identical files with all three exact IPv4/IPv6 max-prefix ceilings,
+`rustbgpd --check` passed, and all four generated policies passed `rbgp policy
+check`. The full differential passed 65/65 checks. All 11 manifest rows were
+accounted for (4 accepts, 7 rejects), and both daemons held all three sessions
+Established before injection and after the verdict sweep.
 
 | Member | Prefix | Verdict on both | rustbgpd deciding policy / term |
 |--------|--------|-----------------|----------------------------------|
@@ -164,6 +162,24 @@ Load-bearing proof: a temporary rust-side-only mutation authorized
 `198.51.100.0/24` in `AS64501_bundle` in `context.yml`, while the BIRD input
 remained unchanged. The driver exited 1 at
 `rustbgpd retains rejected 198.51.100.0/24 from member2 ... timed out after
-30s`; BIRD still rejected it. The mutation was removed byte for byte before
-the final 65/65 green run. Removing either daemon's policy parity therefore
-makes this receipt red instead of producing a false green.
+30s`. Before teardown, a separate query proved the route was in rustbgpd's
+accepted view for `192.0.2.12`, while BIRD's route detail had no
+`AS64501_1` path:
+
+```bash
+set -euo pipefail
+rust_detail=$(docker exec clab-m90-differential-rustbgpd \
+  rbgp -s unix:///var/lib/rustbgpd/grpc.sock rib received 192.0.2.12)
+grep -qF '198.51.100.0/24' <<<"$rust_detail"
+bird_detail=$(docker exec clab-m90-differential-bird \
+  birdc 'show route 198.51.100.0/24 all' 2>/dev/null)
+grep -qF '[AS64500_1 ' <<<"$bird_detail"
+! grep -qF '[AS64501_1 ' <<<"$bird_detail"
+```
+
+The mutation was removed byte for byte (the restored context hash matched the
+table above) before a fresh deploy and the final 65/65 green run. Separately,
+suppressing max-prefix emission made the driver exit 1 at its exact
+three-client `100`/`12000` config assertion before either daemon was started.
+Removing policy parity or the rendered ceilings therefore makes this receipt
+red instead of producing a false green.
