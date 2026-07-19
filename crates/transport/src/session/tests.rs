@@ -14791,6 +14791,46 @@ fn rfc7606_update(attr_bytes: Vec<u8>, announced: &[Ipv4Prefix]) -> UpdateMessag
     }
 }
 
+/// `bgp_update_malformed_total` value for this session's peer and the
+/// given disposition label; 0 when the series does not exist.
+fn update_malformed_count(session: &PeerSession, disposition: &str) -> u64 {
+    session
+        .metrics
+        .registry()
+        .gather()
+        .iter()
+        .filter(|f| f.name() == "bgp_update_malformed_total")
+        .flat_map(prometheus::proto::MetricFamily::get_metric)
+        .filter(|m| {
+            m.get_label()
+                .iter()
+                .any(|l| l.name() == "disposition" && l.value() == disposition)
+        })
+        .map(|m| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+            )]
+            let v = m.get_counter().value() as u64;
+            v
+        })
+        .sum()
+}
+
+/// Assert the counter recorded exactly one malformed UPDATE, under
+/// exactly `disposition` — the sibling dispositions must stay at zero.
+fn assert_single_malformed_disposition(session: &PeerSession, disposition: &str) {
+    for label in ["attribute_discard", "treat_as_withdraw", "session_reset"] {
+        let expected = u64::from(label == disposition);
+        assert_eq!(
+            update_malformed_count(session, label),
+            expected,
+            "bgp_update_malformed_total{{disposition=\"{label}\"}}"
+        );
+    }
+}
+
 /// RFC 7606 §7.4 + §2: a malformed MED treats the UPDATE as though its
 /// routes had been withdrawn — previously accepted routes for the same
 /// NLRI are removed — and the session stays Established.
@@ -14842,6 +14882,7 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
         SessionState::Established,
         "treat-as-withdraw must keep the session Established"
     );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
 /// RFC 7606 §7.7: a malformed AGGREGATOR is attribute-discard — the UPDATE
@@ -14868,6 +14909,7 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].prefix, Prefix::V4(prefix));
     assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
 /// RFC 7606 §7.11: a malformed `MP_REACH_NLRI` means the NLRI cannot be
@@ -14899,6 +14941,7 @@ async fn rfc7606_malformed_mp_reach_still_resets_session() {
             "no routes may be delivered"
         );
     }
+    assert_single_malformed_disposition(&session, "session_reset");
 }
 
 /// RFC 7606 §5.2: an UPDATE carrying path attributes but no reachable NLRI
@@ -14929,6 +14972,7 @@ async fn rfc7606_malformed_attr_without_reachable_nlri_resets_session() {
             "no routes may be delivered"
         );
     }
+    assert_single_malformed_disposition(&session, "session_reset");
 }
 
 /// Structurally valid IPv6-unicast `MP_REACH_NLRI` raw attribute:
@@ -14974,6 +15018,7 @@ async fn rfc7606_empty_mp_reach_with_taw_error_resets_session() {
             "no routes may be delivered"
         );
     }
+    assert_single_malformed_disposition(&session, "session_reset");
 }
 
 /// Regression guard for the §5.2 tightening above: an `MP_REACH` that
@@ -14997,6 +15042,7 @@ async fn rfc7606_nonempty_mp_reach_with_taw_error_stays_established() {
         SessionState::Established,
         "reachable MP NLRI keeps the treat-as-withdraw path (no over-reset)"
     );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
     while let Ok(msg) = rib_rx.try_recv() {
         if let RibUpdate::RoutesReceived { announced, .. } = msg {
             assert!(
@@ -15028,6 +15074,7 @@ async fn rfc7606_discarded_attrs_do_not_fake_end_of_rib() {
         "an all-attributes-discarded UPDATE is junk, not an EoR"
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
 /// RFC 7606 §2: treat-as-withdraw must cover EVPN too — a previously

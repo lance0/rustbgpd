@@ -24,6 +24,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefix-granular, and serves an empty view for peers with no live
   session. All backing RPCs are `sensitive_read`-tier — no
   authorization change for existing adapter deployments.
+- **Per-disposition malformed-UPDATE counters + RFC 7606 interop
+  proof.** New `bgp_update_malformed_total{peer, disposition}` counter
+  (`disposition` ∈ `attribute_discard` / `treat_as_withdraw` /
+  `session_reset`) increments once per malformed UPDATE at the point
+  the RFC 7606 disposition is decided, on every handling path —
+  including the §5.2 no-reachable-NLRI session-reset escalation and
+  decode-level resets. The M91 interop lab
+  (`tests/interop/m91-rfc7606-malformed.clab.yml`) drives a raw
+  speaker injecting one malformed UPDATE per disposition class and
+  asserts session survival, RIB contents, the counter, and the §6
+  DEBUG full-message capture end to end.
 
 ### Fixed
 

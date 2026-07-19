@@ -12,11 +12,21 @@ use rustbgpd_policy::{
     RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{
-    ImportRejectReason, NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
+    ImportRejectReason, MalformedUpdateDisposition, NextHopOwnershipBlockReason, OtcBlockReason,
+    RrLoopReason,
 };
 use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
 use std::time::SystemTime;
+/// Canonical `bgp_update_malformed_total` label for a wire-crate
+/// RFC 7606 disposition.
+fn malformed_disposition_label(disposition: ErrorDisposition) -> MalformedUpdateDisposition {
+    match disposition {
+        ErrorDisposition::AttributeDiscard => MalformedUpdateDisposition::AttributeDiscard,
+        ErrorDisposition::TreatAsWithdraw => MalformedUpdateDisposition::TreatAsWithdraw,
+        ErrorDisposition::SessionReset => MalformedUpdateDisposition::SessionReset,
+    }
+}
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
 /// action}` for one import-side chain evaluation. Policy falls back to
 /// `"inline"` for anonymous / inline policies; cardinality stays
@@ -1135,6 +1145,12 @@ impl PeerSession {
             Ok(r) => r,
             Err(e) => {
                 warn!(peer = %self.peer_label, error = %e, "UPDATE decode error");
+                // parse_revised reserves Err for session-reset-class
+                // malformations (RFC 7606 §3 (j), §5.3).
+                self.metrics.record_update_malformed(
+                    &self.peer_label,
+                    MalformedUpdateDisposition::SessionReset,
+                );
                 self.drive_fsm(Event::DecodeError(e)).await;
                 return;
             }
@@ -1220,6 +1236,10 @@ impl PeerSession {
             );
             self.debug_dump_malformed_update(&update, &parsed);
             if update_err.disposition == ErrorDisposition::SessionReset {
+                self.metrics.record_update_malformed(
+                    &self.peer_label,
+                    MalformedUpdateDisposition::SessionReset,
+                );
                 let notif = NotificationMessage::new(
                     NotificationCode::UpdateMessage,
                     update_err.subcode,
@@ -1248,6 +1268,10 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
+                self.metrics.record_update_malformed(
+                    &self.peer_label,
+                    MalformedUpdateDisposition::SessionReset,
+                );
                 if let Some(m) = malformed
                     .iter()
                     .find(|m| m.disposition == ErrorDisposition::TreatAsWithdraw)
@@ -1272,9 +1296,20 @@ impl PeerSession {
                 announced = parsed.announced.len(),
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
+            self.metrics.record_update_malformed(
+                &self.peer_label,
+                MalformedUpdateDisposition::TreatAsWithdraw,
+            );
             self.treat_update_as_withdraw(&parsed, ImportRejectReason::TreatAsWithdraw, None)
                 .await;
             return;
+        }
+        // Weaker than treat-as-withdraw: the only remaining non-clean
+        // disposition is attribute-discard — the offending attributes were
+        // dropped and the UPDATE proceeds without them.
+        if let Some(applied) = disposition {
+            self.metrics
+                .record_update_malformed(&self.peer_label, malformed_disposition_label(applied));
         }
         // 3. End-of-RIB detection (RFC 4724 §2). An UPDATE that only became
         // empty because malformed attributes were discarded is junk, not an
