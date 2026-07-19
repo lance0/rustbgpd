@@ -176,7 +176,7 @@ lands (ADR-0107 and the community-based announcement-control track).
 | IRR origin-AS enforcement | `route.origin-as` accessor (`==`/`!=`/asn-set `in`, three-valued on absent origin) + indexed `asn-set` | Shipped (#757; the gap claimed in earlier drafts was stale — verified end-to-end with docs and tests) |
 | RPKI ROA validation via RTR (RFC 6811/8097) | `[rpki.cache_servers]`, `route.rpki == valid\|invalid\|not-found`, `OV_*` ext-community tagging | Shipped |
 | RPKI ROAs merged as route objects | generator-side (arouteserver does the merge) | N/A to daemon |
-| Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108). **Partial:** teardown-only; arouteserver's `restart` action (timed re-establish) is an ADR-0108 deferral — OpenBGPD ships with the same restriction (shutdown + fixed 15-min restart), so teardown-only is target-viable, restart-timer is a parity follow-up |
+| Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108). **Partial:** shutdown only; the renderer refuses arouteserver's timed `restart` action until the daemon has a timed hold-down, because operator-latched shutdown is not equivalent |
 | NEXT_HOP enforcement, `strict` | pre-policy ownership gate | In flight (ADR-0107 strict pilot) |
 | NEXT_HOP enforcement, `same-as` | fleet inventory mode | **Gap:** explicitly deferred by ADR-0107 until the inventory exists; renderer must reject `next_hop.policy: same-as` until then |
 | Max AS_PATH length | `match_as_path_length_le` / `route.as-path.len` | Shipped |

@@ -110,12 +110,15 @@ has no RTT source; permanent), `next_hop.policy` other than `strict`
 `tag`/`tag_and_reject` (reject-reason community wiring is a tracked
 follow-up; the daemon retains rejected routes with reasons natively —
 see the route-server cookbook's filtered-route view), `prepend_rs_as`,
-`perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
+`perform_graceful_shutdown`, `max_prefix.action` `restart`/`block`/`warning`,
+and `max_prefix.count_rejected_routes: true` (rustbgpd counts accepted
+routes only),
 per-client `black_list_pref` and IRR `white_list_*` entries (dropping
 a black list would fail open; dropping a white list would reject
 routes the site intends to accept), and disabling both IRR
-enforcement knobs. `max_prefix.action: restart` renders as
-teardown-only with a warning.
+enforcement knobs. Only `max_prefix.action: shutdown` is rendered;
+an absent effective action emits no max-prefix ceilings, and zero is
+treated as an unset per-family limit.
 
 An empty per-client prefix or origin set aborts the whole render: an
 empty set under the default-reject tail is fail-closed for that client,

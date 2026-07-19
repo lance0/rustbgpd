@@ -364,6 +364,10 @@ struct RpkiOv {
 struct MaxPrefixCfg {
     #[serde(default)]
     action: Option<String>,
+    #[serde(default)]
+    restart_after: Option<u32>,
+    #[serde(default)]
+    count_rejected_routes: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +443,10 @@ struct ClientMaxPrefix {
     limit_ipv6: Option<u32>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(default)]
+    restart_after: Option<u32>,
+    #[serde(default)]
+    count_rejected_routes: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -930,15 +938,6 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
 
     check_next_hop_policy(&filtering.next_hop.policy, "general", &mut refusals);
     check_reject_policy(&filtering.reject_policy.policy, "general", &mut refusals);
-    check_max_prefix_action(
-        filtering
-            .max_prefix
-            .as_ref()
-            .and_then(|m| m.action.as_deref()),
-        "general",
-        &mut refusals,
-    );
-
     if !filtering.irrdb.enforce_origin_in_as_set && !filtering.irrdb.enforce_prefix_in_as_set {
         refusals.push(
             "both irrdb.enforce_origin_in_as_set and irrdb.enforce_prefix_in_as_set are \
@@ -978,13 +977,18 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 &mut refusals,
             );
         }
-        if let Some(max_prefix) = &client.cfg.filtering.max_prefix {
-            check_max_prefix_action(
-                max_prefix.action.as_deref(),
-                &format!("client {}", client.id),
-                &mut refusals,
-            );
-        }
+        let effective_max_prefix = effective_max_prefix(
+            filtering.max_prefix.as_ref(),
+            client.cfg.filtering.max_prefix.as_ref(),
+        );
+        let scope = format!("client {}", client.id);
+        check_max_prefix_action(
+            effective_max_prefix.action,
+            effective_max_prefix.restart_after,
+            &scope,
+            &mut refusals,
+        );
+        check_max_prefix_counting(effective_max_prefix, &scope, &mut refusals);
         // Per-client black/white lists are not rendered; dropping a
         // black list would fail open, dropping a white list would
         // reject routes the site intends to accept.
@@ -1061,13 +1065,78 @@ fn check_reject_policy(policy: &str, scope: &str, refusals: &mut Vec<String>) {
     }
 }
 
-fn check_max_prefix_action(action: Option<&str>, scope: &str, refusals: &mut Vec<String>) {
+#[derive(Clone, Copy)]
+struct EffectiveMaxPrefix<'a> {
+    action: Option<&'a str>,
+    restart_after: Option<u32>,
+    count_rejected_routes: Option<bool>,
+    limit_ipv4: Option<u32>,
+    limit_ipv6: Option<u32>,
+}
+
+/// Resolve the client-over-general inheritance that arouteserver applies to
+/// max-prefix behavior. The per-client limits in `template-context` are
+/// already resolved from client, PeeringDB, and general sources.
+fn effective_max_prefix<'a>(
+    general: Option<&'a MaxPrefixCfg>,
+    client: Option<&'a ClientMaxPrefix>,
+) -> EffectiveMaxPrefix<'a> {
+    EffectiveMaxPrefix {
+        action: client
+            .and_then(|mp| mp.action.as_deref())
+            .or_else(|| general.and_then(|mp| mp.action.as_deref())),
+        restart_after: client
+            .and_then(|mp| mp.restart_after)
+            .or_else(|| general.and_then(|mp| mp.restart_after)),
+        count_rejected_routes: client
+            .and_then(|mp| mp.count_rejected_routes)
+            .or_else(|| general.and_then(|mp| mp.count_rejected_routes)),
+        limit_ipv4: client
+            .and_then(|mp| mp.limit_ipv4)
+            .filter(|limit| *limit > 0),
+        limit_ipv6: client
+            .and_then(|mp| mp.limit_ipv6)
+            .filter(|limit| *limit > 0),
+    }
+}
+
+fn check_max_prefix_action(
+    action: Option<&str>,
+    restart_after: Option<u32>,
+    scope: &str,
+    refusals: &mut Vec<String>,
+) {
     match action {
-        None | Some("shutdown") | Some("restart") => {}
-        Some(other) => refusals.push(format!(
-            "{scope}: max_prefix.action `{other}` is not supported (teardown-style \
-             `shutdown`/`restart` only)"
+        None | Some("shutdown") => {}
+        Some("restart") => {
+            let timer = restart_after
+                .map(|minutes| format!(" with restart_after={minutes} minutes"))
+                .unwrap_or_default();
+            refusals.push(format!(
+                "{scope}: max_prefix.action `restart`{timer} is not supported; rustbgpd \
+                 only implements shutdown and has no timed max-prefix restart"
+            ));
+        }
+        Some(other @ ("block" | "warning")) => refusals.push(format!(
+            "{scope}: max_prefix.action `{other}` is not supported; rustbgpd only \
+             implements shutdown"
         )),
+        Some(other) => refusals.push(format!(
+            "{scope}: unknown max_prefix.action `{other}` (only `shutdown` is supported)"
+        )),
+    }
+}
+
+fn check_max_prefix_counting(
+    max_prefix: EffectiveMaxPrefix<'_>,
+    scope: &str,
+    refusals: &mut Vec<String>,
+) {
+    if max_prefix.count_rejected_routes == Some(true) {
+        refusals.push(format!(
+            "{scope}: max_prefix.count_rejected_routes=true is not supported; rustbgpd \
+             max-prefix ceilings count accepted routes only, so set it to false"
+        ));
     }
 }
 
@@ -1150,12 +1219,14 @@ fn resolve_clients<'a>(
                 client.id
             ));
         }
-        let (limit_ipv4, limit_ipv6) = match &filtering.max_prefix {
-            Some(mp) => (
-                mp.limit_ipv4.filter(|n| *n > 0),
-                mp.limit_ipv6.filter(|n| *n > 0),
-            ),
-            None => (None, None),
+        let max_prefix = effective_max_prefix(
+            ctx.cfg.filtering.max_prefix.as_ref(),
+            filtering.max_prefix.as_ref(),
+        );
+        let (limit_ipv4, limit_ipv6) = if max_prefix.action == Some("shutdown") {
+            (max_prefix.limit_ipv4, max_prefix.limit_ipv6)
+        } else {
+            (None, None)
         };
 
         let description = client
@@ -1209,21 +1280,6 @@ fn collect_warnings(ctx: &Context, warnings: &mut Vec<String>) {
         warnings.push(
             "rfc8950 (IPv6 next hop for IPv4 NLRI) is not rendered yet; sessions are \
              emitted per-family"
-                .to_owned(),
-        );
-    }
-    if ctx
-        .cfg
-        .filtering
-        .max_prefix
-        .as_ref()
-        .and_then(|m| m.action.as_deref())
-        == Some("restart")
-    {
-        warnings.push(
-            "max_prefix.action `restart` renders as teardown-only (the daemon's timed \
-             re-establish action is a tracked follow-up); sessions torn down by a \
-             max-prefix breach need an operator clear"
                 .to_owned(),
         );
     }

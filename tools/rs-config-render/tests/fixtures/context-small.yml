@@ -67,7 +67,9 @@ cfg:
       reject_invalid: true
     max_prefix:
       action: shutdown
+      count_rejected_routes: false
       peering_db: {enabled: true}
+      restart_after: 15
       general_limit_ipv4: 170000
       general_limit_ipv6: 12000
     reject_policy:
