@@ -1069,7 +1069,7 @@ fn check_reject_policy(policy: &str, scope: &str, refusals: &mut Vec<String>) {
 struct EffectiveMaxPrefix<'a> {
     action: Option<&'a str>,
     restart_after: Option<u32>,
-    count_rejected_routes: Option<bool>,
+    count_rejected_routes: bool,
     limit_ipv4: Option<u32>,
     limit_ipv6: Option<u32>,
 }
@@ -1090,7 +1090,9 @@ fn effective_max_prefix<'a>(
             .or_else(|| general.and_then(|mp| mp.restart_after)),
         count_rejected_routes: client
             .and_then(|mp| mp.count_rejected_routes)
-            .or_else(|| general.and_then(|mp| mp.count_rejected_routes)),
+            .or_else(|| general.and_then(|mp| mp.count_rejected_routes))
+            // ARouteServer 1.23.2 resolves an omitted value to true.
+            .unwrap_or(true),
         limit_ipv4: client
             .and_then(|mp| mp.limit_ipv4)
             .filter(|limit| *limit > 0),
@@ -1132,10 +1134,14 @@ fn check_max_prefix_counting(
     scope: &str,
     refusals: &mut Vec<String>,
 ) {
-    if max_prefix.count_rejected_routes == Some(true) {
+    if max_prefix.action == Some("shutdown")
+        && (max_prefix.limit_ipv4.is_some() || max_prefix.limit_ipv6.is_some())
+        && max_prefix.count_rejected_routes
+    {
         refusals.push(format!(
-            "{scope}: max_prefix.count_rejected_routes=true is not supported; rustbgpd \
-             max-prefix ceilings count accepted routes only, so set it to false"
+            "{scope}: effective max_prefix.count_rejected_routes=true is not supported; \
+             ARouteServer defaults this option to true, while rustbgpd max-prefix ceilings \
+             count accepted routes only, so set it to false"
         ));
     }
 }

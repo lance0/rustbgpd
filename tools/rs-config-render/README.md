@@ -111,8 +111,9 @@ has no RTT source; permanent), `next_hop.policy` other than `strict`
 follow-up; the daemon retains rejected routes with reasons natively —
 see the route-server cookbook's filtered-route view), `prepend_rs_as`,
 `perform_graceful_shutdown`, `max_prefix.action` `restart`/`block`/`warning`,
-and `max_prefix.count_rejected_routes: true` (rustbgpd counts accepted
-routes only),
+and an effective `max_prefix.count_rejected_routes: true` while a positive
+shutdown limit is active (ARouteServer 1.23.2 defaults this option to true,
+while rustbgpd counts accepted routes only),
 per-client `black_list_pref` and IRR `white_list_*` entries (dropping
 a black list would fail open; dropping a white list would reject
 routes the site intends to accept), and disabling both IRR

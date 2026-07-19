@@ -580,10 +580,27 @@ fn unsupported_effective_max_prefix_actions_are_refused() {
 }
 
 #[test]
-/// Load-bearing proof: deleting the true-value refusal or reversing
-/// client-over-general count precedence makes `refusals` panic or loses the
-/// asserted client-scoped error.
-fn count_rejected_routes_true_is_refused_at_effective_scope() {
+/// Load-bearing proof: defaulting an omitted value to false, checking the
+/// value without an active shutdown/positive limit, deleting the true-value
+/// refusal, or reversing client-over-general precedence breaks an asserted
+/// success or refusal below.
+fn rejected_route_counting_is_checked_only_for_an_active_limit() {
+    // ARouteServer 1.23.2 defaults an omitted value to true. Silently treating
+    // this context as accepted-only would change when shutdown happens.
+    let mut omitted = healthy_value();
+    omitted["cfg"]["filtering"]["max_prefix"]
+        .as_mapping_mut()
+        .expect("max_prefix mapping")
+        .remove(serde_yaml::Value::String(
+            "count_rejected_routes".to_owned(),
+        ));
+    let items = refusals(render(&to_yaml(&omitted), &rtr_options()));
+    assert!(
+        items.iter().any(|item| item.contains("client AS4242_1")
+            && item.contains("defaults this option to true")),
+        "{items:?}"
+    );
+
     let mut inherited = healthy_value();
     set_path(
         &mut inherited,
@@ -613,4 +630,68 @@ fn count_rejected_routes_true_is_refused_at_effective_scope() {
             .any(|item| item.contains("client AS4242_1") && item.contains("=true")),
         "{items:?}"
     );
+
+    // A client can explicitly select rustbgpd's accepted-route model over an
+    // inherited general true value.
+    let mut allowed_override = healthy_value();
+    set_path(
+        &mut allowed_override,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = allowed_override["clients"].clone();
+    for client in clients.as_sequence_mut().expect("clients list") {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+            serde_yaml::Value::Bool(false),
+        );
+    }
+    set_path(&mut allowed_override, &["clients"], clients);
+    render(&to_yaml(&allowed_override), &rtr_options()).expect("explicit false override");
+
+    // Counting semantics are irrelevant when no shutdown action is active,
+    // even if ARouteServer leaves resolved positive limits in the context.
+    let mut disabled = healthy_value();
+    set_path(
+        &mut disabled,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    set_path(
+        &mut disabled,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = disabled["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::Null,
+    );
+    set_path(&mut disabled, &["clients"], clients);
+    render(&to_yaml(&disabled), &rtr_options()).expect("disabled max-prefix counting");
+
+    // A shutdown action with only zero/unset family limits is also inactive.
+    let mut zero_limits = healthy_value();
+    set_path(
+        &mut zero_limits,
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    let mut clients = zero_limits["clients"].clone();
+    for client in clients.as_sequence_mut().expect("clients list") {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "limit_ipv4"],
+            serde_yaml::Value::Number(0.into()),
+        );
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "limit_ipv6"],
+            serde_yaml::Value::Number(0.into()),
+        );
+    }
+    set_path(&mut zero_limits, &["clients"], clients);
+    render(&to_yaml(&zero_limits), &rtr_options()).expect("zero limits disable enforcement");
 }
