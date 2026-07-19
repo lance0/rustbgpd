@@ -63,19 +63,20 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l token-file -d 'Bear
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "confirm" -d 'Confirm a pending confirmed config transaction'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults materialized)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "confirm" -d 'Confirm a pending confirmed config transaction'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults materialized)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status effective import help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -120,6 +121,15 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l format -d 'Source format (default: auto-detect from content)' -r -f -a "bird\t''
+frr\t''
+gobgp\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l out -d 'Write the translated config here (default: stdout; required with --json)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "diff" -d 'Diff a candidate TOML file against the daemon\'s live runtime snapshot'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "plan" -d 'Validate and classify a candidate transaction without mutation'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "apply" -d 'Commit a previously planned candidate transaction'
@@ -127,6 +137,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults materialized)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1067,6 +1078,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "abort" -d 'Abort a pending confirmed config transaction and roll back immediately'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "status" -d 'Show pending or last confirmed-transaction lifecycle state'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults materialized)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from config" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "add" -d 'Add a new neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "delete" -d 'Delete this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "enable" -d 'Enable this neighbor'

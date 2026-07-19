@@ -2854,6 +2854,7 @@ dependencies = [
  "prometheus",
  "rs-config-render",
  "rtnetlink",
+ "rustbgpctl",
  "rustbgpd-api",
  "rustbgpd-bfd",
  "rustbgpd-bmp",

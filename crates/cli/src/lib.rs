@@ -4,4 +4,5 @@
 
 #![deny(unsafe_code)]
 
+pub mod importer;
 pub mod ribdiff;

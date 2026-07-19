@@ -1,0 +1,71 @@
+# Edge router — GoBGP. Two transit uplinks plus an IXP peer bound to a
+# peer group, with a bogon-reject import policy.
+
+[global.config]
+as = 64500
+router-id = "192.0.2.10"
+
+[global.apply-policy.config]
+default-import-policy = "accept-route"
+import-policy-list = ["bogon-reject"]
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.1"
+peer-as = 64496
+description = "transit-a uplink"
+auth-password = "example-md5-secret"
+[neighbors.timers.config]
+hold-time = 90
+keepalive-interval = 30
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+[neighbors.afi-safis.prefix-limit.config]
+max-prefixes = 500000
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "2001:db8::1"
+peer-as = 64497
+description = "transit-b v6"
+[neighbors.timers.config]
+hold-time = 60
+keepalive-interval = 30
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-unicast"
+[neighbors.afi-safis.prefix-limit.config]
+max-prefixes = 200000
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.200"
+peer-group = "ixp-peers"
+[neighbors.apply-policy.config]
+import-policy-list = ["ixp-in"]
+
+[[peer-groups]]
+[peer-groups.config]
+peer-group-name = "ixp-peers"
+peer-as = 64499
+[[peer-groups.afi-safis]]
+[peer-groups.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[policy-definitions]]
+name = "bogon-reject"
+[[policy-definitions.statements]]
+name = "reject-bogons"
+[policy-definitions.statements.conditions.match-prefix-set]
+prefix-set = "bogons"
+[policy-definitions.statements.actions.route-disposition]
+disposition = "reject-route"
+
+[[defined-sets.prefix-sets]]
+prefix-set-name = "bogons"
+[[defined-sets.prefix-sets.prefix-list]]
+ip-prefix = "10.0.0.0/8"

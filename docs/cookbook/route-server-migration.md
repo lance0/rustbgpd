@@ -1,9 +1,38 @@
 # Route-server migration notes
 
 This page maps common FRR, BIRD, and ARouteServer route-server concepts to
-rustbgpd's config and verification surfaces. It is not a mechanical converter;
-use it to build a side-by-side candidate, then run the shadow trial from the
-route-server cookbook before carrying production traffic.
+rustbgpd's config and verification surfaces. Structure is mechanical now —
+policy is not: `rbgp config import` translates the structural subset of a
+BIRD 2, FRR, or GoBGP config and refuses to guess at anything else, so use
+the importer for the skeleton, this page for the policy concepts it lists as
+untranslated, then run the shadow trial from the route-server cookbook
+before carrying production traffic.
+
+## The mechanical first step
+
+```bash
+# 1. Translate the structure; the report lists every stanza that was NOT
+#    translated, with source line numbers (exit 0 only when nothing was
+#    skipped; 2 = translated with skips; 3 = nothing translatable).
+rbgp config import bird.conf --out config.toml
+
+# 2. Hand-translate the reported policy stanzas to .rpol
+#    (docs/rpol-language.md), wire them into import/export chains, then
+#    validate — --check also compiles every referenced .rpol file.
+rustbgpd --check config.toml
+
+# 3. Shadow trial (docs/cookbook/route-server.md), then compare the
+#    advertised view against the incumbent per member:
+rbgp diff advertised --neighbor 198.51.100.2 --against bird-member.ndjson
+```
+
+The importer covers local AS, router-id, neighbors (address, remote AS,
+description), peer groups, address families, hold timers, and max-prefix
+limits. MD5/auth presence is flagged but secrets are never imported. BIRD
+filters, FRR route-maps/prefix-lists, and GoBGP policy-definitions are
+deliberately not translated — a wrong mechanical policy translation would
+be worse than the honest list; the sections below are the hand-translation
+map for exactly those stanzas.
 
 ## Baseline rustbgpd shape
 

@@ -60,6 +60,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
     config diff, plan    0 no changes / 1 error / 2 changes present\n  \
+    config import        0 clean translation / 1 error / 2 translated with skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below --coverage-min\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
@@ -483,6 +484,38 @@ enum ConfigAction {
     /// before reusing it as a config file. Use --json (-j) for a JSON
     /// rendering; the default output is TOML.
     Effective,
+
+    /// Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml
+    ///
+    /// Deliberately bounded structural importer: translates local AS,
+    /// router-id, neighbors (address, remote AS, description), peer
+    /// groups, address families, hold timers, and max-prefix limits.
+    /// Routing POLICY IS NEVER translated — BIRD filters, FRR
+    /// route-maps/prefix-lists, and GoBGP policy-definitions are listed,
+    /// with source line numbers, in the import report (stderr; stdout
+    /// with --json) for hand-translation to .rpol. Secrets are never
+    /// imported: MD5/auth presence is flagged instead. Runs locally, no
+    /// daemon needed. Validate the result with `rustbgpd --check`, then
+    /// follow docs/cookbook/route-server-migration.md (shadow trial,
+    /// `rbgp diff advertised`) before carrying traffic.
+    #[command(after_help = "Exit codes:\n  \
+        0  clean full structural translation (nothing skipped)\n  \
+        1  error (unreadable source, unrecognized format, parse failure)\n  \
+        2  translated with skips (config written; the report lists every skipped stanza)\n  \
+        3  refused (no translatable BGP structure in the source)")]
+    Import {
+        /// Source config: BIRD 2 (.conf), FRR running-config (.conf), or GoBGP (.toml)
+        #[arg(value_name = "SOURCE")]
+        source: String,
+
+        /// Source format (default: auto-detect from content)
+        #[arg(long, value_parser = ["bird", "frr", "gobgp"])]
+        format: Option<String>,
+
+        /// Write the translated config here (default: stdout; required with --json)
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1733,6 +1766,24 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         ));
     }
 
+    // `config import` translates a foreign config in-process — no daemon.
+    if let Command::Config {
+        action:
+            ConfigAction::Import {
+                source,
+                format,
+                out,
+            },
+    } = &cli.command
+    {
+        std::process::exit(rustbgpctl::importer::run_import(
+            source,
+            format.as_deref(),
+            out.as_deref(),
+            cli.json,
+        ));
+    }
+
     // `policy fmt` is also purely local — no daemon.
     if let Command::Policy {
         action: PolicyAction::Fmt { files, check },
@@ -1920,6 +1971,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             ConfigAction::Status => commands::config::status(connection, json).await,
             ConfigAction::Effective => commands::config::effective(connection, json).await,
+            ConfigAction::Import { .. } => unreachable!("handled before connect"),
         },
 
         Command::Neighbor {

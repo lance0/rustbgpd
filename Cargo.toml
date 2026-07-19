@@ -190,6 +190,9 @@ bench = false
 # The emitted-config gate (tests/rs_config_render_emitted_check.rs)
 # renders the tool's fixture and proves the output passes `--check`.
 rs-config-render = { path = "tools/rs-config-render" }
+# The importer gate (tests/config_import_emitted_check.rs) translates the
+# CLI's BIRD/FRR/GoBGP fixtures and proves the output passes `--check`.
+rustbgpctl = { path = "crates/cli" }
 serde_yaml.workspace = true
 tempfile.workspace = true
 tower.workspace = true
