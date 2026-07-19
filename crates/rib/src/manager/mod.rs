@@ -233,8 +233,12 @@ pub struct RibManager {
     peer_is_rr_client: HashMap<IpAddr, bool>,
     /// Local RFC 9234 role for the active outbound registration.
     peer_local_roles: HashMap<IpAddr, Option<BgpRole>>,
+    /// Current RFC 9234 egress-denied disposition, indexed by peer and
+    /// prefix so one-prefix churn never scans every denied route.
+    peer_otc_blocked: HashMap<IpAddr, HashMap<Prefix, HashSet<u32>>>,
     /// OTC rejections waiting to ride the next reserved outbound envelope to
-    /// transport's existing metric/event publisher.
+    /// transport's existing metric/event publisher. Every pending identity is
+    /// also present in [`Self::peer_otc_blocked`].
     pending_otc_blocked: HashMap<IpAddr, HashMap<(Prefix, u32), crate::route::Route>>,
     /// RFC 9107 ORR vantage per registered outbound peer (RR clients
     /// configured with `orr_vantage` only).
@@ -1184,6 +1188,7 @@ impl RibManager {
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
             peer_local_roles: HashMap::new(),
+            peer_otc_blocked: HashMap::new(),
             pending_otc_blocked: HashMap::new(),
             peer_orr_vantage: HashMap::new(),
             orr: crate::orr::OrrState::default(),

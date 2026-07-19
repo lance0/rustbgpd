@@ -1880,12 +1880,112 @@ impl RibManager {
         )
     }
 
+    /// Reconcile the latest OTC disposition for exactly the prefixes evaluated
+    /// by one staging pass. Newly blocked identities become pending diagnostic
+    /// edges; unchanged blocked identities remain current without re-emitting.
+    pub(super) fn reconcile_peer_otc_blocked(
+        &mut self,
+        peer: IpAddr,
+        affected_prefixes: &HashSet<Prefix>,
+        blocked_routes: Vec<crate::route::Route>,
+    ) {
+        let mut blocked_by_prefix: HashMap<Prefix, HashMap<u32, crate::route::Route>> =
+            HashMap::new();
+        for route in blocked_routes {
+            if affected_prefixes.contains(&route.prefix) {
+                blocked_by_prefix
+                    .entry(route.prefix)
+                    .or_default()
+                    .insert(route.path_id, route);
+            }
+        }
+
+        let current = self.peer_otc_blocked.entry(peer).or_default();
+        let pending = self.pending_otc_blocked.entry(peer).or_default();
+        for prefix in affected_prefixes {
+            let old = current.remove(prefix).unwrap_or_default();
+            let blocked = blocked_by_prefix.remove(prefix).unwrap_or_default();
+            let next: HashSet<u32> = blocked.keys().copied().collect();
+
+            for path_id in old.difference(&next) {
+                pending.remove(&(*prefix, *path_id));
+            }
+            for (path_id, route) in blocked {
+                if !old.contains(&path_id) || pending.contains_key(&(*prefix, path_id)) {
+                    pending.insert((*prefix, path_id), route);
+                }
+            }
+            if !next.is_empty() {
+                current.insert(*prefix, next);
+            }
+        }
+
+        if current.is_empty() {
+            self.peer_otc_blocked.remove(&peer);
+        }
+        if pending.is_empty() {
+            self.pending_otc_blocked.remove(&peer);
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "outbound commit needs all family queues for one atomic send"
+    )]
+    pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
+        &mut self,
+        peer: IpAddr,
+        next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
+        announce: Arc<[crate::route::Route]>,
+        withdraw: Vec<(Prefix, u32)>,
+        end_of_rib: Vec<(Afi, Safi)>,
+        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
+        flowspec_announce: Vec<crate::route::FlowSpecRoute>,
+        flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
+        evpn_announce: Vec<crate::route::EvpnRibRoute>,
+        evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
+        bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
+        bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
+        vpn_announce: Vec<crate::route::VpnRibRoute>,
+        vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
+        labeled_announce: Vec<crate::route::LabeledRibRoute>,
+        labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
+        rtc_announce: Vec<crate::route::RtcRibRoute>,
+        rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+        group_prior: HashSet<crate::update::ExactExportKey>,
+        shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
+    ) -> bool {
+        self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+            peer,
+            next_hop_override,
+            announce,
+            withdraw,
+            end_of_rib,
+            refresh_markers,
+            flowspec_announce,
+            flowspec_withdraw,
+            evpn_announce,
+            evpn_withdraw,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce,
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            group_prior,
+            shared_unicast_precommit,
+            None,
+        )
+    }
+
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "outbound commit needs all family queues for one atomic send"
     )]
-    pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
+    pub(super) fn try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
         &mut self,
         peer: IpAddr,
         mut next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
@@ -1907,6 +2007,7 @@ impl RibManager {
         mut rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
         group_prior: HashSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
+        otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
     ) -> bool {
         let gated = announce
             .iter()
@@ -1955,13 +2056,23 @@ impl RibManager {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
         };
+
+        let local_role = self.peer_local_roles.get(&peer).copied().flatten();
+        if let Some(prefixes) = otc_reconcile_prefixes {
+            let blocked = announce
+                .iter()
+                .filter(|route| otc_egress_blocked(route, local_role))
+                .cloned()
+                .collect();
+            self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
+        }
         let Ok(permit) = tx.try_reserve() else {
             return false;
         };
 
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
-        // precommit must leave those structures intact for the retry.
+        // precommit leaves those structures intact for the retry.
         let has_candidate_route_payload = !announce.is_empty()
             || !withdraw.is_empty()
             || !flowspec_announce.is_empty()
@@ -1997,12 +2108,6 @@ impl RibManager {
         // shape. Single-best group staging applies the same gate before its
         // shared table commit; this central pass covers private single-best,
         // ORR, Add-Path, and per-client-best without duplicating their tails.
-        let mut otc_blocked: Vec<crate::route::Route> = self
-            .pending_otc_blocked
-            .remove(&peer)
-            .map(|pending| pending.into_values().collect())
-            .unwrap_or_default();
-        let local_role = self.peer_local_roles.get(&peer).copied().flatten();
         if announce
             .iter()
             .any(|route| otc_egress_blocked(route, local_role))
@@ -2032,7 +2137,6 @@ impl RibManager {
                     {
                         withdraw.push((route.prefix, route.path_id));
                     }
-                    otc_blocked.push(route);
                 } else {
                     permitted.push(route);
                     permitted_next_hops.push(next_hop);
@@ -2041,6 +2145,13 @@ impl RibManager {
             announce = permitted.into();
             next_hop_override = permitted_next_hops.into();
         }
+        let otc_blocked: Vec<crate::route::Route> = self
+            .pending_otc_blocked
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .cloned()
+            .collect();
 
         // A route rejected on an earlier pass was never advertised (or its
         // prior advertisement was withdrawn by that transition). Suppress a
@@ -2440,6 +2551,14 @@ impl RibManager {
             );
         }
 
+        if let Some(pending) = self.pending_otc_blocked.get_mut(&peer) {
+            for route in &otc_blocked {
+                pending.remove(&(route.prefix, route.path_id));
+            }
+            if pending.is_empty() {
+                self.pending_otc_blocked.remove(&peer);
+            }
+        }
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
@@ -3411,6 +3530,9 @@ impl RibManager {
                 if let Some(extras) = self.pending_extra_withdraws.get(&peer) {
                     all.extend(extras.unicast.iter().map(|(prefix, _)| *prefix));
                 }
+                if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
+                    all.extend(blocked.keys().copied());
+                }
                 all.retain(|prefix| !self.selection_deferred(prefix_family(prefix)));
                 Cow::Owned(all)
             } else if member_of.is_some() {
@@ -3751,8 +3873,17 @@ impl RibManager {
                     }
                     current_policy_filtered_routes
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
-                    group_otc_blocked = group
-                        .otc_blocked_for_member(peer, (!resync).then_some(&effective_prefixes));
+                    group_otc_blocked = if resync {
+                        group.otc_blocked_for_member(peer, None)
+                    } else {
+                        group_stage
+                            .get(&gid)
+                            .into_iter()
+                            .flat_map(|stage| stage.otc_blocked.iter())
+                            .filter(|route| route.peer != peer)
+                            .cloned()
+                            .collect()
+                    };
                 }
                 // Per-member export-policy counters — integer adds, no
                 // per-(prefix × peer) work. A clean pass takes the group
@@ -3767,20 +3898,7 @@ impl RibManager {
                 }
             }
             if member_of.is_some() {
-                let pending = self.pending_otc_blocked.entry(peer).or_default();
-                if resync {
-                    pending.clear();
-                } else {
-                    pending.retain(|(prefix, _), _| !effective_prefixes.contains(prefix));
-                }
-                pending.extend(
-                    group_otc_blocked
-                        .into_iter()
-                        .map(|route| ((route.prefix, route.path_id), route)),
-                );
-                if pending.is_empty() {
-                    self.pending_otc_blocked.remove(&peer);
-                }
+                self.reconcile_peer_otc_blocked(peer, &effective_prefixes, group_otc_blocked);
             }
 
             // Resolve export policy, sendable families, and RR state before
@@ -4386,7 +4504,7 @@ impl RibManager {
                 } else {
                     HashSet::new()
                 };
-                if self.try_send_and_commit_outbound_update_with_group_prior(
+                if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
                     nh_override_flags,
                     announce,
@@ -4411,6 +4529,7 @@ impl RibManager {
                         probe_cache: &mut shared_unicast_probe_cache,
                         lazy_group_prior,
                     }),
+                    member_of.is_none().then_some(effective_prefixes.as_ref()),
                 ) {
                     self.update_policy_filtered_routes_for_prefixes(
                         peer,

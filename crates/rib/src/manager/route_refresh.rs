@@ -706,12 +706,21 @@ impl RibManager {
                     .filter(|p| prefix_family(p) == family),
             );
         }
+        if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
+            all_prefixes.extend(
+                blocked
+                    .keys()
+                    .filter(|prefix| prefix_family(prefix) == family)
+                    .copied(),
+            );
+        }
 
         // Stage against an empty outbound view so ROUTE-REFRESH
         // re-advertises the current export set for this family rather than
         // diffing against what was already sent.
         let refresh_view = AdjRibOut::new(peer);
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
+        let mut grouped_otc_blocked = Vec::new();
 
         if safi == Safi::FlowSpec {
             let flow_rules: HashSet<FlowSpecKey> = self
@@ -1005,6 +1014,7 @@ impl RibManager {
                 }
                 current_policy_filtered_routes
                     .extend(group.policy_filtered_for_member(peer, &all_prefixes));
+                grouped_otc_blocked = group.otc_blocked_for_member(peer, Some(&all_prefixes));
             }
             // Export counters for the replayed family, from the group's
             // staged residue (per-peer refresh re-eval parity).
@@ -1183,6 +1193,10 @@ impl RibManager {
             }
         }
 
+        if member_of.is_some() {
+            self.reconcile_peer_otc_blocked(peer, &all_prefixes, grouped_otc_blocked);
+        }
+
         if self.outbound_peers.contains_key(&peer) {
             let mut group_prior = HashSet::new();
             if member_of.is_some()
@@ -1205,7 +1219,7 @@ impl RibManager {
                     .then_some(key)
                 }));
             }
-            if !self.try_send_and_commit_outbound_update_with_group_prior(
+            if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 nh_override_flags.into(),
                 announce.into(),
@@ -1233,6 +1247,7 @@ impl RibManager {
                 rtc_withdraw,
                 group_prior,
                 None,
+                member_of.is_none().then_some(&all_prefixes),
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
