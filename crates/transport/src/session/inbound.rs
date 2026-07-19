@@ -1944,8 +1944,10 @@ impl PeerSession {
         // happens once in `RouteAttrBundle::new`.
         let mut flowspec_announced: Vec<FlowSpecRoute> = Vec::new();
         let mut flowspec_withdrawn: Vec<FlowSpecKey> = Vec::new();
+        let mut denied_flowspec: Vec<FlowSpecKey> = Vec::new();
         let mut evpn_announced: Vec<EvpnRibRoute> = Vec::new();
         let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
+        let mut policy_denied_evpn: Vec<EvpnRouteKey> = Vec::new();
         let mut bgpls_announced: Vec<BgpLsRibRoute> = Vec::new();
         let mut bgpls_withdrawn: Vec<BgpLsRouteKey> = Vec::new();
         let mut denied_bgpls: Vec<BgpLsRouteKey> = Vec::new();
@@ -2060,6 +2062,11 @@ impl PeerSession {
                                     is_llgr_stale: false,
                                     path_id: 0,
                                 });
+                            } else {
+                                denied_flowspec.push(FlowSpecKey {
+                                    afi: mp.afi,
+                                    rule: rule.clone(),
+                                });
                             }
                         }
                         continue;
@@ -2128,6 +2135,8 @@ impl PeerSession {
                                     is_stale: false,
                                     is_llgr_stale: false,
                                 });
+                            } else {
+                                policy_denied_evpn.push(route.key());
                             }
                         }
                         continue;
@@ -2737,11 +2746,21 @@ impl PeerSession {
         for key in &flowspec_withdrawn {
             self.known_flowspec.remove(key);
         }
+        for key in denied_flowspec {
+            if self.known_flowspec.remove(&key) {
+                flowspec_withdrawn.push(key);
+            }
+        }
         for route in &flowspec_announced {
             self.known_flowspec.insert(route.selection_key());
         }
         for key in &evpn_withdrawn {
             self.known_evpn.remove(key);
+        }
+        for key in policy_denied_evpn {
+            if self.known_evpn.remove(&key) {
+                evpn_withdrawn.push(key);
+            }
         }
         for route in &evpn_announced {
             self.known_evpn.insert(route.key());
