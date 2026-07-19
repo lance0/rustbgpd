@@ -465,6 +465,7 @@ impl RibManager {
         self.peer_local_roles.remove(&peer);
         self.peer_export_encoders.remove(&peer);
         self.peer_unexportable.remove(&peer);
+        self.peer_otc_blocked.remove(&peer);
         self.pending_otc_blocked.remove(&peer);
         // The ORR vantage binding is per-registration: dropping the last
         // peer bound to a vantage must also drop the vantage's cached
@@ -1117,6 +1118,18 @@ impl RibManager {
         for rib in self.ribs.values() {
             all_prefixes.extend(rib.iter().map(|r| r.prefix));
         }
+        let otc_prefixes: HashSet<Prefix> = all_prefixes
+            .iter()
+            .filter(|prefix| {
+                let family = prefix_family(prefix);
+                !self.selection_deferred(family)
+                    && !orf_gated.contains(&family)
+                    && sendable
+                        .as_ref()
+                        .is_some_and(|families| families.contains(&family))
+            })
+            .copied()
+            .collect();
 
         // Stage against an empty outbound view so initial dump always
         // re-sends the full current table for this peer.
@@ -1133,6 +1146,7 @@ impl RibManager {
         // path; grouped peers skip it (empty staging set).
         let member_of = self.grouped_member_of(peer);
         let mut vpn_group_replayed = false;
+        let mut grouped_otc_blocked = Vec::new();
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
             // table entry whose captured SOURCE communities tag it may
@@ -1181,6 +1195,7 @@ impl RibManager {
             }
             current_policy_filtered_routes
                 .extend(group.policy_filtered_for_member(peer, &all_prefixes));
+            grouped_otc_blocked = group.otc_blocked_for_member(peer, Some(&otc_prefixes));
         }
         if let Some(gid) = member_of {
             // Export counters for the join, reconstructed from the
@@ -1649,6 +1664,10 @@ impl RibManager {
                 .extend(convergence_held);
         }
 
+        if member_of.is_some() {
+            self.reconcile_peer_otc_blocked(peer, &otc_prefixes, grouped_otc_blocked);
+        }
+
         let has_outbound_diff = !announce.is_empty()
             || !withdraw.is_empty()
             || !fs_announce.is_empty()
@@ -1662,9 +1681,10 @@ impl RibManager {
             || !labeled_announce.is_empty()
             || !labeled_withdraw.is_empty()
             || !rtc_announce.is_empty()
-            || !rtc_withdraw.is_empty();
+            || !rtc_withdraw.is_empty()
+            || self.pending_otc_blocked.contains_key(&peer);
         let sent = !has_outbound_diff
-            || self.try_send_and_commit_outbound_update(
+            || self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 nh_override_flags.into(),
                 announce.into(),
@@ -1683,6 +1703,9 @@ impl RibManager {
                 labeled_withdraw,
                 rtc_announce,
                 rtc_withdraw,
+                HashSet::new(),
+                None,
+                member_of.is_none().then_some(&otc_prefixes),
             );
         if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");

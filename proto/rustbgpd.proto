@@ -2448,9 +2448,10 @@ message BfdSessionEvent {
 // Emitted whenever an OTC route-leak rule (RFC 9234 §5) blocks one
 // or more unicast routes at either an ingress or egress decision
 // site. The legacy `bgp_otc_routes_blocked_total{peer, reason}`
-// counter and the `otc_routes_blocked` scalar on NeighborState are
-// unchanged — this structured event is the per-decision surface
-// needed for incident reconstruction.
+// counter and the `otc_routes_blocked` scalar on NeighborState remain the
+// compatibility surfaces. Ingress remains per rejected UPDATE decision; egress
+// events emit once per peer/route transition into the blocked disposition
+// and re-arm after permit, withdrawal, or session reset.
 message OtcRouteBlockedEvent {
   BgpEventType event_type = 1;
   string peer_address = 2;

@@ -395,6 +395,47 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         assert_eq!((stop.gate, stop.code), ("otc", "otc_egress_blocked"));
     }
 
+    for (peer, _) in &receivers {
+        let (reply, result) = oneshot::channel();
+        tx.send(RibUpdate::RefreshPeerOutbound { peer: *peer, reply })
+            .await
+            .unwrap();
+        assert_eq!(result.await.unwrap(), Ok(()));
+    }
+    let _ = query_best_routes(&tx).await;
+    let mut resyncs = 0;
+    for (_, out_rx) in &mut receivers {
+        while let Ok(update) = out_rx.try_recv() {
+            resyncs += 1;
+            assert!(
+                update.otc_blocked.is_empty(),
+                "force resync repeated an unchanged OTC edge"
+            );
+        }
+    }
+    assert!(
+        resyncs > 0,
+        "force resync proof did not observe an envelope"
+    );
+    for (peer, _) in &receivers {
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer: *peer,
+            session_id: 7,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+    }
+    for (_, out_rx) in &mut receivers {
+        let refresh = out_rx.recv().await.unwrap();
+        assert_eq!(refresh.refresh_markers.len(), 2);
+        assert!(
+            refresh.otc_blocked.is_empty(),
+            "route refresh repeated an unchanged OTC edge"
+        );
+    }
+
     let now_permitted = make_route(never_advertised_prefix, Ipv4Addr::new(198, 51, 100, 2));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -418,12 +459,67 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         );
     }
 
+    let blocked_again = with_otc(
+        make_route(never_advertised_prefix, Ipv4Addr::new(198, 51, 100, 2)),
+        64512,
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: blocked_again.peer,
+        announced: vec![blocked_again],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    for (_, out_rx) in &mut receivers {
+        assert_eq!(out_rx.recv().await.unwrap().otc_blocked.len(), 1);
+    }
+
+    tx.send(RibUpdate::PeerDown {
+        peer: grouped,
+        session_id: 7,
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut rejoined_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: grouped,
+        session_id: 8,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerUp {
+        peer: grouped,
+        session_id: 8,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    assert_eq!(rejoined_rx.recv().await.unwrap().otc_blocked.len(), 2);
+
     drop(tx);
     handle.await.unwrap();
 }
 
-#[tokio::test]
-async fn grouped_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery() {
+async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     tokio::time::pause();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -448,7 +544,7 @@ async fn grouped_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery(
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,
-        per_client_best: false,
+        per_client_best,
         interpret_rfc1997: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
@@ -488,9 +584,34 @@ async fn grouped_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery(
     let recovered = out_rx.recv().await.unwrap();
     assert!(recovered.announce.is_empty());
     assert_eq!(recovered.otc_blocked.len(), 1);
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.await.unwrap(), Ok(()));
+    let _ = query_best_routes(&tx).await;
+    while let Ok(update) = out_rx.try_recv() {
+        assert!(
+            update.otc_blocked.is_empty(),
+            "force retry repeated an unchanged OTC edge"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grouped_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery() {
+    assert_otc_backpressure_dedup(false).await;
+}
+
+#[tokio::test]
+async fn private_otc_backpressure_emits_one_deduplicated_diagnostic_on_recovery() {
+    assert_otc_backpressure_dedup(true).await;
 }
 
 #[tokio::test]
@@ -561,6 +682,15 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     })
     .await
     .unwrap();
+    let _ = query_best_routes(&tx).await;
+    drain_eor(&mut out_rx).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "empty dirty resync leaked an obsolete OTC diagnostic"
+    );
+
     let permitted = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24),
         Ipv4Addr::new(198, 51, 100, 22),
@@ -577,10 +707,6 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     })
     .await
     .unwrap();
-    let _ = query_best_routes(&tx).await;
-
-    drain_eor(&mut out_rx).await;
-    tokio::time::advance(Duration::from_secs(2)).await;
     let recovered = out_rx.recv().await.unwrap();
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, permitted.prefix);

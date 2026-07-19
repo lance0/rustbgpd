@@ -58,6 +58,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Outbound RFC 9234 OTC diagnostics now emit once per transition into a blocked disposition, rather than repeating on unchanged refresh/resync retries; permit, withdrawal, or session reset re-arms the edge.
 - Import-policy-denied FlowSpec and EVPN replacements now withdraw the exact accepted identity.
 - **Release tarballs ship `rs-config-render`.** The route-server
   config renderer was built by the release workflow but never staged
