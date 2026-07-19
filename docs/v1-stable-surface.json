@@ -185,13 +185,15 @@
           {"path": "crates/cli/tests/fixtures/ribsnap/from-bmp.expected.ndjson", "sha256": "d0e1952367a6ea7af95c9341585799adb3c51a23410a0ba7431ca1dc4a7223c9"},
           {"path": "crates/cli/tests/fixtures/ribsnap/from-mrt.expected.ndjson", "sha256": "50c40435631db256f10a0263a4888ce103443fa55a7509df1bf11ceeab15a9cc"},
           {"path": "crates/cli/tests/fixtures/ribsnap/frr-m83.expected.ndjson", "sha256": "12443e42345d555d13e350689e563b01633925c3439309e7260647416c44edb1"},
-          {"path": "crates/cli/tests/fixtures/ribsnap/gobgp-m83.expected.ndjson", "sha256": "11dfad0e9eb38dcb13ba072f5e848360a36fb03eb0c4bd877c86451a7c45f4ee"}
+          {"path": "crates/cli/tests/fixtures/ribsnap/gobgp-m83.expected.ndjson", "sha256": "11dfad0e9eb38dcb13ba072f5e848360a36fb03eb0c4bd877c86451a7c45f4ee"},
+          {"path": "crates/cli/tests/fixtures/ribsnap/gobgp-v47-m92.expected.ndjson", "sha256": "664ee668f34acfd4a3ba23066a7e22ce2d8c092ccf1852cb9252fb1a729f1dd6"}
         ],
         "producer_tests": [
           {"id": "bird-advertised-export-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "bird_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&BIRD)", "golden": "crates/cli/tests/fixtures/ribsnap/bird-m83.expected.ndjson", "golden_linkage": "BIRD.golden, \"bird-m83.expected.ndjson\""},
           {"id": "bmp-post-policy-adj-rib-out-adapter", "source": "crates/cli/src/commands/ribsnap_bmp.rs", "test": "emits_golden_snapshot", "test_linkage": "run_capture(&golden_capture())", "golden": "crates/cli/tests/fixtures/ribsnap/from-bmp.expected.ndjson", "golden_linkage": "/tests/fixtures/ribsnap/from-bmp.expected.ndjson"},
           {"id": "frr-advertised-detail-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "frr_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&FRR)", "golden": "crates/cli/tests/fixtures/ribsnap/frr-m83.expected.ndjson", "golden_linkage": "FRR.golden, \"frr-m83.expected.ndjson\""},
           {"id": "gobgp-adj-out-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "gobgp_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&GOBGP)", "golden": "crates/cli/tests/fixtures/ribsnap/gobgp-m83.expected.ndjson", "golden_linkage": "GOBGP.golden, \"gobgp-m83.expected.ndjson\""},
+          {"id": "gobgp-v47-adj-out-adapter", "source": "crates/cli/src/commands/diff.rs", "test": "gobgp_v47_golden_matches_and_diffs_clean", "test_linkage": "check_golden(&GOBGP_V47)", "golden": "crates/cli/tests/fixtures/ribsnap/gobgp-v47-m92.expected.ndjson", "golden_linkage": "GOBGP_V47.golden, \"gobgp-v47-m92.expected.ndjson\""},
           {"id": "mrt-adj-rib-out-adapter", "source": "crates/cli/src/commands/ribsnap.rs", "test": "emits_golden_snapshot_for_adj_rib_out_capture", "test_linkage": "run(&opts(dump.path(), \"adj-rib-out-capture\"))", "golden": "crates/cli/tests/fixtures/ribsnap/from-mrt.expected.ndjson", "golden_linkage": "/tests/fixtures/ribsnap/from-mrt.expected.ndjson"}
         ],
         "record_json_contracts": {

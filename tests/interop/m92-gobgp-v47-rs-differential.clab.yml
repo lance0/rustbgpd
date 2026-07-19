@@ -1,0 +1,84 @@
+name: m92-gobgp-v47-rs-differential
+
+topology:
+  nodes:
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth5 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set eth5 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m92-rs.toml:/config/rustbgpd.toml:ro
+      exec:
+        - ip addr add 192.0.2.9/24 dev eth1
+        - ip addr add 2001:db8:92::9/64 dev eth1
+        - ip link set eth1 up
+
+    gobgp-rs:
+      kind: linux
+      image: gobgp:v4.7.0-m92
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m92-rs.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.10/24 dev eth1
+        - ip addr add 2001:db8:92::10/64 dev eth1
+        - ip link set eth1 up
+
+    target:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m92-target.conf:/config/bird.conf:ro
+      exec:
+        - ip addr add 192.0.2.11/24 dev eth1
+        - ip addr add 2001:db8:92::11/64 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+    source1:
+      kind: linux
+      image: gobgp:v4.7.0-m92
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m92-source1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.12/24 dev eth1
+        - ip addr add 2001:db8:92::12/64 dev eth1
+        - ip link set eth1 up
+
+    source2:
+      kind: linux
+      image: gobgp:v4.7.0-m92
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m92-source2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.13/24 dev eth1
+        - ip addr add 2001:db8:92::13/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "gobgp-rs:eth1"]
+    - endpoints: ["switch:eth3", "target:eth1"]
+    - endpoints: ["switch:eth4", "source1:eth1"]
+    - endpoints: ["switch:eth5", "source2:eth1"]

@@ -1,0 +1,53 @@
+# M92 rustbgpd candidate route server. Both source members and the BIRD
+# target share one dual-stack IXP LAN; the peer address is the IPv4
+# transport address and both unicast families ride that session.
+[global]
+asn = 64496
+router_id = "192.0.2.9"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[security.grpc]
+enforcement = "legacy"
+
+[policy.definitions.deny-m92-v6-control]
+default_action = "permit"
+[[policy.definitions.deny-m92-v6-control.statements]]
+prefix = "2001:db8:92ff::/48"
+action = "deny" # M92_TARGET_V6_CONTROL
+
+[policy.definitions.deny-all-to-sources]
+default_action = "deny"
+
+[[neighbors]]
+address = "192.0.2.12"
+remote_asn = 64501
+description = "m92-source1"
+route_server_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+export_policy_chain = ["deny-all-to-sources"]
+
+[[neighbors]]
+address = "192.0.2.13"
+remote_asn = 64502
+description = "m92-source2"
+route_server_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+export_policy_chain = ["deny-all-to-sources"]
+
+[[neighbors]]
+address = "192.0.2.11"
+remote_asn = 64510
+description = "m92-bird-target"
+route_server_client = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+graceful_restart = true
+gr_restart_time = 30
+gr_stale_routes_time = 30
+export_policy_chain = ["deny-m92-v6-control"]

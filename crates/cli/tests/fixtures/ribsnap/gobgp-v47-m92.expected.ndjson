@@ -1,0 +1,6 @@
+{"record":"header","schema":"rbgp-ribsnap/1","source":"gobgp-adjout/1 view=adj-rib-out-capture m92-gobgp-v4.7-incumbent","generation":92}
+{"record":"route","peer":"192.0.2.11","peer_asn":64510,"prefix":"198.51.100.0/24","origin":0,"as_path":[64501],"next_hop":"192.0.2.12","med":92,"communities":[4227137628],"large_communities":["64501:92:4"]}
+{"record":"route","peer":"192.0.2.11","peer_asn":64510,"prefix":"2001:db8:9201::/48","origin":0,"as_path":[64501],"med":192,"communities":[4227137728],"large_communities":["64501:92:6"],"next_hop":"2001:db8:92::12"}
+{"record":"route","peer":"192.0.2.11","peer_asn":64510,"prefix":"2001:db8:9202::/48","origin":0,"as_path":[64502],"next_hop":"2001:db8:92::13"}
+{"record":"route","peer":"192.0.2.11","peer_asn":64510,"prefix":"203.0.113.0/24","origin":0,"as_path":[64502],"next_hop":"192.0.2.13"}
+{"record":"trailer","routes":4}

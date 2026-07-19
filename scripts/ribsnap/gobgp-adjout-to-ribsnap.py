@@ -8,9 +8,10 @@ Capture (on the incumbent GoBGP route server, one run per member):
     gobgp-adjout-to-ribsnap.py --peer <member-ip> --peer-asn <member-asn> \
         gobgp-<member>.json > gobgp-<member>.ndjson
 
-Verified against GoBGP 3.37.0. adj-out is the true post-policy
-Adj-RIB-Out: AS_PATH includes GoBGP's own prepend and the next hop is
-the rewritten wire value, so no attribute needs to be ignored.
+Verified against GoBGP 3.37.0 and 4.7.0. adj-out is GoBGP's computed
+post-export view (not retained sent-state): normal eBGP prepends and
+route-server transparency are already reflected, so no AS_PATH or next-hop
+ignore is needed. Extended communities still require the documented ignore.
 
 Honesty notes (see docs/ribdiff.md for the adapter matrix):
   - Add-Path: when Add-Path send is negotiated, adj-out -j emits one

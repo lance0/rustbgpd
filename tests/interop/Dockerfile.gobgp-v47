@@ -1,0 +1,19 @@
+FROM debian:bookworm-slim
+
+ARG GOBGP_VERSION=4.7.0
+ARG GOBGP_SHA256=05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0
+ARG TARGETARCH
+
+RUN test "${TARGETARCH}" = amd64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl iproute2 \
+    && curl -fsSLo /tmp/gobgp.tar.gz \
+        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz" \
+    && echo "${GOBGP_SHA256}  /tmp/gobgp.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/gobgp.tar.gz -C /usr/local/bin gobgp gobgpd \
+    && test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}" \
+    && test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}" \
+    && rm -f /tmp/gobgp.tar.gz \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["sleep", "infinity"]
