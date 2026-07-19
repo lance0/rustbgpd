@@ -1,0 +1,385 @@
+//! `rbgp config import` — golden translations, honesty-report content
+//! (skipped stanzas with source line numbers), and the exit-code
+//! ladder. The emitted-config `rustbgpd --check` acceptance gate lives
+//! in the workspace-root tests (`tests/config_import_emitted_check.rs`)
+//! where the daemon binary is available.
+
+use rustbgpctl::importer::{ImportError, SourceFormat, detect_format, import_source, run_import};
+
+const BIRD: &str = include_str!("fixtures/import/bird.conf");
+const FRR: &str = include_str!("fixtures/import/frr.conf");
+const GOBGP: &str = include_str!("fixtures/import/gobgp.toml");
+
+fn skip_lines(report: &rustbgpctl::importer::Report) -> Vec<(Option<usize>, String)> {
+    report
+        .skipped
+        .iter()
+        .map(|s| (s.line, s.stanza.clone()))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Golden translations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bird_golden_translation() {
+    let imported = import_source(SourceFormat::Bird, "bird.conf", BIRD).expect("translates");
+    assert_eq!(
+        imported.config_toml,
+        include_str!("fixtures/import/expected-bird.toml")
+    );
+}
+
+#[test]
+fn frr_golden_translation() {
+    let imported = import_source(SourceFormat::Frr, "frr.conf", FRR).expect("translates");
+    assert_eq!(
+        imported.config_toml,
+        include_str!("fixtures/import/expected-frr.toml")
+    );
+}
+
+#[test]
+fn gobgp_golden_translation() {
+    let imported = import_source(SourceFormat::Gobgp, "gobgp.toml", GOBGP).expect("translates");
+    assert_eq!(
+        imported.config_toml,
+        include_str!("fixtures/import/expected-gobgp.toml")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Honesty report: every untranslated stanza, with source line numbers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bird_report_lists_skipped_stanzas_with_lines() {
+    let report = import_source(SourceFormat::Bird, "bird.conf", BIRD)
+        .expect("translates")
+        .report;
+    let skips = skip_lines(&report);
+    // Filters and filter-adjacent stanzas, each pinned to its source line.
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(8) && s.starts_with("define OUR_NETS"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(14) && s.contains("protocol static"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(20) && s.contains("filter export_to_upstream"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(53) && s.contains("export where"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(63) && s.contains("import filter"))
+    );
+    // Filter skips carry the .rpol pointer.
+    assert!(
+        report
+            .skipped
+            .iter()
+            .filter(|s| s.stanza.contains("filter"))
+            .all(|s| s.guidance.contains(".rpol")),
+        "filter guidance must point at .rpol"
+    );
+    // MD5 presence is flagged; the secret itself never appears anywhere.
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("192.0.2.1") && w.contains("MD5"))
+    );
+    let imported = import_source(SourceFormat::Bird, "bird.conf", BIRD).expect("translates");
+    assert!(!imported.config_toml.contains("example-md5-secret"));
+    assert_eq!(report.exit_code, 2);
+}
+
+#[test]
+fn frr_report_lists_skipped_stanzas_with_lines() {
+    let report = import_source(SourceFormat::Frr, "frr.conf", FRR)
+        .expect("translates")
+        .report;
+    let skips = skip_lines(&report);
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(7) && s.starts_with("ip prefix-list OUR-NETS seq 5"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(8) && s.starts_with("ip prefix-list OUR-NETS seq 10"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(10) && s.starts_with("route-map UPSTREAM-OUT"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(29) && s.starts_with("network 198.51.100.0/24"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(33) && s.contains("route-map UPSTREAM-OUT out"))
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| *l == Some(41) && s.starts_with("ip route"))
+    );
+    // Benign daemon boilerplate is not noise in the report.
+    assert!(
+        !skips
+            .iter()
+            .any(|(_, s)| s.contains("hostname") || s.contains("frr version"))
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("192.0.2.1") && w.contains("MD5"))
+    );
+    let imported = import_source(SourceFormat::Frr, "frr.conf", FRR).expect("translates");
+    assert!(!imported.config_toml.contains("example-md5-secret"));
+    assert_eq!(report.exit_code, 2);
+}
+
+#[test]
+fn gobgp_report_lists_skipped_stanzas_with_lines() {
+    let report = import_source(SourceFormat::Gobgp, "gobgp.toml", GOBGP)
+        .expect("translates")
+        .report;
+    let skips = skip_lines(&report);
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| l.is_some() && s == "policy-definitions")
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| l.is_some() && s == "defined-sets")
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| l.is_some() && s == "global.apply-policy")
+    );
+    assert!(
+        skips
+            .iter()
+            .any(|(l, s)| l.is_some() && s.contains("192.0.2.200") && s.contains("apply-policy"))
+    );
+    assert!(skips.iter().any(|(_, s)| s.contains("afi-safi l2vpn-evpn")));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("192.0.2.1") && w.contains("MD5"))
+    );
+    let imported = import_source(SourceFormat::Gobgp, "gobgp.toml", GOBGP).expect("translates");
+    assert!(!imported.config_toml.contains("example-md5-secret"));
+    assert_eq!(report.exit_code, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Exit-code ladder
+// ---------------------------------------------------------------------------
+
+const CLEAN_FRR: &str = "\
+router bgp 64500
+ bgp router-id 192.0.2.10
+ neighbor 192.0.2.1 remote-as 64496
+ neighbor 192.0.2.1 description upstream
+ !
+ address-family ipv4 unicast
+  neighbor 192.0.2.1 activate
+ exit-address-family
+!
+";
+
+#[test]
+fn exit_0_clean_full_translation() {
+    let imported = import_source(SourceFormat::Frr, "clean.conf", CLEAN_FRR).expect("translates");
+    assert!(
+        imported.report.skipped.is_empty(),
+        "{:?}",
+        imported.report.skipped
+    );
+    assert_eq!(imported.report.exit_code, 0);
+
+    let clean_bird = "router id 192.0.2.10;\n\
+                      protocol bgp up { local as 64500; neighbor 192.0.2.1 as 64496; \
+                      ipv4 { import all; }; }\n";
+    let imported = import_source(SourceFormat::Bird, "clean.conf", clean_bird).expect("translates");
+    assert!(
+        imported.report.skipped.is_empty(),
+        "{:?}",
+        imported.report.skipped
+    );
+    assert_eq!(imported.report.exit_code, 0);
+
+    let clean_gobgp = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+                       [[neighbors]]\n[neighbors.config]\n\
+                       neighbor-address = \"192.0.2.1\"\npeer-as = 64496\n";
+    let imported =
+        import_source(SourceFormat::Gobgp, "clean.toml", clean_gobgp).expect("translates");
+    assert!(
+        imported.report.skipped.is_empty(),
+        "{:?}",
+        imported.report.skipped
+    );
+    assert_eq!(imported.report.exit_code, 0);
+}
+
+#[test]
+fn exit_1_parse_and_format_errors() {
+    let err = import_source(SourceFormat::Gobgp, "x.toml", "not = [valid").unwrap_err();
+    assert!(matches!(err, ImportError::Parse(_)));
+    assert_eq!(err.exit_code(), 1);
+
+    let err = detect_format("mystery.conf", "hello world\n").unwrap_err();
+    assert!(matches!(err, ImportError::Format(_)));
+    assert_eq!(err.exit_code(), 1);
+}
+
+#[test]
+fn exit_2_translated_with_skips() {
+    for (format, path, contents) in [
+        (SourceFormat::Bird, "bird.conf", BIRD),
+        (SourceFormat::Frr, "frr.conf", FRR),
+        (SourceFormat::Gobgp, "gobgp.toml", GOBGP),
+    ] {
+        let imported = import_source(format, path, contents).expect("translates");
+        assert!(!imported.report.skipped.is_empty());
+        assert_eq!(imported.report.exit_code, 2, "{path}");
+    }
+}
+
+#[test]
+fn exit_3_refused_when_nothing_translatable() {
+    // Valid FRR shape, but no BGP instance at all.
+    let err = import_source(SourceFormat::Frr, "x.conf", "hostname r1\nlog syslog\n").unwrap_err();
+    assert!(matches!(err, ImportError::Empty(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 3);
+
+    // A BGP instance with no translatable neighbors.
+    let err = import_source(
+        SourceFormat::Frr,
+        "x.conf",
+        "router bgp 64500\n bgp router-id 192.0.2.1\n",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ImportError::Empty(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Structural details worth pinning
+// ---------------------------------------------------------------------------
+
+#[test]
+fn format_detection() {
+    assert!(matches!(
+        detect_format("a.conf", BIRD),
+        Ok(SourceFormat::Bird)
+    ));
+    assert!(matches!(
+        detect_format("a.conf", FRR),
+        Ok(SourceFormat::Frr)
+    ));
+    assert!(matches!(
+        detect_format("a.toml", GOBGP),
+        Ok(SourceFormat::Gobgp)
+    ));
+    // Extension wins for TOML even without [global.config] on top.
+    assert!(matches!(
+        detect_format("b.toml", "x = 1\n"),
+        Ok(SourceFormat::Gobgp)
+    ));
+}
+
+#[test]
+fn group_remote_as_resolves_onto_members() {
+    // FRR: remote-as on the peer-group only.
+    let imported = import_source(SourceFormat::Frr, "frr.conf", FRR).expect("translates");
+    assert!(
+        imported
+            .config_toml
+            .contains("address = \"192.0.2.1\"\nremote_asn = 64496")
+    );
+    // GoBGP: peer-as on the peer-group only.
+    let imported = import_source(SourceFormat::Gobgp, "gobgp.toml", GOBGP).expect("translates");
+    assert!(
+        imported
+            .config_toml
+            .contains("address = \"192.0.2.200\"\nremote_asn = 64499")
+    );
+}
+
+#[test]
+fn keepalive_mismatch_is_warned_never_guessed() {
+    for (format, path, contents, needle) in [
+        (SourceFormat::Bird, "bird.conf", BIRD, "upstream2"),
+        (SourceFormat::Frr, "frr.conf", FRR, "2001:db8::1"),
+        (SourceFormat::Gobgp, "gobgp.toml", GOBGP, "2001:db8::1"),
+    ] {
+        let report = import_source(format, path, contents)
+            .expect("translates")
+            .report;
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains(needle) && w.contains("hold_time/3")),
+            "{path}: {:?}",
+            report.warnings
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_import (the CLI surface): I/O paths of the ladder
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_import_missing_file_is_exit_1() {
+    assert_eq!(run_import("/nonexistent/x.conf", None, None, false), 1);
+}
+
+#[test]
+fn run_import_json_requires_out() {
+    assert_eq!(run_import("/nonexistent/x.conf", None, None, true), 1);
+}
+
+#[test]
+fn run_import_writes_config_and_exits_2_on_skips() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("frr.conf");
+    std::fs::write(&source, FRR).expect("write source");
+    let out = dir.path().join("config.toml");
+    let code = run_import(
+        source.to_str().expect("utf8"),
+        None,
+        Some(out.to_str().expect("utf8")),
+        false,
+    );
+    assert_eq!(code, 2);
+    let written = std::fs::read_to_string(&out).expect("config written");
+    assert_eq!(written, include_str!("fixtures/import/expected-frr.toml"));
+}

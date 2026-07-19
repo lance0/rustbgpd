@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rbgp config import` — bounded structural importer for BIRD 2, FRR,
+  and GoBGP configurations.** Translates the structural subset (local
+  AS, router-id, neighbors, peer groups, address families, hold timers,
+  max-prefix limits) of a BIRD 2, FRR (vtysh running-config), or GoBGP
+  TOML source into a rustbgpd `config.toml` and refuses to guess at
+  policy: BIRD filters, FRR route-maps/prefix-lists, and GoBGP
+  policy-definitions are listed — with source line numbers — in an
+  import report for hand-translation to `.rpol`. Secrets are never
+  imported (MD5/auth presence is flagged instead). Distinct exit codes:
+  0 clean full translation, 1 error, 2 translated-with-skips, 3 nothing
+  translatable; the emitted config for every checked-in fixture is
+  gate-tested against `rustbgpd --check`. The route-server migration
+  cookbook now opens with the mechanical importer → `--check` → shadow
+  trial → `rbgp diff advertised` flow.
 - **Birdwatcher adapter serves the Alice-LG noexport views.**
   `GET /routes/noexport/{id}` completes the adapter's looking-glass
   contract: Loc-RIB best routes not advertised to the peer

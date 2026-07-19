@@ -136,6 +136,9 @@ _rbgp() {
             rbgp__subcmd__config,help)
                 cmd="rbgp__subcmd__config__subcmd__help"
                 ;;
+            rbgp__subcmd__config,import)
+                cmd="rbgp__subcmd__config__subcmd__import"
+                ;;
             rbgp__subcmd__config,plan)
                 cmd="rbgp__subcmd__config__subcmd__plan"
                 ;;
@@ -159,6 +162,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__config__subcmd__help,help)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__help"
+                ;;
+            rbgp__subcmd__config__subcmd__help,import)
+                cmd="rbgp__subcmd__config__subcmd__help__subcmd__import"
                 ;;
             rbgp__subcmd__config__subcmd__help,plan)
                 cmd="rbgp__subcmd__config__subcmd__help__subcmd__plan"
@@ -534,6 +540,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__config,effective)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__effective"
+                ;;
+            rbgp__subcmd__help__subcmd__config,import)
+                cmd="rbgp__subcmd__help__subcmd__config__subcmd__import"
                 ;;
             rbgp__subcmd__help__subcmd__config,plan)
                 cmd="rbgp__subcmd__help__subcmd__config__subcmd__plan"
@@ -1283,7 +1292,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config)
-            opts="-s -j -h --addr --token-file --json --no-color --help diff plan apply confirm abort status effective help"
+            opts="-s -j -h --addr --token-file --json --no-color --help diff plan apply confirm abort status effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1467,7 +1476,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__help)
-            opts="diff plan apply confirm abort status effective help"
+            opts="diff plan apply confirm abort status effective import help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1564,6 +1573,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__config__subcmd__help__subcmd__import)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__config__subcmd__help__subcmd__plan)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1585,6 +1608,40 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__config__subcmd__import)
+            opts="-s -j -h --format --out --addr --token-file --json --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --format)
+                    COMPREPLY=($(compgen -W "bird frr gobgp" -- "${cur}"))
+                    return 0
+                    ;;
+                --out)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -4089,7 +4146,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config)
-            opts="diff plan apply confirm abort status effective"
+            opts="diff plan apply confirm abort status effective import"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4159,6 +4216,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__config__subcmd__effective)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__config__subcmd__import)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
