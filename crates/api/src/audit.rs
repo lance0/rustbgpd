@@ -147,6 +147,34 @@ pub(crate) fn get_effective_config_summary() -> GrpcRequestSummary {
     GrpcRequestSummary::new("request=empty")
 }
 
+/// Summary for `ListConfigHistory`; there are no request fields, and the
+/// response carries timestamps, hashes, and count summaries only — never
+/// config document contents.
+pub(crate) fn list_config_history_summary() -> GrpcRequestSummary {
+    GrpcRequestSummary::new("request=empty")
+}
+
+/// Summary for `RollbackConfigTransaction`. The rollback candidate is
+/// resolved server-side from retained history, so unlike apply there is no
+/// candidate TOML to redact; the comment can carry sensitive context and is
+/// logged as presence only, mirroring the apply summary.
+pub(crate) fn rollback_config_transaction_summary(
+    index: u32,
+    expected_runtime_snapshot_token: &str,
+    client_request_id: &str,
+    comment: &str,
+    confirm_id: &str,
+    confirm_timeout_seconds: u32,
+) -> GrpcRequestSummary {
+    GrpcRequestSummary::new(format!(
+        "index={index} expected_runtime_snapshot_token_present={} client_request_id={} comment_present={} confirm_id={} confirm_timeout_seconds={confirm_timeout_seconds}",
+        !expected_runtime_snapshot_token.is_empty(),
+        safe_summary_value(client_request_id),
+        !comment.is_empty(),
+        safe_summary_value(confirm_id),
+    ))
+}
+
 /// Summary for `gnmi.gNMI/Set`. Set payloads can carry future secret-bearing
 /// config values, so log only operation counts and extension count.
 pub(crate) fn gnmi_set_summary(request: &crate::gnmi::SetRequest) -> GrpcRequestSummary {

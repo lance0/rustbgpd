@@ -20,6 +20,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod bfd_runtime;
 mod blackhole;
 mod config;
+mod config_history;
 mod config_persister;
 mod config_transaction_control;
 mod confirm_journal;
@@ -3187,7 +3188,12 @@ async fn run<T>(
         let (event_tx, event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
         let (bridge_replace_tx, bridge_replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
-        let persister = ConfigPersister::new(mutation_rx, path.clone(), config.clone());
+        let persister = ConfigPersister::new(
+            mutation_rx,
+            path.clone(),
+            config.clone(),
+            Some(config_history::history_dir(&config.runtime_state_dir())),
+        );
         tokio::spawn(persister.run());
         tokio::spawn(run_config_bridge(
             event_rx,
@@ -3912,6 +3918,13 @@ async fn run<T>(
                 confirm_journal_path: Some(confirm_journal::journal_path(
                     &config.runtime_state_dir(),
                 )),
+                // Rollback resolution reads the history the config persister
+                // records; without --config there is no persister and the
+                // history/rollback RPCs fail closed.
+                config_history_dir: config
+                    .file_path
+                    .is_some()
+                    .then(|| config_history::history_dir(&config.runtime_state_dir())),
             },
             metrics.clone(),
         );
@@ -4105,8 +4118,10 @@ async fn run<T>(
                 config_mutation_gate: Some(config_mutation_gate.clone()),
                 startup_tables: config.fib_tables.clone(),
                 // FIB CRUD never journals; only the transaction controller
-                // above owns commit-confirm durability.
+                // above owns commit-confirm durability (and the applied-config
+                // history reads).
                 confirm_journal_path: None,
+                config_history_dir: None,
             },
         )),
         gnmi_set: Some(config_transaction_controller.gnmi_set_fn()),
@@ -4114,6 +4129,8 @@ async fn run<T>(
         config_transaction_confirm: Some(config_transaction_controller.confirm_fn()),
         config_transaction_abort: Some(config_transaction_controller.abort_fn()),
         config_transaction_status: Some(config_transaction_controller.status_fn()),
+        config_history_list: Some(config_transaction_controller.history_fn()),
+        config_rollback: Some(config_transaction_controller.rollback_fn()),
         config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),

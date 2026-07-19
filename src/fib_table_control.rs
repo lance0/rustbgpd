@@ -72,6 +72,12 @@ pub struct FibTableControlDeps {
     /// transaction controller uses it; `None` disables journaling (unit tests
     /// and non-transaction consumers of these deps).
     pub confirm_journal_path: Option<std::path::PathBuf>,
+    /// Applied-config history directory
+    /// (`<runtime_state_dir>/config-history/`, see `config_history`). Only
+    /// the config transaction controller reads it (history listing and
+    /// rollback resolution); the config persister owns the writes. `None`
+    /// disables history/rollback (unit tests and non-transaction consumers).
+    pub config_history_dir: Option<std::path::PathBuf>,
 }
 
 /// FIB commit failure carrying whether the commit's completion state is
@@ -614,6 +620,7 @@ mod tests {
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
             confirm_journal_path: None,
+            config_history_dir: None,
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
             .await
@@ -683,6 +690,7 @@ mod tests {
             config_mutation_gate: None,
             startup_tables: vec![original.clone()],
             confirm_journal_path: None,
+            config_history_dir: None,
         });
         let err = mutate(deps, Mutation::Upsert(table("core", 1001)))
             .await

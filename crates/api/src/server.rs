@@ -306,6 +306,53 @@ pub type ConfigTransactionStatusFn = Arc<
         + 'static,
 >;
 
+/// Future returned by the daemon-owned config history list hook.
+pub type ConfigHistoryListFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::ListConfigHistoryResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.ListConfigHistory`.
+///
+/// The binary crate owns this because the applied-config history lives under
+/// its `runtime_state_dir`.
+pub type ConfigHistoryListFn = Arc<
+    dyn Fn(crate::proto::ListConfigHistoryRequest) -> ConfigHistoryListFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Future returned by the daemon-owned config rollback hook.
+pub type ConfigRollbackFuture = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::proto::ConfigTransactionApplyResponse,
+                    ConfigTransactionApplyError,
+                >,
+            > + Send,
+    >,
+>;
+
+/// Daemon-owned hook for `ConfigService.RollbackConfigTransaction`.
+///
+/// The binary crate owns this because rollback resolves the retained history
+/// entry and routes it through the same transaction executor as
+/// `ApplyConfigTransaction`.
+pub type ConfigRollbackFn = Arc<
+    dyn Fn(crate::proto::RollbackConfigTransactionRequest) -> ConfigRollbackFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
 /// Future returned by a daemon-owned runtime config mutation gate.
 pub type ConfigMutationGateFuture =
     Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
@@ -531,6 +578,12 @@ pub struct ServeConfig {
     pub config_transaction_abort: Option<ConfigTransactionAbortFn>,
     /// Daemon hook for confirmed config transaction status.
     pub config_transaction_status: Option<ConfigTransactionStatusFn>,
+    /// Daemon hook for listing the applied-config history. `None` fails
+    /// closed with `FAILED_PRECONDITION`.
+    pub config_history_list: Option<ConfigHistoryListFn>,
+    /// Daemon hook for rolling back to a retained applied config through the
+    /// transaction executor. `None` fails closed with `FAILED_PRECONDITION`.
+    pub config_rollback: Option<ConfigRollbackFn>,
     /// Daemon hook used to reject persisted runtime-config mutations while a
     /// confirmed transaction is pending.
     pub config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -904,6 +957,8 @@ async fn run_listener(
     let config_transaction_confirm = config.config_transaction_confirm;
     let config_transaction_abort = config.config_transaction_abort;
     let config_transaction_status = config.config_transaction_status;
+    let config_history_list = config.config_history_list;
+    let config_rollback = config.config_rollback;
     let config_mutation_gate = config.config_mutation_gate;
     let runtime_config_lock = config.runtime_config_lock;
     let dataplane_route_events = config.dataplane_route_events;
@@ -966,6 +1021,8 @@ async fn run_listener(
                 config_transaction_confirm,
                 config_transaction_abort,
                 config_transaction_status,
+                config_history_list,
+                config_rollback,
                 config_mutation_gate,
                 runtime_config_lock,
                 dataplane_route_events,
@@ -1024,6 +1081,8 @@ async fn run_listener(
                 config_transaction_confirm,
                 config_transaction_abort,
                 config_transaction_status,
+                config_history_list,
+                config_rollback,
                 config_mutation_gate,
                 runtime_config_lock,
                 dataplane_route_events,
@@ -1088,6 +1147,8 @@ async fn run_tcp_listener(
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
     config_transaction_status: Option<ConfigTransactionStatusFn>,
+    config_history_list: Option<ConfigHistoryListFn>,
+    config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1238,6 +1299,8 @@ async fn run_tcp_listener(
             config_transaction_confirm.clone(),
             config_transaction_abort.clone(),
             config_transaction_status.clone(),
+            config_history_list.clone(),
+            config_rollback.clone(),
         ),
         interceptor.clone(),
     ));
@@ -1344,6 +1407,8 @@ async fn run_uds_listener(
     config_transaction_confirm: Option<ConfigTransactionConfirmFn>,
     config_transaction_abort: Option<ConfigTransactionAbortFn>,
     config_transaction_status: Option<ConfigTransactionStatusFn>,
+    config_history_list: Option<ConfigHistoryListFn>,
+    config_rollback: Option<ConfigRollbackFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: Arc<tokio::sync::Mutex<()>>,
     dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
@@ -1454,6 +1519,8 @@ async fn run_uds_listener(
             config_transaction_confirm.clone(),
             config_transaction_abort.clone(),
             config_transaction_status.clone(),
+            config_history_list.clone(),
+            config_rollback.clone(),
         ),
         interceptor.clone(),
     ));

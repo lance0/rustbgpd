@@ -306,6 +306,15 @@ grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
   rustbgpd.v1.RibService/WatchRoutes
 ```
 
+Config changes get the full Junos-style transactional quartet: `rbgp config
+plan` (commit check), `rbgp config diff` (show compare, annotated with live
+reload impact), `rbgp config apply --confirm-id --confirm-timeout` (commit
+confirmed, with a crash-safe boot revert), and `rbgp config rollback N`
+against a bounded on-disk history of applied configs — rollback routes
+through the same transaction engine as apply, so it gets the same impact
+preview, receipts, and confirm window. Details:
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 The full service/RPC table and per-RPC examples: [docs/API.md](docs/API.md).
 gNMI operator guide: [docs/GNMI.md](docs/GNMI.md).
 

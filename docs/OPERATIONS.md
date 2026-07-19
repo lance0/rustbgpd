@@ -174,6 +174,55 @@ intact, rather than risk an unsafe revert. Keep the config and
 for containerized deployments that bind-mount the config from an exotic
 backend.
 
+### The transactional quartet: check, compare, commit confirmed, rollback
+
+For operators coming from Junos, the four verbs map directly:
+
+| Junos | rustbgpd |
+|-------|----------|
+| `commit check` | `rbgp config plan` (or `rustbgpd --check` offline) |
+| `show \| compare` | `rbgp config diff` (with reload-impact annotations) |
+| `commit confirmed` | `rbgp config apply --confirm-id ... --confirm-timeout ...` |
+| `rollback N` | `rbgp config rollback N` |
+
+The daemon retains a bounded on-disk history of applied configs (the last 20
+distinct documents, content-hash-deduplicated, timestamped) under
+`<runtime_state_dir>/config-history/`. Every durable config write records an
+entry — transaction applies, gRPC neighbor/FIB/policy CRUD, and the config
+running at daemon startup — so the history survives restarts and "put back
+what was running yesterday" is one command:
+
+```bash
+# What has been applied? Newest first; index 0 is the running config.
+rbgp config history
+rbgp -j config history
+
+# Restore the previous applied config (Junos `rollback 1`)
+rbgp config rollback 1
+
+# A cautious rollback: auto-reverts the rollback itself unless confirmed
+rbgp config rollback 1 --confirm-id undo-1 --confirm-timeout 120
+rbgp config confirm undo-1
+```
+
+`config history` lists index, timestamp, content hash, and a one-line summary
+per entry — never config document contents. `config rollback N` resolves
+entry N server-side and routes it through the **same transaction path as
+`config apply`**: the same plan classification, the same reload-impact and
+update-group annotations, the same receipts, and the same
+`--confirm-id`/`--confirm-timeout` confirmed-commit window (journal, timeout
+auto-revert, and boot revert included). There is no second apply engine —
+a rollback whose entry contains sections the transaction executor cannot
+commit live (for example restart-required `[global]` fields) is rejected
+without mutation, exactly like an apply of that file would be. Rolling back
+past the retained history fails cleanly, naming how many entries exist.
+
+History and rollback require the daemon to have been started with `--config`
+(no persisted config means nothing to retain). SIGHUP reloads adopt the
+operator's edited file without recording it — the history tracks what the
+daemon itself persisted; your config file under version control remains the
+authority for hand-edited changes.
+
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
 `config plan`, then apply with the returned token. The transaction reconfigures

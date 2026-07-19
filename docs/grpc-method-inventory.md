@@ -60,7 +60,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
 
-### ConfigService (7 RPCs)
+### ConfigService (9 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -71,6 +71,8 @@ shape itself does not raise the tier.
 | `AbortConfigTransaction` | `operator_only` | Abort a pending confirmed config transaction and roll back immediately through the transaction executor. |
 | `GetConfigTransactionStatus` | `sensitive_read` | Returns redacted confirmed-transaction lifecycle status: pending/last state, confirm id, deadline, committed sections, and snapshot token, but never candidate TOML. |
 | `GetEffectiveConfig` | `sensitive_read` | Returns the full effective running config as normalized TOML with defaults materialized (`rbgp config effective`). Whole-config disclosure: peer lists, policy structure, topology. Secret material (`md5_password`, `tcp_ao.key`) is replaced with `<redacted>` before the document leaves the daemon. |
+| `ListConfigHistory` | `sensitive_read` | Lists the bounded on-disk applied-config history: per-entry index, timestamp, SHA-256 content hash, and a one-line count summary. Never returns config documents, but discloses change cadence and identity facts — full-config-adjacent read. |
+| `RollbackConfigTransaction` | `operator_only` | Junos-style `rollback N`: resolves a retained applied-config snapshot server-side and routes it through the same transaction executor as `ApplyConfigTransaction` (same plan/impact classification and receipts, optionally commit-confirmed). Same tier as apply because it is an apply. Comment is audit-redacted (presence only). |
 
 ### NeighborService (11 RPCs)
 
@@ -218,13 +220,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 58 | 58.6% |
-| `mutating` | 19 | 19.2% |
-| `operator_only` | 22 | 22.2% |
-| **Total** | **99** | **100%** |
+| `sensitive_read` | 59 | 58.4% |
+| `mutating` | 19 | 18.8% |
+| `operator_only` | 23 | 22.8% |
+| **Total** | **101** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 99
-total is 95 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 101
+total is 97 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

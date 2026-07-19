@@ -7,7 +7,8 @@ use crate::audit::{
     abort_config_transaction_summary, apply_config_transaction_summary,
     confirm_config_transaction_summary, diff_runtime_config_summary,
     get_config_transaction_status_summary, get_effective_config_summary,
-    plan_config_transaction_summary, set_request_summary,
+    list_config_history_summary, plan_config_transaction_summary,
+    rollback_config_transaction_summary, set_request_summary,
 };
 use crate::peer_types::{
     PeerManagerCommand, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
@@ -15,8 +16,8 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    ConfigTransactionAbortFn, ConfigTransactionApplyError, ConfigTransactionApplyFn,
-    ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyError,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
 };
 
 pub struct ConfigService {
@@ -25,6 +26,8 @@ pub struct ConfigService {
     transaction_confirm: Option<ConfigTransactionConfirmFn>,
     transaction_abort: Option<ConfigTransactionAbortFn>,
     transaction_status: Option<ConfigTransactionStatusFn>,
+    history_list: Option<ConfigHistoryListFn>,
+    rollback: Option<ConfigRollbackFn>,
 }
 
 impl ConfigService {
@@ -36,6 +39,8 @@ impl ConfigService {
             transaction_confirm: None,
             transaction_abort: None,
             transaction_status: None,
+            history_list: None,
+            rollback: None,
         }
     }
 
@@ -45,11 +50,15 @@ impl ConfigService {
         transaction_confirm: Option<ConfigTransactionConfirmFn>,
         transaction_abort: Option<ConfigTransactionAbortFn>,
         transaction_status: Option<ConfigTransactionStatusFn>,
+        history_list: Option<ConfigHistoryListFn>,
+        rollback: Option<ConfigRollbackFn>,
     ) -> Self {
         self.transaction_apply = transaction_apply;
         self.transaction_confirm = transaction_confirm;
         self.transaction_abort = transaction_abort;
         self.transaction_status = transaction_status;
+        self.history_list = history_list;
+        self.rollback = rollback;
         self
     }
 }
@@ -298,6 +307,50 @@ impl proto::config_service_server::ConfigService for ConfigService {
             ));
         };
         transaction_status(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn list_config_history(
+        &self,
+        request: Request<proto::ListConfigHistoryRequest>,
+    ) -> Result<Response<proto::ListConfigHistoryResponse>, Status> {
+        set_request_summary(&request, list_config_history_summary());
+        let request = request.into_inner();
+        let Some(history_list) = &self.history_list else {
+            return Err(Status::failed_precondition(
+                "ConfigService.ListConfigHistory executor is unavailable",
+            ));
+        };
+        history_list(request)
+            .await
+            .map(Response::new)
+            .map_err(ConfigTransactionApplyError::into_status)
+    }
+
+    async fn rollback_config_transaction(
+        &self,
+        request: Request<proto::RollbackConfigTransactionRequest>,
+    ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        set_request_summary(
+            &request,
+            rollback_config_transaction_summary(
+                request.get_ref().index,
+                &request.get_ref().expected_runtime_snapshot_token,
+                &request.get_ref().client_request_id,
+                &request.get_ref().comment,
+                &request.get_ref().confirm_id,
+                request.get_ref().confirm_timeout_seconds,
+            ),
+        );
+        let request = request.into_inner();
+        let Some(rollback) = &self.rollback else {
+            return Err(Status::failed_precondition(
+                "ConfigService.RollbackConfigTransaction executor is unavailable",
+            ));
+        };
+        rollback(request)
             .await
             .map(Response::new)
             .map_err(ConfigTransactionApplyError::into_status)
@@ -657,6 +710,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         );
 
         let resp = svc
@@ -736,6 +791,8 @@ mod tests {
                     })
                 })
             })),
+            None,
+            None,
         );
 
         let confirmed = svc
@@ -800,6 +857,123 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn history_and_rollback_hooks_forward_requests() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx).with_transaction_hooks(
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::new(|_request| {
+                Box::pin(async move {
+                    Ok(proto::ListConfigHistoryResponse {
+                        entries: vec![proto::ConfigHistoryEntry {
+                            index: 0,
+                            timestamp_unix_seconds: 1_787_000_000,
+                            sha256: "ab".repeat(32),
+                            summary: "asn 65001, 2 neighbor(s)".to_string(),
+                        }],
+                        human_text: "1 applied config(s) retained.\n".to_string(),
+                    })
+                })
+            })),
+            Some(Arc::new(
+                |request: proto::RollbackConfigTransactionRequest| {
+                    Box::pin(async move {
+                        assert_eq!(request.index, 2);
+                        assert_eq!(request.confirm_id, "rollback-1");
+                        Ok(proto::ConfigTransactionApplyResponse {
+                            status: proto::ConfigTransactionPlanStatus::Committable.into(),
+                            runtime_snapshot_token: "kv1:rolledback:3".to_string(),
+                            committed_sections: vec!["[[neighbors]] modify".to_string()],
+                            human_text: "Rolled back to applied config 2.\n".to_string(),
+                            confirmation: None,
+                            update_group_impact: None,
+                        })
+                    })
+                },
+            )),
+        );
+
+        let history = svc
+            .list_config_history(Request::new(proto::ListConfigHistoryRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].sha256, "ab".repeat(32));
+
+        let rolled_back = svc
+            .rollback_config_transaction(Request::new(proto::RollbackConfigTransactionRequest {
+                index: 2,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: "rollback-1".to_string(),
+                confirm_timeout_seconds: 60,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rolled_back.runtime_snapshot_token, "kv1:rolledback:3");
+    }
+
+    #[tokio::test]
+    async fn history_and_rollback_fail_closed_without_executor() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+
+        let err = svc
+            .list_config_history(Request::new(proto::ListConfigHistoryRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let err = svc
+            .rollback_config_transaction(Request::new(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn rollback_audit_summary_hides_comment_body() {
+        let (tx, _rx) = mpsc::channel(1);
+        let svc = ConfigService::new(tx);
+        let audit_handle = GrpcAuditHandle::default();
+        let mut request = Request::new(proto::RollbackConfigTransactionRequest {
+            index: 3,
+            expected_runtime_snapshot_token: "kv1:abc:9".to_string(),
+            client_request_id: "deploy-42".to_string(),
+            comment: "secret maintenance note".to_string(),
+            confirm_id: "rollback-1".to_string(),
+            confirm_timeout_seconds: 120,
+        });
+        request.extensions_mut().insert(audit_handle.clone());
+
+        let _ = svc.rollback_config_transaction(request).await;
+
+        let summary = audit_handle.summary().expect("audit summary missing");
+        assert!(summary.as_str().contains("index=3"));
+        assert!(
+            summary
+                .as_str()
+                .contains("expected_runtime_snapshot_token_present=true")
+        );
+        assert!(summary.as_str().contains("client_request_id=deploy-42"));
+        assert!(summary.as_str().contains("comment_present=true"));
+        assert!(summary.as_str().contains("confirm_id=rollback-1"));
+        assert!(!summary.as_str().contains("secret"));
     }
 
     #[tokio::test]
