@@ -60,11 +60,17 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
 
 #[allow(
     clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for peer-group conversion"
+    clippy::too_many_lines,
+    reason = "peer-group conversion mirrors the complete protobuf definition"
 )]
 fn proto_definition_to_input(
     definition: proto::PeerGroupDefinition,
 ) -> Result<PeerGroupDefinition, Status> {
+    if definition.max_prefix_restart_seconds == Some(0) {
+        return Err(Status::invalid_argument(
+            "max_prefix_restart_seconds must be greater than zero when set",
+        ));
+    }
     let hold_time = definition
         .hold_time
         .map(u16::try_from)
@@ -121,6 +127,7 @@ fn proto_definition_to_input(
         hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
+        max_prefix_restart_seconds: definition.max_prefix_restart_seconds,
         md5_password: definition.md5_password.map(Into::into),
         ttl_security: definition.ttl_security,
         families,
@@ -174,6 +181,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         hold_time: definition.hold_time.map(u32::from),
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
+        max_prefix_restart_seconds: definition.max_prefix_restart_seconds,
         // Read RPCs expose the group shape, not credential material.
         md5_password: None,
         has_md5_password: Some(definition.md5_password.is_some()),
@@ -710,6 +718,25 @@ mod tests {
         assert_eq!(input.send_hold_time, Some(500));
         let back = input_definition_to_proto(&input);
         assert_eq!(back.send_hold_time, Some(500));
+    }
+
+    /// The timed max-prefix policy survives both peer-group API conversion
+    /// directions, while zero is rejected rather than silently becoming the
+    /// fail-closed default.
+    #[test]
+    fn max_prefix_restart_round_trips_and_rejects_zero() {
+        let mut definition = sample_definition();
+        definition.max_prefix_restart_seconds = Some(300);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.max_prefix_restart_seconds, Some(300));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.max_prefix_restart_seconds, Some(300));
+
+        let mut invalid = sample_definition();
+        invalid.max_prefix_restart_seconds = Some(0);
+        let err = proto_definition_to_input(invalid).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("max_prefix_restart_seconds"));
     }
 
     /// `per_client_best` round-trips proto -> input -> proto.

@@ -162,6 +162,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub max_prefixes: Option<u32>,
     #[serde(default)]
+    pub max_prefix_restart_seconds: Option<u32>,
+    #[serde(default)]
     pub md5_password: Option<String>,
     #[serde(default)]
     pub has_md5_password: Option<bool>,
@@ -216,6 +218,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             hold_time: j.hold_time,
             send_hold_time: j.send_hold_time,
             max_prefixes: j.max_prefixes,
+            max_prefix_restart_seconds: j.max_prefix_restart_seconds,
             md5_password: j.md5_password,
             ttl_security: j.ttl_security,
             families: j.families,
@@ -329,6 +332,7 @@ mod tests {
     fn peer_group_definition_round_trip() {
         let json = r#"{
             "hold_time": 90,
+            "max_prefix_restart_seconds": 300,
             "families": ["ipv4_unicast", "ipv6_unicast"],
             "import_policy_chain": ["from-transit"],
             "export_policy_chain": ["to-transit"],
@@ -338,6 +342,7 @@ mod tests {
         let parsed: JsonPeerGroupDefinition = serde_json::from_str(json).unwrap();
         let proto = proto::PeerGroupDefinition::from(parsed);
         assert_eq!(proto.hold_time, Some(90));
+        assert_eq!(proto.max_prefix_restart_seconds, Some(300));
         assert_eq!(proto.families.len(), 2);
         assert_eq!(proto.import_policy_chain, vec!["from-transit".to_string()]);
         assert_eq!(proto.export_policy_chain, vec!["to-transit".to_string()]);

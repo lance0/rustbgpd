@@ -122,6 +122,9 @@ struct ManagedPeer {
     enabled: bool,
     hold_time: Option<u16>,
     max_prefixes: Option<u32>,
+    /// Manager-owned max-prefix restart policy. Session tasks only report the
+    /// breach and never observe or schedule this hold-down.
+    max_prefix_restart_seconds: Option<u32>,
     transport_config: TransportConfig,
     import_policy: Option<PolicyChain>,
     export_policy: Option<PolicyChain>,
@@ -190,6 +193,14 @@ struct ManagedPeer {
     advertise_graceful_shutdown: bool,
 }
 
+#[derive(Debug, Clone)]
+struct MaxPrefixLatch {
+    error: String,
+    generation: u64,
+    source_session_id: u64,
+    deadline: Option<tokio::time::Instant>,
+}
+
 /// Exact global inventory bound to an in-progress or failed TCP-AO
 /// generation. Retained until commit so a same-generation retry cannot change
 /// key material after any listener/session may already have installed a
@@ -229,10 +240,14 @@ struct PendingInbound {
 pub struct PeerManager {
     peers: HashMap<PeerKey, ManagedPeer>,
     /// Max-prefix shutdowns owned by the manager rather than a disposable
-    /// session task. Presence keeps the peer administratively disabled across
-    /// passive accepts, collision handling, and config reconciliation until
-    /// the operator explicitly enables it.
-    max_prefix_latches: HashMap<PeerKey, String>,
+    /// session task. Presence fences passive accepts, collision handling, and
+    /// config reconciliation until explicit enable or one configured restart
+    /// attempt reaches its deadline; a failed attempt remains latched down.
+    max_prefix_latches: HashMap<PeerKey, MaxPrefixLatch>,
+    /// Cached earliest deadline, recomputed only when latch state mutates so
+    /// ordinary actor traffic does not scan every disabled peer.
+    next_max_prefix_restart_deadline: Option<tokio::time::Instant>,
+    next_max_prefix_latch_generation: u64,
     /// Session generations being joined before an ownership transfer or
     /// deletion completes. A terminal max-prefix signal emitted during that
     /// barrier still belongs to the peer; entries are removed only after the
@@ -529,6 +544,8 @@ impl PeerManager {
         Self {
             peers: HashMap::new(),
             max_prefix_latches: HashMap::new(),
+            next_max_prefix_restart_deadline: None,
+            next_max_prefix_latch_generation: 1,
             retiring_sessions: HashMap::new(),
             session_index: HashMap::new(),
             rx,
@@ -772,6 +789,7 @@ impl PeerManager {
         }
 
         loop {
+            let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -863,6 +881,7 @@ impl PeerManager {
                                 self.current_config = candidate;
                                 self.dynamic_ranges =
                                     Self::parse_dynamic_ranges(&self.current_config);
+                                self.invalidate_stale_dynamic_max_prefix_restarts();
                                 self.config_snapshot_staged = true;
                                 // ADR-0110 freshness: the staged config
                                 // transaction is live from this point.
@@ -889,6 +908,7 @@ impl PeerManager {
                                     self.current_config = candidate;
                                     self.dynamic_ranges =
                                         Self::parse_dynamic_ranges(&self.current_config);
+                                    self.invalidate_stale_dynamic_max_prefix_restarts();
                                     self.config_snapshot_staged = false;
                                     // ADR-0110 freshness: rollback re-applies
                                     // the previous (accepted) config.
@@ -954,6 +974,9 @@ impl PeerManager {
                         PeerManagerCommand::ApplyConfigEvent { event, reply } => {
                             let result = apply_config_event(&mut self.current_config, &event)
                                 .map_err(|error| error.to_string());
+                            if result.is_ok() {
+                                self.invalidate_stale_dynamic_max_prefix_restarts();
+                            }
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
@@ -1402,6 +1425,7 @@ impl PeerManager {
                         // reflects any accepted runtime CRUD, so a plain re-parse is
                         // correct — no merge/provenance needed.
                         self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+                        self.invalidate_stale_dynamic_max_prefix_restarts();
                         // ADR-0110 freshness: every successful reload flows
                         // through this snapshot replacement — stamp the
                         // generation even when policy content is unchanged
@@ -1451,6 +1475,15 @@ impl PeerManager {
                     }
                 } => {
                     self.emit_periodic_bmp_stats().await;
+                }
+                () = async move {
+                    if let Some(deadline) = max_prefix_restart_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.handle_due_max_prefix_restarts().await;
                 }
             }
         }

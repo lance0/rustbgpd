@@ -1900,6 +1900,69 @@ max_prefixes_ipv4 = 10
     assert_eq!(peers[0].0.max_prefixes, None, "aggregate stays independent");
 }
 
+/// Load-bearing: removing the peer-group fallback in `resolve_neighbor` makes
+/// the first assertion read `None`; accepting plain `u32` makes the zero case
+/// parse successfully instead of failing closed.
+#[test]
+fn max_prefix_restart_inherits_overrides_and_rejects_zero() {
+    let inherited = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+max_prefix_restart_seconds = 30
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+"#;
+    let config = parse(inherited).unwrap();
+    let resolved = config.resolved_neighbors().unwrap();
+    assert_eq!(resolved[0].max_prefix_restart_seconds, Some(30));
+
+    let overridden = inherited.replace(
+        "peer_group = \"ixp-members\"",
+        "peer_group = \"ixp-members\"\nmax_prefix_restart_seconds = 10",
+    );
+    let config = parse(&overridden).unwrap();
+    assert_eq!(
+        config.resolved_neighbors().unwrap()[0].max_prefix_restart_seconds,
+        Some(10)
+    );
+
+    let zero = inherited.replace(
+        "max_prefix_restart_seconds = 30",
+        "max_prefix_restart_seconds = 0",
+    );
+    assert!(
+        parse(&zero).is_err(),
+        "zero must not disable the opt-in action ambiguously"
+    );
+}
+
+/// Load-bearing: removing the field from the hot-applicable classifier makes
+/// this edit require a session rebuild instead of invalidating the old timer
+/// through the in-place manager update.
+#[test]
+fn max_prefix_restart_edit_is_hot_applicable() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut hot = old.clone();
+    hot.max_prefix_restart_seconds = std::num::NonZeroU32::new(30);
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+    assert!(
+        super::describe_neighbor_changes(&old, &hot)
+            .iter()
+            .any(|change| change.field == "max_prefix_restart_seconds")
+    );
+}
+
 #[test]
 fn per_family_max_prefix_edit_is_hot_applicable() {
     let old = test_neighbor("10.0.0.2", 65002);
@@ -5361,6 +5424,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -6099,6 +6163,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefix_restart_seconds: None,
             md5_password: None,
             ttl_security: None,
             bfd: None,
@@ -6142,6 +6207,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
         tcp_ao: Some(
@@ -6195,6 +6261,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -6257,6 +6324,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
         tcp_ao: Some(

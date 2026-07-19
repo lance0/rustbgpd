@@ -39,7 +39,7 @@ waiting for a natural flap. The matrix calls this out per row as
 fields "session reset".
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `gr_stale_routes_time`,
+(`description`, `max_prefixes`, `max_prefix_restart_seconds`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
 import/export policy and chain fields) are applied **in place**: the
 session task, its TCP connection, and the FSM are untouched, and policy
@@ -104,6 +104,7 @@ reload).
 | `slow_peer_duration` | live (effective next session) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture semantics as the threshold. |
 | `slow_peer_isolation` | live (effective next session) | Move a flagged-slow peer to the per-peer update path. Same capture semantics as the threshold. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
+| `max_prefix_restart_seconds` | live | Manager-owned hold-down policy. A successful value change hot-applies without touching the session and invalidates any countdown from an older incident; a rejected change preserves it. The field does not retroactively arm an indefinitely latched peer. |
 | `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
 | `tcp_ao` | live (add-only generation) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs when owner identity, existing key order/material, and selection are unchanged. The listener and managed protected sessions are preflighted, verified, and generation-fenced. Selection, deprecation, deletion, edits/reordering, or owner changes remain pinned and are logged at `ERROR`. Runtime config transactions and their field-only impact report remain conservatively restart-required because they do not run the SIGHUP generation coordinator. |
 | `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
@@ -146,6 +147,7 @@ configure their keyring directly.
 | `slow_peer_duration` | live (effective next session) | Same as neighbor. |
 | `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
+| `max_prefix_restart_seconds` | live (static session reset; transaction dynamic bounce) | Inherited by group members. Direct group edits reshape static members and manager-sync all dynamic members without bouncing them. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. Old countdowns are invalidated. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
 | `bfd` | restart-required | Pinned. |
 | `ttl_security` | live (effective next session) | |

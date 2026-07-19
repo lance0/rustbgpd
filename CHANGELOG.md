@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Opt-in timed restart after max-prefix teardown.** Neighbors and peer groups
+  accept a non-zero `max_prefix_restart_seconds`; the default remains an
+  indefinite fail-closed shutdown latch. The peer manager makes one
+  generation-fenced restart attempt after the hold-down, invalidates stale
+  countdowns on config or dynamic-range replacement, and exposes the action,
+  configured duration, and remaining milliseconds through gRPC, CLI, and JSON.
+
 - **Operator dashboard and alerting cover slow peers and RIB actor latency.**
   The shipped Grafana overview now separates transport endpoints from bare
   neighbor addresses, exposes coalesced outbound queues, slow-peer state,

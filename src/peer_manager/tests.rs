@@ -49,6 +49,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
         ttl_security: false,
@@ -455,6 +456,45 @@ fn dynamic_test_manager() -> PeerManager {
         None,
         make_dynamic_manager_config(),
     )
+}
+
+/// Load-bearing producer-path proof: dropping the field at either
+/// `ResolvedNeighbor` -> `PeerManagerConfig` or `PeerManagerConfig` -> `ManagedPeer`
+/// makes the final assertion `None` while parsing/inheritance still passes.
+#[tokio::test]
+async fn inherited_max_prefix_restart_reaches_managed_peer() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+max_prefix_restart_seconds = 30
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix-members"
+"#,
+    );
+    let resolved = config.resolved_neighbors().unwrap().pop().unwrap();
+    let peer_config = PeerManager::peer_manager_config_from_resolved(resolved, false);
+    assert_eq!(peer_config.max_prefix_restart_seconds, Some(30));
+
+    let mut mgr = test_peer_manager();
+    let peer = key(peer_config.address);
+    mgr.add_peer(peer_config, false).await.unwrap();
+    assert_eq!(
+        mgr.peers[&peer].max_prefix_restart_seconds,
+        Some(30),
+        "manager must own the fully resolved restart policy"
+    );
 }
 
 #[test]
@@ -1144,6 +1184,7 @@ fn insert_test_managed_peer_with_asn(
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -1415,6 +1456,7 @@ fn insert_test_scoped_managed_peer(
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -1444,6 +1486,7 @@ struct FakePeerCounters {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MaxPrefixTrigger {
     Start,
+    StartTwice,
     CollisionDump,
     Shutdown,
 }
@@ -1460,13 +1503,16 @@ fn max_prefix_on_command_peer_handle(
 
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
-        let mut emitted = false;
+        let mut emitted = 0;
         while let Some(command) = session_rx.recv().await {
             let terminal = matches!(&command, PeerCommand::CollisionDump | PeerCommand::Shutdown);
             let should_emit = match command {
                 PeerCommand::Start => {
                     counters.start.fetch_add(1, Ordering::SeqCst);
-                    trigger == MaxPrefixTrigger::Start
+                    matches!(
+                        trigger,
+                        MaxPrefixTrigger::Start | MaxPrefixTrigger::StartTwice
+                    )
                 }
                 PeerCommand::CollisionDump => {
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
@@ -1514,8 +1560,13 @@ fn max_prefix_on_command_peer_handle(
                 }
                 _ => false,
             };
-            if should_emit && !emitted {
-                emitted = true;
+            let emission_limit = if trigger == MaxPrefixTrigger::StartTwice {
+                2
+            } else {
+                1
+            };
+            if should_emit && emitted < emission_limit {
+                emitted += 1;
                 notify_tx
                     .send(SessionNotification::MaxPrefixExceeded {
                         session_id,
@@ -1640,6 +1691,9 @@ fn fake_peer_handle_with_route_refresh_reply(
         let mut pending_route_refresh_replies = Vec::new();
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
+                PeerCommand::Start => {
+                    counters.start.fetch_add(1, Ordering::SeqCst);
+                }
                 PeerCommand::QueryState { reply } => {
                     counters.query_state.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(PeerSessionState {
@@ -1971,6 +2025,248 @@ async fn wait_counter(counter: &AtomicU32, expected: u32) {
     assert_eq!(counter.load(Ordering::SeqCst), expected);
 }
 
+/// Load-bearing timed-restart proof: removing the run-loop sleep, using
+/// `>=` one second early, extending on a duplicate terminal notice, or leaving
+/// the latch armed after success makes one of the exact count/deadline/status
+/// assertions fail.
+#[tokio::test(start_paused = true)]
+async fn max_prefix_restart_fires_at_exact_first_deadline_once() {
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 70));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Idle, None, counters.clone()),
+        false,
+    );
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(30);
+    assert!(mgr.install_max_prefix_latch(
+        key(addr),
+        1,
+        "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+        Some(30),
+    ));
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let info = mgr.get_peer_info(&key(addr)).await.unwrap();
+    assert_eq!(info.max_prefix_action, "restart");
+    assert_eq!(info.max_prefix_restart_seconds, Some(30));
+    assert_eq!(info.max_prefix_restart_remaining_millis, Some(20_000));
+    assert!(!mgr.install_max_prefix_latch(
+        key(addr),
+        2,
+        "duplicate terminal notice".to_string(),
+        Some(30),
+    ));
+
+    let task = tokio::spawn(mgr.run());
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(19)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(counters.start.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 1);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply })
+        .await
+        .unwrap();
+    let peers = response.await.unwrap();
+    assert!(peers[0].enabled);
+    assert_eq!(peers[0].max_prefix_action, "restart");
+    assert_eq!(peers[0].max_prefix_restart_remaining_millis, None);
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
+}
+
+/// Load-bearing re-arm proof: after the first automatic restart, a second
+/// terminal max-prefix notification must create one fresh hold-down. Failing
+/// to remove the consumed latch suppresses the second incident; reusing its
+/// deadline fires early; retaining either deadline adds extra Start attempts.
+#[tokio::test(start_paused = true)]
+async fn post_restart_second_breach_gets_one_fresh_hold_down() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 74));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = max_prefix_on_command_peer_handle(
+        addr,
+        1,
+        rustbgpd_transport::SessionRole::Primary,
+        MaxPrefixTrigger::StartTwice,
+        mgr.session_notify_tx.clone(),
+        counters.clone(),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    mgr.peers
+        .get_mut(&key(addr))
+        .unwrap()
+        .max_prefix_restart_seconds = Some(30);
+
+    mgr.peers[&key(addr)].handle.start().await.unwrap();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    mgr.drain_ready_session_notifications().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 1);
+    let first_generation = mgr.max_prefix_latches[&key(addr)].generation;
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    mgr.drain_ready_session_notifications().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 2);
+    let second = &mgr.max_prefix_latches[&key(addr)];
+    assert_ne!(second.generation, first_generation);
+    assert_eq!(
+        second.deadline.unwrap() - tokio::time::Instant::now(),
+        Duration::from_secs(30),
+        "the second incident must own a full fresh hold-down"
+    );
+
+    tokio::time::advance(Duration::from_secs(29)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    mgr.drain_ready_session_notifications().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 3);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
+    tokio::time::advance(Duration::from_secs(31)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 3);
+}
+
+/// Load-bearing explicit-disable race proof: removing the pre-await deadline
+/// invalidation lets the due handler send Start after the operator's Stop.
+#[tokio::test(start_paused = true)]
+async fn explicit_disable_consumes_pending_max_prefix_restart() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 71));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = max_prefix_on_command_peer_handle(
+        addr,
+        1,
+        rustbgpd_transport::SessionRole::Primary,
+        MaxPrefixTrigger::CollisionDump,
+        mgr.session_notify_tx.clone(),
+        counters.clone(),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(30);
+    mgr.install_max_prefix_latch(key(addr), 1, "max-prefix".to_string(), Some(30));
+
+    mgr.disable_peer(key(addr), None).await.unwrap();
+    assert!(
+        mgr.max_prefix_latches
+            .get(&key(addr))
+            .is_some_and(|latch| latch.deadline.is_none())
+    );
+    tokio::time::advance(Duration::from_secs(31)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    tokio::task::yield_now().await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+    assert!(!mgr.peers.get(&key(addr)).unwrap().enabled);
+}
+
+/// Load-bearing dynamic-range fence: deleting the accepting range must remove
+/// remaining-time visibility immediately. Omitting delete-time invalidation
+/// leaves the old deadline armed and this assertion red.
+#[tokio::test(start_paused = true)]
+async fn dynamic_range_removal_invalidates_max_prefix_restart() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 72));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        72,
+        fake_peer_handle(addr, SessionState::Idle, None, counters.clone()),
+        false,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    mgr.peers
+        .get_mut(&key(addr))
+        .unwrap()
+        .max_prefix_restart_seconds = Some(30);
+    mgr.install_max_prefix_latch(key(addr), 72, "max-prefix".to_string(), Some(30));
+
+    mgr.delete_dynamic_range("127.0.0.0/8").unwrap();
+    let latch = mgr.max_prefix_latches.get(&key(addr)).unwrap();
+    assert!(latch.deadline.is_none());
+    let info = mgr.get_peer_info(&key(addr)).await.unwrap();
+    assert_eq!(info.max_prefix_action, "shutdown");
+    assert_eq!(info.max_prefix_restart_remaining_millis, None);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+}
+
+/// Load-bearing single-attempt proof: retaining the deadline after a failed
+/// Start turns the feature into an unbounded retry loop; clearing the latch
+/// entirely weakens fail-closed recovery. Both mutations make this red.
+#[tokio::test(start_paused = true)]
+async fn failed_max_prefix_restart_becomes_indefinite_shutdown() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 73));
+    let (commands, receiver) = mpsc::channel(1);
+    drop(receiver);
+    let task = tokio::spawn(async { Ok(()) });
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(1);
+    mgr.install_max_prefix_latch(key(addr), 1, "max-prefix".to_string(), Some(1));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert!(!managed.enabled);
+    let latch = mgr.max_prefix_latches.get(&key(addr)).unwrap();
+    assert!(latch.deadline.is_none());
+    let info = mgr.get_peer_info(&key(addr)).await.unwrap();
+    assert_eq!(info.max_prefix_action, "shutdown");
+    assert_eq!(info.max_prefix_restart_remaining_millis, None);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    assert!(mgr.max_prefix_latches[&key(addr)].deadline.is_none());
+}
+
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
     crate::config::Neighbor {
         address: addr.to_string(),
@@ -1986,6 +2282,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
         bfd: None,
@@ -2059,8 +2356,10 @@ async fn add_peer_and_list() {
     handle.await.unwrap();
 }
 
-#[tokio::test]
-async fn reconfigure_peer_preserves_disabled_state() {
+/// Load-bearing full-reconfigure proof: removing the pre-delete invalidation
+/// lets an old incident's timer restart the replacement peer after 30 seconds.
+#[tokio::test(start_paused = true)]
+async fn reconfigure_peer_preserves_disabled_state_and_cancels_old_restart() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
@@ -2075,15 +2374,21 @@ async fn reconfigure_peer_preserves_disabled_state() {
         None,
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let mut initial = make_config(addr, 65002);
+    initial.max_prefix_restart_seconds = Some(30);
+    mgr.add_peer(initial, false).await.unwrap();
     mgr.disable_peer(key(addr), None).await.unwrap();
-    mgr.max_prefix_latches.insert(
+    mgr.install_max_prefix_latch(
         key(addr),
+        0,
         "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+        Some(30),
     );
+    let original_generation = mgr.max_prefix_latches[&key(addr)].generation;
 
     let mut replacement = make_config(addr, 65002);
     replacement.hold_time = Some(45);
+    replacement.max_prefix_restart_seconds = Some(30);
     let previous = mgr.reconfigure_peer(replacement).await.unwrap();
 
     assert_eq!(previous.hold_time, Some(90));
@@ -2094,6 +2399,19 @@ async fn reconfigure_peer_preserves_disabled_state() {
         mgr.max_prefix_latches.contains_key(&key(addr)),
         "reconfigure's non-reap delete/re-add must preserve the latch"
     );
+    let latch = &mgr.max_prefix_latches[&key(addr)];
+    assert!(
+        latch.deadline.is_none(),
+        "replacement must cancel the old timer"
+    );
+    assert_ne!(
+        latch.generation, original_generation,
+        "replacement must fence the old latch generation"
+    );
+    tokio::time::advance(Duration::from_secs(31)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    assert!(!mgr.peers[&key(addr)].enabled);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
 }
 
 /// Load-bearing reconcile recovery proof: if a changed peer's re-add failed,
@@ -2103,9 +2421,11 @@ async fn reconfigure_peer_preserves_disabled_state() {
 async fn classified_add_honors_retained_max_prefix_latch() {
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 22));
-    mgr.max_prefix_latches.insert(
+    mgr.install_max_prefix_latch(
         key(addr),
+        0,
         "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+        None,
     );
 
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
@@ -2195,6 +2515,95 @@ async fn hot_update_peer_applies_in_place_without_session_rebuild() {
     assert_eq!(managed.max_prefixes, Some(500));
     assert_eq!(managed.transport_config.max_prefixes, Some(500));
     assert_eq!(managed.transport_config.gr_stale_routes_time, 300);
+}
+
+/// Load-bearing hot-update boundary proof: an unrelated accepted edit keeps
+/// the exact armed incident, while a successful restart-duration change
+/// cancels it. Removing the conditional invalidation makes the final assertion
+/// red; making invalidation unconditional makes the identity assertions red.
+#[tokio::test(start_paused = true)]
+async fn hot_update_peer_only_cancels_restart_when_duration_changes() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 75));
+    let mut initial = make_config(addr, 65002);
+    initial.max_prefix_restart_seconds = Some(30);
+    mgr.add_peer(initial, false).await.unwrap();
+    mgr.disable_peer(key(addr), None).await.unwrap();
+
+    mgr.install_max_prefix_latch(key(addr), 1, "original".to_string(), Some(30));
+    let original_generation = mgr.max_prefix_latches[&key(addr)].generation;
+    let original_deadline = mgr.max_prefix_latches[&key(addr)].deadline;
+    let mut description_edit = make_config(addr, 65002);
+    description_edit.max_prefix_restart_seconds = Some(30);
+    description_edit.description = "updated".to_string();
+    mgr.hot_update_peer(description_edit).await.unwrap();
+    assert_eq!(
+        mgr.max_prefix_latches[&key(addr)].generation,
+        original_generation
+    );
+    assert_eq!(
+        mgr.max_prefix_latches[&key(addr)].deadline,
+        original_deadline
+    );
+
+    let mut duration_edit = make_config(addr, 65002);
+    duration_edit.max_prefix_restart_seconds = Some(60);
+    duration_edit.description = "updated".to_string();
+    mgr.hot_update_peer(duration_edit).await.unwrap();
+    assert!(mgr.max_prefix_latches[&key(addr)].deadline.is_none());
+}
+
+/// Load-bearing rejected-replacement proof: moving countdown invalidation
+/// ahead of the fallible RIB refresh cancels the armed timer even though the
+/// export-knob replacement returns `Err`, making both identity assertions red.
+#[tokio::test(start_paused = true)]
+async fn rejected_hot_update_preserves_old_restart_countdown() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 77));
+    let mut initial = make_config(addr, 65002);
+    initial.max_prefix_restart_seconds = Some(30);
+    mgr.add_peer(initial, false).await.unwrap();
+    mgr.disable_peer(key(addr), None).await.unwrap();
+    mgr.install_max_prefix_latch(key(addr), 1, "original".to_string(), Some(30));
+    let original_generation = mgr.max_prefix_latches[&key(addr)].generation;
+    let original_deadline = mgr.max_prefix_latches[&key(addr)].deadline;
+    drop(rib_rx);
+
+    let mut rejected = make_config(addr, 65002);
+    rejected.max_prefix_restart_seconds = Some(60);
+    rejected.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    assert!(mgr.hot_update_peer(rejected).await.is_err());
+    assert_eq!(
+        mgr.max_prefix_latches[&key(addr)].generation,
+        original_generation
+    );
+    assert_eq!(
+        mgr.max_prefix_latches[&key(addr)].deadline,
+        original_deadline
+    );
+    assert_eq!(mgr.peers[&key(addr)].max_prefix_restart_seconds, Some(30));
 }
 
 #[tokio::test]
@@ -2593,6 +3002,7 @@ fn insert_test_dynamic_managed_peer(
             enabled,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -2731,9 +3141,11 @@ async fn rollback_reap_clears_dynamic_max_prefix_latch() {
         8,
         "ix-members",
     );
-    mgr.max_prefix_latches.insert(
+    mgr.install_max_prefix_latch(
         key(peer_addr),
+        0,
         "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+        None,
     );
 
     assert_eq!(
@@ -2747,9 +3159,16 @@ async fn rollback_reap_clears_dynamic_max_prefix_latch() {
     );
 }
 
+/// Load-bearing transaction-bounce proof: removing the pre-filter policy sync
+/// leaves the matching disabled dynamic peer on `None` instead of 30 seconds.
 #[tokio::test]
 async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
     let mut mgr = dynamic_test_manager();
+    mgr.current_config
+        .peer_groups
+        .get_mut("ix-members")
+        .unwrap()
+        .max_prefix_restart_seconds = std::num::NonZeroU32::new(30);
 
     let static_counters = Arc::new(FakePeerCounters::default());
     let static_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
@@ -2834,6 +3253,10 @@ async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
     assert_eq!(static_counters.stop.load(Ordering::SeqCst), 0);
     assert_eq!(other_range_counters.stop.load(Ordering::SeqCst), 0);
     assert_eq!(disabled_counters.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        mgr.peers[&key(disabled_addr)].max_prefix_restart_seconds,
+        Some(30)
+    );
 
     // The bounce only signals: ManagedPeer removal, the
     // `dynamic_peer_count` slot decrement, and metric reaping stay owned by
@@ -3001,6 +3424,7 @@ peer_group = "edge"
                 hold_time: Some(45),
                 send_hold_time: None,
                 max_prefixes: None,
+                max_prefix_restart_seconds: None,
                 md5_password: None,
                 ttl_security: None,
                 families: Vec::new(),
@@ -3037,6 +3461,7 @@ fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::Pe
         hold_time,
         send_hold_time: None,
         max_prefixes: None,
+        max_prefix_restart_seconds: None,
         md5_password: None,
         ttl_security: None,
         families: Vec::new(),
@@ -5583,6 +6008,7 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes: Some(1000),
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: Some(30),
         md5_password: Some("hunter2".into()),
         tcp_ao: Some(
             rustbgpd_transport::TcpAoConfig {
@@ -5636,6 +6062,7 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes,
         max_prefixes_ipv4,
         max_prefixes_ipv6,
+        max_prefix_restart_seconds: _max_prefix_restart_seconds,
         md5_password,
         tcp_ao,
         ttl_security,
@@ -6625,6 +7052,74 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
     rib_drainer.abort();
 }
 
+/// Load-bearing dynamic inheritance proof: dropping the post-commit sync in
+/// `apply_peer_group_change` leaves an accepted dynamic peer on the duration
+/// it inherited at accept time. The None -> 30 assertion and the 30 -> 60
+/// countdown cancellation each fail independently without that sync.
+#[tokio::test(start_paused = true)]
+async fn set_peer_group_restart_policy_updates_live_dynamic_peer() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 76));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        76,
+        fake_peer_handle(
+            addr,
+            SessionState::Idle,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    assert_eq!(mgr.peers[&key(addr)].max_prefix_restart_seconds, None);
+
+    let mut group = crate::policy_admin::config_peer_group_to_api(
+        &mgr.current_config.peer_groups["ix-members"],
+    );
+    group.max_prefix_restart_seconds = Some(30);
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: group,
+            ack: None,
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mgr.peers[&key(addr)].max_prefix_restart_seconds, Some(30));
+
+    mgr.install_max_prefix_latch(key(addr), 76, "first policy".to_string(), Some(30));
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let mut group = crate::policy_admin::config_peer_group_to_api(
+        &mgr.current_config.peer_groups["ix-members"],
+    );
+    group.max_prefix_restart_seconds = Some(60);
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: group,
+            ack: None,
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mgr.peers[&key(addr)].max_prefix_restart_seconds, Some(60));
+    assert!(mgr.max_prefix_latches[&key(addr)].deadline.is_none());
+
+    mgr.remove_max_prefix_latch(&key(addr));
+    mgr.install_max_prefix_latch(key(addr), 76, "second policy".to_string(), Some(60));
+    assert_eq!(
+        mgr.max_prefix_latches[&key(addr)].deadline.unwrap() - tokio::time::Instant::now(),
+        Duration::from_mins(1)
+    );
+}
+
 /// A catalog mutation's fan-out is atomic: when applying the resolved
 /// chains to peer 2 fails mid-loop, peer 1 (already updated) is restored
 /// to its prior chains, peer 3 is never touched, and `current_config`
@@ -7064,6 +7559,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -12335,6 +12831,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -12510,6 +13007,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -12695,6 +13193,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -12899,6 +13398,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -13133,6 +13633,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,
@@ -13312,6 +13813,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
             enabled: true,
             hold_time: Some(hold),
             max_prefixes: None,
+            max_prefix_restart_seconds: None,
             transport_config: transport,
             import_policy: None,
             export_policy: None,

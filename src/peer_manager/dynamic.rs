@@ -295,10 +295,30 @@ impl PeerManager {
             parse_dynamic_prefix(&dn.prefix)
                 .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
         });
+        let affected: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter(|(_, managed)| {
+                managed.is_dynamic
+                    && managed
+                        .accepted_dynamic_range
+                        .as_ref()
+                        .is_some_and(|accepted| {
+                            accepted.addr == key.0 && accepted.prefix_len == key.1
+                        })
+            })
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in affected {
+            self.invalidate_max_prefix_restart(&peer);
+        }
         Ok(removed)
     }
 
-    fn dynamic_peer_still_allowed_by_current_ranges(&self, managed: &ManagedPeer) -> bool {
+    pub(super) fn dynamic_peer_still_allowed_by_current_ranges(
+        &self,
+        managed: &ManagedPeer,
+    ) -> bool {
         let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
             return false;
         };
@@ -316,6 +336,24 @@ impl PeerManager {
                 && range.peer_group == accepted.peer_group
                 && (range.remote_asn == 0 || range.remote_asn == managed.remote_asn)
         })
+    }
+
+    pub(super) fn invalidate_stale_dynamic_max_prefix_restarts(&mut self) {
+        let stale: Vec<PeerKey> = self
+            .max_prefix_latches
+            .iter()
+            .filter(|(_, latch)| latch.deadline.is_some())
+            .filter_map(|(peer, _)| {
+                let managed = self.peers.get(peer)?;
+                (managed.is_dynamic
+                    && (!self.dynamic_peer_still_allowed_by_current_ranges(managed)
+                        || !self.dynamic_restart_policy_still_current(managed)))
+                .then_some(peer.clone())
+            })
+            .collect();
+        for peer in stale {
+            self.invalidate_max_prefix_restart(&peer);
+        }
     }
 
     /// Remove dynamic peers whose accepting range is absent from the current
@@ -338,7 +376,7 @@ impl PeerManager {
             let Some(mut managed) = self.peers.remove(&peer_key) else {
                 continue;
             };
-            self.max_prefix_latches.remove(&peer_key);
+            self.remove_max_prefix_latch(&peer_key);
             self.unregister_session(managed.session_id);
             if let Some(pending) = managed.pending_inbound.take() {
                 self.unregister_session(pending.session_id);

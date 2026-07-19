@@ -32,6 +32,7 @@ use crate::policy_admin::{self, apply_config_event};
 /// Build a `PeerManagerNeighborConfig` from transport config components.
 pub(crate) fn build_peer_mgr_config(
     tc: &rustbgpd_transport::TransportConfig,
+    max_prefix_restart_seconds: Option<u32>,
     label: &str,
     import: Option<&PolicyChain>,
     export: Option<&PolicyChain>,
@@ -49,6 +50,7 @@ pub(crate) fn build_peer_mgr_config(
         max_prefixes: tc.max_prefixes,
         max_prefixes_ipv4: tc.max_prefixes_ipv4,
         max_prefixes_ipv6: tc.max_prefixes_ipv6,
+        max_prefix_restart_seconds,
         md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
         ttl_security: tc.ttl_security,
@@ -1714,6 +1716,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                         .map(|neighbor| {
                             build_peer_mgr_config(
                                 &neighbor.transport_config,
+                                neighbor.max_prefix_restart_seconds,
                                 &neighbor.label,
                                 neighbor.import_policy.as_ref(),
                                 neighbor.export_policy.as_ref(),
@@ -5917,20 +5920,28 @@ peer_group = "secure"
         );
     }
 
-    /// Adding a peer-group definition on reload must surface as a
-    /// `SetPeerGroup` command. Catches the silent-ignore failure mode
-    /// where peer-group edits would only be detected, not applied.
+    /// Load-bearing peer-group reload proof: adding a definition must surface
+    /// as `SetPeerGroup`, and the timed max-prefix policy must survive the
+    /// config -> API -> config round trip. Dropping the field from either
+    /// policy-admin conversion makes the final value assertion red.
     #[tokio::test]
-    async fn reload_applies_peer_group_addition() {
+    async fn reload_applies_peer_group_addition_with_max_prefix_restart() {
         let new_toml = format!(
-            "{}\n[peer_groups.external]\nhold_time = 60\n",
+            "{}\n[peer_groups.external]\nhold_time = 60\nmax_prefix_restart_seconds = 300\n",
             baseline_toml()
         );
         let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
+        let returned = returned.expect("reload must succeed");
         assert!(
             tags.contains(&"SetPeerGroup(external)".to_string()),
             "expected SetPeerGroup(external) — saw {tags:?}"
+        );
+        assert_eq!(
+            returned.peer_groups["external"]
+                .max_prefix_restart_seconds
+                .map(std::num::NonZeroU32::get),
+            Some(300),
+            "SIGHUP must preserve the peer-group timed-restart policy"
         );
     }
 
@@ -6439,6 +6450,7 @@ remote_asn = 65002
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
                     ttl_security: false,
@@ -6544,6 +6556,7 @@ remote_asn = 65002
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
                     ttl_security: false,

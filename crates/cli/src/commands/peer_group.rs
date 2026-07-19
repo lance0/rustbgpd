@@ -37,6 +37,8 @@ struct JsonPeerGroupDetail {
     send_hold_time: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_prefixes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_prefix_restart_seconds: Option<u32>,
     has_md5_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl_security: Option<bool>,
@@ -71,6 +73,39 @@ struct JsonPeerGroupDetail {
     inline_export_policy_count: usize,
     import_policy_chain: Vec<String>,
     export_policy_chain: Vec<String>,
+}
+
+fn json_peer_group_detail(
+    name: String,
+    def: &crate::proto::PeerGroupDefinition,
+) -> JsonPeerGroupDetail {
+    JsonPeerGroupDetail {
+        name,
+        hold_time: def.hold_time,
+        send_hold_time: def.send_hold_time,
+        max_prefixes: def.max_prefixes,
+        max_prefix_restart_seconds: def.max_prefix_restart_seconds,
+        has_md5_password: def.has_md5_password.unwrap_or(false),
+        ttl_security: def.ttl_security,
+        families: def.families.clone(),
+        graceful_restart: def.graceful_restart,
+        gr_restart_time: def.gr_restart_time,
+        gr_stale_routes_time: def.gr_stale_routes_time,
+        llgr_stale_time: def.llgr_stale_time,
+        local_ipv6_nexthop: def.local_ipv6_nexthop.clone(),
+        route_reflector_client: def.route_reflector_client,
+        orr_vantage: def.orr_vantage.clone(),
+        route_server_client: def.route_server_client,
+        per_client_best: def.per_client_best,
+        remove_private_as: def.remove_private_as.clone(),
+        add_path_receive: def.add_path_receive,
+        add_path_send: def.add_path_send,
+        add_path_send_max: def.add_path_send_max,
+        inline_import_policy_count: def.import_policy.len(),
+        inline_export_policy_count: def.export_policy.len(),
+        import_policy_chain: def.import_policy_chain.clone(),
+        export_policy_chain: def.export_policy_chain.clone(),
+    }
 }
 
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -129,32 +164,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
 
     let def = resp.definition.unwrap_or_default();
     if json {
-        let detail = JsonPeerGroupDetail {
-            name: resp.name.clone(),
-            hold_time: def.hold_time,
-            send_hold_time: def.send_hold_time,
-            max_prefixes: def.max_prefixes,
-            has_md5_password: def.has_md5_password.unwrap_or(false),
-            ttl_security: def.ttl_security,
-            families: def.families.clone(),
-            graceful_restart: def.graceful_restart,
-            gr_restart_time: def.gr_restart_time,
-            gr_stale_routes_time: def.gr_stale_routes_time,
-            llgr_stale_time: def.llgr_stale_time,
-            local_ipv6_nexthop: def.local_ipv6_nexthop.clone(),
-            route_reflector_client: def.route_reflector_client,
-            orr_vantage: def.orr_vantage.clone(),
-            route_server_client: def.route_server_client,
-            per_client_best: def.per_client_best,
-            remove_private_as: def.remove_private_as.clone(),
-            add_path_receive: def.add_path_receive,
-            add_path_send: def.add_path_send,
-            add_path_send_max: def.add_path_send_max,
-            inline_import_policy_count: def.import_policy.len(),
-            inline_export_policy_count: def.export_policy.len(),
-            import_policy_chain: def.import_policy_chain.clone(),
-            export_policy_chain: def.export_policy_chain.clone(),
-        };
+        let detail = json_peer_group_detail(resp.name.clone(), &def);
         output::print_json_pretty(&detail)?;
     } else {
         println!("Name:                  {}", resp.name);
@@ -166,6 +176,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(m) = def.max_prefixes {
             println!("Max Prefixes:          {m}");
+        }
+        if let Some(seconds) = def.max_prefix_restart_seconds {
+            println!("Max Prefix Restart:    {seconds}s");
         }
         if def.has_md5_password.unwrap_or(false) {
             println!("MD5 Password:          (set)");
@@ -328,6 +341,22 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use std::io::Write;
+
+    /// Load-bearing projection proof: dropping the field from the peer-group
+    /// JSON mapper removes it from this serialized operator view.
+    #[test]
+    fn detail_json_preserves_max_prefix_restart() {
+        let definition = crate::proto::PeerGroupDefinition {
+            max_prefix_restart_seconds: Some(300),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(json_peer_group_detail(
+            "ix-members".to_string(),
+            &definition,
+        ))
+        .unwrap();
+        assert_eq!(value["max_prefix_restart_seconds"], 300);
+    }
 
     #[tokio::test]
     async fn list_renders_empty() {

@@ -18,6 +18,202 @@ use super::{
 };
 
 impl PeerManager {
+    fn allocate_max_prefix_latch_generation(&mut self) -> u64 {
+        let generation = self.next_max_prefix_latch_generation;
+        self.next_max_prefix_latch_generation =
+            self.next_max_prefix_latch_generation.wrapping_add(1);
+        generation
+    }
+
+    pub(super) fn recompute_next_max_prefix_restart_deadline(&mut self) {
+        self.next_max_prefix_restart_deadline = self
+            .max_prefix_latches
+            .values()
+            .filter_map(|latch| latch.deadline)
+            .min();
+    }
+
+    pub(super) fn install_max_prefix_latch(
+        &mut self,
+        peer: PeerKey,
+        source_session_id: u64,
+        error: String,
+        restart_seconds: Option<u32>,
+    ) -> bool {
+        // The first terminal incident owns the hold-down. Duplicate terminal
+        // notices from collision/retirement paths must not extend it.
+        if self.max_prefix_latches.contains_key(&peer) {
+            return false;
+        }
+        let generation = self.allocate_max_prefix_latch_generation();
+        let deadline = restart_seconds.map(|seconds| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into())
+        });
+        self.max_prefix_latches.insert(
+            peer,
+            super::MaxPrefixLatch {
+                error,
+                generation,
+                source_session_id,
+                deadline,
+            },
+        );
+        if deadline.is_some_and(|candidate| {
+            self.next_max_prefix_restart_deadline
+                .is_none_or(|current| candidate < current)
+        }) {
+            self.next_max_prefix_restart_deadline = deadline;
+        }
+        true
+    }
+
+    pub(super) fn invalidate_max_prefix_restart(&mut self, peer: &PeerKey) {
+        let generation = self.allocate_max_prefix_latch_generation();
+        let changed = self.max_prefix_latches.get_mut(peer).is_some_and(|latch| {
+            if latch.deadline.take().is_some() {
+                latch.generation = generation;
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            self.recompute_next_max_prefix_restart_deadline();
+        }
+    }
+
+    pub(super) fn remove_max_prefix_latch(&mut self, peer: &PeerKey) {
+        if self.max_prefix_latches.remove(peer).is_some() {
+            self.recompute_next_max_prefix_restart_deadline();
+        }
+    }
+
+    pub(super) fn dynamic_restart_policy_still_current(&self, managed: &ManagedPeer) -> bool {
+        if !managed.is_dynamic {
+            return true;
+        }
+        let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
+            return false;
+        };
+        self.current_config
+            .peer_groups
+            .get(&accepted.peer_group)
+            .and_then(|group| group.max_prefix_restart_seconds)
+            .map(std::num::NonZeroU32::get)
+            == managed.max_prefix_restart_seconds
+    }
+
+    pub(super) fn sync_dynamic_max_prefix_restart_for_group(&mut self, name: &str) {
+        let restart_seconds = self
+            .current_config
+            .peer_groups
+            .get(name)
+            .and_then(|group| group.max_prefix_restart_seconds)
+            .map(std::num::NonZeroU32::get);
+        let dynamic_members: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter(|(_, managed)| {
+                managed.is_dynamic
+                    && managed
+                        .accepted_dynamic_range
+                        .as_ref()
+                        .is_some_and(|accepted| accepted.peer_group == name)
+                    && managed.max_prefix_restart_seconds != restart_seconds
+            })
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in dynamic_members {
+            self.invalidate_max_prefix_restart(&peer);
+            if let Some(managed) = self.peers.get_mut(&peer) {
+                managed.max_prefix_restart_seconds = restart_seconds;
+            }
+        }
+    }
+
+    pub(super) async fn handle_due_max_prefix_restarts(&mut self) {
+        let now = tokio::time::Instant::now();
+        let mut due: Vec<(PeerKey, u64)> = self
+            .max_prefix_latches
+            .iter()
+            .filter_map(|(peer, latch)| {
+                latch
+                    .deadline
+                    .is_some_and(|deadline| deadline <= now)
+                    .then_some((peer.clone(), latch.generation))
+            })
+            .collect();
+        due.sort_by(|left, right| left.0.cmp(&right.0));
+
+        for (peer, generation) in due {
+            let latch_matches = self.max_prefix_latches.get(&peer).is_some_and(|latch| {
+                latch.generation == generation
+                    && latch.deadline.is_some_and(|deadline| deadline <= now)
+            });
+            let peer_matches = self.peers.get(&peer).is_some_and(|managed| {
+                !managed.enabled
+                    && managed.pending_inbound.is_none()
+                    && managed.max_prefix_restart_seconds.is_some()
+                    && (!managed.is_dynamic
+                        || self.dynamic_peer_still_allowed_by_current_ranges(managed))
+                    && self.dynamic_restart_policy_still_current(managed)
+            });
+            if !latch_matches || !peer_matches {
+                self.invalidate_max_prefix_restart(&peer);
+                continue;
+            }
+
+            // Consume the single automatic attempt before awaiting the bounded
+            // command. Failure therefore remains an indefinite fail-closed
+            // latch and can never become a retry loop.
+            self.invalidate_max_prefix_restart(&peer);
+            let address = peer.address;
+            if self.bfd_should_withhold(&address) {
+                if let Some(managed) = self.peers.get_mut(&peer) {
+                    managed.enabled = true;
+                }
+                self.remove_max_prefix_latch(&peer);
+                self.set_bfd_peer_disabled(address, false);
+                self.mark_bfd_withheld(address);
+                self.publish_peer_lifecycle_event(
+                    &peer,
+                    SessionLifecycleEventType::PeerEnabled,
+                    format!("peer {address} max-prefix hold-down expired; waiting for BFD"),
+                );
+                info!(%address, "max-prefix hold-down expired; strict BFD still withholds BGP until BFD Up");
+                continue;
+            }
+            let result = self
+                .peers
+                .get(&peer)
+                .expect("validated above")
+                .handle
+                .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await;
+            match result {
+                Ok(()) => {
+                    if let Some(managed) = self.peers.get_mut(&peer) {
+                        managed.enabled = true;
+                    }
+                    self.remove_max_prefix_latch(&peer);
+                    self.set_bfd_peer_disabled(address, false);
+                    self.publish_peer_lifecycle_event(
+                        &peer,
+                        SessionLifecycleEventType::PeerEnabled,
+                        format!(
+                            "peer {address} automatically restarted after max-prefix hold-down"
+                        ),
+                    );
+                    info!(%address, "peer automatically restarted after max-prefix hold-down");
+                }
+                Err(error) => {
+                    warn!(%address, %error, "automatic max-prefix restart attempt failed; peer remains latched disabled");
+                }
+            }
+        }
+        self.recompute_next_max_prefix_restart_deadline();
+    }
+
     /// Keep a removed generation terminally owned until its actor cannot emit
     /// again, then consume every lossless notice it published before retiring
     /// the session id. This is the common ownership-transfer fence.
@@ -97,6 +293,7 @@ impl PeerManager {
             max_prefixes: managed.max_prefixes,
             max_prefixes_ipv4: tc.max_prefixes_ipv4,
             max_prefixes_ipv6: tc.max_prefixes_ipv6,
+            max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
             ttl_security: tc.ttl_security,
@@ -282,6 +479,7 @@ impl PeerManager {
                 enabled,
                 hold_time,
                 max_prefixes,
+                max_prefix_restart_seconds: config.max_prefix_restart_seconds,
                 transport_config: transport,
                 import_policy,
                 export_policy,
@@ -354,6 +552,7 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
+        self.invalidate_max_prefix_restart(&peer);
         #[cfg(test)]
         if let Some(remaining) = self.inject_reconfigure_failures.get_mut(&peer) {
             if *remaining == 0 {
@@ -443,7 +642,7 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
     ) -> Result<(), PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
-        let (knobs_changed, export_knobs_changed, policies_changed) = {
+        let (knobs_changed, export_knobs_changed, policies_changed, restart_policy_changed) = {
             let managed = self
                 .peers
                 .get(&peer)
@@ -470,6 +669,7 @@ impl PeerManager {
                 export_knobs_changed,
                 managed.import_policy != config.import_policy
                     || managed.export_policy != config.export_policy,
+                managed.max_prefix_restart_seconds != config.max_prefix_restart_seconds,
             )
         };
 
@@ -561,6 +761,15 @@ impl PeerManager {
             }
         }
 
+        // The actor runs this method serially, so a deadline cannot fire while
+        // the awaited updates above are in flight. Cancel the old incident's
+        // countdown only after every fallible apply step succeeds: an accepted
+        // restart-duration change never inherits it, while a rejected change
+        // or an unrelated hot edit keeps the prior recovery policy intact.
+        if restart_policy_changed {
+            self.invalidate_max_prefix_restart(&peer);
+        }
+
         // Manager-side bookkeeping so `rbgp neighbor list` and any later
         // session rebuild see the new values.
         let managed = self
@@ -569,6 +778,7 @@ impl PeerManager {
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed.description.clone_from(&config.description);
         managed.max_prefixes = config.max_prefixes;
+        managed.max_prefix_restart_seconds = config.max_prefix_restart_seconds;
         managed.transport_config.max_prefixes = config.max_prefixes;
         managed.transport_config.max_prefixes_ipv4 = config.max_prefixes_ipv4;
         managed.transport_config.max_prefixes_ipv6 = config.max_prefixes_ipv6;
@@ -698,6 +908,14 @@ impl PeerManager {
         let mut outcome = DynamicPeerBounceOutcome::default();
         if ranges.is_empty() {
             return outcome;
+        }
+
+        let peer_groups: BTreeSet<_> = ranges
+            .iter()
+            .map(|range| range.peer_group.as_str())
+            .collect();
+        for peer_group in peer_groups {
+            self.sync_dynamic_max_prefix_restart_for_group(peer_group);
         }
 
         let mut matched: Vec<PeerKey> = self
@@ -877,7 +1095,7 @@ impl PeerManager {
             // A real operator deletion is authoritative even if the actor
             // crossed max-prefix while it was being joined. Reconfigure keeps
             // the latch for the replacement generation.
-            self.max_prefix_latches.remove(&peer);
+            self.remove_max_prefix_latch(&peer);
         }
         if shutdown.joined() {
             info!(%address, "peer deleted");
@@ -964,7 +1182,7 @@ impl PeerManager {
         // Clear the manager-owned error only after the session accepted Start,
         // so a failed command cannot accidentally reopen passive acceptance.
         managed.enabled = true;
-        self.max_prefix_latches.remove(&peer);
+        self.remove_max_prefix_latch(&peer);
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerEnabled,
@@ -986,6 +1204,9 @@ impl PeerManager {
         reason: Option<bytes::Bytes>,
     ) -> Result<(), PeerLifecycleError> {
         let address = peer.address;
+        // Invalidate before any await: an already-due automatic restart must
+        // never overtake an explicit operator disable.
+        self.invalidate_max_prefix_restart(&peer);
         let pending = {
             let managed = self
                 .peers

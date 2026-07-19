@@ -34,6 +34,14 @@ pub(super) fn build_peer_info(
         hold_time: managed.hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
         max_prefixes: managed.max_prefixes,
+        max_prefix_action: if managed.max_prefix_restart_seconds.is_some() {
+            "restart"
+        } else {
+            "shutdown"
+        }
+        .to_string(),
+        max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
+        max_prefix_restart_remaining_millis: None,
         families: managed.transport_config.peer.families.clone(),
         remove_private_as: managed.transport_config.remove_private_as,
         route_server_client: managed.transport_config.route_server_client,
@@ -272,8 +280,21 @@ impl PeerManager {
         let managed = self.peers.get(peer)?;
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
         let mut info = build_peer_info(peer, managed, session_state.as_ref());
-        if let Some(error) = self.max_prefix_latches.get(peer) {
-            info.last_error.clone_from(error);
+        if let Some(latch) = self.max_prefix_latches.get(peer) {
+            info.last_error.clone_from(&latch.error);
+            info.max_prefix_action = if latch.deadline.is_some() {
+                "restart"
+            } else {
+                "shutdown"
+            }
+            .to_string();
+            info.max_prefix_restart_remaining_millis = latch.deadline.map(|deadline| {
+                deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            });
         }
         Some(info)
     }
@@ -292,8 +313,21 @@ impl PeerManager {
         for (peer, managed) in &self.peers {
             let session_state = states.get(peer).and_then(Option::as_ref);
             let mut info = build_peer_info(peer, managed, session_state);
-            if let Some(error) = self.max_prefix_latches.get(peer) {
-                info.last_error.clone_from(error);
+            if let Some(latch) = self.max_prefix_latches.get(peer) {
+                info.last_error.clone_from(&latch.error);
+                info.max_prefix_action = if latch.deadline.is_some() {
+                    "restart"
+                } else {
+                    "shutdown"
+                }
+                .to_string();
+                info.max_prefix_restart_remaining_millis = latch.deadline.map(|deadline| {
+                    deadline
+                        .saturating_duration_since(tokio::time::Instant::now())
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX)
+                });
             }
             infos.push(info);
         }

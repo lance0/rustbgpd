@@ -333,12 +333,22 @@ impl PeerManager {
                         )
                     },
                 );
-                let pending = self.peers.get_mut(&peer_key).and_then(|managed| {
-                    managed.enabled = false;
-                    managed.pending_inbound.take()
-                });
-                self.max_prefix_latches
-                    .insert(peer_key.clone(), error.clone());
+                let (pending, restart_seconds) =
+                    self.peers
+                        .get_mut(&peer_key)
+                        .map_or((None, None), |managed| {
+                            managed.enabled = false;
+                            (
+                                managed.pending_inbound.take(),
+                                managed.max_prefix_restart_seconds,
+                            )
+                        });
+                let installed = self.install_max_prefix_latch(
+                    peer_key.clone(),
+                    session_id,
+                    error.clone(),
+                    restart_seconds,
+                );
                 self.set_bfd_peer_disabled(peer_addr, true);
 
                 // Stop the currently owned primary for every breach. The
@@ -369,7 +379,19 @@ impl PeerManager {
                         )
                         .await;
                 }
-                info!(%peer_addr, %error, "peer latched disabled after max-prefix breach; explicit enable required");
+                if installed {
+                    if let Some(seconds) = restart_seconds {
+                        info!(%peer_addr, %error, seconds, "peer latched disabled after max-prefix breach; one automatic restart scheduled");
+                    } else {
+                        info!(%peer_addr, %error, "peer latched disabled after max-prefix breach; explicit enable required");
+                    }
+                } else {
+                    let original_session_id = self
+                        .max_prefix_latches
+                        .get(&peer_key)
+                        .map(|latch| latch.source_session_id);
+                    debug!(%peer_addr, session_id, original_session_id, "duplicate max-prefix terminal notice kept the original latch deadline");
+                }
             }
         }
     }

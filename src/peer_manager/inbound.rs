@@ -298,6 +298,7 @@ impl PeerManager {
                     enabled: true,
                     hold_time: cfg.hold_time,
                     max_prefixes: cfg.max_prefixes,
+                    max_prefix_restart_seconds: cfg.max_prefix_restart_seconds,
                     transport_config: transport,
                     import_policy,
                     export_policy,

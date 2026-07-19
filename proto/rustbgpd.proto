@@ -442,6 +442,9 @@ message NeighborConfig {
   bool per_client_best = 17;
   // Experimental Paths-Limit preference advertised for Add-Path receive families.
   uint32 paths_limit_receive_max = 18;
+  // Optional non-zero hold-down before one automatic restart attempt after a
+  // max-prefix shutdown. Unset preserves the fail-closed shutdown latch.
+  optional uint32 max_prefix_restart_seconds = 19;
 }
 
 message PathsLimitState {
@@ -547,6 +550,10 @@ message NeighborState {
   // announcements sent to this peer. Presence distinguishes an older daemon
   // that does not expose this state from an explicit disabled value.
   optional bool graceful_shutdown_advertise_intent = 37;
+  // Effective current max-prefix disposition: "shutdown" or "restart".
+  string max_prefix_action = 38;
+  // Present only while a timed max-prefix restart hold-down is active.
+  optional uint64 max_prefix_restart_remaining_millis = 39;
 }
 
 message SelectionDeferralFamilyState {
@@ -821,6 +828,9 @@ message NamedNeighborSet {
 message PeerGroupDefinition {
   optional uint32 hold_time = 1;
   optional uint32 max_prefixes = 2;
+  // Optional timed max-prefix restart inherited by group members. When set,
+  // must be greater than zero. Omit to retain fail-closed shutdown semantics.
+  optional uint32 max_prefix_restart_seconds = 26;
   // Write requests may set md5_password. Read responses redact the value and
   // set has_md5_password instead so clients can preserve or display presence.
   optional string md5_password = 3;

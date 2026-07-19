@@ -191,6 +191,9 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         // peer-group surface does not carry them.
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefix_restart_seconds: definition
+            .max_prefix_restart_seconds
+            .and_then(std::num::NonZeroU32::new),
         md5_password: definition
             .md5_password
             .as_ref()
@@ -241,6 +244,9 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         hold_time: definition.hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
+        max_prefix_restart_seconds: definition
+            .max_prefix_restart_seconds
+            .map(std::num::NonZeroU32::get),
         md5_password: definition.md5_password.as_deref().map(Into::into),
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
@@ -430,6 +436,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     max_prefixes: cfg.max_prefixes,
                     max_prefixes_ipv4: cfg.max_prefixes_ipv4,
                     max_prefixes_ipv6: cfg.max_prefixes_ipv6,
+                    max_prefix_restart_seconds: cfg
+                        .max_prefix_restart_seconds
+                        .and_then(std::num::NonZeroU32::new),
                     md5_password: cfg
                         .md5_password
                         .as_ref()
@@ -889,6 +898,7 @@ remote_asn = 65002
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: Some(
                         rustbgpd_transport::TcpAoConfig {

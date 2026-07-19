@@ -83,6 +83,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         cfg.map(|c| c.per_client_best).unwrap_or(false),
         &n.update_group,
     );
+    let max_prefix_action = max_prefix_action_label(
+        &n.max_prefix_action,
+        cfg.and_then(|config| config.max_prefix_restart_seconds),
+    );
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -103,6 +107,9 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             messages_sent: n.messages_sent,
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
+            max_prefix_action: max_prefix_action.to_string(),
+            max_prefix_restart_seconds: cfg.and_then(|c| c.max_prefix_restart_seconds),
+            max_prefix_restart_remaining_millis: n.max_prefix_restart_remaining_millis,
             authentication: authentication_label(n.authentication).to_string(),
             tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
             tcp_ao_desired_generation: n.tcp_ao_desired_generation,
@@ -218,6 +225,13 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Send Hold Time:        {}",
             cfg.and_then(|c| c.send_hold_time).unwrap_or(0)
         );
+        println!("Max-Prefix Action:     {max_prefix_action}");
+        if let Some(seconds) = cfg.and_then(|c| c.max_prefix_restart_seconds) {
+            println!("Max-Prefix Restart:    {seconds}s configured");
+        }
+        if let Some(remaining) = n.max_prefix_restart_remaining_millis {
+            println!("Max-Prefix Hold-Down:  {remaining}ms remaining");
+        }
         println!(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
@@ -414,6 +428,18 @@ fn graceful_shutdown_advertise_intent_label(value: Option<bool>) -> &'static str
     }
 }
 
+fn max_prefix_action_label(reported: &str, restart_seconds: Option<u32>) -> &str {
+    if reported.is_empty() {
+        if restart_seconds.is_some() {
+            "restart"
+        } else {
+            "shutdown"
+        }
+    } else {
+        reported
+    }
+}
+
 fn tcp_ao_health_label(value: i32) -> &'static str {
     match crate::proto::TcpAoHealth::try_from(value) {
         Ok(crate::proto::TcpAoHealth::NotApplicable) => "not_applicable",
@@ -518,6 +544,7 @@ pub async fn add(
                 add_path_send: opts.add_path_send,
                 add_path_send_max: opts.add_path_send_max,
                 paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
+                max_prefix_restart_seconds: None,
             }),
         })
         .await?;
@@ -734,6 +761,15 @@ mod tests {
             "disabled"
         );
         assert_eq!(graceful_shutdown_advertise_intent_label(None), "unknown");
+    }
+
+    /// Load-bearing: returning the raw protobuf string makes both old-daemon
+    /// cases blank instead of deriving a truthful action from config presence.
+    #[test]
+    fn max_prefix_action_is_rolling_upgrade_safe() {
+        assert_eq!(max_prefix_action_label("", None), "shutdown");
+        assert_eq!(max_prefix_action_label("", Some(30)), "restart");
+        assert_eq!(max_prefix_action_label("shutdown", Some(30)), "shutdown");
     }
 
     #[test]
