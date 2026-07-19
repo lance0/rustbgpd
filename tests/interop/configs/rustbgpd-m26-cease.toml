@@ -15,7 +15,7 @@ address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-m26-cease"
 hold_time = 90
-# Low limit: FRR advertises 3 prefixes, so this triggers Cease/1
+# Harness starts FRR at this exact bound, then injects a third prefix.
 max_prefixes = 2
 
 [security.grpc]

@@ -270,7 +270,11 @@ impl PeerManager {
     pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {
         let managed = self.peers.get(peer)?;
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
-        Some(build_peer_info(peer, managed, session_state.as_ref()))
+        let mut info = build_peer_info(peer, managed, session_state.as_ref());
+        if let Some(error) = self.max_prefix_latches.get(peer) {
+            info.last_error.clone_from(error);
+        }
+        Some(info)
     }
 
     pub(super) async fn list_peers(&self) -> Vec<PeerInfo> {
@@ -286,7 +290,11 @@ impl PeerManager {
         let mut infos = Vec::with_capacity(self.peers.len());
         for (peer, managed) in &self.peers {
             let session_state = states.get(peer).and_then(Option::as_ref);
-            infos.push(build_peer_info(peer, managed, session_state));
+            let mut info = build_peer_info(peer, managed, session_state);
+            if let Some(error) = self.max_prefix_latches.get(peer) {
+                info.last_error.clone_from(error);
+            }
+            infos.push(info);
         }
         infos
     }

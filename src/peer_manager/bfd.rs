@@ -276,10 +276,17 @@ impl PeerManager {
                     .and_then(|key| self.peers.get_mut(key))
                     .and_then(|managed| managed.pending_inbound.take());
                 if let Some(pending) = pending {
-                    self.unregister_session(pending.session_id);
-                    let _ = self
-                        .shutdown_handle_bounded(peer, "BFD down pending inbound", pending.handle)
-                        .await;
+                    if let Some(peer_key) = &peer_key {
+                        let _ = self
+                            .quiesce_retiring_session(
+                                peer_key,
+                                pending.session_id,
+                                pending.handle,
+                                "BFD down pending inbound",
+                                false,
+                            )
+                            .await;
+                    }
                     info!(%peer, "BFD down — shut down pending inbound collision candidate");
                 }
                 if let Some(managed) = peer_key.as_ref().and_then(|key| self.peers.get(key)) {

@@ -3,7 +3,8 @@
 # Validates: Cease NOTIFICATION handling between rustbgpd and FRR.
 # - rustbgpd sends Cease/1 (Max Prefixes) when limit is exceeded
 # - FRR handles the NOTIFICATION and session tears down cleanly
-# - Session re-establishes after the limit condition is cleared
+# - rustbgpd keeps the peer disabled until explicit enable
+# - Session re-establishes only after the excess route is removed and enabled
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m26-cease-frr.clab.yml
@@ -41,4 +42,4 @@ topology:
 
 # Network: 10.0.0.0/24
 # rustbgpd: 10.0.0.1, AS 65001 (max_prefixes = 2)
-# FRR:      10.0.0.2, AS 65002 (advertises 3 prefixes → triggers Cease)
+# FRR:      10.0.0.2, AS 65002 (starts at 2; harness injects 3rd → Cease)

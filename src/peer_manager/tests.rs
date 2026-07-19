@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 fn key(addr: IpAddr) -> PeerKey {
     PeerKey::new(addr, None)
@@ -1433,6 +1433,7 @@ fn insert_test_scoped_managed_peer(
 
 #[derive(Default)]
 struct FakePeerCounters {
+    start: AtomicU32,
     collision_dump: AtomicU32,
     query_state: AtomicU32,
     route_refresh: AtomicU32,
@@ -1440,15 +1441,123 @@ struct FakePeerCounters {
     stop: AtomicU32,
 }
 
-struct TaskDropCounter(Arc<AtomicU32>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaxPrefixTrigger {
+    Start,
+    CollisionDump,
+    Shutdown,
+}
+
+fn max_prefix_on_command_peer_handle(
+    peer_addr: IpAddr,
+    session_id: u64,
+    role: rustbgpd_transport::SessionRole,
+    trigger: MaxPrefixTrigger,
+    notify_tx: mpsc::UnboundedSender<SessionNotification>,
+    counters: Arc<FakePeerCounters>,
+) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut emitted = false;
+        while let Some(command) = session_rx.recv().await {
+            let terminal = matches!(&command, PeerCommand::CollisionDump | PeerCommand::Shutdown);
+            let should_emit = match command {
+                PeerCommand::Start => {
+                    counters.start.fetch_add(1, Ordering::SeqCst);
+                    trigger == MaxPrefixTrigger::Start
+                }
+                PeerCommand::CollisionDump => {
+                    counters.collision_dump.fetch_add(1, Ordering::SeqCst);
+                    trigger == MaxPrefixTrigger::CollisionDump
+                }
+                PeerCommand::Shutdown => {
+                    counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                    trigger == MaxPrefixTrigger::Shutdown
+                }
+                PeerCommand::Stop { .. } => {
+                    counters.stop.fetch_add(1, Ordering::SeqCst);
+                    false
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Idle,
+                        peer_ip: peer_addr,
+                        peer_asn: Some(65002),
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        messages_received: 0,
+                        messages_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                        tcp_ao_info: None,
+                        tcp_ao_protected: false,
+                        slow_peer: false,
+                    });
+                    false
+                }
+                _ => false,
+            };
+            if should_emit && !emitted {
+                emitted = true;
+                notify_tx
+                    .send(SessionNotification::MaxPrefixExceeded {
+                        session_id,
+                        role,
+                        peer_addr,
+                        count: 501,
+                        bound: 500,
+                        family: None,
+                    })
+                    .unwrap();
+            }
+            if terminal {
+                break;
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+struct TaskDropCounter {
+    dropped: Arc<AtomicU32>,
+    notify: Option<Arc<Notify>>,
+}
 
 impl Drop for TaskDropCounter {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+        if let Some(notify) = &self.notify {
+            notify.notify_one();
+        }
     }
 }
 
 async fn stalled_shutdown_peer_handle(dropped: Arc<AtomicU32>) -> PeerHandle {
+    stalled_shutdown_peer_handle_with_notify(dropped, None).await
+}
+
+async fn stalled_shutdown_peer_handle_with_notify(
+    dropped: Arc<AtomicU32>,
+    notify: Option<Arc<Notify>>,
+) -> PeerHandle {
     let (commands, receiver) = mpsc::channel(1);
     commands
         .send(rustbgpd_transport::PeerCommand::Start)
@@ -1456,7 +1565,7 @@ async fn stalled_shutdown_peer_handle(dropped: Arc<AtomicU32>) -> PeerHandle {
         .expect("seed the deliberately full command channel");
     let task = tokio::spawn(async move {
         let _receiver = receiver;
-        let _drop_counter = TaskDropCounter(dropped);
+        let _drop_counter = TaskDropCounter { dropped, notify };
         std::future::pending::<Result<(), rustbgpd_transport::TransportError>>().await
     });
     PeerHandle::from_parts(commands, task)
@@ -1943,6 +2052,10 @@ async fn reconfigure_peer_preserves_disabled_state() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
     mgr.disable_peer(key(addr), None).await.unwrap();
+    mgr.max_prefix_latches.insert(
+        key(addr),
+        "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+    );
 
     let mut replacement = make_config(addr, 65002);
     replacement.hold_time = Some(45);
@@ -1952,6 +2065,35 @@ async fn reconfigure_peer_preserves_disabled_state() {
     let managed = mgr.peers.get(&key(addr)).expect("reconfigured peer");
     assert_eq!(managed.hold_time, Some(45));
     assert!(!managed.enabled);
+    assert!(
+        mgr.max_prefix_latches.contains_key(&key(addr)),
+        "reconfigure's non-reap delete/re-add must preserve the latch"
+    );
+}
+
+/// Load-bearing reconcile recovery proof: if a changed peer's re-add failed,
+/// the next reconcile classifies it as Added. Removing the centralized latch
+/// check in `add_peer_with_admin_state` starts it despite the retained shutdown.
+#[tokio::test]
+async fn classified_add_honors_retained_max_prefix_latch() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 22));
+    mgr.max_prefix_latches.insert(
+        key(addr),
+        "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+    );
+
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+
+    assert!(
+        !mgr.peers.get(&key(addr)).unwrap().enabled,
+        "a retained latch must keep a later classified Add disabled"
+    );
+    mgr.delete_peer(key(addr), false).await.unwrap();
+    assert!(
+        !mgr.max_prefix_latches.contains_key(&key(addr)),
+        "authoritative peer deletion must clear the retained latch"
+    );
 }
 
 #[tokio::test]
@@ -2539,6 +2681,45 @@ async fn rollback_reap_keeps_dynamic_peer_for_host_bit_range_prefix() {
         "a live dynamic session must survive rollback to a snapshot that still contains its (host-bit) range"
     );
     assert_eq!(mgr.dynamic_peer_count, 1);
+}
+
+/// Load-bearing dynamic lifecycle proof: removing the latch cleanup from the
+/// authoritative rollback reap leaves a stale error keyed to the address, so a
+/// future dynamic accept at that address can inherit state from a dead peer.
+#[tokio::test]
+async fn rollback_reap_clears_dynamic_max_prefix_latch() {
+    let mut mgr = dynamic_test_manager();
+    mgr.dynamic_ranges.clear();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 43));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        peer_addr,
+        89,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Idle,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    mgr.max_prefix_latches.insert(
+        key(peer_addr),
+        "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
+    );
+
+    assert_eq!(
+        mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
+        1
+    );
+    assert!(!mgr.peers.contains_key(&key(peer_addr)));
+    assert!(
+        !mgr.max_prefix_latches.contains_key(&key(peer_addr)),
+        "authoritative dynamic removal must reap its manager-owned latch"
+    );
 }
 
 #[tokio::test]
@@ -3495,6 +3676,687 @@ async fn collision_notifications_flush_ready_lifecycle_events_first() {
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+/// Load-bearing ownership/lifecycle proof:
+///
+/// - matching by immutable `SessionRole` rejects a promoted candidate's latch;
+/// - failing to Stop the current owner can leave a rearmed session live;
+/// - dynamic `BackToIdle` auto-removal drops the disabled/latch state;
+/// - consulting only the session's stale `last_error` hides the manager-owned
+///   max-prefix cause; and
+/// - failing to clear on explicit enable leaves the peer permanently latched.
+#[tokio::test]
+async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable() {
+    use rustbgpd_transport::PeerCommand;
+
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 32));
+    let counters = Arc::new(FakePeerCounters::default());
+    let task_counters = counters.clone();
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Idle,
+                        peer_ip: addr,
+                        peer_asn: Some(65002),
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        messages_received: 0,
+                        messages_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: "stale TCP connect error".to_string(),
+                        tcp_ao_info: None,
+                        tcp_ao_protected: false,
+                        slow_peer: false,
+                    });
+                }
+                PeerCommand::Stop { .. } => {
+                    task_counters.stop.fetch_add(1, Ordering::SeqCst);
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        addr,
+        65002,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.is_dynamic = true;
+    mgr.dynamic_peer_count = 1;
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
+        session_id: 1,
+        // Promoted inbound tasks retain this spawn role even though session_id
+        // 1 is now the primary owner in ManagedPeer.
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr: addr,
+        count: 501,
+        bound: 500,
+        family: Some((Afi::Ipv4, Safi::Unicast)),
+    })
+    .await;
+    assert!(!mgr.peers.get(&key(addr)).unwrap().enabled);
+    wait_counter(&counters.stop, 1).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
+
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr: addr,
+    })
+    .await;
+    assert!(mgr.peers.contains_key(&key(addr)));
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    let info = mgr.get_peer_info(&key(addr)).await.unwrap();
+    assert_eq!(
+        info.last_error,
+        "max-prefix limit exceeded for Ipv4/Unicast: 501 accepted, bound 500"
+    );
+    assert_eq!(
+        mgr.list_peers().await[0].last_error,
+        "max-prefix limit exceeded for Ipv4/Unicast: 501 accepted, bound 500",
+        "list and targeted snapshots must both prefer the manager-owned latch"
+    );
+
+    mgr.enable_peer(key(addr)).await.unwrap();
+    assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert_eq!(
+        mgr.get_peer_info(&key(addr)).await.unwrap().last_error,
+        "stale TCP connect error",
+        "explicit enable must remove the manager-owned override"
+    );
+}
+
+/// Removing the session-id ownership check lets a delayed latch from a
+/// superseded generation disable the replacement session.
+#[tokio::test]
+async fn stale_max_prefix_generation_cannot_latch_replacement() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    mgr.session_index.insert(99, key(addr));
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
+        session_id: 99,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        count: 501,
+        bound: 500,
+        family: None,
+    })
+    .await;
+
+    assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
+}
+
+/// Removing the pending-candidate drain lets `BackToIdle` promote a sibling
+/// connection immediately after the primary exceeded max-prefix.
+#[tokio::test]
+async fn primary_max_prefix_breach_drains_pending_collision_candidate() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, primary.clone()),
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
+        session_id: 2,
+    });
+    mgr.register_session(2, &key(addr));
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        count: 501,
+        bound: 500,
+        family: None,
+    })
+    .await;
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+    assert!(mgr.peer_key_for_session(2).is_none());
+}
+
+/// `MaxPrefixExceeded` and `BackToIdle` share one FIFO lossless channel. Removing
+/// that ordering (or handling `BackToIdle` first) auto-removes this dynamic peer
+/// or promotes its candidate before the shutdown latch is installed.
+#[tokio::test]
+async fn queued_max_prefix_precedes_back_to_idle_and_retains_dynamic_latch() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 37));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Idle,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.is_dynamic = true;
+    managed.pending_inbound = Some(PendingInbound {
+        handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
+        session_id: 2,
+    });
+    mgr.register_session(2, &key(addr));
+    mgr.dynamic_peer_count = 1;
+    mgr.session_notify_tx
+        .send(SessionNotification::MaxPrefixExceeded {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: addr,
+            count: 501,
+            bound: 500,
+            family: None,
+        })
+        .unwrap();
+    mgr.session_notify_tx
+        .send(SessionNotification::BackToIdle {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: addr,
+        })
+        .unwrap();
+
+    mgr.drain_ready_session_notifications().await;
+
+    let managed = mgr
+        .peers
+        .get(&key(addr))
+        .expect("latched dynamic peer retained");
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+}
+
+/// A candidate-owned breach is fail-closed for the whole peer. Removing the
+/// unconditional current-primary Stop leaves the sibling Established; removing the
+/// candidate drain leaves the breaching sibling registered.
+#[tokio::test]
+async fn pending_candidate_max_prefix_breach_stops_primary_and_drains_candidate() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 35));
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, primary.clone()),
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
+        session_id: 2,
+    });
+    mgr.register_session(2, &key(addr));
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr: addr,
+        count: 501,
+        bound: 500,
+        family: Some((Afi::Ipv4, Safi::Unicast)),
+    })
+    .await;
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+    assert!(mgr.peer_key_for_session(2).is_none());
+}
+
+/// Load-bearing cross-lane proof: `EnablePeer` starts the session first and
+/// that Start triggers the terminal signal. Removing the unconditional primary
+/// Stop leaves the peer reported disabled but still live after Start.
+#[tokio::test]
+async fn max_prefix_after_enable_start_stops_and_latches_primary() {
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 38));
+    let counters = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            1,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::Start,
+            notify_tx,
+            counters.clone(),
+        ),
+        false,
+    );
+    let manager = tokio::spawn(mgr.run());
+
+    let (reply, result) = oneshot::channel();
+    tx.send(PeerManagerCommand::EnablePeer {
+        peer: key(addr),
+        reply,
+    })
+    .await
+    .unwrap();
+    result.await.unwrap().unwrap();
+    wait_counter(&counters.start, 1).await;
+    wait_counter(&counters.stop, 1).await;
+
+    let (reply, result) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply })
+        .await
+        .unwrap();
+    let peers = result.await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert!(peers[0].last_error.contains("max-prefix limit exceeded"));
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager.await.unwrap();
+}
+
+/// Load-bearing retirement proof: the old actor emits max-prefix only while
+/// processing reconcile's Shutdown. Removing the retirement tombstone or the
+/// latch-aware re-add starts the replacement enabled and loses the cause.
+#[tokio::test]
+async fn reconcile_preserves_max_prefix_emitted_during_old_actor_shutdown() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 39));
+    let counters = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            1,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::Shutdown,
+            notify_tx,
+            counters.clone(),
+        ),
+        false,
+    );
+    mgr.next_session_id = 2;
+    let mut changed = make_config(addr, 65002);
+    changed.description = "replacement".to_string();
+
+    let result = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![changed])
+        .await;
+
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 1);
+    let managed = mgr.peers.get(&key(addr)).expect("replacement peer");
+    assert_ne!(managed.session_id, 1);
+    assert!(!managed.enabled);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(1).is_none());
+}
+
+/// Load-bearing local-wins proof: `OpenReceived` is handled first and the
+/// losing candidate emits max-prefix only while consuming `CollisionDump`.
+/// Unregister-before-join discards that terminal signal and leaves the primary.
+#[tokio::test]
+async fn local_wins_collision_preserves_candidate_terminal_breach() {
+    let mut mgr = test_peer_manager();
+    mgr.router_id = Ipv4Addr::new(10, 0, 0, 10);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 40));
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::OpenConfirm, None, primary.clone()),
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            2,
+            rustbgpd_transport::SessionRole::InboundCandidate,
+            MaxPrefixTrigger::CollisionDump,
+            notify_tx,
+            candidate.clone(),
+        ),
+        2,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::OpenReceived {
+            session_id: 2,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr: addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        })
+        .unwrap();
+
+    mgr.drain_ready_session_notifications().await;
+    wait_counter(&primary.stop, 1).await;
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(managed.session_id, 1);
+    assert_eq!(candidate.collision_dump.load(Ordering::SeqCst), 1);
+    assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(2).is_none());
+}
+
+/// Load-bearing remote-wins proof: after candidate promotion, the retiring old
+/// primary emits max-prefix while consuming `CollisionDump`. Removing its
+/// tombstone leaves the promoted candidate live and enabled.
+#[tokio::test]
+async fn remote_wins_collision_preserves_old_primary_terminal_breach() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 41));
+    let primary = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            1,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::CollisionDump,
+            notify_tx,
+            primary.clone(),
+        ),
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            candidate.clone(),
+        ),
+        2,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::OpenReceived {
+            session_id: 2,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr: addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        })
+        .unwrap();
+
+    mgr.drain_ready_session_notifications().await;
+    wait_counter(&candidate.stop, 1).await;
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(managed.session_id, 2);
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 1);
+    assert_eq!(candidate.stop.load(Ordering::SeqCst), 1);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert_eq!(mgr.peer_key_for_session(2), Some(key(addr)));
+}
+
+/// Load-bearing Idle replacement proof: the old primary emits max-prefix only
+/// from Shutdown. Removing retirement ownership starts the new inbound actor
+/// and loses the terminal latch.
+#[tokio::test]
+async fn inbound_replace_preserves_old_primary_terminal_breach() {
+    let mut mgr = test_peer_manager();
+    mgr.next_session_id = 2;
+    let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let old = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            1,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::Shutdown,
+            notify_tx,
+            old.clone(),
+        ),
+        false,
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (stream, _) = listener.accept().await.unwrap();
+    let client = client.await.unwrap();
+
+    mgr.replace_with_inbound(
+        key(addr),
+        stream,
+        None,
+        rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
+    )
+    .await;
+
+    assert_eq!(old.shutdown.load(Ordering::SeqCst), 1);
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.session_id, 2);
+    assert!(!managed.enabled);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert_eq!(mgr.peer_key_for_session(2), Some(key(addr)));
+
+    drop(client);
+    let managed = mgr.peers.remove(&key(addr)).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
+/// Load-bearing dynamic-retirement proof: the actor emits max-prefix only from
+/// Shutdown after an older `BackToIdle` was queued. Removing the retirement
+/// barrier auto-removes the peer and leaves no explicit-Enable recovery target.
+#[tokio::test]
+async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach() {
+    let mut mgr = test_peer_manager();
+    mgr.next_session_id = 2;
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
+    let old = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        max_prefix_on_command_peer_handle(
+            addr,
+            1,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::Shutdown,
+            notify_tx,
+            old.clone(),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
+    mgr.dynamic_peer_count = 1;
+    mgr.session_notify_tx
+        .send(SessionNotification::BackToIdle {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: addr,
+        })
+        .unwrap();
+
+    mgr.drain_ready_session_notifications().await;
+
+    assert_eq!(old.shutdown.load(Ordering::SeqCst), 1);
+    let managed = mgr.peers.get(&key(addr)).expect("disabled recovery target");
+    assert_eq!(managed.session_id, 2);
+    assert!(managed.is_dynamic);
+    assert!(!managed.enabled);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert_eq!(mgr.peer_key_for_session(2), Some(key(addr)));
+
+    mgr.enable_peer(key(addr)).await.unwrap();
+    assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
+    let managed = mgr.peers.remove(&key(addr)).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
+/// Load-bearing fail-closed recovery proof: a wedged, full primary command
+/// channel makes Stop time out. Removing abort/rebuild leaves the stale generation owned,
+/// omits `PeerDown`, and makes explicit Enable fail with `SessionExited`.
+#[tokio::test(start_paused = true)]
+async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+    let aborted = Arc::new(AtomicU32::new(0));
+    let cancel_notify = Arc::new(Notify::new());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        stalled_shutdown_peer_handle_with_notify(aborted.clone(), Some(cancel_notify.clone()))
+            .await,
+        false,
+    );
+    let candidate = Arc::new(FakePeerCounters::default());
+    mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+        handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
+        session_id: 2,
+    });
+    mgr.register_session(2, &key(addr));
+    mgr.next_session_id = 3;
+
+    rib_tx
+        .send(RibUpdate::PeerDown {
+            peer: addr,
+            session_id: 999,
+        })
+        .await
+        .unwrap();
+    let cancel_observed = aborted.clone();
+    let drain_after_cancel = tokio::spawn(async move {
+        cancel_notify.notified().await;
+        assert_eq!(
+            cancel_observed.load(Ordering::SeqCst),
+            1,
+            "RIB capacity must remain blocked until actor cancellation completes"
+        );
+        let _seed = rib_rx.recv().await.expect("seeded RIB update");
+        rib_rx.recv().await.expect("old-generation RIB fence")
+    });
+
+    tokio::time::timeout(
+        PEER_LIFECYCLE_COMMAND_TIMEOUT * 3,
+        mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
+            session_id: 2,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr: addr,
+            count: 501,
+            bound: 500,
+            family: None,
+        }),
+    )
+    .await
+    .expect("cancellation must precede the capacity-blocked RIB fence");
+
+    let RibUpdate::PeerDown { peer, session_id } = drain_after_cancel.await.unwrap() else {
+        panic!("aborted primary must be fenced in the RIB");
+    };
+    assert_eq!(peer, addr);
+    assert_eq!(session_id, 1);
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.session_id, 3);
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert!(mgr.peer_key_for_session(1).is_none());
+    assert_eq!(mgr.peer_key_for_session(3), Some(key(addr)));
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+    mgr.enable_peer(key(addr)).await.unwrap();
+    assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
 }
 
 #[tokio::test]
@@ -12627,7 +13489,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
             assert_eq!(*remote_router_id, Ipv4Addr::new(10, 0, 0, 2));
         }
         other @ (SessionNotification::BackToIdle { .. }
-        | SessionNotification::StateChanged { .. }) => {
+        | SessionNotification::StateChanged { .. }
+        | SessionNotification::MaxPrefixExceeded { .. }) => {
             panic!("expected OpenReceived from candidate, got {other:?}");
         }
     }
@@ -12669,6 +13532,152 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("promoted inbound candidate did not reach Established");
+}
+
+/// Load-bearing cross-channel ordering proof: removing the pre-accept drain
+/// allows this already-queued latch to lose to `AcceptInbound`, which queries the
+/// old `OpenSent` session and spawns a live collision candidate.
+#[tokio::test]
+async fn queued_max_prefix_latch_fences_inbound_before_collision_handling() {
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::OpenSent, None, counters.clone()),
+        false,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::MaxPrefixExceeded {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+            count: 501,
+            bound: 500,
+            family: None,
+        })
+        .unwrap();
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client_stream = client.await.unwrap();
+    mgr.accept_inbound(server_stream, remote_addr, None, None)
+        .await;
+
+    let managed = mgr.peers.get(&key(peer_addr)).unwrap();
+    assert_eq!(managed.session_id, 1);
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(
+        counters.query_state.load(Ordering::SeqCst),
+        0,
+        "queued lossless latch must run before collision state query"
+    );
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), client_stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "disabled peer must drop the passive socket"
+    );
+}
+
+/// Load-bearing query-race proof: the fake session queues `MaxPrefixExceeded`
+/// before replying Idle. Removing the post-query drain/recheck replaces that
+/// breached generation with the inbound socket before the manager sees it.
+#[tokio::test]
+async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
+    use rustbgpd_transport::PeerCommand;
+
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let notify_tx = mgr.session_notify_tx.clone();
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    notify_tx
+                        .send(SessionNotification::MaxPrefixExceeded {
+                            session_id: 1,
+                            role: rustbgpd_transport::SessionRole::Primary,
+                            peer_addr,
+                            count: 501,
+                            bound: 500,
+                            family: Some((Afi::Ipv4, Safi::Unicast)),
+                        })
+                        .unwrap();
+                    let _ = reply.send(PeerSessionState {
+                        fsm_state: SessionState::Idle,
+                        peer_ip: peer_addr,
+                        peer_asn: Some(65002),
+                        prefix_count: 0,
+                        negotiated_hold_time: None,
+                        four_octet_as: None,
+                        remote_router_id: None,
+                        local_role: None,
+                        remote_role: None,
+                        role_negotiated: false,
+                        peer_paths_limits: Vec::new(),
+                        effective_add_path_send_limits: Vec::new(),
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        messages_received: 0,
+                        messages_sent: 0,
+                        otc_routes_blocked: 0,
+                        import_policy_routes_permitted: 0,
+                        import_policy_routes_denied: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                        tcp_ao_info: None,
+                        tcp_ao_protected: false,
+                        slow_peer: false,
+                    });
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client_stream = client.await.unwrap();
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
+
+    let managed = mgr.peers.get(&key(peer_addr)).unwrap();
+    assert_eq!(managed.session_id, 1);
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert!(mgr.max_prefix_latches.contains_key(&key(peer_addr)));
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), client_stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "latched peer must drop the racing passive socket"
+    );
 }
 
 /// RFC 4271 §6.8 regression: a state query that merely times out (the
@@ -14513,6 +15522,53 @@ async fn bfd_down_tears_down_pending_inbound_candidate() {
         "pending candidate must be gone after BFD down"
     );
     assert!(mgr.peer_key_for_session(2).is_none());
+}
+
+/// Load-bearing BFD retirement proof: the pending actor emits max-prefix only
+/// while consuming BFD Down's Shutdown. Removing the retirement barrier loses
+/// the latch; restarting an administratively disabled peer on BFD Up bypasses
+/// the explicit-Enable contract.
+#[tokio::test]
+async fn bfd_pending_terminal_breach_blocks_later_automatic_restart() {
+    let peer: IpAddr = "10.0.0.43".parse().unwrap();
+    let primary = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _rx) = coupled_mgr(peer, false, fake_bfd_peer_handle(primary.clone()));
+    let pending = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer,
+        max_prefix_on_command_peer_handle(
+            peer,
+            2,
+            rustbgpd_transport::SessionRole::InboundCandidate,
+            MaxPrefixTrigger::Shutdown,
+            notify_tx,
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_bfd_state_change(down(peer)).await;
+
+    assert_eq!(pending.shutdown.load(Ordering::SeqCst), 1);
+    let managed = mgr.peers.get(&key(peer)).unwrap();
+    assert!(!managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert!(mgr.max_prefix_latches.contains_key(&key(peer)));
+    assert!(mgr.retiring_sessions.is_empty());
+    assert!(mgr.peer_key_for_session(2).is_none());
+    let starts_before_up = primary.start.load(Ordering::SeqCst);
+
+    mgr.handle_bfd_state_change(up(peer)).await;
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        primary.start.load(Ordering::SeqCst),
+        starts_before_up,
+        "BFD Up must not restart an administratively disabled max-prefix peer"
+    );
 }
 
 /// Regression: `BackToIdle` must not promote a pending inbound collision

@@ -338,6 +338,7 @@ impl PeerManager {
             let Some(mut managed) = self.peers.remove(&peer_key) else {
                 continue;
             };
+            self.max_prefix_latches.remove(&peer_key);
             self.unregister_session(managed.session_id);
             if let Some(pending) = managed.pending_inbound.take() {
                 self.unregister_session(pending.session_id);

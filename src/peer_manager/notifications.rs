@@ -1,12 +1,95 @@
 use std::net::IpAddr;
 
 use rustbgpd_fsm::SessionState;
-use rustbgpd_transport::{SessionLifecycleNotification, SessionNotification};
-use tracing::{debug, info};
+use rustbgpd_transport::{
+    PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
+};
+use tracing::{debug, info, warn};
 
 use super::PeerManager;
 
 impl PeerManager {
+    /// A failed Stop enqueue cannot leave a candidate's sibling primary live:
+    /// abort it, fence its old RIB ownership, and install a fresh disabled Idle
+    /// actor so the max-prefix latch remains fail-closed but explicit Enable is
+    /// still a usable recovery operation.
+    async fn replace_unstoppable_primary(&mut self, peer_key: &rustbgpd_api::peer_types::PeerKey) {
+        let Some((
+            old_session_id,
+            transport,
+            import_policy,
+            export_policy,
+            gshut,
+            tcp_ao_generation,
+        )) = self.peers.get(peer_key).map(|managed| {
+            (
+                managed.session_id,
+                managed.transport_config.clone(),
+                managed.import_policy.clone(),
+                managed.export_policy.clone(),
+                managed.advertise_graceful_shutdown,
+                managed.tcp_ao_rotation.applied,
+            )
+        })
+        else {
+            return;
+        };
+
+        let new_session_id = self.allocate_session_id();
+        let replacement = PeerHandle::spawn_at_tcp_ao_generation(
+            transport,
+            self.metrics.clone(),
+            self.rib_tx.clone(),
+            import_policy,
+            export_policy,
+            Some(self.session_notify_tx.clone()),
+            Some(self.session_notification_event_tx.clone()),
+            Some(self.session_lifecycle_tx.clone()),
+            self.bmp_tx.clone(),
+            self.validation_rx.clone(),
+            gshut,
+            SessionIdentity::primary(new_session_id),
+            self.transport_event_sink.clone(),
+            tcp_ao_generation,
+        );
+        let Some(managed) = self.peers.get_mut(peer_key) else {
+            return;
+        };
+        let aborted = std::mem::replace(&mut managed.handle, replacement);
+        managed.session_id = new_session_id;
+        // Join cancellation before publishing PeerDown. Without this strict
+        // ordering the old actor could complete an in-flight RIB send after the
+        // fence and repopulate routes under its now-unregistered generation.
+        aborted.abort_for_transport_safety_and_wait().await;
+
+        // The aborted actor cannot execute SessionDown. Fence its exact RIB
+        // generation before a later Enable can emit PeerUp from the replacement.
+        if self
+            .rib_tx
+            .send(rustbgpd_rib::RibUpdate::PeerDown {
+                peer: peer_key.address,
+                session_id: old_session_id,
+            })
+            .await
+            .is_err()
+        {
+            warn!(peer = %peer_key, old_session_id, "RIB unavailable while fencing aborted max-prefix primary");
+        }
+        self.unregister_session(old_session_id);
+        self.register_session(new_session_id, peer_key);
+    }
+
+    /// Drain lossless session ownership/latch signals that were already queued
+    /// before an inbound-accept command. This closes the cross-channel race in
+    /// which a passive reconnect could replace the breached session generation
+    /// before its max-prefix latch was applied.
+    pub(super) async fn drain_ready_session_notifications(&mut self) {
+        while let Ok(notification) = self.session_notify_rx.try_recv() {
+            self.drain_ready_session_lifecycle_notifications();
+            self.handle_session_notification(notification).await;
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
@@ -71,12 +154,13 @@ impl PeerManager {
                 });
                 if let Some(pending) = pending {
                     debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
-                    self.unregister_session(pending.session_id);
                     let _ = self
-                        .shutdown_handle_bounded(
-                            peer_addr,
-                            "BackToIdle pending inbound candidate",
+                        .quiesce_retiring_session(
+                            &peer_key,
+                            pending.session_id,
                             pending.handle,
+                            "BackToIdle pending inbound candidate",
+                            false,
                         )
                         .await;
                     return;
@@ -107,45 +191,75 @@ impl PeerManager {
                     self.dead_letter_pending_for(peer_addr);
                     info!(%peer_addr, "dynamic peer session went idle, removing");
                     if let Some(mut managed) = self.peers.remove(&peer_key) {
-                        self.unregister_session(managed.session_id);
+                        let primary_session_id = managed.session_id;
+                        self.retiring_sessions
+                            .insert(primary_session_id, peer_key.clone());
                         if let Some(pending) = managed.pending_inbound.take() {
-                            self.unregister_session(pending.session_id);
                             let _ = self
-                                .shutdown_handle_bounded(
-                                    peer_addr,
-                                    "BackToIdle dynamic pending inbound",
+                                .quiesce_retiring_session(
+                                    &peer_key,
+                                    pending.session_id,
                                     pending.handle,
+                                    "BackToIdle dynamic pending inbound",
+                                    false,
                                 )
                                 .await;
                         }
-                        // Auto-removal is a full peer deletion (the
-                        // ManagedPeer is gone; a re-accepted peer at
-                        // this address starts a fresh lifecycle), so
-                        // reap its per-peer metric series too — but
-                        // join the session task first so the reap runs
-                        // after its last transport-side emission, the
-                        // same ordering the static delete path uses.
                         let shutdown = self
-                            .shutdown_handle_bounded(
-                                peer_addr,
-                                "BackToIdle dynamic primary",
+                            .quiesce_retiring_session(
+                                &peer_key,
+                                primary_session_id,
                                 managed.handle,
+                                "BackToIdle dynamic primary",
+                                false,
                             )
                             .await;
-                        if shutdown.joined() {
-                            self.reap_deleted_peer_metric_series(
-                                peer_addr,
-                                &managed.transport_config,
-                            )
-                            .await;
-                        } else {
-                            info!(
-                                %peer_addr,
-                                "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
+
+                        if self.max_prefix_latches.contains_key(&peer_key) {
+                            // The retiring actor crossed max-prefix after its
+                            // earlier BackToIdle was queued. Keep a disabled
+                            // recovery target instead of auto-removing the peer
+                            // and making explicit Enable impossible.
+                            let session_id = self.allocate_session_id();
+                            managed.handle = PeerHandle::spawn_at_tcp_ao_generation(
+                                managed.transport_config.clone(),
+                                self.metrics.clone(),
+                                self.rib_tx.clone(),
+                                managed.import_policy.clone(),
+                                managed.export_policy.clone(),
+                                Some(self.session_notify_tx.clone()),
+                                Some(self.session_notification_event_tx.clone()),
+                                Some(self.session_lifecycle_tx.clone()),
+                                self.bmp_tx.clone(),
+                                self.validation_rx.clone(),
+                                managed.advertise_graceful_shutdown,
+                                SessionIdentity::primary(session_id),
+                                self.transport_event_sink.clone(),
+                                managed.tcp_ao_rotation.applied,
                             );
+                            managed.session_id = session_id;
+                            managed.enabled = false;
+                            self.peers.insert(peer_key.clone(), managed);
+                            self.register_session(session_id, &peer_key);
+                            info!(%peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
+                        } else {
+                            // Auto-removal is authoritative when no terminal
+                            // breach was discovered during the join barrier.
+                            self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+                            if shutdown.joined() {
+                                self.reap_deleted_peer_metric_series(
+                                    peer_addr,
+                                    &managed.transport_config,
+                                )
+                                .await;
+                            } else {
+                                info!(
+                                    %peer_addr,
+                                    "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
+                                );
+                            }
                         }
                     }
-                    self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
                     let enabled = self.peers.get(&peer_key).is_some_and(|m| m.enabled);
@@ -165,12 +279,13 @@ impl PeerManager {
                         .get_mut(&peer_key)
                         .and_then(|m| m.pending_inbound.take())
                     {
-                        self.unregister_session(pending.session_id);
                         let _ = self
-                            .shutdown_handle_bounded(
-                                peer_addr,
-                                "BackToIdle dropped pending inbound",
+                            .quiesce_retiring_session(
+                                &peer_key,
+                                pending.session_id,
                                 pending.handle,
+                                "BackToIdle dropped pending inbound",
+                                false,
                             )
                             .await;
                         if withheld {
@@ -178,6 +293,83 @@ impl PeerManager {
                         }
                     }
                 }
+            }
+            SessionNotification::MaxPrefixExceeded {
+                session_id,
+                role,
+                peer_addr,
+                count,
+                bound,
+                family,
+            } => {
+                let Some(peer_key) = self.peer_key_for_session(session_id) else {
+                    debug!(%peer_addr, session_id, ?role, "ignoring max-prefix latch from unknown session");
+                    return;
+                };
+                // SessionRole describes how the task was spawned and remains
+                // InboundCandidate after promotion. Current ownership is
+                // therefore fenced exclusively by the manager's session IDs.
+                let currently_owned = self.peers.get(&peer_key).is_some_and(|managed| {
+                    managed.session_id == session_id
+                        || managed
+                            .pending_inbound
+                            .as_ref()
+                            .is_some_and(|pending| pending.session_id == session_id)
+                });
+                let retiring_owned = self
+                    .retiring_sessions
+                    .get(&session_id)
+                    .is_some_and(|owner| owner == &peer_key);
+                if !currently_owned && !retiring_owned {
+                    debug!(%peer_addr, session_id, ?role, "ignoring stale max-prefix latch notification");
+                    return;
+                }
+
+                let error = family.map_or_else(
+                    || format!("max-prefix limit exceeded: {count} accepted, bound {bound}"),
+                    |(afi, safi)| {
+                        format!(
+                            "max-prefix limit exceeded for {afi:?}/{safi:?}: {count} accepted, bound {bound}"
+                        )
+                    },
+                );
+                let pending = self.peers.get_mut(&peer_key).and_then(|managed| {
+                    managed.enabled = false;
+                    managed.pending_inbound.take()
+                });
+                self.max_prefix_latches
+                    .insert(peer_key.clone(), error.clone());
+                self.set_bfd_peer_disabled(peer_addr, true);
+
+                // Stop the currently owned primary for every breach. The
+                // breaching actor normally stopped itself first, but a queued
+                // Enable/Start can clear that session-local flag before this
+                // manager latch wins the cross-channel race.
+                if let Some(managed) = self.peers.get(&peer_key)
+                    && let Err(stop_error) = managed
+                        .handle
+                        .stop_timeout(None, super::PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await
+                {
+                    warn!(
+                        %peer_addr,
+                        session_id,
+                        error = %stop_error,
+                        "failed to stop primary after max-prefix breach"
+                    );
+                    self.replace_unstoppable_primary(&peer_key).await;
+                }
+                if let Some(pending) = pending {
+                    self.unregister_session(pending.session_id);
+                    let _ = self
+                        .shutdown_handle_bounded(
+                            peer_addr,
+                            "max-prefix latch pending inbound",
+                            pending.handle,
+                        )
+                        .await;
+                }
+                info!(%peer_addr, %error, "peer latched disabled after max-prefix breach; explicit enable required");
             }
         }
     }

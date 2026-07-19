@@ -7,7 +7,10 @@
 #   3. rustbgpd sends Cease/1 (Max Prefixes) NOTIFICATION
 #   4. FRR sees the NOTIFICATION and session tears down
 #   5. Prometheus metric records the max-prefix event
-#   6. Session re-establishes (auto-reconnect)
+#   6. The peer stays administratively down beyond two retry intervals
+#   7. Enable while still over-limit re-latches the peer
+#   8. Removing excess routes alone does not recover the peer
+#   9. Explicit enable after removal re-establishes with two prefixes
 #
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m26-cease-frr.clab.yml
@@ -34,6 +37,49 @@ grpc_neighbor_state() {
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
+grpc_enable_neighbor() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d '{"address": "10.0.0.2"}' \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/EnableNeighbor >/dev/null
+}
+
+frr_state() {
+    docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
+        | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true
+}
+
+max_prefix_metric_value() {
+    grpc_metrics | python3 -c '
+import json, re, sys
+text = json.load(sys.stdin).get("prometheusText", "")
+values = [float(match.group(1)) for match in re.finditer(
+    r"^bgp_max_prefix_exceeded_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$",
+    text,
+    re.MULTILINE,
+)]
+print(int(sum(values)))
+' 2>/dev/null || echo 0
+}
+
+wait_latched_down() {
+    local minimum_metric="$1"
+    for _ in $(seq 1 30); do
+        local state error metric
+        state=$(grpc_neighbor_state || true)
+        error=$(echo "$state" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["lastError"])
+' 2>/dev/null || echo parse-error)
+        metric=$(max_prefix_metric_value)
+        if echo "$error" | grep -qi "max-prefix limit exceeded" \
+            && [ "$metric" -ge "$minimum_metric" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # Use the standardized `start_rustbgpd` from test-lib.sh — handles
 # both the /proc poll loop and the gRPC-ready wait.
 
@@ -42,28 +88,39 @@ grpc_neighbor_state() {
 # ---------------------------------------------------------------------------
 
 test_session_establishes() {
-    log "Test 1: Session initially establishes"
+    log "Test 1: Session establishes at the exact two-prefix bound"
 
-    # Session should come up briefly before the prefix limit triggers
     for i in $(seq 1 30); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+        local state prefix_count
+        state=$(frr_state)
         if [ "$state" = "Established" ]; then
-            ok "Session reached Established (attempt $i)"
-            return 0
-        fi
-        # Also check if FRR already saw a notification (session may have bounced)
-        local last_notif
-        last_notif=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"lastNotificationReason":"[^"]*"' | head -1 || true)
-        if [ -n "$last_notif" ]; then
-            ok "Session established and then received NOTIFICATION (attempt $i)"
-            return 0
+            prefix_count=$(grpc_neighbor_state | python3 -c '
+import json, sys
+value = json.load(sys.stdin)["prefixesReceived"]
+print(int(value))
+' 2>/dev/null || echo parse-error)
+            if [ "$prefix_count" = "2" ]; then
+                ok "Session is Established with exactly two accepted prefixes (attempt $i)"
+                return 0
+            fi
         fi
         sleep 2
     done
-    fail "Session never reached Established within 60s"
+    fail "Session never held Established with exactly two prefixes within 60s"
+}
+
+inject_excess_prefix() {
+    log "Injecting third FRR prefix to cross max_prefixes=2"
+    docker exec "$FRR" vtysh \
+        -c "configure terminal" \
+        -c "router bgp 65002" \
+        -c "address-family ipv4 unicast" \
+        -c "network 10.10.0.0/16" >/dev/null 2>&1 || true
+    if ! docker exec "$FRR" vtysh -c "show running-config" 2>/dev/null \
+        | grep -q '^  network 10\.10\.0\.0/16$'; then
+        fail "FRR did not install the third network statement"
+        return 1
+    fi
 }
 
 test_cease_notification_sent() {
@@ -71,24 +128,12 @@ test_cease_notification_sent() {
 
     # Wait for FRR to see the notification — session should bounce
     for i in $(seq 1 30); do
-        local notif_info
-        notif_info=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
+        local neighbor
+        neighbor=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1" 2>/dev/null || true)
 
-        # FRR tracks last notification reason
-        local reason
-        reason=$(echo "$notif_info" | grep -o '"lastNotificationReason":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-
-        if echo "$reason" | grep -qi "cease\|max.prefix\|exceed"; then
-            ok "FRR received Cease NOTIFICATION: $reason"
-            return 0
-        fi
-
-        # Also check lastResetDueTo
-        local reset_reason
-        reset_reason=$(echo "$notif_info" | grep -o '"lastResetDueTo":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-
-        if echo "$reset_reason" | grep -qi "notification.*received\|cease"; then
-            ok "FRR reports session reset due to: $reset_reason"
+        if echo "$neighbor" \
+            | grep -Fq 'Notification received (Cease/Maximum Number of Prefixes Reached)'; then
+            ok "FRR received Cease/Maximum Number of Prefixes Reached"
             return 0
         fi
 
@@ -102,65 +147,114 @@ test_cease_notification_sent() {
 test_max_prefix_metric() {
     log "Test 3: Prometheus max-prefix-exceeded metric"
 
-    local metrics
-    metrics=$(grpc_metrics | python3 -c "
-import sys, json
-print(json.load(sys.stdin).get('prometheusText', ''))
-" 2>/dev/null || true)
-
-    if echo "$metrics" | grep -q "max_prefix_exceeded"; then
-        ok "max_prefix_exceeded metric present"
+    local value
+    value=$(max_prefix_metric_value)
+    if [ "$value" -ge 1 ]; then
+        ok "bgp_max_prefix_exceeded_total incremented (value=$value)"
     else
-        # May be named differently — check for any prefix-related metric
-        if echo "$metrics" | grep -qi "prefix.*exceed\|max.*prefix"; then
-            ok "Max prefix metric present (alternative name)"
-        else
-            fail "No max-prefix-exceeded metric found"
-            log "DEBUG: Available metrics with 'prefix':"
-            echo "$metrics" | grep -i prefix | head -5 || echo "(none)"
-        fi
+        fail "bgp_max_prefix_exceeded_total did not increment"
     fi
 }
 
-test_session_recovers() {
-    log "Test 4: Session re-establishes after Cease"
+test_session_latches_down() {
+    log "Test 4: max-prefix breach latches the peer administratively down"
 
-    # rustbgpd should auto-reconnect. FRR will re-send the same 3 prefixes,
-    # which will trigger the limit again — but the session should at least
-    # cycle through Established.
-    #
-    # Check for multiple establishment cycles in the FRR neighbor stats.
-    local neighbor_state
-    neighbor_state=$(grpc_neighbor_state)
-
-    local flaps
-    flaps=$(echo "$neighbor_state" | python3 -c "
-import sys, json
-resp = json.load(sys.stdin)
-print(resp.get('flapCount', '0'))
-" 2>/dev/null || echo 0)
-
-    if [ "$flaps" -ge 1 ]; then
-        ok "Session has flapped (flapCount=$flaps) — indicates cycle through Established"
+    if wait_latched_down 1; then
+        ok "Manager owns an actionable max-prefix latch reason"
     else
-        # Even if flap count is 0, if notifications were sent, the test still proves Cease handling
-        local notifs_sent
-        notifs_sent=$(echo "$neighbor_state" | python3 -c "
-import sys, json
-resp = json.load(sys.stdin)
-print(resp.get('notificationsSent', '0'))
-" 2>/dev/null || echo 0)
-
-        if [ "$notifs_sent" -ge 1 ]; then
-            ok "Notifications sent ($notifs_sent) — Cease/Max-Prefix issued"
-        else
-            fail "No flaps or notifications detected"
-        fi
+        fail "Peer did not enter the max-prefix disabled latch"
+        return
     fi
+
+    local metric_before
+    metric_before=$(max_prefix_metric_value)
+    # PeerManager configures a 5 s retry interval. Twelve seconds covers more
+    # than two intervals and catches the old auto-reconnect/bounce behavior.
+    sleep 12
+    local metric_after state
+    metric_after=$(max_prefix_metric_value)
+    state=$(frr_state)
+    if [ "$state" = "Established" ]; then
+        fail "Session re-established without explicit enable"
+    elif [ "$metric_after" -ne "$metric_before" ]; then
+        fail "Max-prefix metric advanced while peer should remain latched ($metric_before -> $metric_after)"
+    else
+        ok "Peer stayed down beyond two retry intervals (FRR state=${state:-unknown})"
+    fi
+}
+
+test_enable_while_over_limit_relatches() {
+    log "Test 5: explicit enable while still over-limit re-latches"
+    local expected
+    expected=$(( $(max_prefix_metric_value) + 1 ))
+    if ! grpc_enable_neighbor; then
+        fail "EnableNeighbor RPC failed"
+        return
+    fi
+    if wait_latched_down "$expected"; then
+        ok "Three-prefix replay exceeded the bound again and restored the disabled latch"
+    else
+        fail "Over-limit explicit enable did not re-latch the peer"
+    fi
+}
+
+test_recovery_requires_removal_and_enable() {
+    log "Test 6: recovery requires excess removal plus explicit enable"
+    local metric_before
+    metric_before=$(max_prefix_metric_value)
+    docker exec "$FRR" vtysh \
+        -c "configure terminal" \
+        -c "router bgp 65002" \
+        -c "address-family ipv4 unicast" \
+        -c "no network 10.10.0.0/16" >/dev/null 2>&1 || true
+    if docker exec "$FRR" vtysh -c "show running-config" 2>/dev/null \
+        | grep -q '^  network 10\.10\.0\.0/16$'; then
+        fail "FRR retained the third network statement after removal"
+        return
+    fi
+
+    sleep 12
+    if [ "$(frr_state)" = "Established" ]; then
+        fail "Removing the excess route bypassed the explicit-enable latch"
+        return
+    fi
+    local error metric_after
+    error=$(grpc_neighbor_state | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["lastError"])
+' 2>/dev/null || echo parse-error)
+    metric_after=$(max_prefix_metric_value)
+    if ! echo "$error" | grep -qi "max-prefix limit exceeded"; then
+        fail "Manager-owned max-prefix last_error disappeared before explicit enable"
+        return
+    elif [ "$metric_after" -ne "$metric_before" ]; then
+        fail "Max-prefix metric advanced after removal without enable ($metric_before -> $metric_after)"
+        return
+    fi
+    ok "Excess removal alone preserved the manager-owned latch"
+
+    if ! grpc_enable_neighbor; then
+        fail "EnableNeighbor RPC failed after excess removal"
+        return
+    fi
+    for _ in $(seq 1 30); do
+        local state prefix_count
+        state=$(frr_state)
+        prefix_count=$(grpc_neighbor_state | python3 -c '
+import json, sys
+print(int(json.load(sys.stdin)["prefixesReceived"]))
+' 2>/dev/null || echo parse-error)
+        if [ "$state" = "Established" ] && [ "$prefix_count" = "2" ]; then
+            ok "Session recovered only after explicit enable with two prefixes"
+            return
+        fi
+        sleep 1
+    done
+    fail "Session did not recover with two prefixes after explicit enable"
 }
 
 test_frr_cease_subcode_acceptance() {
-    log "Test 5: FRR accepted Cease subcode (no crash, clean teardown)"
+    log "Test 7: FRR accepted Cease subcode (no crash, clean teardown)"
 
     # Verify FRR is still running and healthy
     local frr_running
@@ -178,18 +272,21 @@ test_frr_cease_subcode_acceptance() {
 # ---------------------------------------------------------------------------
 main() {
     log "M26 interop test: Cease subcode compatibility"
-    log "Topology: $TOPO (max_prefixes=2, FRR sends 3)"
+    log "Topology: $TOPO (max_prefixes=2, FRR starts at 2; test injects a third)"
 
     resolve_grpc_addr
     start_rustbgpd
 
-    # Give time for session to establish, receive prefixes, and trigger Cease
+    # Give the initial at-bound session time to converge.
     sleep 15
 
     test_session_establishes
+    inject_excess_prefix || exit 1
     test_cease_notification_sent
     test_max_prefix_metric
-    test_session_recovers
+    test_session_latches_down
+    test_enable_while_over_limit_relatches
+    test_recovery_requires_removal_and_enable
     test_frr_cease_subcode_acceptance
 
     echo ""

@@ -18,6 +18,32 @@ use super::{
 };
 
 impl PeerManager {
+    /// Keep a removed generation terminally owned until its actor cannot emit
+    /// again, then consume every lossless notice it published before retiring
+    /// the session id. This is the common ownership-transfer fence.
+    pub(super) async fn quiesce_retiring_session(
+        &mut self,
+        peer: &PeerKey,
+        session_id: u64,
+        handle: PeerHandle,
+        context: &'static str,
+        collision_dump: bool,
+    ) -> PeerShutdownOutcome {
+        self.retiring_sessions.insert(session_id, peer.clone());
+        if collision_dump {
+            let _ = handle
+                .collision_dump_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await;
+        }
+        let outcome = self
+            .shutdown_handle_bounded(peer.address, context, handle)
+            .await;
+        Box::pin(self.drain_ready_session_notifications()).await;
+        self.retiring_sessions.remove(&session_id);
+        self.unregister_session(session_id);
+        outcome
+    }
+
     pub(super) async fn shutdown_handle_bounded(
         &self,
         address: std::net::IpAddr,
@@ -128,6 +154,7 @@ impl PeerManager {
         enabled: bool,
     ) -> Result<(), PeerLifecycleError> {
         let peer_key = PeerKey::new(config.address, config.interface.clone());
+        let enabled = enabled && !self.max_prefix_latches.contains_key(&peer_key);
         let is_link_local = matches!(config.address, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
         match (is_link_local, config.interface.as_ref()) {
             (true, None) => {
@@ -814,22 +841,44 @@ impl PeerManager {
             )));
         }
 
+        // Linearize any terminal signal already emitted by this generation
+        // before moving it out of the live ownership table.
+        self.drain_ready_session_notifications().await;
         let mut managed = self
             .peers
             .remove(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         let removed_config = Self::removed_peer_config(&peer, &managed);
-        self.unregister_session(managed.session_id);
+        let primary_session_id = managed.session_id;
+        self.retiring_sessions
+            .insert(primary_session_id, peer.clone());
         if let Some(pending) = managed.pending_inbound.take() {
-            self.unregister_session(pending.session_id);
             let _ = self
-                .shutdown_handle_bounded(address, "delete pending inbound", pending.handle)
+                .quiesce_retiring_session(
+                    &peer,
+                    pending.session_id,
+                    pending.handle,
+                    "delete pending inbound",
+                    false,
+                )
                 .await;
         }
 
         let shutdown = self
-            .shutdown_handle_bounded(address, "delete primary", managed.handle)
+            .quiesce_retiring_session(
+                &peer,
+                primary_session_id,
+                managed.handle,
+                "delete primary",
+                false,
+            )
             .await;
+        if reap_metric_series {
+            // A real operator deletion is authoritative even if the actor
+            // crossed max-prefix while it was being joined. Reconfigure keeps
+            // the latch for the replacement generation.
+            self.max_prefix_latches.remove(&peer);
+        }
         if shutdown.joined() {
             info!(%address, "peer deleted");
         }
@@ -904,7 +953,6 @@ impl PeerManager {
         let Some(managed) = self.peers.get_mut(&peer) else {
             return Err(PeerLifecycleError::NotFound(peer));
         };
-        managed.enabled = true;
         if !withhold {
             managed
                 .handle
@@ -912,6 +960,11 @@ impl PeerManager {
                 .await
                 .map_err(|e| PeerLifecycleError::Internal(format!("failed to start peer: {e}")))?;
         }
+        // Enable is the sole recovery operation for a max-prefix shutdown.
+        // Clear the manager-owned error only after the session accepted Start,
+        // so a failed command cannot accidentally reopen passive acceptance.
+        managed.enabled = true;
+        self.max_prefix_latches.remove(&peer);
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerEnabled,
@@ -942,9 +995,14 @@ impl PeerManager {
             managed.pending_inbound.take()
         };
         if let Some(pending) = pending {
-            self.unregister_session(pending.session_id);
             let _ = self
-                .shutdown_handle_bounded(address, "disable pending inbound", pending.handle)
+                .quiesce_retiring_session(
+                    &peer,
+                    pending.session_id,
+                    pending.handle,
+                    "disable pending inbound",
+                    false,
+                )
                 .await;
         }
         let managed = self

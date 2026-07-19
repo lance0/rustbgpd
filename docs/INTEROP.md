@@ -430,13 +430,15 @@ exponential-backoff path.
 
 ## Cease Subcode Compatibility
 
-rustbgpd sends Cease/1 (Maximum Number of Prefixes Reached) when a
-per-peer `max_prefixes` limit is exceeded. `OUT_OF_RESOURCES` (subcode 8)
-is defined but not currently sent by any code path.
+rustbgpd latches the peer down and sends Cease/1 (Maximum Number of Prefixes
+Reached) when a per-peer `max_prefixes` limit is exceeded without negotiated
+Notification GR. With the RFC 8538 N-bit, outer Cease/9 (Hard Reset)
+encapsulates the complete Cease/1 reason/data so the over-limit routes are not
+retained as stale.
 
 | Peer | Accepts Cease/1 (Max Prefixes) | Clean Teardown | Notes |
 |------|-------------------------------|----------------|-------|
-| FRR 10.3.1 | Yes | Yes | Reports "Cease/Maximum Number of Prefixes Reached", session re-establishes (M26) |
+| FRR 10.3.1 | Yes | Yes | Reports "Cease/Maximum Number of Prefixes Reached"; peer remains latched until explicit enable (M26) |
 | BIRD | TBD | TBD | — |
 | GoBGP | TBD | TBD | — |
 
@@ -1830,20 +1832,26 @@ with two separate FRR peers.
 
 ---
 
-## M26 Test Results (2026-03-15, FRR 10.3.1)
+## M26 Test Results (2026-07-19, FRR 10.3.1)
 
-Cease subcode compatibility. rustbgpd sends Cease/1 (Max Prefixes) when
-`max_prefixes=2` is exceeded by FRR's 3 prefixes.
+Cease subcode compatibility and shutdown-only recovery. FRR first advertises
+exactly two prefixes so the session must establish at the configured bound;
+the harness then injects a third prefix and rustbgpd sends Cease/1 (Max
+Prefixes) and latches the peer down.
 
 | Test | Result | Details |
 |------|--------|---------|
 | gRPC endpoint ready | PASS | First attempt |
-| Session established (then bounced) | PASS | Established before prefix limit triggers |
-| FRR received Cease NOTIFICATION | PASS | "Cease/Maximum Number of Prefixes Reached" |
-| max_prefix_exceeded metric | PASS | Prometheus counter present |
-| Session flapped | PASS | flapCount=1, cycle through Established |
+| Session established at bound | PASS | FRR Established; rustbgpd reports exactly 2 received prefixes |
+| FRR received Cease NOTIFICATION | PASS | Exact "Cease/Maximum Number of Prefixes Reached" reason |
+| max_prefix_exceeded metric | PASS | `bgp_max_prefix_exceeded_total=1` after first breach |
+| Manager latch reason | PASS | `last_error` contains the actionable max-prefix reason |
+| Automatic retry suppressed | PASS | Still down after 12 s (> two configured 5 s retry intervals); counter unchanged |
+| Enable while over limit | PASS | Three-prefix replay increments the counter and restores the latch |
+| Route removal alone | PASS | Still down after 12 s; latch reason and counter unchanged |
+| Explicit recovery | PASS | After removal + Enable, Established with exactly 2 received prefixes |
 | FRR still operational | PASS | vtysh responds after Cease |
-| **Total** | **6/6** | |
+| **Total** | **10/10** | |
 
 ---
 

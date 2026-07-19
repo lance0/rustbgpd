@@ -128,7 +128,7 @@ covered by later CI receipts). Procedures and results:
 | M20 | Private AS removal (remove/all/replace) | FRR 10.3.1 |
 | M21 | RPKI origin validation via RTR | FRR + StayRTR |
 | M23 | Bidirectional route exchange with GoBGP | GoBGP 4.3.0 |
-| M26 | Cease/Max-Prefixes (subcode 1) teardown + re-establish | FRR 10.3.1 |
+| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR) | FRR 10.3.1 |
 | M27 / M59 | ASPA via RTR v2: validation states, best-path preference, role-aware downstream verification | FRR + RTR v2 mock |
 | M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.3.1 |
 | M30b | EVPN Type 5 IP-prefix origination (RFC 9136) with kernel VRF/L3VNI | FRR 10.3.1 |
