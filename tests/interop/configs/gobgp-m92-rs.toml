@@ -1,0 +1,74 @@
+# M92 GoBGP v4.7 incumbent route server. `deny-m92-v6-control` is
+# applied only toward the BIRD target and matches the candidate's
+# checked-in export policy.
+[global.config]
+as = 64496
+router-id = "192.0.2.10"
+
+[[defined-sets.prefix-sets]]
+prefix-set-name = "m92-v6-control"
+[[defined-sets.prefix-sets.prefix-list]]
+ip-prefix = "2001:db8:92ff::/48"
+masklength-range = "48..48"
+
+[[policy-definitions]]
+name = "deny-m92-v6-control"
+[[policy-definitions.statements]]
+[policy-definitions.statements.conditions.match-prefix-set]
+prefix-set = "m92-v6-control"
+match-set-options = "any"
+[policy-definitions.statements.actions]
+route-disposition = "reject-route"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.12"
+peer-as = 64501
+[neighbors.route-server.config]
+route-server-client = true
+[neighbors.apply-policy.config]
+default-export-policy = "reject-route"
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.13"
+peer-as = 64502
+[neighbors.route-server.config]
+route-server-client = true
+[neighbors.apply-policy.config]
+default-export-policy = "reject-route"
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-unicast"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "192.0.2.11"
+peer-as = 64510
+[neighbors.route-server.config]
+route-server-client = true
+[neighbors.apply-policy.config]
+export-policy-list = ["deny-m92-v6-control"]
+default-export-policy = "accept-route"
+[neighbors.graceful-restart.config]
+enabled = true # M92_TARGET_GR
+restart-time = 30
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true

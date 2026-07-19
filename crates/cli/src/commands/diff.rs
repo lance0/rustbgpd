@@ -1822,8 +1822,20 @@ mod tests {
     ///   gobgp: gobgp neighbor 10.83.2.1 adj-out -j
     ///
     /// Versions at capture: BIRD 2.0.12, FRR 10.3.1, GoBGP 3.37.0.
+    /// The M92 GoBGP 4.7.0 dual-stack fixture was captured toward target
+    /// 192.0.2.11 / AS64510 and merged deterministically with:
+    ///
+    ///   gobgp neighbor 192.0.2.11 adj-out -a ipv4 -j > adj-out-v4.json
+    ///   gobgp neighbor 192.0.2.11 adj-out -a ipv6 -j > adj-out-v6.json
+    ///   jq -S -s '.[0] * .[1]' adj-out-v4.json adj-out-v6.json \
+    ///       > gobgp-v47-m92-adjout.json
+    ///
+    /// GoBGP's raw `peer-address` fields identify the source paths
+    /// (192.0.2.12/.13); the ribsnap `peer` is the export target
+    /// (192.0.2.11), supplied with `--peer` during conversion.
     /// Regenerate the .expected.ndjson goldens by re-running the
-    /// converters with `--generation 7` and the per-adapter args below.
+    /// converters with the per-adapter arguments below (`--generation
+    /// 7` for M83 and `--generation 92` for M92).
     mod adapters {
         use super::*;
 
@@ -1835,7 +1847,9 @@ mod tests {
             raw_fixture: &'static str,
             golden: &'static str,
             peer: &'static str,
+            peer_asn: u32,
             source: &'static str,
+            generation: &'static str,
         }
 
         const BIRD: Converter = Converter {
@@ -1843,25 +1857,37 @@ mod tests {
             raw_fixture: "bird-m83-export.txt",
             golden: "bird-m83.expected.ndjson",
             peer: "10.83.1.1",
+            peer_asn: 65500,
             source: "m83-bird-member",
+            generation: GENERATION,
         };
         const FRR: Converter = Converter {
             script: "frr-advertised-to-ribsnap.py",
             raw_fixture: "frr-m83-advertised-detail.json",
             golden: "frr-m83.expected.ndjson",
             peer: "10.83.3.1",
+            peer_asn: 65500,
             source: "m83-frr-member",
+            generation: GENERATION,
         };
         const GOBGP: Converter = Converter {
             script: "gobgp-adjout-to-ribsnap.py",
             raw_fixture: "gobgp-m83-adjout.json",
             golden: "gobgp-m83.expected.ndjson",
             peer: "10.83.2.1",
+            peer_asn: 65500,
             source: "m83-gobgp-member",
+            generation: GENERATION,
         };
-        /// All snapshots record advertisement toward the M83 route
-        /// server (10.83.x.1, AS 65500).
-        const RS_ASN: u32 = 65500;
+        const GOBGP_V47: Converter = Converter {
+            script: "gobgp-adjout-to-ribsnap.py",
+            raw_fixture: "gobgp-v47-m92-adjout.json",
+            golden: "gobgp-v47-m92.expected.ndjson",
+            peer: "192.0.2.11",
+            peer_asn: 64510,
+            source: "m92-gobgp-v4.7-incumbent",
+            generation: "92",
+        };
 
         fn fixture_path(name: &str) -> std::path::PathBuf {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1876,9 +1902,9 @@ mod tests {
             std::process::Command::new("python3")
                 .arg(script)
                 .args(["--peer", converter.peer])
-                .args(["--peer-asn", &RS_ASN.to_string()])
+                .args(["--peer-asn", &converter.peer_asn.to_string()])
                 .args(["--source", converter.source])
-                .args(["--generation", GENERATION])
+                .args(["--generation", converter.generation])
                 .arg(fixture_path(converter.raw_fixture))
                 .output()
                 .expect("python3 must be runnable for the adapter golden tests")
@@ -1917,11 +1943,12 @@ mod tests {
         /// the same lab (what `rbgp rib recv` on the RS reported each
         /// member actually put on the wire).
         async fn wire_truth_server(
-            peer: &str,
+            converter: &Converter,
             routes: Vec<server_proto::Route>,
         ) -> crate::test_support::MockServerHandle {
             let server = spawn_mock_server(None).await;
-            *server.state.list_neighbors_response.lock().await = vec![neighbor(peer, RS_ASN)];
+            *server.state.list_neighbors_response.lock().await =
+                vec![neighbor(converter.peer, converter.peer_asn)];
             let total = routes.len() as u64;
             *server.state.list_route_pages.lock().await = vec![page(routes, "", total)];
             server
@@ -1977,7 +2004,7 @@ mod tests {
                     ..wire_route("203.0.113.0", 24, "10.83.1.2", vec![65001])
                 },
             ];
-            let server = wire_truth_server(BIRD.peer, routes).await;
+            let server = wire_truth_server(&BIRD, routes).await;
             let (rendered, code) =
                 diff_golden_against(&BIRD, &server, &["as_path", "next_hop", "origin"]).await;
             assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
@@ -2003,7 +2030,7 @@ mod tests {
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
                 })
                 .collect();
-            let server = wire_truth_server(FRR.peer, routes).await;
+            let server = wire_truth_server(&FRR, routes).await;
             let (rendered, code) =
                 diff_golden_against(&FRR, &server, &["as_path", "next_hop"]).await;
             assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
@@ -2027,10 +2054,74 @@ mod tests {
                     ..wire_route("100.66.0.0", 24, "10.83.2.2", vec![65002])
                 },
             ];
-            let server = wire_truth_server(GOBGP.peer, routes).await;
+            let server = wire_truth_server(&GOBGP, routes).await;
             let (rendered, code) = diff_golden_against(&GOBGP, &server, &[]).await;
             assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
             assert!(rendered.contains("matched 2"));
+        }
+
+        /// GoBGP v4.7 M92 captures both unicast families and full core
+        /// attributes; removing MP_REACH handling or this producer's
+        /// inventory entry makes the golden/stable-surface gates red.
+        #[tokio::test]
+        async fn gobgp_v47_golden_matches_and_diffs_clean() {
+            assert_eq!(GOBGP_V47.golden, "gobgp-v47-m92.expected.ndjson");
+            check_golden(&GOBGP_V47);
+            let routes = vec![
+                server_proto::Route {
+                    med: 92,
+                    communities: vec![(64501 << 16) | 92],
+                    large_communities: vec!["64501:92:4".to_string()],
+                    ..wire_route("198.51.100.0", 24, "192.0.2.12", vec![64501])
+                },
+                wire_route("203.0.113.0", 24, "192.0.2.13", vec![64502]),
+                server_proto::Route {
+                    med: 192,
+                    communities: vec![(64501 << 16) | 192],
+                    large_communities: vec!["64501:92:6".to_string()],
+                    ..wire_route("2001:db8:9201::", 48, "2001:db8:92::12", vec![64501])
+                },
+                wire_route("2001:db8:9202::", 48, "2001:db8:92::13", vec![64502]),
+            ];
+            let server = wire_truth_server(&GOBGP_V47, routes).await;
+            let mut json_opts = opts(&fixture_path(GOBGP_V47.golden));
+            json_opts.json = true;
+            let (rendered, code) = run_against(&server, &json_opts).await.unwrap();
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(
+                report["summaries"],
+                serde_json::json!([
+                    {
+                        "peer": {
+                            "address": "192.0.2.11",
+                            "asn": 64510,
+                            "distinguisher": null
+                        },
+                        "family": {"afi": 1, "safi": 1},
+                        "matched": 2,
+                        "incumbent_only": 0,
+                        "rustbgpd_only": 0,
+                        "attribute_changed": 0,
+                        "multiplicity_changed": 0
+                    },
+                    {
+                        "peer": {
+                            "address": "192.0.2.11",
+                            "asn": 64510,
+                            "distinguisher": null
+                        },
+                        "family": {"afi": 2, "safi": 1},
+                        "matched": 2,
+                        "incumbent_only": 0,
+                        "rustbgpd_only": 0,
+                        "attribute_changed": 0,
+                        "multiplicity_changed": 0
+                    }
+                ])
+            );
+            assert_eq!(report["entries"], serde_json::json!([]));
+            assert_eq!(report["ignored_attributes"], serde_json::json!([]));
         }
 
         /// The explained-difference outcome from the lab: the RS
@@ -2048,7 +2139,7 @@ mod tests {
                     ..wire_route(p, 24, "10.83.3.2", vec![65003])
                 })
                 .collect();
-            let server = wire_truth_server(FRR.peer, routes).await;
+            let server = wire_truth_server(&FRR, routes).await;
             let (rendered, code) =
                 diff_golden_against(&FRR, &server, &["as_path", "next_hop"]).await;
             assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
