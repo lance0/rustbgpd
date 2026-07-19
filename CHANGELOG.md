@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator dashboard and alerting cover slow peers and RIB actor latency.**
+  The shipped Grafana overview now separates transport endpoints from bare
+  neighbor addresses, exposes coalesced outbound queues, slow-peer state,
+  discrete update-group membership, export-policy transition state/duration,
+  actor-poll latency, and accepted-policy age. Prometheus rules warn on a peer
+  that remains slow for five minutes and on actor polls above the exact 200ms
+  histogram boundary; structural dashboard and promtool gates protect both.
+
 - **RFC 8326 graceful-shutdown advertise intent is visible per neighbor.**
   `rbgp neighbor <peer>` reports the local desired state as enabled, disabled,
   or unknown when connected to an older daemon; JSON and `NeighborState` field

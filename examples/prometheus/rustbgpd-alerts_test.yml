@@ -163,6 +163,38 @@ tests:
                 session was torn down with a Cease / Maximum Number of
                 Prefixes Reached NOTIFICATION.
 
+  # ── BgpPeerSlow ───────────────────────────────────────────────
+  # Load-bearing: reverting `== 1`, shortening/lengthening `for: 5m`,
+  # or aggregating away the endpoint makes one of these exact boundary
+  # expectations red.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_peer_slow{peer="192.0.2.10:179", instance="edge1:9179", job="rustbgpd"}'
+        values: "1x14"
+      - series: 'bgp_peer_slow{peer="[2001:db8::10]:179", instance="edge1:9179", job="rustbgpd"}'
+        values: "0x14"
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: BgpPeerSlow
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: BgpPeerSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.10:179
+              instance: edge1:9179
+              job: rustbgpd
+            exp_annotations:
+              summary: "BGP peer endpoint 192.0.2.10:179 is slow"
+              description: >-
+                The Established session endpoint 192.0.2.10:179 on
+                edge1:9179 has remained slow for 5 minutes because its
+                outbound coalesced-frame queue is not draining. Updates
+                are still buffered; inspect bgp_peer_outbound_queue_depth
+                and the remote receiver before the backlog reaches its
+                bound.
+
   # ── RpkiVrpTableEmpty ─────────────────────────────────────────
   - interval: 1m
     input_series:
@@ -275,6 +307,53 @@ tests:
                 policy-transition warning;
                 bgp_rib_policy_transition_last_duration_milliseconds is the
                 previous terminal sample until this transition completes.
+
+  # ── BgpPolicyTransitionActorPollExceededReadinessBudget ─────
+  # Load-bearing: the firing series has observations in (0.2, 0.5],
+  # the boundary series lands exactly at 0.2, and the historical series
+  # has a non-zero raw count-minus-bucket gap but no recent increase.
+  # Removing `ignoring(le)`, moving 0.2 to 0.5, changing > to >=, using
+  # raw counters, or aggregating away job/poll_kind makes this test red.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_count{instance="edge1:9179", job="rustbgpd", poll_kind="prefix_snapshot"}'
+        values: "0+1x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge1:9179", job="rustbgpd", poll_kind="prefix_snapshot", le="0.2"}'
+        values: "0x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge1:9179", job="rustbgpd", poll_kind="prefix_snapshot", le="0.5"}'
+        values: "0+1x20"
+      # Exact-boundary observations are healthy: count == le="0.2".
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_count{instance="edge2:9179", job="rustbgpd", poll_kind="bounded"}'
+        values: "0+1x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge2:9179", job="rustbgpd", poll_kind="bounded", le="0.2"}'
+        values: "0+1x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge2:9179", job="rustbgpd", poll_kind="bounded", le="0.5"}'
+        values: "0+1x20"
+      # Historical raw gap is flat throughout the evaluation window.
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_count{instance="edge3:9179", job="route-server", poll_kind="finalize"}'
+        values: "10x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge3:9179", job="route-server", poll_kind="finalize", le="0.2"}'
+        values: "7x20"
+      - series: 'bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance="edge3:9179", job="route-server", poll_kind="finalize", le="0.5"}'
+        values: "10x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: BgpPolicyTransitionActorPollExceededReadinessBudget
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              job: rustbgpd
+              poll_kind: prefix_snapshot
+            exp_annotations:
+              summary: >-
+                RIB actor poll exceeded readiness budget (prefix_snapshot)
+              description: >-
+                The prefix_snapshot export-policy transition path on
+                edge1:9179 exceeded the 200ms actor-poll budget in the last
+                15 minutes. A long single-threaded poll could delay a
+                concurrent readiness probe and other RIB work; inspect the
+                dashboard p99 and transition state before retrying a reload.
 
   # ── BgpPolicyEvalErrors ───────────────────────────────────────
   - interval: 1m
