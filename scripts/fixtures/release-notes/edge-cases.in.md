@@ -24,6 +24,19 @@ enforcement = "legacy"
 roles = { admin = "spki-sha256:..." }
 ```
 
+> A hard-wrapped blockquote paragraph whose continuation lines must
+> join into one line with a single leading marker, not literal `>`
+> characters mid-sentence.
+>
+> A second blockquote paragraph, separated by the blank `>` line above,
+> that stays its own paragraph.
+
+> A blockquote immediately before a heading.
+
+### After the quote
+
+- A bullet right after a blockquote section, unaffected by it.
+
 A small table whose rows must stay verbatim (never joined):
 
 | Field | Meaning |
