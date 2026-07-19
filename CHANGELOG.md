@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 8326 graceful-shutdown advertise intent is visible per neighbor.**
+  `rbgp neighbor <peer>` reports the local desired state as enabled, disabled,
+  or unknown when connected to an older daemon; JSON and `NeighborState` field
+  37 preserve the same presence-aware state. This is advertisement intent, not
+  evidence of downstream receipt or convergence.
+
 - **`rbgp config import` — bounded structural importer for BIRD 2, FRR,
   and GoBGP configurations.** Translates the structural subset (local
   AS, router-id, neighbors, peer groups, address families, hold timers,

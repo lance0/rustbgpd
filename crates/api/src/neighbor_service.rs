@@ -584,6 +584,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_rotation_phase: info.tcp_ao_rotation.phase.as_str().to_string(),
         tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
         slow_peer: info.slow_peer,
+        graceful_shutdown_advertise_intent: Some(info.graceful_shutdown_advertise_intent),
     }
 }
 
@@ -2123,6 +2124,22 @@ mod tests {
         assert_eq!(state.messages_received, 4321);
         assert_eq!(state.messages_sent, 1234);
         assert!(state.route_reflector_client);
+    }
+
+    /// Load-bearing: collapsing proto presence or hard-coding either value
+    /// makes one half of this local-intent mapping fail.
+    #[test]
+    fn peer_info_to_proto_preserves_graceful_shutdown_advertise_intent() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        assert_eq!(
+            peer_info_to_proto(&info).graceful_shutdown_advertise_intent,
+            Some(false)
+        );
+        info.graceful_shutdown_advertise_intent = true;
+        assert_eq!(
+            peer_info_to_proto(&info).graceful_shutdown_advertise_intent,
+            Some(true)
+        );
     }
 
     #[test]

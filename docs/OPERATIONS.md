@@ -1858,9 +1858,15 @@ persist across daemon restart by design (RFC 8326 is a maintenance-
 window action, not a steady state).
 
 When the toggle flips, rustbgpd issues a `RibUpdate::RefreshPeerOutbound`
-which forces re-emission of all routes already in `AdjRibOut` to the
-target peer. The community appears on the wire immediately (no need
-to wait for an unrelated RIB event).
+which queues re-emission of all routes already in `AdjRibOut` to the
+target peer without waiting for an unrelated RIB event. Receiver-side
+verification is still required to prove delivery.
+
+`rbgp neighbor <peer>` always reports the local desired state as
+`GShut Advertise Intent: enabled|disabled|unknown`; `unknown` means the CLI is
+connected to an older daemon that does not expose this field. This is only the
+local send intent — it does not prove that a route was re-advertised, received,
+or converged downstream.
 
 **Receiver (the side honoring others' GShut):**
 
@@ -1892,10 +1898,8 @@ authoritative checks are:
 rbgp rib --neighbor <draining-peer> \
     | jq '.routes[] | {prefix, localPrefAttr, communities}'
 
-# Initiator-side: confirm the toggle is set on the live session via
-# the daemon log (look for "RFC 8326 graceful-shutdown advertise
-# toggled" in journalctl / Docker logs).
-journalctl -u rustbgpd | grep "graceful-shutdown advertise toggled"
+# Initiator-side: confirm the local desired advertisement state.
+rbgp neighbor <receiving-peer> | grep 'GShut Advertise Intent: enabled'
 
 # Or verify on the *receiving* peer's BGP table — the canonical
 # observation. On FRR:

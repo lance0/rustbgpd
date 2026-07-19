@@ -29,6 +29,7 @@ pub(super) fn build_peer_info(
         peer_group: managed.peer_group.clone(),
         state: session_state.map_or(SessionState::Idle, |s| s.fsm_state),
         enabled: managed.enabled,
+        graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
         prefix_count: session_state.map_or(0, |s| s.prefix_count),
         hold_time: managed.hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
