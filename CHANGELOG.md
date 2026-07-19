@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release tarballs ship `rs-config-render`.** The route-server
+  config renderer was built by the release workflow but never staged
+  into `rustbgpd-<arch>.tar.gz` — v0.60.0 tarballs contain only
+  `rustbgpd` and `rbgp`. The binary is now packed alongside them, and
+  the tarball content assertion checks all three binaries for
+  presence and non-emptiness.
+
 ## [0.60.0] — 2026-07-18
 
 > **Release framing — why this is v0.60.0.** This release marks the

@@ -576,9 +576,10 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
     `rustbgpd-linux-arm64.tar.gz` plus per-arch `checksums-<arch>.txt`.
-    Each tarball contains `rustbgpd`, `rbgp`, `LICENSE-MIT`, and
-    `LICENSE-APACHE` (license presence is asserted by the workflow;
-    the runtime image likewise ships both licenses at `/`).
+    Each tarball contains `rustbgpd`, `rbgp`, `rs-config-render`,
+    `LICENSE-MIT`, and `LICENSE-APACHE` (binary and license presence
+    is asserted by the workflow; the runtime image likewise ships both
+    licenses at `/`).
     The version-less filenames are what powers the static
     `releases/latest/download/` URLs in `docs/deployment.md`; if the
     filenames drift, deployment.md silently breaks for new operators.

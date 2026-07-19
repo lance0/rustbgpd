@@ -83,7 +83,8 @@ jobs:
 
       - name: Package binaries
         run: |
-          # Pack the daemon and CLI into a single per-arch tarball with a
+          # Pack the daemon, CLI, and route-server config renderer into
+          # a single per-arch tarball with a
           # version-less filename. This is what powers the static
           # `https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-<arch>.tar.gz`
           # URL pattern in docs/deployment.md — operators never have to
@@ -94,7 +95,7 @@ jobs:
           #
           # Tarball layout (the share/ tree mirrors what packagers
           # install under /usr/share):
-          #   rustbgpd, rbgp                          binaries
+          #   rustbgpd, rbgp, rs-config-render        binaries
           #   LICENSE-MIT, LICENSE-APACHE             licenses
           #   rustbgpd.schema.json                    config JSON Schema
           #   share/man/man1/rbgp.1                   CLI man page
@@ -112,6 +113,7 @@ jobs:
           mkdir -p dist staging/share/man/man1 staging/share/man/man8 staging/share/completions
           cp target/${{ matrix.target }}/release/rustbgpd staging/
           cp target/${{ matrix.target }}/release/rbgp staging/
+          cp target/${{ matrix.target }}/release/rs-config-render staging/
           cp LICENSE-MIT LICENSE-APACHE staging/
           cp docs/rustbgpd.schema.json staging/
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
@@ -128,7 +130,8 @@ jobs:
             "$RBGP" completions "$shell" > staging/share/completions/rbgp.$shell
           done
           tar -C staging -czf dist/rustbgpd-${SUFFIX}.tar.gz \
-            rustbgpd rbgp LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share
+            rustbgpd rbgp rs-config-render \
+            LICENSE-MIT LICENSE-APACHE rustbgpd.schema.json share
           # Also publish the config JSON Schema as a standalone asset so
           # editors can reference the stable
           # `releases/latest/download/rustbgpd.schema.json` URL. Both
@@ -138,7 +141,7 @@ jobs:
           cd dist
           sha256sum rustbgpd-${SUFFIX}.tar.gz > checksums-${SUFFIX}.txt
 
-      - name: Assert tarball has nonempty licenses, man pages, and completions
+      - name: Assert tarball has nonempty binaries, licenses, man pages, and completions
         run: |
           set -euo pipefail
           SUFFIX=${{ matrix.suffix }}
@@ -148,7 +151,8 @@ jobs:
           # `pipefail` that non-zero tar status fails the check on the first
           # present entry (LICENSE-MIT) even though it is there.
           entries="$(tar -tzf "dist/rustbgpd-${SUFFIX}.tar.gz")"
-          for f in LICENSE-MIT LICENSE-APACHE \
+          for f in rustbgpd rbgp rs-config-render \
+                   LICENSE-MIT LICENSE-APACHE \
                    share/man/man1/rbgp.1 share/man/man8/rustbgpd.8 \
                    share/completions/rbgp.bash share/completions/rbgp.zsh \
                    share/completions/rbgp.fish; do

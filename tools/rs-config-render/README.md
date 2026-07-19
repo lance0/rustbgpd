@@ -21,6 +21,11 @@ $ rustbgpd --check /var/lib/rs/candidate/config.toml
 
 [arouteserver]: https://github.com/pierky/arouteserver
 
+Release tarballs (`rustbgpd-<arch>.tar.gz` on the [releases
+page](https://github.com/lance0/rustbgpd/releases)) ship the
+`rs-config-render` binary alongside `rustbgpd` and `rbgp`; from
+source, `cargo build --release -p rs-config-render`.
+
 The end-to-end operator walkthrough — arouteserver through the
 Alice-LG looking glass — is
 [`docs/cookbook/ixp-filter-pipeline.md`](../../docs/cookbook/ixp-filter-pipeline.md).
