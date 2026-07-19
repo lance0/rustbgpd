@@ -1,0 +1,21 @@
+[global]
+asn = 65001
+router_id = "10.91.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Raw fixture injects one malformed UPDATE per RFC 7606 disposition class.
+[[neighbors]]
+address = "10.91.1.2"
+remote_asn = 65091
+description = "m91-raw-malformed"
+hold_time = 90
+
+[security.grpc]
+enforcement = "legacy"

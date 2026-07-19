@@ -1,0 +1,46 @@
+# Containerlab topology: rustbgpd ↔ raw-BGP fixture (M91 — RFC 7606)
+#
+# Validates RFC 7606 revised error handling end to end against a raw
+# speaker injecting one malformed UPDATE per disposition class:
+#
+#   * malformed MED → treat-as-withdraw: the UPDATE's routes are removed,
+#     the session stays Established;
+#   * malformed AGGREGATOR → attribute-discard: the announcement survives
+#     without the attribute;
+#   * malformed MED with no reachable NLRI → session reset (RFC 7606 §5.2);
+#   * each phase increments bgp_update_malformed_total{peer,disposition}
+#     and emits the §6 full-message DEBUG capture.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m91-rfc7606-malformed.clab.yml
+#   bash tests/interop/scripts/test-m91-rfc7606-malformed.sh
+#   containerlab destroy -t tests/interop/m91-rfc7606-malformed.clab.yml --cleanup
+
+name: m91-rfc7606-malformed
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m91-rfc7606.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.91.1.1/24 dev eth1
+        - ip link set eth1 up
+
+    raw-peer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      cmd: sleep infinity
+      binds:
+        - ./scripts/m91_rfc7606_raw_bgp.py:/usr/local/bin/m91_rfc7606_raw_bgp.py:ro
+      exec:
+        - ip addr add 10.91.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "raw-peer:eth1"]

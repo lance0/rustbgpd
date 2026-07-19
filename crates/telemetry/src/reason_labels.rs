@@ -251,6 +251,64 @@ impl std::fmt::Display for ImportRejectReason {
     }
 }
 
+/// RFC 7606 revised-error-handling disposition applied to a malformed
+/// UPDATE, from weakest to strongest action.
+///
+/// One label value per UPDATE — the RFC 7606 §3 (h) strongest-action
+/// rule has already been applied by the time the disposition is
+/// recorded, so an UPDATE with several malformed attributes counts
+/// once under the disposition that actually governed it.
+///
+/// Surfaces sharing this vocabulary:
+///
+/// - `bgp_update_malformed_total{peer, disposition}` label values
+///   ([`crate::BgpMetrics::record_update_malformed`]);
+/// - the documented values in `docs/OPERATIONS.md`.
+///
+/// The transport warn/debug log lines render the wire crate's
+/// hyphenated `ErrorDisposition::as_str` tokens; the metric label is
+/// the `snake_case` form pinned here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MalformedUpdateDisposition {
+    /// RFC 7606 §2: the malformed attribute was discarded and the
+    /// UPDATE processed without it.
+    AttributeDiscard,
+    /// RFC 7606 §2: every route carried in the UPDATE was handled as
+    /// withdrawn; the session stayed Established.
+    TreatAsWithdraw,
+    /// RFC 4271 §6.3 NOTIFICATION + session reset, retained where the
+    /// NLRI cannot be trusted (RFC 7606 §3 (j), §5) — including the
+    /// §5.2 no-reachable-NLRI escalation of a treat-as-withdraw-class
+    /// error.
+    SessionReset,
+}
+
+impl MalformedUpdateDisposition {
+    /// Every canonical disposition, for vocabulary walks in tests and
+    /// docs.
+    pub const ALL: [Self; 3] = [
+        Self::AttributeDiscard,
+        Self::TreatAsWithdraw,
+        Self::SessionReset,
+    ];
+
+    /// The canonical label string shared by every surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AttributeDiscard => "attribute_discard",
+            Self::TreatAsWithdraw => "treat_as_withdraw",
+            Self::SessionReset => "session_reset",
+        }
+    }
+}
+
+impl std::fmt::Display for MalformedUpdateDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Exact outbound encoder rejection reasons shared by metrics and RIB logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExactExportReason {
@@ -288,8 +346,8 @@ impl std::fmt::Display for ExactExportReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExactExportReason, ImportRejectReason, NextHopOwnershipBlockReason, OtcBlockReason,
-        RrLoopReason,
+        ExactExportReason, ImportRejectReason, MalformedUpdateDisposition,
+        NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -339,6 +397,15 @@ mod tests {
         for reason in ImportRejectReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn malformed_update_dispositions_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for disposition in MalformedUpdateDisposition::ALL {
+            assert_snake_case(disposition.as_str());
+            assert!(seen.insert(disposition.as_str()), "duplicate label");
         }
     }
 
@@ -393,6 +460,14 @@ mod tests {
                 "rr_loop",
                 "treat_as_withdraw",
             ]
+        );
+        let dispositions: Vec<&str> = MalformedUpdateDisposition::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(
+            dispositions,
+            ["attribute_discard", "treat_as_withdraw", "session_reset"]
         );
         let exact: Vec<&str> = ExactExportReason::ALL.iter().map(|r| r.as_str()).collect();
         assert_eq!(

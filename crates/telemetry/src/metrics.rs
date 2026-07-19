@@ -183,6 +183,7 @@ pub struct BgpMetrics {
     as_path_loop_detected: IntCounterVec,
     rr_loop_detected: IntCounterVec,
     bgpls_nlri_discarded: IntCounterVec,
+    update_malformed: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
     role_mismatch: IntCounterVec,
 
@@ -934,6 +935,20 @@ impl BgpMetrics {
                 "Total known BGP-LS NLRIs discarded for out-of-order descriptor TLVs (RFC 9552); the session is preserved",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let update_malformed = IntCounterVec::new(
+            Opts::new(
+                "bgp_update_malformed_total",
+                "Malformed UPDATE messages by the RFC 7606 disposition applied: \
+                 disposition ∈ {attribute_discard, treat_as_withdraw, \
+                 session_reset}. One increment per malformed UPDATE, labeled \
+                 with the strongest-action disposition that governed it \
+                 (RFC 7606 §3 (h)), including the §5.2 no-reachable-NLRI \
+                 session-reset escalation.",
+            ),
+            &["peer", "disposition"],
         )
         .expect("valid metric definition");
 
@@ -1765,6 +1780,9 @@ impl BgpMetrics {
             .register(Box::new(bgpls_nlri_discarded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_malformed.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(otc_routes_blocked.clone()))
             .expect("metric not already registered");
         registry
@@ -2055,6 +2073,7 @@ impl BgpMetrics {
             as_path_loop_detected,
             rr_loop_detected,
             bgpls_nlri_discarded,
+            update_malformed,
             otc_routes_blocked,
             role_mismatch,
             policy_routes,
@@ -2185,6 +2204,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.bgpls_nlri_discarded, peer);
+        Self::reap_peer_series_from_vec(&self.update_malformed, peer);
         Self::reap_peer_series_from_vec(&self.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.role_mismatch, peer);
         Self::reap_peer_series_from_vec(&self.policy_routes, peer);
@@ -2911,6 +2931,24 @@ impl BgpMetrics {
         self.bgpls_nlri_discarded
             .with_label_values(&[peer])
             .inc_by(count);
+    }
+
+    /// Record a malformed UPDATE by the RFC 7606 disposition applied.
+    ///
+    /// One call per malformed UPDATE, at the point the final
+    /// disposition is decided — the caller has already applied the
+    /// §3 (h) strongest-action rule across the UPDATE's malformed
+    /// attributes. The `disposition` label value is the canonical
+    /// [`crate::reason_labels::MalformedUpdateDisposition`] string —
+    /// typed here so the vocabulary cannot drift between surfaces.
+    pub fn record_update_malformed(
+        &self,
+        peer: &str,
+        disposition: crate::reason_labels::MalformedUpdateDisposition,
+    ) {
+        self.update_malformed
+            .with_label_values(&[peer, disposition.as_str()])
+            .inc();
     }
 
     /// Record RFC 9234 OTC route-leak blocking. The `reason` label
@@ -4975,6 +5013,32 @@ mod tests {
     }
 
     #[test]
+    fn update_malformed_counter_tracks_each_disposition_separately() {
+        let m = BgpMetrics::new();
+        for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
+            m.record_update_malformed("10.0.0.1", disposition);
+        }
+        m.record_update_malformed(
+            "10.0.0.1",
+            crate::reason_labels::MalformedUpdateDisposition::TreatAsWithdraw,
+        );
+
+        for (disposition, expected) in [
+            ("attribute_discard", 1),
+            ("treat_as_withdraw", 2),
+            ("session_reset", 1),
+        ] {
+            assert_eq!(
+                m.update_malformed
+                    .with_label_values(&["10.0.0.1", disposition])
+                    .get(),
+                expected,
+                "disposition {disposition}"
+            );
+        }
+    }
+
+    #[test]
     fn rr_loop_detected_counter_increments_per_update() {
         let m = BgpMetrics::new();
         m.record_rr_loop_detected("10.0.0.1");
@@ -5157,6 +5221,10 @@ mod tests {
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
         m.record_bgpls_nlri_discarded(peer, 2);
+        m.record_update_malformed(
+            peer,
+            crate::reason_labels::MalformedUpdateDisposition::TreatAsWithdraw,
+        );
         m.record_otc_routes_blocked(
             peer,
             crate::reason_labels::OtcBlockReason::IngressPeerMismatch,
@@ -5200,8 +5268,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 39 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 39);
+        // 40 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 40);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5211,7 +5279,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 39);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 40);
     }
 
     #[test]
