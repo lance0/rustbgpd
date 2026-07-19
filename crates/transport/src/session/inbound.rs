@@ -745,6 +745,43 @@ impl PeerSession {
             first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
+    /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast
+    /// UPDATE between role-aware, four-octet-AS-capable eBGP speakers fails
+    /// the ASPA first-AS precondition. Roleless sessions keep their
+    /// compatibility behavior, and an RS-client remains exempt for a
+    /// transparent route server / IX.
+    pub(super) fn aspa_first_as_mismatch(
+        &self,
+        four_octet_as: bool,
+        is_ebgp: bool,
+        has_unicast_announcements: bool,
+        attrs: &[PathAttribute],
+    ) -> Option<(Option<u32>, u32)> {
+        if !four_octet_as || !is_ebgp || !has_unicast_announcements {
+            return None;
+        }
+        let context = self.aspa_validation_context();
+        if context.first_as_check_exempt {
+            return None;
+        }
+        let neighbor_asn = context.neighbor_asn?;
+        let path = attrs.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        })?;
+        if path
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, rustbgpd_wire::AsPathSegment::AsSet(_)))
+        {
+            return None;
+        }
+        let received_first_as = path.segments.iter().find_map(|segment| match segment {
+            rustbgpd_wire::AsPathSegment::AsSequence(asns) => asns.first().copied(),
+            rustbgpd_wire::AsPathSegment::AsSet(_) => None,
+        });
+        (received_first_as != Some(neighbor_asn)).then_some((received_first_as, neighbor_asn))
+    }
     /// RFC 7606 treat-as-withdraw primitive: drop every announcement carried
     /// in the UPDATE, withdraw any previously accepted route those
     /// announcements replace, process the explicit withdrawals normally
@@ -1310,6 +1347,47 @@ impl PeerSession {
         if let Some(applied) = disposition {
             self.metrics
                 .record_update_malformed(&self.peer_label, malformed_disposition_label(applied));
+        }
+        // draft-ietf-sidrops-aspa-verification-26 §5: between role-aware,
+        // four-octet-AS-capable eBGP speakers, an AS_PATH whose most recently
+        // added AS is not the negotiated neighbor AS is semantically invalid
+        // and SHALL use RFC 7606 treat-as-withdraw. Section 6.2 scopes ASPA
+        // verification to IPv4/IPv6 unicast. Apply this before policy/ASPA
+        // state so the disposition cannot depend on an operator policy or
+        // cache snapshot.
+        let has_unicast_announcements = !parsed.announced.is_empty()
+            || parsed.attributes.iter().any(|attr| {
+                matches!(
+                    attr,
+                    PathAttribute::MpReachNlri(mp)
+                        if matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
+                            && mp.safi == Safi::Unicast
+                            && !mp.announced.is_empty()
+                )
+            });
+        if let Some((received_first_as, neighbor_asn)) = self.aspa_first_as_mismatch(
+            four_octet_as,
+            is_ebgp,
+            has_unicast_announcements,
+            &parsed.attributes,
+        ) {
+            warn!(
+                peer = %self.peer_label,
+                received_first_as = ?received_first_as,
+                neighbor_asn,
+                "ASPA first-AS precondition failed; treating UPDATE as withdraw"
+            );
+            self.metrics.record_update_malformed(
+                &self.peer_label,
+                MalformedUpdateDisposition::TreatAsWithdraw,
+            );
+            self.treat_update_as_withdraw(
+                &parsed,
+                ImportRejectReason::TreatAsWithdraw,
+                Some("aspa_first_as_mismatch"),
+            )
+            .await;
+            return;
         }
         // 3. End-of-RIB detection (RFC 4724 §2). An UPDATE that only became
         // empty because malformed attributes were discarded is junk, not an

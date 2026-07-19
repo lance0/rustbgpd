@@ -527,6 +527,166 @@ fn aspa_validation_context_preserves_roleless_legacy_behavior() {
     assert_eq!(context.local_role, None);
     assert!(!context.first_as_check_exempt);
 }
+fn aspa_first_as_update(prefix: Ipv4Prefix, first_asn: u32) -> UpdateMessage {
+    UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![first_asn, 65010])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+}
+/// Load-bearing proof: deleting the role-aware first-AS branch in
+/// `process_update` leaves the second announcement installed, so the exact
+/// withdrawal and known-prefix assertions fail.
+#[tokio::test]
+async fn aspa_first_as_mismatch_withdraws_replacement_and_keeps_session_established() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Peer);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session
+        .process_update(aspa_first_as_update(prefix, 65002))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx
+        .try_recv()
+        .expect("matching first-AS route must reach the RIB")
+    else {
+        panic!("expected matching first-AS RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1, "matching first AS remains accepted");
+    assert_eq!(session.known_prefix_count(), 1);
+
+    session
+        .process_update(aspa_first_as_update(prefix, 65003))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("mismatched replacement must reach the RIB as a withdrawal")
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "first-AS treat-as-withdraw must not reset the session"
+    );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+/// Load-bearing transparent-IX control: removing the RS-client exemption (or
+/// applying the first-AS check to every eBGP session) makes this mismatched
+/// route disappear instead of being announced.
+#[tokio::test]
+async fn aspa_first_as_mismatch_exempts_route_server_client() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::RouteServerClient);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    session
+        .process_update(aspa_first_as_update(prefix, 65003))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("transparent-IX route must reach the RIB")
+    else {
+        panic!("expected route-server-client RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(withdrawn.is_empty());
+    assert_eq!(session.known_prefix_count(), 1);
+}
+/// Load-bearing compatibility controls: removing either the eBGP or
+/// configured-role guard makes its corresponding mismatched path return a
+/// violation.
+#[test]
+fn aspa_first_as_mismatch_preserves_roleless_and_ibgp_compatibility() {
+    let attrs = [PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![65003])],
+    })];
+
+    let mut roleless_ebgp = make_test_session(65001, 65002);
+    install_test_negotiated_session(&mut roleless_ebgp, negotiated_session(65002, false));
+    assert_eq!(
+        roleless_ebgp.aspa_first_as_mismatch(true, true, true, &attrs),
+        None,
+        "roleless eBGP keeps legacy first-AS behavior"
+    );
+
+    let mut internal_role_session = make_test_session(65001, 65001);
+    internal_role_session.config.peer.local_role = Some(BgpRole::Peer);
+    install_test_negotiated_session(&mut internal_role_session, negotiated_session(65001, false));
+    assert_eq!(
+        internal_role_session.aspa_first_as_mismatch(true, false, true, &attrs),
+        None,
+        "the ASPA first-AS precondition is not applied to iBGP"
+    );
+
+    let mut external_role_session = make_test_session(65001, 65002);
+    external_role_session.config.peer.local_role = Some(BgpRole::Peer);
+    install_test_negotiated_session(&mut external_role_session, negotiated_session(65002, false));
+    assert_eq!(
+        external_role_session.aspa_first_as_mismatch(false, true, true, &attrs),
+        None,
+        "the draft check requires four-octet-AS capability"
+    );
+    assert_eq!(
+        external_role_session.aspa_first_as_mismatch(true, true, false, &attrs),
+        None,
+        "the draft check is scoped to IPv4/IPv6 unicast announcements"
+    );
+
+    let empty_path = [PathAttribute::AsPath(AsPath { segments: vec![] })];
+    assert_eq!(
+        external_role_session.aspa_first_as_mismatch(true, true, true, &empty_path),
+        Some((None, 65002)),
+        "an AS_PATH with no ordered first AS fails the neighbor-AS check"
+    );
+    let split_sequence = [PathAttribute::AsPath(AsPath {
+        segments: vec![
+            AsPathSegment::AsSequence(vec![]),
+            AsPathSegment::AsSequence(vec![65003]),
+        ],
+    })];
+    assert_eq!(
+        external_role_session.aspa_first_as_mismatch(true, true, true, &split_sequence),
+        Some((Some(65003), 65002)),
+        "the first ordered ASN may be in a later AS_SEQUENCE"
+    );
+    let with_as_set = [PathAttribute::AsPath(AsPath {
+        segments: vec![
+            AsPathSegment::AsSequence(vec![65003]),
+            AsPathSegment::AsSet(vec![65010]),
+        ],
+    })];
+    assert_eq!(
+        external_role_session.aspa_first_as_mismatch(true, true, true, &with_as_set),
+        None,
+        "AS_SET disposition remains outside the neighbor-AS gate"
+    );
+}
 fn configure_scoped_link_local_peer(session: &mut PeerSession) {
     session.peer_ip = IpAddr::V6("fe80::2".parse().unwrap());
     session.config.peer_interface = Some("eth1".to_string());
