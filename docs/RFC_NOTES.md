@@ -312,9 +312,19 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 ### AS_TRANS Handling
 
 - When encoding for a 2-byte-only peer: replace any ASN > 65535 with
-  AS_TRANS in AS_PATH, and include AS4_PATH for the full path.
-- When decoding from a 2-byte-only peer: if AS4_PATH is present,
-  reconstruct the true path per RFC 6793 §4.2.3.
+  AS_TRANS in AS_PATH. Emitting a compensating AS4_PATH is not implemented.
+- AS4_PATH and AS4_AGGREGATOR remain opaque attributes; inbound AS4_PATH is
+  not reconstructed into AS_PATH per RFC 6793 §4.2.3.
+
+## RFC 9774 — AS_SET / AS_CONFED_SET Deprecation
+
+- The revised inbound attribute decoder inspects raw AS_PATH and opaque
+  AS4_PATH segment framing for AS_SET and AS_CONFED_SET before duplicate
+  discard, and assigns RFC 7606 treat-as-withdraw on every session and family.
+  When the UPDATE carries no reachable NLRI, the existing RFC 7606 §5.2
+  composition escalates that disposition to a session reset.
+- This targeted inspection does not add general AS4_PATH parsing or RFC 6793
+  path reconstruction.
 
 ---
 
@@ -422,7 +432,8 @@ Interpretation decisions:
   so a hostile peer cannot spam operators at info/warn; nothing is rendered
   when DEBUG is disabled. Per-disposition counters are a follow-up.
 - AS4_PATH / AS4_AGGREGATOR are not decoded as typed attributes (they pass
-  through opaquely), so no malformation can be detected for them today.
+  through opaquely). The RFC 9774 set-segment inspection above is the narrow
+  exception; other AS4_PATH malformations are not detected.
 
 ## Milestone 1 — RFC 4271 Sections
 

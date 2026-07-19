@@ -15137,6 +15137,90 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
+/// Load-bearing RFC 9774 proof: deleting the raw `AS_SET` inspection admits
+/// both announcements, so the exact mixed-withdrawal and prefix-state
+/// assertions fail. The explicit/replacement overlap also proves one output.
+#[tokio::test]
+async fn rfc9774_as_set_replacement_withdraws_exactly_once_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let overlap = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let replacement = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let first_seen = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&[]),
+            &[overlap, replacement],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial accepted routes");
+    };
+    assert_eq!(announced.len(), 2);
+
+    let mut withdrawn = Vec::new();
+    rustbgpd_wire::nlri::encode_nlri(&[overlap], &mut withdrawn);
+    let malformed = UpdateMessage {
+        withdrawn_routes: Bytes::from(withdrawn),
+        path_attributes: Bytes::from(
+            [
+                &[0x40, 1, 1, 0][..],
+                &[0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA],
+                &[0x40, 3, 4, 10, 0, 0, 2],
+            ]
+            .concat(),
+        ),
+        nlri: rfc7606_update(Vec::new(), &[overlap, replacement, first_seen]).nlri,
+    };
+    session.process_update(malformed).await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("RFC 9774 withdrawal must reach RIB")
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![(Prefix::V4(overlap), 0), (Prefix::V4(replacement), 0)],
+        "explicit/replacement overlap is emitted once; first-seen stays silent"
+    );
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+/// Load-bearing RFC 7606 §5.2 composition proof: deleting the new RFC 9774
+/// detector (or bypassing existing disposition composition) leaves this
+/// no-NLRI `AS_SET` UPDATE Established instead of reset.
+#[tokio::test]
+async fn rfc9774_as_set_without_reachable_nlri_resets_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    session
+        .process_update(rfc7606_update(
+            vec![0x40, 1, 1, 0, 0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA],
+            &[],
+        ))
+        .await;
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(!matches!(update, RibUpdate::RoutesReceived { .. }));
+    }
+    assert_single_malformed_disposition(&session, "session_reset");
+}
+
 /// RFC 7606 §7.7: a malformed AGGREGATOR is attribute-discard — the UPDATE
 /// (and its announcements) proceed without the attribute, and the session
 /// stays Established.
