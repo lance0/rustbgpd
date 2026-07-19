@@ -61,8 +61,8 @@ Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` /
 `Get` / `Subscribe`, RFC 7951 JSON over mTLS) plus a transaction-backed
 `Set` subset for static numbered-neighbor config, BMP export to
 collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a
-Birdwatcher-shaped status/peer/accepted-route REST subset via the
-external `examples/birdwatcher-adapter`, structured JSON logging, and
+Birdwatcher-shaped status/peer/accepted/filtered/noexport REST subset
+via the external `examples/birdwatcher-adapter`, structured JSON logging, and
 per-peer counters. The explain surfaces have their own catalog:
 [explain.md](explain.md). gNMI operator guide: [GNMI.md](GNMI.md);
 Grafana dashboard: [GRAFANA.md](GRAFANA.md).

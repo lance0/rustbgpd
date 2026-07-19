@@ -1870,17 +1870,20 @@ loser would survive the equal-cost multipath cut.
 
 ### Looking glass (Birdwatcher-shaped REST subset)
 
-For status, peer, accepted-route, and filtered-route views in external
-looking glass frontends, run the external `examples/birdwatcher-adapter`
-binary. It serves the Birdwatcher-shaped endpoints (`/status`,
-`/protocols/bgp` with real per-neighbor filtered counts,
-`/routes/protocol/{id}`, `/routes/peer/{peer}`, `/routes/filtered/{id}`)
-from the daemon's gRPC API. The filtered view surfaces the
-`PolicyService.ListRejectedRoutes` reject-retention store with a
-synthesized reject-reason large community per route (mapping table and
-Alice-LG rejection config in the adapter's README). Alice-LG's noexport
-view is not exposed (no NO_EXPORT-excluded route set is retained). The
-in-daemon `[global.telemetry.looking_glass]` server has been removed.
+For status, peer, accepted-route, filtered-route, and noexport views in
+external looking glass frontends, run the external
+`examples/birdwatcher-adapter` binary. It serves the Birdwatcher-shaped
+endpoints (`/status`, `/protocols/bgp` with real per-neighbor filtered
+counts, `/routes/protocol/{id}`, `/routes/peer/{peer}`,
+`/routes/filtered/{id}`, `/routes/noexport/{id}`) from the daemon's gRPC
+API. The filtered view surfaces the `PolicyService.ListRejectedRoutes`
+reject-retention store with a synthesized reject-reason large community
+per route; the noexport view diffs Loc-RIB best against the peer's
+Adj-RIB-Out and names each suppression's export gate via
+`RibService.ExplainAdvertisedRoute`, with its own synthesized
+noexport-reason community (mapping tables and Alice-LG config in the
+adapter's README). The in-daemon `[global.telemetry.looking_glass]`
+server has been removed.
 
 ### EVPN Route Reflector + Bidirectional VTEP
 

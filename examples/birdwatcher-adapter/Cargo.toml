@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Birdwatcher-shaped status, peer, and accepted-route REST adapter for rustbgpd, backed by the daemon gRPC API."
+description = "Birdwatcher-shaped status, peer, accepted-route, filtered-route, and noexport REST adapter for rustbgpd, backed by the daemon gRPC API."
 
 [[bin]]
 name = "birdwatcher-adapter"

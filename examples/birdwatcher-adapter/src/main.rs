@@ -1,11 +1,11 @@
 //! Birdwatcher-shaped REST looking glass adapter for rustbgpd.
 //!
-//! Standalone HTTP server that serves the status, peer, accepted-route, and
-//! filtered-route subset consumed by Alice-LG and similar looking glass
-//! frontends, sourcing all data from a running rustbgpd over gRPC. This
-//! replaces the removed in-daemon `[global.telemetry.looking_glass]` server's
-//! four endpoints and adds the filtered view on top. It is not a complete
-//! Alice-LG backend: noexport views are not wired up.
+//! Standalone HTTP server that serves the status, peer, accepted-route,
+//! filtered-route, and noexport subset consumed by Alice-LG and similar
+//! looking glass frontends, sourcing all data from a running rustbgpd over
+//! gRPC. This replaces the removed in-daemon
+//! `[global.telemetry.looking_glass]` server's four endpoints and adds the
+//! filtered and noexport views on top.
 //!
 //! **Supported endpoints** (single-table mode):
 //! - `GET /status` — daemon status
@@ -15,11 +15,22 @@
 //! - `GET /routes/filtered/{id}` — rejected routes retained by the peer's
 //!   session (`PolicyService.ListRejectedRoutes`), tagged with a synthesized
 //!   reject-reason large community (see the README mapping table)
+//! - `GET /routes/noexport/{id}` — Loc-RIB best routes NOT advertised to the
+//!   peer (`ListBestRoutes` minus `ListAdvertisedRoutes`), each explained by
+//!   the live export gate ladder (`RibService.ExplainAdvertisedRoute`) and
+//!   tagged with a synthesized noexport-reason large community
+//!
+//! Coverage is honest, not complete: routes are IPv4/IPv6 unicast only
+//! (no VPN/EVPN views), the noexport view is prefix-granular and covers
+//! every export-ladder suppression (split horizon, RR reflection, family,
+//! LLGR, ORF, RT membership, export policy) — not only NO_EXPORT-community
+//! routes — and multi-table endpoints beyond `/routes/peer` are absent.
 //!
 //! Response shapes use Birdwatcher field names so Alice-LG can parse this
 //! subset without adapter code. Fields that have no rustbgpd equivalent are
 //! present but empty/zero.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 use axum::extract::{Path, State};
@@ -34,7 +45,7 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[command(
     name = "birdwatcher-adapter",
-    about = "Birdwatcher-shaped status, peer, accepted-route, and filtered-route REST subset, served from rustbgpd's gRPC API"
+    about = "Birdwatcher-shaped status, peer, accepted-route, filtered-route, and noexport REST subset, served from rustbgpd's gRPC API"
 )]
 struct Args {
     /// rustbgpd gRPC endpoint, e.g. `http://127.0.0.1:50051`.
@@ -81,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/peer/{peer}", get(routes_peer))
         .route("/routes/filtered/{id}", get(routes_filtered))
+        .route("/routes/noexport/{id}", get(routes_noexport))
         .with_state(state);
 
     info!(addr = %args.listen, "starting Birdwatcher-shaped looking glass subset");
@@ -421,6 +433,189 @@ fn rejected_route_to_birdwatcher(route: &proto::RejectedRoute, peer: IpAddr) -> 
 }
 
 // ---------------------------------------------------------------------------
+// GET /routes/noexport/{id}  — Alice-LG not-exported view
+//   →  RibService.ListBestRoutes − RibService.ListAdvertisedRoutes,
+//      each missing prefix explained by RibService.ExplainAdvertisedRoute
+// ---------------------------------------------------------------------------
+
+async fn routes_noexport(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    // Accepts both the "bgp_<addr>" protocol id and a bare peer IP.
+    let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
+    let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut rib = proto::rib_service_client::RibServiceClient::new(state.channel.clone());
+
+    // Adj-RIB-Out prefix set. Prefix-granular on purpose: any advertised
+    // path for a prefix means the prefix is exported (an Add-Path peer's
+    // partially-suppressed extra paths are not reported as noexport).
+    let mut advertised: HashSet<(String, u32)> = HashSet::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = rib
+            .list_advertised_routes(proto::ListRoutesRequest {
+                neighbor_address: peer_addr.to_string(),
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                page_size: 1000,
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| bad_gateway("ListAdvertisedRoutes", &e))?
+            .into_inner();
+        advertised.extend(
+            resp.routes
+                .iter()
+                .map(|r| (r.prefix.clone(), r.prefix_length)),
+        );
+        if resp.next_page_token.is_empty() {
+            break;
+        }
+        page_token = resp.next_page_token;
+    }
+
+    // Loc-RIB best — the export candidate set (single-best send mode;
+    // only best routes are export candidates).
+    let mut best: Vec<proto::Route> = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = rib
+            .list_best_routes(proto::ListRoutesRequest {
+                afi_safi: proto::AddressFamily::Unspecified as i32,
+                page_size: 1000,
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| bad_gateway("ListBestRoutes", &e))?
+            .into_inner();
+        best.extend(resp.routes);
+        if resp.next_page_token.is_empty() {
+            break;
+        }
+        page_token = resp.next_page_token;
+    }
+
+    // One explain per suppressed prefix — a dry run of the same staging
+    // body the live export path executes, so the reason cannot drift
+    // from the real decision. O(suppressed prefixes) RPCs; pair with
+    // Alice-LG's `[noexport] load_on_demand` (its own default) so this
+    // is only computed when an operator opens the view.
+    let mut routes: Vec<Value> = Vec::new();
+    for route in noexport_candidates(&best, &advertised) {
+        let explain = match rib
+            .explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
+                peer_address: peer_addr.to_string(),
+                prefix: route.prefix.clone(),
+                prefix_length: route.prefix_length,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            // Peer not registered for outbound updates (no live
+            // session): nothing is being exported *or* withheld — an
+            // empty noexport view, same posture as the filtered view.
+            Err(s) if s.code() == tonic::Code::NotFound => {
+                info!(
+                    peer = %peer_addr,
+                    "peer has no outbound export state; serving empty noexport view"
+                );
+                return Ok(Json(serde_json::json!({
+                    "api": api_block(),
+                    "routes": [],
+                })));
+            }
+            Err(e) => return Err(bad_gateway("ExplainAdvertisedRoute", &e)),
+        };
+        if let Some(v) = noexport_route_to_birdwatcher(route, &explain) {
+            routes.push(v);
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "api": api_block(),
+        "routes": routes,
+    })))
+}
+
+/// Loc-RIB best routes whose prefix is absent from the peer's advertised
+/// set — the not-exported candidates, deduped per prefix (multipath /
+/// Add-Path can put several best paths on one prefix).
+fn noexport_candidates<'a>(
+    best: &'a [proto::Route],
+    advertised: &HashSet<(String, u32)>,
+) -> Vec<&'a proto::Route> {
+    let mut seen: HashSet<(&str, u32)> = HashSet::new();
+    best.iter()
+        .filter(|r| !advertised.contains(&(r.prefix.clone(), r.prefix_length)))
+        .filter(|r| seen.insert((r.prefix.as_str(), r.prefix_length)))
+        .collect()
+}
+
+/// Synthesized noexport-reason large community, `64496:65521:<gate id>`.
+///
+/// Same edge-synthesis convention as `reject_reason_community`: global
+/// administrator `64496` (RFC 5398 documentation ASN, collision-free with
+/// wire communities), function `65521` (adjacent to the reject-reason
+/// function `65520`, distinct so Alice-LG's `[rejection]` and `[noexport]`
+/// matchers never overlap), and a stable id per export gate that stopped
+/// the route (`0` = gate not recognized by this adapter build). Gate names
+/// are the daemon's stable export-ladder vocabulary; ids are append-only.
+fn noexport_reason_community(gate: &str) -> [u64; 3] {
+    let id = match gate {
+        "split_horizon" => 1,
+        "rr_reflection" => 2,
+        "family" => 3,
+        "llgr" => 4,
+        "orf" => 5,
+        "rt_membership" => 6,
+        "export_policy" => 7,
+        _ => 0,
+    };
+    [64496, 65521, id]
+}
+
+/// Convert a suppressed best route plus its export explain to the
+/// birdwatcher route JSON shape.
+///
+/// Same shape as `route_to_birdwatcher` (the route carries its full
+/// Loc-RIB attributes), with the suppression surfaced twice: as the
+/// synthesized noexport-reason large community (what Alice-LG matches)
+/// and as human-readable `noexport_reason` / `noexport_reason_detail`
+/// extra keys (the stopping gate name and its detail line, ignored by
+/// parsers that don't know them).
+///
+/// Returns `None` when the explain does not actually deny the route —
+/// an advertisement the snapshot diff raced (the daemon decided
+/// ADVERTISE between the two listings). Serving that as "not exported"
+/// would be a fabrication; it disappears from the view instead.
+fn noexport_route_to_birdwatcher(
+    route: &proto::Route,
+    explain: &proto::ExplainAdvertisedRouteResponse,
+) -> Option<Value> {
+    if explain.decision != proto::ExplainDecision::Deny as i32 {
+        return None;
+    }
+    let stop = explain
+        .gates
+        .iter()
+        .find(|g| g.verdict == proto::ExportGateVerdict::Stop as i32);
+    let (gate, detail) = stop.map_or(("", ""), |g| (g.gate.as_str(), g.detail.as_str()));
+
+    let mut json = route_to_birdwatcher(route);
+    json["noexport_reason"] = Value::from(gate);
+    json["noexport_reason_detail"] = Value::from(detail);
+    json["bgp"]["large_communities"]
+        .as_array_mut()
+        .expect("route_to_birdwatcher always renders bgp.large_communities")
+        .push(serde_json::json!(noexport_reason_community(gate)));
+    Some(json)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -715,6 +910,142 @@ mod tests {
             let body = filtered_routes_body(&resp, peer);
             assert!(body["api"].is_object(), "{body}");
             assert_eq!(body["routes"], serde_json::json!([]), "{body}");
+        }
+    }
+
+    /// The set diff behind the noexport view: a route suppressed for the
+    /// peer appears, an exported route does not, duplicate best paths
+    /// for one prefix render once, and an empty Loc-RIB yields an empty
+    /// view. This is the mutation-proof core — flipping the membership
+    /// test either way fails it.
+    #[test]
+    fn noexport_candidates_keep_suppressed_and_exclude_exported() {
+        let mk = |prefix: &str, len: u32, path_id: u32| proto::Route {
+            prefix: prefix.to_string(),
+            prefix_length: len,
+            path_id,
+            ..Default::default()
+        };
+        let best = vec![
+            mk("10.1.0.0", 24, 0), // suppressed
+            mk("10.2.0.0", 24, 0), // exported
+            mk("10.1.0.0", 24, 1), // second best path, same prefix
+        ];
+        let advertised: HashSet<(String, u32)> = [("10.2.0.0".to_string(), 24)].into();
+
+        let candidates = noexport_candidates(&best, &advertised);
+        let networks: Vec<(&str, u32)> = candidates
+            .iter()
+            .map(|r| (r.prefix.as_str(), r.prefix_length))
+            .collect();
+        assert_eq!(
+            networks,
+            vec![("10.1.0.0", 24)],
+            "suppressed once, exported absent"
+        );
+
+        assert!(
+            noexport_candidates(&[], &advertised).is_empty(),
+            "empty Loc-RIB yields an empty noexport view"
+        );
+    }
+
+    /// Every export-ladder gate maps to its pinned triplet, and an
+    /// unknown (future) gate degrades to the generic id 0. Like the
+    /// reject-reason ids, these are part of the documented Alice-LG
+    /// contract — append-only.
+    #[test]
+    fn noexport_reason_community_mapping_is_stable() {
+        for (gate, id) in [
+            ("split_horizon", 1),
+            ("rr_reflection", 2),
+            ("family", 3),
+            ("llgr", 4),
+            ("orf", 5),
+            ("rt_membership", 6),
+            ("export_policy", 7),
+            ("some_future_gate", 0),
+        ] {
+            assert_eq!(
+                noexport_reason_community(gate),
+                [64496, 65521, id],
+                "gate {gate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn noexport_route_conversion_matches_birdwatcher_shape() {
+        let route = proto::Route {
+            prefix: "10.1.0.0".to_string(),
+            prefix_length: 24,
+            next_hop: "192.0.2.9".to_string(),
+            peer_address: "192.0.2.9".to_string(),
+            as_path: vec![65010],
+            local_pref: 100,
+            large_communities: vec!["65001:1:2".to_string()],
+            ..Default::default()
+        };
+        let explain = proto::ExplainAdvertisedRouteResponse {
+            decision: proto::ExplainDecision::Deny as i32,
+            gates: vec![
+                proto::ExportGateStep {
+                    gate: "best_route".to_string(),
+                    code: "learned".to_string(),
+                    verdict: proto::ExportGateVerdict::Pass as i32,
+                    detail: "Loc-RIB best".to_string(),
+                },
+                proto::ExportGateStep {
+                    gate: "export_policy".to_string(),
+                    code: "policy_denied".to_string(),
+                    verdict: proto::ExportGateVerdict::Stop as i32,
+                    detail: "denied by term no-transit".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let json =
+            noexport_route_to_birdwatcher(&route, &explain).expect("denied route must render");
+        // Base birdwatcher route shape is preserved…
+        assert_eq!(json["network"], "10.1.0.0/24");
+        assert_eq!(json["gateway"], "192.0.2.9");
+        assert_eq!(json["learnt_from"], "192.0.2.9");
+        assert_eq!(json["bgp"]["as_path"], serde_json::json!([65010]));
+        assert_eq!(json["bgp"]["local_pref"], 100);
+        // …the stopping gate is surfaced as the reason…
+        assert_eq!(json["noexport_reason"], "export_policy");
+        assert_eq!(json["noexport_reason_detail"], "denied by term no-transit");
+        // …and the synthesized triplet rides last after wire communities.
+        assert_eq!(
+            json["bgp"]["large_communities"],
+            serde_json::json!([[65001, 1, 2], [64496, 65521, 7]])
+        );
+    }
+
+    /// An explain that does not deny (the snapshot diff raced an
+    /// in-flight advertisement) renders nothing — the view never
+    /// fabricates a "not exported" claim.
+    #[test]
+    fn noexport_route_conversion_skips_non_denied() {
+        let route = proto::Route {
+            prefix: "10.1.0.0".to_string(),
+            prefix_length: 24,
+            ..Default::default()
+        };
+        for decision in [
+            proto::ExplainDecision::Advertise,
+            proto::ExplainDecision::Unspecified,
+            proto::ExplainDecision::NoBestRoute,
+        ] {
+            let explain = proto::ExplainAdvertisedRouteResponse {
+                decision: decision as i32,
+                ..Default::default()
+            };
+            assert!(
+                noexport_route_to_birdwatcher(&route, &explain).is_none(),
+                "decision {decision:?} must not render as noexport"
+            );
         }
     }
 

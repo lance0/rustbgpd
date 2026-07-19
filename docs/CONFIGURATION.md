@@ -390,8 +390,9 @@ accepted-route endpoints (`/status`, `/protocols/bgp`,
 `/routes/protocol/{id}`, `/routes/peer/{peer}`) now live in the maintained
 external `examples/birdwatcher-adapter`, which also serves a filtered-route
 view (`/routes/filtered/{id}`, from `PolicyService.ListRejectedRoutes` with
-structured reject reasons). This is not yet a complete Alice-LG backend:
-noexport views are absent. A
+structured reject reasons) and a noexport view (`/routes/noexport/{id}`,
+best-routes-minus-advertised with each suppression explained by
+`RibService.ExplainAdvertisedRoute`). A
 config that still sets `[global.telemetry.looking_glass]` fails to load with a
 migration error. See the adapter README for the endpoint→gRPC mapping.
 

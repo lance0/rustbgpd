@@ -141,13 +141,16 @@ $ ls /var/lib/rustbgpd/mrt/
 feed.20260703.120001.123456789.mrt.gz
 ```
 
-**Looking glass (optional):** for status, peer, accepted-route, and
-filtered-route views in an Alice-LG-style frontend, run the
+**Looking glass (optional):** for status, peer, accepted-route,
+filtered-route, and noexport views in an Alice-LG-style frontend, run the
 [`examples/birdwatcher-adapter/`](../../examples/birdwatcher-adapter/)
 against a gRPC TCP listener. (The in-daemon
 `[global.telemetry.looking_glass]` server has been removed.) The filtered
 view is served from `PolicyService.ListRejectedRoutes` with structured
-reject reasons; noexport views are not yet supplied.
+reject reasons; the noexport view diffs the Loc-RIB best set against the
+peer's Adj-RIB-Out and names each suppression's export gate via
+`RibService.ExplainAdvertisedRoute` — see the adapter README for exactly
+what each view contains.
 
 ## Watch
 

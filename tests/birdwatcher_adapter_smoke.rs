@@ -17,6 +17,13 @@
 //! `/routes/filtered/{id}` view (reason token + synthesized reason
 //! community) and the real `routes.filtered` neighbor-summary count
 //! end-to-end.
+//!
+//! A third neighbor (127.0.0.2, announce-nothing receiver) exercises the
+//! `/routes/noexport/{id}` view from both sides: the accepted route is
+//! exported to the receiver (so its noexport view is empty) while split
+//! horizon suppresses it toward its announcer (so it appears in the
+//! announcer's noexport view with the gate name and the synthesized
+//! noexport-reason community).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -161,6 +168,11 @@ description = "smoke peer"
 address = "127.0.0.1"
 remote_asn = 65020
 description = "live peer"
+
+[[neighbors]]
+address = "127.0.0.2"
+remote_asn = 65030
+description = "receiver peer"
 "#,
         runtime_dir = runtime_dir.display()
     );
@@ -224,6 +236,49 @@ fn establish_bgp_and_announce(bgp_port: u16) -> TcpStream {
     stream
 }
 
+/// Second minimal speaker: complete the handshake as AS 65030 from
+/// source address 127.0.0.2 (the daemon maps sessions to configured
+/// neighbors by source IP) and announce nothing — a pure receiver, so
+/// the daemon's export path advertises the accepted route to it. The
+/// std TcpStream API cannot bind a source address; borrow tokio's
+/// TcpSocket for the connect and hand back a blocking std stream.
+fn establish_bgp_receiver(bgp_port: u16) -> TcpStream {
+    use rustbgpd_wire::message::{Message, encode_message};
+    use rustbgpd_wire::open::OpenMessage;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("build tokio runtime");
+    let stream = rt
+        .block_on(async {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            socket.bind("127.0.0.2:0".parse().unwrap())?;
+            socket
+                .connect(format!("127.0.0.1:{bgp_port}").parse().unwrap())
+                .await?
+                .into_std()
+        })
+        .expect("connect to BGP port from 127.0.0.2");
+    stream
+        .set_nonblocking(false)
+        .expect("blocking receiver stream");
+
+    let open = Message::Open(OpenMessage {
+        version: 4,
+        my_as: 65030,
+        hold_time: 90,
+        bgp_identifier: "10.0.0.3".parse().unwrap(),
+        capabilities: Vec::new(),
+    });
+    let mut stream = stream;
+    for msg in [&open, &Message::Keepalive] {
+        let encoded = encode_message(msg).expect("encode BGP message");
+        stream.write_all(&encoded).expect("write BGP message");
+    }
+    stream
+}
+
 /// Inverse of the servers' `format_epoch_secs` (`"YYYY-MM-DD HH:MM:SS"`
 /// → Unix epoch seconds) so two `age` renderings can be compared with
 /// clock-recovery jitter tolerance. Howard Hinnant's `days_from_civil`.
@@ -246,7 +301,7 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 }
 
 #[test]
-fn adapter_serves_birdwatcher_shaped_status_peer_accepted_and_filtered_route_subset() {
+fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let grpc_port = free_port();
     let adapter_port = free_port();
@@ -399,4 +454,61 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_and_filtered_route_sub
     // the filtered view is empty, not an error.
     let down = get_json(adapter_port, "/routes/filtered/bgp_192.0.2.10", "adapter");
     assert_eq!(down["routes"], serde_json::json!([]), "{down}");
+
+    // /routes/noexport/{id} — the accepted route is Loc-RIB best, but
+    // split horizon suppresses it toward its own announcer: the
+    // announcer's noexport view must serve it with the stopping gate
+    // name and the synthesized noexport-reason community.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let noexport = loop {
+        let noexport = get_json(adapter_port, "/routes/noexport/bgp_127.0.0.1", "adapter");
+        if noexport["routes"].as_array().is_some_and(|r| r.len() == 1) {
+            break noexport;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "suppressed route did not appear on the noexport view\nadapter: {noexport}\ndaemon stderr:\n{}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(200));
+    };
+    let suppressed = &noexport["routes"][0];
+    assert_eq!(suppressed["network"], "10.99.0.0/24", "{noexport}");
+    assert_eq!(suppressed["noexport_reason"], "split_horizon", "{noexport}");
+    assert!(
+        suppressed["bgp"]["large_communities"]
+            .as_array()
+            .is_some_and(|lcs| lcs.contains(&serde_json::json!([64496, 65521, 1]))),
+        "noexport route must carry the synthesized split_horizon community: {noexport}"
+    );
+
+    // Bring up the announce-nothing receiver peer: the daemon exports
+    // the accepted route to it. Once the export shows on the neighbor
+    // summary, the exported route must NOT appear in the receiver's
+    // noexport view (mutation proof: exported ≠ noexport).
+    let _receiver_session = establish_bgp_receiver(bgp_port);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
+        let exported = &protocols["protocols"]["bgp_127.0.0.2"]["routes"]["exported"];
+        let receiver_noexport = get_json(adapter_port, "/routes/noexport/bgp_127.0.0.2", "adapter");
+        if exported == 1 && receiver_noexport["routes"] == serde_json::json!([]) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exported route must leave the receiver's noexport view\nprotocols: {protocols}\nnoexport: {receiver_noexport}\ndaemon stderr:\n{}",
+            daemon.stderr()
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    // A configured peer with no live session has no outbound export
+    // state — the noexport view is empty, not an error.
+    let down_noexport = get_json(adapter_port, "/routes/noexport/bgp_192.0.2.10", "adapter");
+    assert_eq!(
+        down_noexport["routes"],
+        serde_json::json!([]),
+        "{down_noexport}"
+    );
 }

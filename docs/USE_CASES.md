@@ -409,9 +409,10 @@ IX peer C  ──┘
 - **Birdwatcher-shaped REST subset** — the external
   [`examples/birdwatcher-adapter`](../examples/birdwatcher-adapter/) serves
   accepted-route, filtered-route (with reject-reason communities synthesized
-  from `PolicyService.ListRejectedRoutes` structured reasons), peer (with
-  real filtered counts), and status views from the gRPC API; only the
-  noexport view remains before it is a complete Alice-LG backend
+  from `PolicyService.ListRejectedRoutes` structured reasons), noexport
+  (best-routes-minus-advertised, each suppression explained by the live
+  export ladder), peer (with real filtered counts), and status views from
+  the gRPC API
 - **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 
