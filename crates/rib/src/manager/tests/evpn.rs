@@ -1,5 +1,53 @@
 use super::*;
 
+fn with_evpn_community(mut route: EvpnRibRoute, community: u32) -> EvpnRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![community]));
+    route
+}
+
+fn evpn_no_advertise_policy(
+    matched_community: u32,
+    add: bool,
+    remove: bool,
+) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![rustbgpd_policy::CommunityMatch::Standard {
+                value: matched_community,
+            }],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications {
+                communities_add: add
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                communities_remove: remove
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE)
+                    .into_iter()
+                    .collect(),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
 /// Regression: EVPN routes learned from a peer that goes down must be
 /// withdrawn from remaining peers. Before this fix, `handle_peer_down` removed
 /// the dead peer's Adj-RIB-In but never called `recompute_and_distribute_evpn`,
@@ -1199,6 +1247,309 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     let best = query_evpn_routes(&tx).await;
     assert_eq!(best.len(), 1, "refreshed EVPN route must survive EoRR");
     assert_eq!(best[0].key(), imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Source `NO_ADVERTISE` is enforced before export policy, withdraws only the
+/// exact prior EVPN key, and recovers without disturbing a sibling route.
+///
+/// Break-to-red: deleting the pre-policy guard lets the targeted removal policy
+/// export the first-seen scoped route; removing the existing-state membership
+/// check emits a withdrawal for that unknown route; omitting or broadening the
+/// withdrawal fails the exact-key and sibling assertions; sticky suppression
+/// prevents the recovery announcement.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered actor scenario proves source precedence, silence, exact withdrawal, and recovery"
+)]
+async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = Ipv4Addr::new(198, 51, 100, 11);
+    let source_ip = IpAddr::V4(source);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(evpn_no_advertise_policy(
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+            false,
+            true,
+        )),
+        sendable_families: evpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let first_seen = with_evpn_community(
+        make_evpn_imet(source, 99),
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+    );
+    for attempt in 0..2 {
+        let mut scoped = first_seen.clone();
+        if attempt > 0 {
+            Arc::make_mut(&mut scoped.attributes).push(PathAttribute::Med(attempt));
+        }
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: source_ip,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![scoped],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = query_evpn_routes(&tx).await;
+        assert!(
+            out_rx.try_recv().is_err(),
+            "first-seen and repeated source-scoped EVPN routes stay silent"
+        );
+    }
+
+    let primary = make_evpn_imet(source, 100);
+    let sibling = make_evpn_imet(source, 200);
+    let primary_key = primary.key();
+    let sibling_key = sibling.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![primary.clone(), sibling],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let initial = out_rx.try_recv().expect("plain EVPN routes must advertise");
+    assert_eq!(initial.evpn_announce.len(), 2);
+    assert!(
+        initial
+            .evpn_announce
+            .iter()
+            .any(|route| route.key() == primary_key)
+    );
+    assert!(
+        initial
+            .evpn_announce
+            .iter()
+            .any(|route| route.key() == sibling_key)
+    );
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![with_evpn_community(
+            primary.clone(),
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        )],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let scoped = out_rx
+        .try_recv()
+        .expect("source NO_ADVERTISE must withdraw the prior EVPN route");
+    assert!(scoped.evpn_announce.is_empty());
+    assert_eq!(scoped.evpn_withdraw, vec![primary_key]);
+
+    let recovered_primary = with_evpn_community(primary, (65000u32 << 16) | 0x01BD);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![recovered_primary],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let recovered = out_rx
+        .try_recv()
+        .expect("removing source NO_ADVERTISE must re-announce EVPN");
+    assert_eq!(recovered.evpn_announce.len(), 1);
+    assert_eq!(recovered.evpn_announce[0].key(), primary_key);
+    assert!(recovered.evpn_withdraw.is_empty());
+    assert!(
+        out_rx.try_recv().is_err(),
+        "sibling EVPN route must not churn"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Policy-added `NO_ADVERTISE` suppresses first-seen EVPN routes, withdraws
+/// only an exact prior advertisement, and recovers when policy scope is removed.
+///
+/// Break-to-red: deleting the post-policy guard announces the scoped route;
+/// removing the existing-state membership check emits a first-seen withdrawal;
+/// omitting or broadening the withdrawal fails the exact-key and sibling
+/// assertions; sticky suppression prevents either recovery announcement.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered actor scenario proves policy-added suppression, silence, exact withdrawal, and recovery"
+)]
+async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
+    let marker = (65000u32 << 16) | 0x01BC;
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = Ipv4Addr::new(198, 51, 100, 12);
+    let source_ip = IpAddr::V4(source);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 32));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(evpn_no_advertise_policy(marker, true, false)),
+        sendable_families: evpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let primary = with_evpn_community(make_evpn_imet(source, 300), marker);
+    let sibling = make_evpn_imet(source, 400);
+    let primary_key = primary.key();
+    let sibling_key = sibling.key();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![primary.clone(), sibling],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let first_seen = out_rx
+        .try_recv()
+        .expect("unscoped EVPN sibling must advertise");
+    assert_eq!(first_seen.evpn_announce.len(), 1);
+    assert_eq!(first_seen.evpn_announce[0].key(), sibling_key);
+    assert!(first_seen.evpn_withdraw.is_empty());
+
+    let mut repeated = primary.clone();
+    Arc::make_mut(&mut repeated.attributes).push(PathAttribute::Med(50));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source_ip,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![repeated],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "repeated policy-scoped EVPN route stays silent"
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(evpn_no_advertise_policy(marker, false, false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let recovered = out_rx
+        .try_recv()
+        .expect("removing policy-added NO_ADVERTISE must announce EVPN");
+    assert_eq!(recovered.evpn_announce.len(), 1);
+    assert_eq!(recovered.evpn_announce[0].key(), primary_key);
+    assert!(recovered.evpn_withdraw.is_empty());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(evpn_no_advertise_policy(marker, true, false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let scoped = out_rx
+        .try_recv()
+        .expect("policy-added NO_ADVERTISE must withdraw prior EVPN");
+    assert!(scoped.evpn_announce.is_empty());
+    assert_eq!(scoped.evpn_withdraw, vec![primary_key]);
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: Some(evpn_no_advertise_policy(marker, false, false)),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let _ = query_evpn_routes(&tx).await;
+    let recovered_again = out_rx
+        .try_recv()
+        .expect("EVPN must recover after repeated policy scope");
+    assert_eq!(recovered_again.evpn_announce.len(), 1);
+    assert_eq!(recovered_again.evpn_announce[0].key(), primary_key);
+    assert!(recovered_again.evpn_withdraw.is_empty());
+    assert!(
+        out_rx.try_recv().is_err(),
+        "sibling EVPN route must not churn"
+    );
 
     drop(tx);
     handle.await.unwrap();
