@@ -11,9 +11,9 @@ before carrying production traffic.
 ## The mechanical first step
 
 ```bash
-# 1. Translate the structure; the report lists every stanza that was NOT
-#    translated, with source line numbers (exit 0 only when nothing was
-#    skipped; 2 = translated with skips; 3 = nothing translatable).
+# 1. Translate the structure; the report lists every warning and stanza that
+#    needs review, with source line numbers where available (exit 0 only
+#    when neither exists; 2 = translated but needs review; 3 = nothing).
 rbgp config import bird.conf --out config.toml
 
 # 2. Hand-translate the reported policy stanzas to .rpol

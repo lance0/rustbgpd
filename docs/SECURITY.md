@@ -304,6 +304,17 @@ Use a separate `runtime_state_dir` for every concurrently running daemon.
 The directory is single-writer state for the marker, checkpoint, FIB receipt,
 and Unix socket; owner-only permissions do not make cross-process sharing safe.
 
+## Applied-config history confidentiality
+
+`<runtime_state_dir>/config-history/*.toml` and a pending
+`commit-confirm-journal.json` contain complete configuration snapshots. That
+can include TCP-MD5 passwords, TCP-AO keys, API credentials, and other secrets;
+the redacted `rbgp config history` summary does not make the files themselves
+safe to publish. Snapshot files are created owner-only (`0600`), and history
+reads verify their filename SHA-256 before they are eligible for rollback.
+Keep `runtime_state_dir` on owner-controlled local storage and protect backups
+as secret-bearing configuration, not as ordinary operational telemetry.
+
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
 Running rustbgpd in **EVPN VTEP mode** on Linux (a non-empty

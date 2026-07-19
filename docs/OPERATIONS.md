@@ -187,10 +187,10 @@ For operators coming from Junos, the four verbs map directly:
 
 The daemon retains a bounded on-disk history of applied configs (the last 20
 distinct documents, content-hash-deduplicated, timestamped) under
-`<runtime_state_dir>/config-history/`. Every durable config write records an
-entry — transaction applies, gRPC neighbor/FIB/policy CRUD, and the config
-running at daemon startup — so the history survives restarts and "put back
-what was running yesterday" is one command:
+`<runtime_state_dir>/config-history/`. Transaction applies, gRPC
+neighbor/FIB/policy CRUD, successful SIGHUP reloads, and the config running at
+daemon startup all record an entry, so the history survives restarts and "put
+back what was running yesterday" is one command:
 
 ```bash
 # What has been applied? Newest first; index 0 is the running config.
@@ -207,7 +207,8 @@ rbgp config confirm undo-1
 
 `config history` lists index, timestamp, content hash, and a one-line summary
 per entry — never config document contents. `config rollback N` resolves
-entry N server-side and routes it through the **same transaction path as
+entry N server-side, verifies that its bytes match the SHA-256 in its file
+name, and routes it through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, the same receipts, and the same
 `--confirm-id`/`--confirm-timeout` confirmed-commit window (journal, timeout

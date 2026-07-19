@@ -619,6 +619,8 @@ processes is unsupported even when their configuration files differ.
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
 | `warm-bundle-v1/` | Optional owner-private shutdown checkpoint (`manifest.json` plus a content-addressed MRT artifact). Published only when `warm_cache_checkpoint_on_shutdown = true`; not restored on startup. | Yes |
+| `commit-confirm-journal.json` | Owner-private pre-transaction config snapshot for crash-safe confirmed commits; consumed by confirm/abort/timeout or boot revert. | Until the transaction is terminal |
+| `config-history/*.toml` | Last 20 distinct applied configs for `rbgp config history` / `rollback N`; owner-private and secret-bearing. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 

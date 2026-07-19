@@ -706,9 +706,9 @@ impl ConfigTransactionController {
         for entry in &entries {
             // Summaries come from the entry contents; a per-entry read
             // failure degrades that one summary instead of failing the list.
-            let summary = crate::config_history::read_entry(dir, entry.index).map_or_else(
+            let summary = crate::config_history::read(entry).map_or_else(
                 |error| format!("(unreadable entry: {error})"),
-                |(_, toml_str)| crate::config_history::summarize(&toml_str),
+                |toml_str| crate::config_history::summarize(&toml_str),
             );
             proto_entries.push(proto::ConfigHistoryEntry {
                 index: u32::try_from(entry.index).unwrap_or(u32::MAX),

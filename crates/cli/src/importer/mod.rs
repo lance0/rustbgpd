@@ -17,13 +17,14 @@
 //!
 //! | code | meaning                                                    |
 //! |------|------------------------------------------------------------|
-//! | 0    | clean full structural translation (nothing skipped)        |
+//! | 0    | clean full structural translation (no warnings or skips)   |
 //! | 1    | error: unreadable source, unrecognized format, parse error |
-//! | 2    | translated with skips (config written; report lists them)  |
+//! | 2    | translated with warnings/skips (config written; review it) |
 //! | 3    | refused: no translatable BGP structure in the source       |
 //!
-//! Anything skipped is non-zero by construction: a silent partial
-//! translation would be worse than no translation.
+//! Anything requiring operator attention is non-zero by construction: a
+//! silent partial or placeholder-bearing translation would be worse than an
+//! explicit review result.
 
 pub mod bird;
 pub mod frr;
@@ -169,7 +170,11 @@ pub struct Report {
 
 impl Report {
     pub fn exit_code(&self) -> i32 {
-        if self.skipped.is_empty() { 0 } else { 2 }
+        if self.skipped.is_empty() && self.warnings.is_empty() {
+            0
+        } else {
+            2
+        }
     }
 
     pub fn render_text(&self) -> String {
@@ -220,7 +225,7 @@ impl Report {
             "\nresult: {} (exit {})",
             match self.exit_code() {
                 0 => "clean full structural translation",
-                _ => "translated with skips",
+                _ => "translated with warnings/skips; review required",
             },
             self.exit_code()
         );

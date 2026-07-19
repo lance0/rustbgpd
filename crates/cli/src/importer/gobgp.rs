@@ -65,7 +65,11 @@ fn as_u32(value: &toml::Value) -> Option<u32> {
     match value {
         toml::Value::Integer(n) => u32::try_from(*n).ok(),
         // gobgp's config dumper writes some integers as floats.
-        toml::Value::Float(f) if f.fract() == 0.0 && *f >= 0.0 => Some(*f as u32),
+        toml::Value::Float(f)
+            if f.is_finite() && f.fract() == 0.0 && *f >= 0.0 && *f <= f64::from(u32::MAX) =>
+        {
+            Some(*f as u32)
+        }
         _ => None,
     }
 }
