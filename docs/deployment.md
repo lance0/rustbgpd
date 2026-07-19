@@ -38,11 +38,12 @@ note.
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and
 `rustbgpd-linux-arm64.tar.gz` under
 [GitHub Releases](https://github.com/lance0/rustbgpd/releases). Each
-ships `rustbgpd` (the daemon) and `rbgp` (the CLI), plus man pages
+ships `rustbgpd` (the daemon), `rbgp` (the CLI), and
+`rs-config-render` (the route-server config renderer), plus man pages
 and shell completions under `share/`:
 
 ```
-rustbgpd, rbgp                          binaries
+rustbgpd, rbgp, rs-config-render        binaries
 LICENSE-MIT, LICENSE-APACHE             licenses
 rustbgpd.schema.json                    config JSON Schema
 share/man/man1/rbgp.1                   CLI man page
