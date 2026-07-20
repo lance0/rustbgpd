@@ -66,7 +66,8 @@ if len(sock.encode()) > 100:
     sys.exit(f"grpc.sock path too long for SUN_LEN ({len(sock)} bytes): {sock}\n"
              f"pass a shorter <out_dir> (e.g. /tmp/rls/full).")
 
-GLOBAL_ASN = 65500  # not in 64512..64512+n_peers, so every neighbor is eBGP
+# RFC 6996 private four-octet ASN, disjoint from every supported stub ASN.
+GLOBAL_ASN = 4200000000
 
 
 def stub_addr(i: int) -> str:
@@ -85,8 +86,8 @@ def stub_asn(i: int) -> int:
 # config's route-server-client neighbors default rs_control_communities on,
 # and standard communities under the RS ASN are RFC 7947 §2.3.2 control
 # forms — scrubbed from the wire toward enabled members, which would blind
-# the harness to its own generation evidence. 65400 is outside the stub
-# ASN range and is not the RS ASN.
+# the harness to its own generation evidence. 65400 may be a stub ASN; it is
+# neither GLOBAL_ASN nor zero, which is the control-community distinction.
 GENERATIONS = [
     ("gen-a.rpol", "192.0.2.0/24", "65400:1000"),
     (

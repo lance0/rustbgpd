@@ -11,6 +11,7 @@ a receipt harness broken on `main`.
 |---|---|---|
 | [`rrharness/`](rrharness/) | RibManager flood/churn CPU + memory profiling (manager task in isolation, folded-stack output) | `docs/perf/rebaseline-2026-07.md`, LAN-348 re-profile |
 | [`reloadstall/`](reloadstall/) | Policy-reload UPDATE-stall at route-server scale (real BGP stub clients vs a running daemon) | `docs/perf/reload-stall-2026-07.md` (LAN-333) |
+| [`route-server-1000/`](route-server-1000/) | Fixed-shape 1,000-peer rustbgpd route-server retained receipt driver | LAN-508 (evidence pending; no claim yet) |
 
 Build (from repo root):
 
