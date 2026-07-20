@@ -7,6 +7,7 @@
 use rustbgpctl::importer::{ImportError, SourceFormat, detect_format, import_source, run_import};
 
 const BIRD: &str = include_str!("fixtures/import/bird.conf");
+const BIRD_INCLUDES: &str = include_str!("fixtures/import/bird-includes.conf");
 const FRR: &str = include_str!("fixtures/import/frr.conf");
 const GOBGP: &str = include_str!("fixtures/import/gobgp.toml");
 
@@ -104,6 +105,48 @@ fn bird_report_lists_skipped_stanzas_with_lines() {
     let imported = import_source(SourceFormat::Bird, "bird.conf", BIRD).expect("translates");
     assert!(!imported.config_toml.contains("example-md5-secret"));
     assert_eq!(report.exit_code, 2);
+}
+
+/// Load-bearing include-boundary proof: removing the pre-context include
+/// intercept changes or loses these diagnostics, including the one inside an
+/// otherwise ignored block. Weakening its operator guidance also changes the
+/// exact tuples.
+#[test]
+fn bird_includes_are_reported_from_every_parser_context() {
+    const GUIDANCE: &str = "BIRD imports are deliberately single-file; flatten all referenced \
+                            files into one source before importing";
+
+    let imported = import_source(SourceFormat::Bird, "bird-includes.conf", BIRD_INCLUDES)
+        .expect("translates the available skeleton");
+    assert_eq!(imported.report.source_path, "bird-includes.conf");
+    let skips = imported
+        .report
+        .skipped
+        .iter()
+        .map(|skip| (skip.line, skip.stanza.as_str(), skip.guidance.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        skips,
+        vec![
+            (Some(1), r#"include "conf.d/*.conf""#, GUIDANCE),
+            (Some(6), r#"include "peer.conf""#, GUIDANCE),
+            (Some(9), r#"include "policy.conf""#, GUIDANCE),
+            (Some(15), r#"include "device.conf""#, GUIDANCE),
+        ]
+    );
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(imported.report.warnings.is_empty());
+    assert_eq!(imported.report.local_asn, 64500);
+    assert_eq!(imported.report.router_id, "192.0.2.10");
+    assert_eq!(imported.report.neighbor_count, 1);
+    assert!(imported.config_toml.contains("address = \"192.0.2.1\""));
+    assert!(imported.config_toml.contains("remote_asn = 64496"));
+    assert!(
+        imported
+            .config_toml
+            .contains("families = [\"ipv4_unicast\"]")
+    );
 }
 
 #[test]

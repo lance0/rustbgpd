@@ -9,6 +9,9 @@
 
 use super::{GENERIC_GUIDANCE, Group, Model, Neighbor, RPOL_GUIDANCE, Skip};
 
+const INCLUDE_GUIDANCE: &str = "BIRD imports are deliberately single-file; flatten all referenced \
+                                 files into one source before importing";
+
 #[derive(Debug)]
 enum Event {
     /// `...;` statement (semicolon stripped).
@@ -188,17 +191,23 @@ pub fn parse(input: &str) -> Model {
                 };
                 stack.push(frame);
             }
-            Event::Stmt { line, text } => match ctx(&stack) {
-                Ctx::Top => top_stmt(&mut model, line, &text),
-                Ctx::Bgp => {
-                    let Some(Frame::Bgp(acc)) = stack.last_mut() else {
-                        unreachable!("ctx said Bgp");
-                    };
-                    bgp_stmt(&mut model, acc, line, &text);
+            Event::Stmt { line, text } => {
+                if text.split_whitespace().next() == Some("include") {
+                    skip(&mut model, line, text, INCLUDE_GUIDANCE);
+                    continue;
                 }
-                Ctx::Channel(ipv6) => channel_stmt(&mut model, &mut stack, ipv6, line, &text),
-                Ctx::Ignore => {}
-            },
+                match ctx(&stack) {
+                    Ctx::Top => top_stmt(&mut model, line, &text),
+                    Ctx::Bgp => {
+                        let Some(Frame::Bgp(acc)) = stack.last_mut() else {
+                            unreachable!("ctx said Bgp");
+                        };
+                        bgp_stmt(&mut model, acc, line, &text);
+                    }
+                    Ctx::Channel(ipv6) => channel_stmt(&mut model, &mut stack, ipv6, line, &text),
+                    Ctx::Ignore => {}
+                }
+            }
             Event::Close => {
                 if let Some(Frame::Bgp(acc)) = stack.pop() {
                     finalize_bgp(&mut model, acc);

@@ -34,6 +34,12 @@ deliberately not translated — a wrong mechanical policy translation would
 be worse than the honest list; the sections below are the hand-translation
 map for exactly those stanzas.
 
+The importer deliberately reads one BIRD source file and does not resolve files
+named by standalone `include` statements. Flatten every referenced file into
+one source before importing. Standalone `include` statements that remain are
+reported with their source line and make the translated skeleton exit 2 for
+operator review.
+
 ## Baseline rustbgpd shape
 
 Start from:
