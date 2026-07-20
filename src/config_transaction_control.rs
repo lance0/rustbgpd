@@ -7785,18 +7785,10 @@ neighbors = [
             .iter()
             .map(|row| row.transport_config.remote_addr.ip())
             .collect::<Vec<_>>();
-        assert_eq!(
-            peers,
-            [
-                "10.0.0.11",
-                "10.0.0.12",
-                "10.0.0.13",
-                "10.0.0.14",
-                "10.0.0.15"
-            ]
-            .map(|peer| peer.parse::<std::net::IpAddr>().unwrap())
-        );
-
+        let expected_peers = (11..=15)
+            .map(|last| std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last)))
+            .collect::<Vec<_>>();
+        assert_eq!(peers, expected_peers);
         let (rib_tx, rib_rx) = mpsc::channel(128);
         let (_query_tx, query_rx) = mpsc::channel(1);
         let rib_task = tokio::spawn(
@@ -7819,7 +7811,7 @@ neighbors = [
         );
 
         let mut session_acks = BTreeMap::new();
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
         for (index, neighbor) in resolved.into_iter().enumerate() {
             let peer = neighbor.transport_config.remote_addr.ip();
             let session_id = u64::try_from(index + 1).unwrap();
@@ -7852,7 +7844,9 @@ neighbors = [
                 .expect("real RIB must accept heterogeneous PeerUp");
         }
         let peer_task = tokio::spawn(peer_manager.run());
-
+        let before = query_real_update_group_snapshot(&rib_tx).await;
+        assert_eq!(before.peers.len(), 5, "all heterogeneous peers are live");
+        while outbound_rx.try_recv().is_ok() {}
         let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new())
             .await
             .expect("heterogeneous plan must succeed");
@@ -7929,6 +7923,7 @@ neighbors = [
         .await
         .expect("heterogeneous apply must succeed");
         ack_task.await.unwrap();
+        while outbound_rx.try_recv().is_ok() {}
 
         let after = query_real_update_group_snapshot(&rib_tx).await;
         let live = after
@@ -7990,6 +7985,11 @@ neighbors = [
 
         drop(peer_tx);
         peer_task.await.unwrap();
+        for (peer, acks) in &session_acks {
+            tokio::time::timeout(std::time::Duration::from_secs(1), acks.wait_for_exit())
+                .await
+                .unwrap_or_else(|_| panic!("Established test session {peer} did not exit"));
+        }
         drop(rib_tx);
         rib_task.await.unwrap();
     }
