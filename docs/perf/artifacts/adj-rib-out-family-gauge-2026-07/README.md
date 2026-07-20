@@ -1,7 +1,7 @@
 # Adj-RIB-Out family-gauge benchmark artifacts
 
 This directory retains the exact unrounded Criterion estimates used by
-`../adj-rib-out-family-gauge-2026-07.md`.
+`../../adj-rib-out-family-gauge-2026-07.md`.
 
 - `primary.csv`: control/target means and 95% confidence bounds, plus
   Criterion's paired mean-change estimate and bounds.
