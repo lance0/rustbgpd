@@ -17,6 +17,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   generation-fenced restart attempt after the hold-down, invalidates stale
   countdowns on config or dynamic-range replacement, and exposes the action,
   configured duration, and remaining milliseconds through gRPC, CLI, and JSON.
+  `rs-config-render` maps ARouteServer's OpenBGPD-style `restart_after` minutes
+  to checked seconds and records the emitted timer in its render receipt.
 
 - **Operator dashboard and alerting cover slow peers and RIB actor latency.**
   The shipped Grafana overview now separates transport endpoints from bare

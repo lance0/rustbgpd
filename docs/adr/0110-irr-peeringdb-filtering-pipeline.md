@@ -176,7 +176,7 @@ lands (ADR-0107 and the community-based announcement-control track).
 | IRR origin-AS enforcement | `route.origin-as` accessor (`==`/`!=`/asn-set `in`, three-valued on absent origin) + indexed `asn-set` | Shipped (#757; the gap claimed in earlier drafts was stale — verified end-to-end with docs and tests) |
 | RPKI ROA validation via RTR (RFC 6811/8097) | `[rpki.cache_servers]`, `route.rpki == valid\|invalid\|not-found`, `OV_*` ext-community tagging | Shipped |
 | RPKI ROAs merged as route objects | generator-side (arouteserver does the merge) | N/A to daemon |
-| Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108). **Partial:** shutdown only; the renderer refuses arouteserver's timed `restart` action until the daemon has a timed hold-down, because operator-latched shutdown is not equivalent |
+| Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108), including ARouteServer's OpenBGPD-style timed `restart` action with checked minute-to-second conversion |
 | NEXT_HOP enforcement, `strict` | pre-policy ownership gate | In flight (ADR-0107 strict pilot) |
 | NEXT_HOP enforcement, `same-as` | fleet inventory mode | **Gap:** explicitly deferred by ADR-0107 until the inventory exists; renderer must reject `next_hop.policy: same-as` until then |
 | Max AS_PATH length | `match_as_path_length_le` / `route.as-path.len` | Shipped |
@@ -200,11 +200,9 @@ lands (ADR-0107 and the community-based announcement-control track).
 | Operator local-customization hooks (`.local` files) | rpol `import` + `rpol_roots` for policy; **TOML has no include** — the renderer owns the whole TOML and must provide merge-in points itself | Design point for the renderer, not a daemon gap |
 
 Summary: after the two in-flight tracks land, every load-bearing axis is
-covered by shipped primitives except four bounded items — origin-AS
-accessor (small language addition), max-prefix restart action (ADR-0108
-deferral), NEXT_HOP same-AS (ADR-0107 deferral, renderer-rejected until
-then), and looking-glass reject-reason retention (separate adoption-track
-item). None blocks a first pilot at OpenBGPD-equivalence level.
+covered by shipped primitives except two bounded items — NEXT_HOP same-AS
+(ADR-0107 deferral, renderer-rejected until then), and looking-glass reject-reason
+retention (separate adoption-track item). Neither blocks a pilot; active ceilings remain accepted-route-only.
 
 ### Delivery plan
 
@@ -241,7 +239,7 @@ item). None blocks a first pilot at OpenBGPD-equivalence level.
    freshness").
 
 **Phase 2 — parity and upstream (after a pilot transcript exists):**
-max-prefix restart-timer action; reject-reason retention wiring for the
+reject-reason retention wiring for the
 looking-glass surface; offer the template package + builder upstream.
 
 **Phase 3 — demand-gated:** bgpq4-JSON→rpol native converter; PeeringDB
@@ -295,5 +293,4 @@ exists.
   arouteserver-target deferral and RTT-community reject
 - [ADR-0107](0107-route-server-next-hop-ownership.md) — NEXT_HOP
   ownership (strict pilot in flight; same-AS deferred)
-- [ADR-0108](0108-per-family-max-prefix-limits.md) — per-family
-  max-prefix (restart action deferred)
+- [ADR-0108](0108-per-family-max-prefix-limits.md) — per-family max-prefix and timed restart

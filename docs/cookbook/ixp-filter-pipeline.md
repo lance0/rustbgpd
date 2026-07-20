@@ -47,24 +47,27 @@ Install and configure arouteserver itself per its
 [documentation][arouteserver] (`arouteserver setup`, then your
 `general.yml` / `clients.yml`).
 
-rustbgpd currently implements ARouteServer's shutdown action with
-post-import-policy prefix accounting. Configure that model explicitly;
-the renderer refuses `restart`, `block`, `warning`, or rejected-route
-counting instead of silently changing their behavior:
+rustbgpd implements ARouteServer's shutdown and OpenBGPD-style timed-restart
+actions with post-import-policy prefix accounting. ARouteServer's BIRD target
+restarts immediately and ignores `restart_after`; this is not BIRD timed parity.
+Configure the model explicitly; the renderer refuses `block`, `warning`, or
+rejected-route counting instead of silently changing their behavior:
 
 ```yaml
 cfg:
   filtering:
     max_prefix:
-      action: shutdown
+      action: restart
+      restart_after: 15 # ARouteServer minutes; rendered as 900 seconds
       count_rejected_routes: false
 ```
 
 An absent effective action disables max-prefix enforcement even when
 ARouteServer leaves resolved limit values in the context; a zero family
-limit is likewise treated as unset. ARouteServer 1.23.2 defaults
-`count_rejected_routes` to `true`, so an active positive shutdown limit must
-set it explicitly to `false` for rustbgpd's accepted-route accounting model.
+limit is likewise treated as unset, and a restart timer is emitted only with a
+positive family limit. ARouteServer 1.23.2 defaults `count_rejected_routes` to
+`true`, so an active positive shutdown or restart limit must set it explicitly
+to `false` for rustbgpd's accepted-route accounting model.
 
 The command's output format is arouteserver's, not ours: 1.23.2 emits
 a *sectioned report* (per-key heading plus a YAML fragment). The

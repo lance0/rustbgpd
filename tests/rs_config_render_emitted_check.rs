@@ -26,6 +26,9 @@ fn untouched_fixture_aborts_on_the_empty_irr_bundle() {
 }
 
 #[test]
+/// Load-bearing proof: dropping the active family ceiling or 37-minute to
+/// 2,220-second conversion breaks the exact assertions; emitting a daemon-
+/// invalid timer breaks the real `rustbgpd --check` invocation.
 fn emitted_config_passes_rustbgpd_check() {
     // Drop the abort-proving client, then render the healthy context.
     let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).expect("fixture parses");
@@ -37,8 +40,24 @@ fn emitted_config_passes_rustbgpd_check() {
         .as_mapping_mut()
         .expect("irrdb_info mapping")
         .remove(serde_yaml::Value::String("AS51325_bundle".to_owned()));
+    value["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
+    value["cfg"]["filtering"]["max_prefix"]["restart_after"] = 37.into();
+    value["cfg"]["filtering"]["max_prefix"]["count_rejected_routes"] = false.into();
     let yaml = serde_yaml::to_string(&value).expect("context serializes");
     let rendered = render(&yaml, &rtr_options()).expect("healthy context renders");
+    assert!(
+        rendered.files["config.toml"]
+            .contains("max_prefixes_ipv6 = 1000\nmax_prefix_restart_seconds = 2220"),
+        "{}",
+        rendered.files["config.toml"]
+    );
+    let client = rendered.receipt["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|client| client["id"] == "AS197000_1")
+        .unwrap();
+    assert_eq!(client["max_prefix_restart_seconds"], 2220);
 
     let out_dir = tempfile::tempdir().expect("tempdir");
     for (rel_path, contents) in &rendered.files {

@@ -455,8 +455,8 @@ fn client_black_and_white_lists_are_refused() {
 
 #[test]
 /// Load-bearing proof: removing the effective-action gate, client-to-general
-/// fallback, or zero-limit filter emits or suppresses an asserted config or
-/// receipt field.
+/// fallback, minute conversion, client timer override, receipt field, or
+/// zero-limit filter breaks an exact config or receipt assertion below.
 fn effective_max_prefix_action_controls_limit_emission() {
     let mut value = healthy_value();
     // ARouteServer can leave resolved limits populated while disabling
@@ -480,9 +480,11 @@ fn effective_max_prefix_action_controls_limit_emission() {
         "{}",
         disabled.files["config.toml"]
     );
+    assert!(!disabled.files["config.toml"].contains("max_prefix_restart_seconds"));
     for client in disabled.receipt["clients"].as_array().unwrap() {
         assert!(client["max_prefixes_ipv4"].is_null(), "{client}");
         assert!(client["max_prefixes_ipv6"].is_null(), "{client}");
+        assert!(client["max_prefix_restart_seconds"].is_null(), "{client}");
     }
 
     // The same clients inherit an enabled general shutdown action. Positive
@@ -498,6 +500,34 @@ fn effective_max_prefix_action_controls_limit_emission() {
     assert!(toml.contains("max_prefixes_ipv6 = 1000"), "{toml}");
     assert!(!toml.contains("max_prefixes_ipv4 = 0"), "{toml}");
     assert!(!toml.contains("max_prefixes_ipv6 = 0"), "{toml}");
+    assert!(!toml.contains("max_prefix_restart_seconds"), "{toml}");
+    assert!(
+        enabled.receipt["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|client| client["max_prefix_restart_seconds"].is_null())
+    );
+
+    // General and client restart timers inherit leaf-wise and convert from
+    // ARouteServer minutes to rustbgpd seconds.
+    value["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
+    value["cfg"]["filtering"]["max_prefix"]["restart_after"] = 37.into();
+    value["clients"][0]["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
+    value["clients"][0]["cfg"]["filtering"]["max_prefix"]["restart_after"] = 2.into();
+    let restarted = render(&to_yaml(&value), &rtr_options()).expect("timed restart render");
+    let toml = &restarted.files["config.toml"];
+    assert!(
+        toml.contains("max_prefixes_ipv4 = 5000\nmax_prefix_restart_seconds = 120"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("max_prefixes_ipv6 = 1000\nmax_prefix_restart_seconds = 2220"),
+        "{toml}"
+    );
+    let clients = restarted.receipt["clients"].as_array().unwrap();
+    assert_eq!(clients[0]["max_prefix_restart_seconds"], 120);
+    assert_eq!(clients[1]["max_prefix_restart_seconds"], 2220);
 }
 
 #[test]
@@ -528,10 +558,11 @@ fn client_shutdown_overrides_unsupported_general_max_prefix_action() {
 }
 
 #[test]
-/// Load-bearing proof: accepting any listed action, dropping `restart_after`
-/// parsing, or dropping general-action inheritance misses an asserted refusal.
-fn unsupported_effective_max_prefix_actions_are_refused() {
-    for action in ["restart", "block", "warning"] {
+/// Load-bearing proof: accepting an unsupported action or deleting the
+/// required/nonzero/checked restart timer validation breaks a refusal; changing
+/// the largest representable minute conversion breaks the boundary assertion.
+fn restart_action_validates_timer_and_unsupported_actions_are_refused() {
+    for action in ["block", "warning", "mystery"] {
         let mut value = healthy_value();
         let mut clients = value["clients"].clone();
         set_path(
@@ -539,13 +570,6 @@ fn unsupported_effective_max_prefix_actions_are_refused() {
             &["cfg", "filtering", "max_prefix", "action"],
             serde_yaml::Value::String(action.into()),
         );
-        if action == "restart" {
-            set_path(
-                &mut clients[0],
-                &["cfg", "filtering", "max_prefix", "restart_after"],
-                serde_yaml::Value::Number(37.into()),
-            );
-        }
         set_path(&mut value, &["clients"], clients);
         let items = refusals(render(&to_yaml(&value), &rtr_options()));
         assert!(
@@ -553,37 +577,46 @@ fn unsupported_effective_max_prefix_actions_are_refused() {
                 && item.contains(&format!("action `{action}`"))),
             "{action}: {items:?}"
         );
-        if action == "restart" {
-            assert!(
-                items
-                    .iter()
-                    .any(|item| item.contains("restart_after=37 minutes")),
-                "{items:?}"
-            );
-        }
     }
 
-    // An absent client action inherits the general action.
-    let mut value = healthy_value();
-    set_path(
-        &mut value,
-        &["cfg", "filtering", "max_prefix", "action"],
-        serde_yaml::Value::String("restart".into()),
-    );
-    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    for (restart_after, marker) in [
+        (None, "requires restart_after > 0"),
+        (Some(0), "requires restart_after > 0"),
+        (Some(71_582_789), "u32-second maximum"),
+    ] {
+        let mut value = healthy_value();
+        value["cfg"]["filtering"]["max_prefix"]["restart_after"] =
+            restart_after.map_or(serde_yaml::Value::Null, |_| 37.into());
+        value["clients"][0]["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
+        value["clients"][0]["cfg"]["filtering"]["max_prefix"]["limit_ipv4"] = 0.into();
+        if let Some(minutes) = restart_after {
+            value["clients"][0]["cfg"]["filtering"]["max_prefix"]["restart_after"] = minutes.into();
+        }
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.contains("client AS4242_1") && item.contains(marker)),
+            "{restart_after:?}: {items:?}"
+        );
+    }
+
+    let mut boundary = healthy_value();
+    boundary["clients"][0]["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
+    boundary["clients"][0]["cfg"]["filtering"]["max_prefix"]["restart_after"] = 71_582_788.into();
+    let rendered = render(&to_yaml(&boundary), &rtr_options()).expect("boundary restart");
     assert!(
-        items
-            .iter()
-            .any(|item| item.contains("client AS197000_1") && item.contains("action `restart`")),
-        "{items:?}"
+        rendered.files["config.toml"].contains("max_prefix_restart_seconds = 4294967280"),
+        "{}",
+        rendered.files["config.toml"]
     );
 }
 
 #[test]
 /// Load-bearing proof: defaulting an omitted value to false, checking the
-/// value without an active shutdown/positive limit, deleting the true-value
-/// refusal, or reversing client-over-general precedence breaks an asserted
-/// success or refusal below.
+/// value without an active shutdown/restart positive limit, deleting the
+/// true-value refusal, or reversing client-over-general precedence breaks an
+/// asserted success or refusal below.
 fn rejected_route_counting_is_checked_only_for_an_active_limit() {
     // ARouteServer 1.23.2 defaults an omitted value to true. Silently treating
     // this context as accepted-only would change when shutdown happens.
@@ -602,6 +635,7 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
     );
 
     let mut inherited = healthy_value();
+    inherited["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
     set_path(
         &mut inherited,
         &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
@@ -634,6 +668,16 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
     // A client can explicitly select rustbgpd's accepted-route model over an
     // inherited general true value.
     let mut allowed_override = healthy_value();
+    set_path(
+        &mut allowed_override,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("restart".into()),
+    );
+    set_path(
+        &mut allowed_override,
+        &["cfg", "filtering", "max_prefix", "restart_after"],
+        serde_yaml::Value::Number(1.into()),
+    );
     set_path(
         &mut allowed_override,
         &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
@@ -672,8 +716,13 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
     set_path(&mut disabled, &["clients"], clients);
     render(&to_yaml(&disabled), &rtr_options()).expect("disabled max-prefix counting");
 
-    // A shutdown action with only zero/unset family limits is also inactive.
+    // A timed restart with only zero/unset family limits is also inactive.
     let mut zero_limits = healthy_value();
+    set_path(
+        &mut zero_limits,
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("restart".into()),
+    );
     set_path(
         &mut zero_limits,
         &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
@@ -681,6 +730,11 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
     );
     let mut clients = zero_limits["clients"].clone();
     for client in clients.as_sequence_mut().expect("clients list") {
+        set_path(
+            client,
+            &["cfg", "filtering", "max_prefix", "action"],
+            serde_yaml::Value::String("restart".into()),
+        );
         set_path(
             client,
             &["cfg", "filtering", "max_prefix", "limit_ipv4"],
@@ -693,5 +747,15 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
         );
     }
     set_path(&mut zero_limits, &["clients"], clients);
-    render(&to_yaml(&zero_limits), &rtr_options()).expect("zero limits disable enforcement");
+    let rendered =
+        render(&to_yaml(&zero_limits), &rtr_options()).expect("zero limits disable enforcement");
+    assert!(!rendered.files["config.toml"].contains("max_prefixes_"));
+    assert!(!rendered.files["config.toml"].contains("max_prefix_restart_seconds"));
+    assert!(
+        rendered.receipt["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|client| client["max_prefix_restart_seconds"].is_null())
+    );
 }

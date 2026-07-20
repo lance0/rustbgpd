@@ -835,6 +835,7 @@ struct ResolvedClient<'a> {
     allow_longer_prefixes: bool,
     limit_ipv4: Option<u32>,
     limit_ipv6: Option<u32>,
+    max_prefix_restart_seconds: Option<u32>,
 }
 
 pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderError> {
@@ -1110,21 +1111,26 @@ fn check_max_prefix_action(
 ) {
     match action {
         None | Some("shutdown") => {}
-        Some("restart") => {
-            let timer = restart_after
-                .map(|minutes| format!(" with restart_after={minutes} minutes"))
-                .unwrap_or_default();
-            refusals.push(format!(
-                "{scope}: max_prefix.action `restart`{timer} is not supported; rustbgpd \
-                 only implements shutdown and has no timed max-prefix restart"
-            ));
-        }
+        Some("restart") => match restart_after {
+            None => refusals.push(format!(
+                "{scope}: max_prefix.action `restart` requires restart_after > 0 minutes"
+            )),
+            Some(0) => refusals.push(format!(
+                "{scope}: max_prefix.action `restart` requires restart_after > 0 minutes"
+            )),
+            Some(minutes) if minutes.checked_mul(60).is_none() => refusals.push(format!(
+                "{scope}: max_prefix.restart_after={minutes} minutes exceeds rustbgpd's \
+                 u32-second maximum"
+            )),
+            Some(_) => {}
+        },
         Some(other @ ("block" | "warning")) => refusals.push(format!(
             "{scope}: max_prefix.action `{other}` is not supported; rustbgpd only \
-             implements shutdown"
+             implements `shutdown` and timed `restart`"
         )),
         Some(other) => refusals.push(format!(
-            "{scope}: unknown max_prefix.action `{other}` (only `shutdown` is supported)"
+            "{scope}: unknown max_prefix.action `{other}` (only `shutdown` and timed \
+             `restart` are supported)"
         )),
     }
 }
@@ -1134,7 +1140,7 @@ fn check_max_prefix_counting(
     scope: &str,
     refusals: &mut Vec<String>,
 ) {
-    if max_prefix.action == Some("shutdown")
+    if matches!(max_prefix.action, Some("shutdown" | "restart"))
         && (max_prefix.limit_ipv4.is_some() || max_prefix.limit_ipv6.is_some())
         && max_prefix.count_rejected_routes
     {
@@ -1229,11 +1235,20 @@ fn resolve_clients<'a>(
             ctx.cfg.filtering.max_prefix.as_ref(),
             filtering.max_prefix.as_ref(),
         );
-        let (limit_ipv4, limit_ipv6) = if max_prefix.action == Some("shutdown") {
+        let (limit_ipv4, limit_ipv6) = if matches!(max_prefix.action, Some("shutdown" | "restart"))
+        {
             (max_prefix.limit_ipv4, max_prefix.limit_ipv6)
         } else {
             (None, None)
         };
+        let max_prefix_restart_seconds = (max_prefix.action == Some("restart")
+            && (limit_ipv4.is_some() || limit_ipv6.is_some()))
+        .then(|| {
+            max_prefix
+                .restart_after
+                .and_then(|minutes| minutes.checked_mul(60))
+        })
+        .flatten();
 
         let description = client
             .description
@@ -1256,6 +1271,7 @@ fn resolve_clients<'a>(
             allow_longer_prefixes: ctx.cfg.filtering.irrdb.allow_longer_prefixes,
             limit_ipv4,
             limit_ipv6,
+            max_prefix_restart_seconds,
         });
     }
 
@@ -1391,6 +1407,9 @@ fn render_toml(
         }
         if let Some(limit) = rc.limit_ipv6 {
             let _ = writeln!(out, "max_prefixes_ipv6 = {limit}");
+        }
+        if let Some(seconds) = rc.max_prefix_restart_seconds {
+            let _ = writeln!(out, "max_prefix_restart_seconds = {seconds}");
         }
         let _ = writeln!(
             out,
@@ -1762,6 +1781,7 @@ fn build_receipt(
             "origin_set_size": rc.origins.len(),
             "max_prefixes_ipv4": rc.limit_ipv4,
             "max_prefixes_ipv6": rc.limit_ipv6,
+            "max_prefix_restart_seconds": rc.max_prefix_restart_seconds,
         })).collect::<Vec<_>>(),
         "warnings": warnings,
     })
