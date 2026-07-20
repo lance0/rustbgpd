@@ -257,7 +257,7 @@ struct Cfg {
     #[serde(default)]
     graceful_shutdown: Toggle,
     #[serde(default)]
-    blackhole_filtering: Option<serde_yaml::Value>,
+    blackhole_filtering: BlackholeFiltering,
     #[serde(default)]
     rtt_thresholds: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -276,6 +276,13 @@ enum RouterId {
 struct Toggle {
     #[serde(default)]
     enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct BlackholeFiltering {
+    policy_ipv4: Option<String>,
+    policy_ipv6: Option<String>,
+    announce_to_client: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -405,6 +412,9 @@ struct ClientCfg {
     gtsm: Option<bool>,
     #[serde(default)]
     multihop: Option<u32>,
+    rfc8950: Option<bool>,
+    #[serde(default)]
+    blackhole_filtering: BlackholeFiltering,
     #[serde(default)]
     filtering: ClientFiltering,
 }
@@ -851,7 +861,7 @@ pub fn render(context_input: &str, opts: &Options) -> Result<Rendered, RenderErr
 
     check_refusals(&ctx, opts)?;
 
-    let resolved = resolve_clients(&ctx, opts, &mut warnings)?;
+    let resolved = resolve_clients(&ctx, opts)?;
     collect_warnings(&ctx, &mut warnings);
 
     let router_id = match &ctx.cfg.router_id {
@@ -937,6 +947,18 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         );
     }
 
+    let blackhole = &cfg.blackhole_filtering;
+    for (name, policy) in [
+        ("policy_ipv4", &blackhole.policy_ipv4),
+        ("policy_ipv6", &blackhole.policy_ipv6),
+    ] {
+        if let Some(policy) = policy {
+            refusals.push(format!(
+                "general: blackhole_filtering.{name} `{policy}` is not rendered"
+            ));
+        }
+    }
+
     check_next_hop_policy(&filtering.next_hop.policy, "general", &mut refusals);
     check_reject_policy(&filtering.reject_policy.policy, "general", &mut refusals);
     if !filtering.irrdb.enforce_origin_in_as_set && !filtering.irrdb.enforce_prefix_in_as_set {
@@ -964,6 +986,32 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
     }
 
     for client in &ctx.clients {
+        let scope = format!("client {}", client.id);
+        let ipv6 = client.ip.contains(':');
+        let multihop = client.cfg.multihop.or(cfg.multihop).unwrap_or(0);
+        if multihop > 0 {
+            refusals.push(format!(
+                "{scope}: effective multihop={multihop} is not rendered; set this client to 0 or disable general multihop"
+            ));
+        }
+        let rfc8950 = client.cfg.rfc8950.unwrap_or(cfg.rfc8950);
+        if ipv6 && rfc8950 {
+            refusals.push(format!(
+                "{scope}: effective rfc8950=true is not rendered on IPv6 sessions"
+            ));
+        }
+        let client_has_blackhole_policy = if ipv6 {
+            blackhole.policy_ipv6.is_some() || (rfc8950 && blackhole.policy_ipv4.is_some())
+        } else {
+            blackhole.policy_ipv4.is_some()
+        };
+        let client_announce = client.cfg.blackhole_filtering.announce_to_client;
+        let general_announce = cfg.blackhole_filtering.announce_to_client.unwrap_or(true);
+        if client_has_blackhole_policy && client_announce.is_some_and(|v| v != general_announce) {
+            refusals.push(format!(
+                "{scope}: blackhole announce_to_client override is not rendered"
+            ));
+        }
         if let Some(next_hop) = &client.cfg.filtering.next_hop {
             check_next_hop_policy(
                 &next_hop.policy,
@@ -982,7 +1030,6 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             filtering.max_prefix.as_ref(),
             client.cfg.filtering.max_prefix.as_ref(),
         );
-        let scope = format!("client {}", client.id);
         check_max_prefix_action(
             effective_max_prefix.action,
             effective_max_prefix.restart_after,
@@ -1155,7 +1202,6 @@ fn check_max_prefix_counting(
 fn resolve_clients<'a>(
     ctx: &'a Context,
     opts: &Options,
-    warnings: &mut Vec<String>,
 ) -> Result<Vec<ResolvedClient<'a>>, RenderError> {
     let mut resolved = Vec::new();
     let mut implausible = Vec::new();
@@ -1225,12 +1271,6 @@ fn resolve_clients<'a>(
         let add_path = client.cfg.add_path.unwrap_or(ctx.cfg.add_path);
         let per_client_best = ctx.cfg.path_hiding && !add_path;
         let gtsm = client.cfg.gtsm.unwrap_or(ctx.cfg.gtsm);
-        if client.cfg.multihop.or(ctx.cfg.multihop).is_some() {
-            warnings.push(format!(
-                "client {}: multihop is ignored (route-server clients are on-link)",
-                client.id
-            ));
-        }
         let max_prefix = effective_max_prefix(
             ctx.cfg.filtering.max_prefix.as_ref(),
             filtering.max_prefix.as_ref(),
@@ -1285,33 +1325,6 @@ fn collect_warnings(ctx: &Context, warnings: &mut Vec<String>) {
     if ctx.cfg.passive == Some(false) {
         warnings.push("passive=false is ignored: the daemon both listens and connects".to_owned());
     }
-    if ctx
-        .cfg
-        .blackhole_filtering
-        .as_ref()
-        .is_some_and(blackhole_configured)
-    {
-        warnings.push(
-            "blackhole_filtering is configured but not rendered (deferred); BLACKHOLE-tagged \
-             more-specifics are rejected by the prefix-length window terms — fail-closed, \
-             not fail-open"
-                .to_owned(),
-        );
-    }
-    if ctx.cfg.rfc8950 {
-        warnings.push(
-            "rfc8950 (IPv6 next hop for IPv4 NLRI) is not rendered yet; sessions are \
-             emitted per-family"
-                .to_owned(),
-        );
-    }
-}
-
-fn blackhole_configured(value: &serde_yaml::Value) -> bool {
-    value.as_mapping().is_some_and(|m| {
-        m.iter()
-            .any(|(k, v)| matches!(k.as_str(), Some("policy_ipv4" | "policy_ipv6")) && !v.is_null())
-    })
 }
 
 // ---------------------------------------------------------------------------

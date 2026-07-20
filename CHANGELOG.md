@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **ARouteServer renders fail stale on unsupported session semantics.**
+  `rs-config-render` now exits 2 before writing output for effective multihop,
+  IPv6-session RFC 8950, and active blackhole policy/propagation settings
+  instead of warning and silently omitting them.
+
 - **Cold-ingest fanout services readiness between outbound peers.** Ordinary
   route ingest now services the dedicated read-only readiness lane at peer
   boundaries, including mixed update-group and private-policy fleets, without

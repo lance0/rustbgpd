@@ -40,6 +40,7 @@ cfg:
   blackhole_filtering:
     policy_ipv4: null
     policy_ipv6: null
+    announce_to_client: true
   rtt_thresholds: null
   communities:
     blackholing: {std: null, lrg: null, ext: null}
@@ -84,6 +85,8 @@ clients:
     ip: "192.0.2.11"
     description: "member-one"
     cfg:
+      rfc8950: false
+      blackhole_filtering: {announce_to_client: true}
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS4242_bundle"]
@@ -93,6 +96,8 @@ clients:
     ip: "2001:db8:0:1::22"
     description: "member-two-v6"
     cfg:
+      rfc8950: false
+      blackhole_filtering: {announce_to_client: true}
       gtsm: true
       filtering:
         irrdb:
@@ -105,6 +110,8 @@ clients:
     ip: "192.0.2.13"
     description: "member-empty-irr"
     cfg:
+      rfc8950: false
+      blackhole_filtering: {announce_to_client: true}
       filtering:
         irrdb:
           as_set_bundle_ids: ["AS51325_bundle"]

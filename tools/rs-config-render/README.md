@@ -122,6 +122,12 @@ enforcement knobs. `shutdown` emits the positive family ceilings;
 while converting to `u32` seconds. An absent action or zero family limits emit
 neither ceilings nor a restart timer.
 
+The renderer also refuses effective nonzero multihop, RFC 8950 on an
+IPv6 session, and any active IPv4/IPv6 blackhole policy (including a
+matching per-client `announce_to_client` override). Those session and
+propagation semantics are not emitted; warning and continuing would
+silently change the route server's behavior.
+
 An empty per-client prefix or origin set aborts the whole render: an
 empty set under the default-reject tail is fail-closed for that client,
 and an empty upstream IRR answer almost always means broken data, not a
