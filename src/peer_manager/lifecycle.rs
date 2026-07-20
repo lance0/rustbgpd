@@ -5,6 +5,7 @@ use rustbgpd_api::peer_types::{
     PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::RibUpdate;
+use rustbgpd_transport::{PeerCommand, PeerCommandError};
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::oneshot;
@@ -16,6 +17,22 @@ use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT, PeerManager,
     PeerShutdownOutcome,
 };
+
+async fn send_max_prefix_start_before(
+    commands: tokio::sync::mpsc::Sender<PeerCommand>,
+    deadline: tokio::time::Instant,
+) -> Result<(), PeerCommandError> {
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => Err(PeerCommandError::TimedOut {
+            operation: "start",
+            deadline: PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        }),
+        result = commands.send(PeerCommand::Start) => {
+            result.map_err(|_| PeerCommandError::SessionExited)
+        }
+    }
+}
 
 impl PeerManager {
     fn allocate_max_prefix_latch_generation(&mut self) -> u64 {
@@ -68,18 +85,21 @@ impl PeerManager {
     }
 
     pub(super) fn invalidate_max_prefix_restart(&mut self, peer: &PeerKey) {
+        if self.invalidate_max_prefix_restart_without_recompute(peer) {
+            self.recompute_next_max_prefix_restart_deadline();
+        }
+    }
+
+    fn invalidate_max_prefix_restart_without_recompute(&mut self, peer: &PeerKey) -> bool {
         let generation = self.allocate_max_prefix_latch_generation();
-        let changed = self.max_prefix_latches.get_mut(peer).is_some_and(|latch| {
+        self.max_prefix_latches.get_mut(peer).is_some_and(|latch| {
             if latch.deadline.take().is_some() {
                 latch.generation = generation;
                 true
             } else {
                 false
             }
-        });
-        if changed {
-            self.recompute_next_max_prefix_restart_deadline();
-        }
+        })
     }
 
     pub(super) fn remove_max_prefix_latch(&mut self, peer: &PeerKey) {
@@ -145,6 +165,8 @@ impl PeerManager {
             .collect();
         due.sort_by(|left, right| left.0.cmp(&right.0));
 
+        let attempt_deadline = now + PEER_LIFECYCLE_COMMAND_TIMEOUT;
+        let mut starts = Vec::with_capacity(due.len());
         for (peer, generation) in due {
             let latch_matches = self.max_prefix_latches.get(&peer).is_some_and(|latch| {
                 latch.generation == generation
@@ -159,20 +181,20 @@ impl PeerManager {
                     && self.dynamic_restart_policy_still_current(managed)
             });
             if !latch_matches || !peer_matches {
-                self.invalidate_max_prefix_restart(&peer);
+                let _ = self.invalidate_max_prefix_restart_without_recompute(&peer);
                 continue;
             }
 
             // Consume the single automatic attempt before awaiting the bounded
             // command. Failure therefore remains an indefinite fail-closed
             // latch and can never become a retry loop.
-            self.invalidate_max_prefix_restart(&peer);
+            let _ = self.invalidate_max_prefix_restart_without_recompute(&peer);
             let address = peer.address;
             if self.bfd_should_withhold(&address) {
                 if let Some(managed) = self.peers.get_mut(&peer) {
                     managed.enabled = true;
                 }
-                self.remove_max_prefix_latch(&peer);
+                let _ = self.max_prefix_latches.remove(&peer);
                 self.set_bfd_peer_disabled(address, false);
                 self.mark_bfd_withheld(address);
                 self.publish_peer_lifecycle_event(
@@ -183,19 +205,31 @@ impl PeerManager {
                 info!(%address, "max-prefix hold-down expired; strict BFD still withholds BGP until BFD Up");
                 continue;
             }
-            let result = self
+            let commands = self
                 .peers
                 .get(&peer)
                 .expect("validated above")
                 .handle
-                .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await;
+                .commands_sender();
+            starts.push((peer, commands));
+        }
+        self.recompute_next_max_prefix_restart_deadline();
+
+        let attempts = starts
+            .iter()
+            .map(|(_, commands)| send_max_prefix_start_before(commands.clone(), attempt_deadline));
+        let results = self
+            .await_with_readiness(futures::future::join_all(attempts))
+            .await;
+
+        for ((peer, _commands), result) in starts.into_iter().zip(results) {
+            let address = peer.address;
             match result {
                 Ok(()) => {
                     if let Some(managed) = self.peers.get_mut(&peer) {
                         managed.enabled = true;
                     }
-                    self.remove_max_prefix_latch(&peer);
+                    let _ = self.max_prefix_latches.remove(&peer);
                     self.set_bfd_peer_disabled(address, false);
                     self.publish_peer_lifecycle_event(
                         &peer,
@@ -207,6 +241,12 @@ impl PeerManager {
                     info!(%address, "peer automatically restarted after max-prefix hold-down");
                 }
                 Err(error) => {
+                    if let Some(latch) = self.max_prefix_latches.get_mut(&peer) {
+                        latch.error = format!(
+                            "automatic max-prefix restart failed: {error}; peer remains disabled; run 'rbgp neighbor {} enable' to retry",
+                            peer.label()
+                        );
+                    }
                     warn!(%address, %error, "automatic max-prefix restart attempt failed; peer remains latched disabled");
                 }
             }

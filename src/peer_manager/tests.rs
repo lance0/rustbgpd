@@ -2245,7 +2245,8 @@ async fn dynamic_range_removal_invalidates_max_prefix_restart() {
 
 /// Load-bearing single-attempt proof: retaining the deadline after a failed
 /// Start turns the feature into an unbounded retry loop; clearing the latch
-/// entirely weakens fail-closed recovery. Both mutations make this red.
+/// entirely weakens fail-closed recovery. Omitting failure replacement leaves
+/// the stale breach text instead of the exact recovery action.
 #[tokio::test(start_paused = true)]
 async fn failed_max_prefix_restart_becomes_indefinite_shutdown() {
     let mut mgr = test_peer_manager();
@@ -2270,12 +2271,226 @@ async fn failed_max_prefix_restart_becomes_indefinite_shutdown() {
     assert!(!managed.enabled);
     let latch = mgr.max_prefix_latches.get(&key(addr)).unwrap();
     assert!(latch.deadline.is_none());
+    assert_eq!(
+        latch.error,
+        "automatic max-prefix restart failed: session task exited; peer remains disabled; run 'rbgp neighbor 10.0.0.73 enable' to retry"
+    );
     let info = mgr.get_peer_info(&key(addr)).await.unwrap();
     assert_eq!(info.max_prefix_action, "shutdown");
     assert_eq!(info.max_prefix_restart_remaining_millis, None);
     tokio::time::advance(Duration::from_secs(10)).await;
     mgr.handle_due_max_prefix_restarts().await;
     assert!(mgr.max_prefix_latches[&key(addr)].deadline.is_none());
+}
+
+fn full_max_prefix_restart_channel(release_after: Option<Duration>) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (commands, mut receiver) = mpsc::channel(1);
+    commands
+        .try_send(PeerCommand::Start)
+        .expect("pre-fill the automatic-restart command channel");
+    let task = tokio::spawn(async move {
+        if let Some(delay) = release_after {
+            tokio::time::sleep(delay).await;
+            let _ = receiver.recv().await;
+        }
+        std::future::pending::<Result<(), rustbgpd_transport::TransportError>>().await
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// Load-bearing aggregate-restart proof:
+/// - sequential per-peer waits make the handler exceed the exact 500 ms bound;
+/// - bypassing `await_with_readiness` leaves the queued snapshot unanswered at 100 ms;
+/// - applying futures in completion order publishes the high peer before the low peer;
+/// - retaining the breach text instead of the delivery failure breaks the exact recovery error.
+#[tokio::test(start_paused = true)]
+async fn due_max_prefix_restarts_share_one_readiness_serving_deadline() {
+    use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
+
+    let low = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 80));
+    let middle = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 81));
+    let high = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 82));
+    let (_commands_tx, commands_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut mgr = PeerManager::new(
+        commands_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    for (address, release_after) in [
+        (low, Some(Duration::from_millis(300))),
+        (middle, None),
+        (high, Some(Duration::from_millis(100))),
+    ] {
+        insert_test_managed_peer(
+            &mut mgr,
+            address,
+            full_max_prefix_restart_channel(release_after),
+            false,
+        );
+        let managed = mgr.peers.get_mut(&key(address)).unwrap();
+        managed.enabled = false;
+        managed.max_prefix_restart_seconds = Some(1);
+        assert!(mgr.install_max_prefix_latch(
+            key(address),
+            1,
+            format!("stale max-prefix breach for {address}"),
+            Some(0),
+        ));
+    }
+
+    let mut events = mgr.session_events_tx.subscribe();
+    let (readiness_reply, readiness_response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers {
+            reply: readiness_reply,
+        })
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let readiness = tokio::spawn(async move {
+        let peers = readiness_response.await.unwrap();
+        (tokio::time::Instant::now(), peers)
+    });
+    let handler = tokio::spawn(async move {
+        mgr.handle_due_max_prefix_restarts().await;
+        mgr
+    });
+    tokio::task::yield_now().await;
+
+    // Check between the snapshot's 100 ms per-session bound and the 200 ms
+    // readiness contract, avoiding an assertion on the timeout timer's edge.
+    tokio::time::advance(Duration::from_millis(150)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    assert!(readiness.is_finished());
+    let (readiness_at, peers) = readiness.await.unwrap();
+    assert_eq!(peers.len(), 3);
+    assert!(readiness_at - started < Duration::from_millis(200));
+
+    tokio::time::advance(Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(199)).await;
+    tokio::task::yield_now().await;
+    assert!(!handler.is_finished());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    assert!(handler.is_finished());
+    let mgr = handler.await.unwrap();
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_millis(500)
+    );
+
+    let enabled: Vec<IpAddr> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            SessionEvent::Lifecycle(event)
+                if event.event_type == SessionLifecycleEventType::PeerEnabled =>
+            {
+                Some(event.peer)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(enabled, vec![low, high]);
+    assert!(mgr.peers[&key(low)].enabled);
+    assert!(!mgr.peers[&key(middle)].enabled);
+    assert!(mgr.peers[&key(high)].enabled);
+    assert_eq!(mgr.max_prefix_latches[&key(middle)].deadline, None);
+    assert_eq!(
+        mgr.max_prefix_latches[&key(middle)].error,
+        "automatic max-prefix restart failed: start timed out after 500ms; peer remains disabled; run 'rbgp neighbor 10.0.0.81 enable' to retry"
+    );
+}
+
+fn straddling_restart_channel(starts: Arc<AtomicU32>) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (commands, mut receiver) = mpsc::channel(1);
+    commands
+        .try_send(PeerCommand::CollisionDump)
+        .expect("pre-fill the straddling command channel");
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        let _ = receiver.recv().await;
+        while let Some(command) = receiver.recv().await {
+            if matches!(command, PeerCommand::Start) {
+                starts.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// Load-bearing expired-deadline proof: replacing the biased deadline-first
+/// select with `timeout_at` lets the newly writable send win when the second
+/// readiness snapshot returns after the deadline, enabling the peer and
+/// incrementing `starts` at 550 ms.
+#[tokio::test(start_paused = true)]
+async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
+    use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
+
+    let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 83));
+    let starts = Arc::new(AtomicU32::new(0));
+    let (readiness_tx, readiness_rx) = mpsc::channel(2);
+    let mut mgr = test_peer_manager().with_readiness_queries(readiness_rx);
+    insert_test_managed_peer(
+        &mut mgr,
+        address,
+        straddling_restart_channel(starts.clone()),
+        false,
+    );
+    let managed = mgr.peers.get_mut(&key(address)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(1);
+    mgr.install_max_prefix_latch(key(address), 1, "stale breach".to_string(), Some(0));
+
+    let started = tokio::time::Instant::now();
+    let handler = tokio::spawn(async move {
+        mgr.handle_due_max_prefix_restarts().await;
+        mgr
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(450)).await;
+    let (second_reply, second_response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers {
+            reply: second_reply,
+        })
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    second_response.await.unwrap();
+    let mgr = handler.await.unwrap();
+
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_millis(550)
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(!mgr.peers[&key(address)].enabled);
+    assert!(
+        mgr.max_prefix_latches[&key(address)]
+            .error
+            .contains("start timed out after 500ms")
+    );
 }
 
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
