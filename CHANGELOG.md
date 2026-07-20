@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BIRD config imports report standalone `include` statements.** The bounded
+  single-file importer preserves their source lines in every parser context,
+  gives explicit flattening guidance, and exits 2 with the translated skeleton
+  for operator review.
+
 - **ARouteServer renders fail stale on unsupported session semantics.**
   `rs-config-render` now exits 2 before writing output for effective multihop,
   IPv6-session RFC 8950, and active blackhole policy/propagation settings
