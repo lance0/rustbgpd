@@ -150,7 +150,11 @@ the data-driven filtering/tooling wrapper, not the daemon.
   attributes now treat-as-withdraw / attribute-discard per §7 across all
   families with the session staying Established; session reset only where the
   NLRI is untrustworthy. Adversarially reviewed pre-merge (LAN-465).
-  Follow-ups: per-disposition counters, interop-lab malformed-attr proof.
+  **Per-disposition counters + malformed-UPDATE interop proof shipped
+  ([#1014](https://github.com/lance0/rustbgpd/pull/1014)):**
+  `bgp_update_malformed_total{peer,disposition}` records
+  `attribute_discard`, `treat_as_withdraw`, and `session_reset`, and M91 drives
+  all three through a raw-speaker lab.
 - Fanout-observability trio: ~~per-update-group / queue-depth metrics~~
   **Shipped (#962)** (`bgp_peer_outbound_queue_depth`, `bgp_peer_update_group`)
   → ~~slow-peer detection~~ **Shipped (#967)** (threshold+duration detector,
@@ -370,13 +374,17 @@ new AFI/SAFI and EVPN dataplane expansion.
   proposes, but does not authorize, an actor-owned continuation; implementation
   remains blocked on resumable container ownership and exact-export
   continuation, not RIB sharding.
-- **Expose groupability before apply.** Config transaction planning now projects
+- **Expose groupability before apply and explain it live.** Config transaction planning now projects
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded
-  receipt-envelope capacity classes. Remaining: surface the same classifier in
-  policy linting and add a post-renegotiation projection; until then session
-  reshape stays explicitly indeterminate. Do not present byte-precise memory or
-  time estimates until a calibrated model exists.
+  receipt-envelope capacity classes. The shipped live comparison
+  ([#1041](https://github.com/lance0/rustbgpd/pull/1041), LAN-456) reports whether
+  two configured peers share, occupy separate groups, or use a private fallback,
+  with ID-free membership and difference reasons.
+  Predictive policy-lint and post-renegotiation projections were rejected as
+  misleading: session reshapes stay explicitly indeterminate until negotiation
+  completes. Do not present byte-precise memory or time estimates until a
+  calibrated model exists.
 - **Keep update-group correctness as a permanent fault program.** The bounded
   deterministic foundation is shipped: grouped and forced-per-peer output are
   compared under channel saturation/virtual retry, dirty policy swaps and
@@ -400,11 +408,14 @@ new AFI/SAFI and EVPN dataplane expansion.
   rotate atomically on SIGHUP; listener, path, auth-mode, principal, role, and
   access changes remain restart-required. Privilege separation remains a
   larger architectural choice, not a release-checkbox claim.
-- **Pilot route-server next-hop ownership after its identity prerequisite.**
-  ADR-0107 documents the current transparent-but-unchecked pipeline and a
-  proposed opt-in strict-peer pilot. Bind its identity to the live session
-  generation; same-AS alternate next hops and explicit authorization remain
-  later modes behind a generation-consistent fleet inventory.
+- **Route-server next-hop ownership strict-peer pilot shipped
+  ([#964](https://github.com/lance0/rustbgpd/pull/964)).**
+  [ADR-0107](docs/adr/0107-route-server-next-hop-ownership.md) is Accepted:
+  opt-in `next_hop_ownership = "strict_peer"` checks the
+  immutable wire next-hop identity before import policy and fails closed for
+  third-party or unverifiable next hops. Same-AS alternate next hops and
+  explicit authorization remain deferred behind a generation-consistent fleet
+  inventory.
 - **Single-owner RIB actor ceiling: measured at 1M; sharding stays unjustified.**
   The named-workload number that gates ADR-0100 parallel-RibManager exists
   ([the 1M actor-ceiling receipt](docs/perf/actor-ceiling-1m-2026-07.md),

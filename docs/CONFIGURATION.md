@@ -1600,6 +1600,7 @@ A peer falls back to the plain per-peer path (with identical semantics
 | `per_client_best` | RFC 7947 §2.3.2 per-client best-path is enabled (the filtered best is per-member) |
 | `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
 | `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
+| `slow_peer` | Slow-peer isolation moved the peer onto its own path; it can rejoin a group after the backlog clears |
 
 RT-Constrain negotiation is deliberately **not** in this table: since
 v2 it is part of the group key, not a fallback reason. Add-Path send
@@ -1614,6 +1615,42 @@ fallback reason on its `Update Group` line. Metrics:
 (registry growth — append-only for the process lifetime), and
 `bgp_update_group_residue_entries` (withdrawal residue held while a
 member is dirty; returns to zero when its resync completes).
+
+To compare two configured peers without depending on process-local `group:N`
+identifiers, query their live memberships directly:
+
+```console
+rbgp neighbor 192.0.2.10 --compare 192.0.2.11
+rbgp --json neighbor 2001:db8::10 --compare 2001:db8::11
+```
+
+The comparison reports one of four verdicts:
+
+| Verdict | Meaning |
+|---------|---------|
+| `shared` | Both peers are grouped in the same live shared-staging group |
+| `separate` | Both peers are grouped, but their staging inputs place them in different groups |
+| `private` | Both peers have live outbound membership and at least one uses a per-peer fallback path |
+| `unknown` | At least one configured peer has no live outbound registration, or the group metadata is unavailable |
+
+The output names each side's ID-free membership as `grouped`, `unknown`, or one
+of the fallback reasons in the table above. For `separate`, `differences` uses
+stable semantic categories rather than internal IDs: `export_policy`,
+`session_kind`, `route_reflector_client`, `local_role`, `rfc1997_mode`,
+`negotiated_families`, and `llgr_families`. `shared`, `private`, and `unknown`
+carry no difference list; for private peers, the side-specific membership
+reasons explain why shared staging is unavailable.
+
+Ordinary IPv6 literals work as shown above. The normal scoped link-local
+neighbor spelling is `fe80::1%eth0`, but live update-group comparison currently
+rejects any IPv6 link-local peer (scoped or bare) with `INVALID_ARGUMENT` because
+the actor-owned membership registry is keyed by address only. Inspect each
+scoped peer's `Update Group` line separately instead.
+
+See [ADR-0098](adr/0098-update-groups.md),
+[ADR-0099](adr/0099-update-groups-v2.md), and LAN-456 /
+[#1041](https://github.com/lance0/rustbgpd/pull/1041) for the live, ID-free
+comparison design.
 
 ---
 
