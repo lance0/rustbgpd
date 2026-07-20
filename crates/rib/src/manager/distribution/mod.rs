@@ -3086,7 +3086,7 @@ impl RibManager {
         }
         let changed = std::mem::take(&mut self.pending_distribute_changed);
         let affected = std::mem::take(&mut self.pending_distribute_affected);
-        self.distribute_changes(&changed, &affected);
+        self.distribute_ingest_changes(&changed, &affected);
     }
 
     /// Register `peer` as a unicast announcer for `prefix` in the reverse
@@ -3421,14 +3421,31 @@ impl RibManager {
     /// so that Adj-RIB-Out only contains routes the transport can actually
     /// serialize for this peer. The transport retains `is_family_negotiated`
     /// as a safety net.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "distribution loop coordinates dirty peers, forced resync, and all families"
-    )]
+    fn distribute_ingest_changes(
+        &mut self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+    ) {
+        self.distribute_changes_inner(best_changed, all_affected, true);
+    }
+
     pub(super) fn distribute_changes(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
+    ) {
+        self.distribute_changes_inner(best_changed, all_affected, false);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "distribution loop coordinates dirty peers, forced resync, and all families"
+    )]
+    fn distribute_changes_inner(
+        &mut self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+        service_ingest_readiness: bool,
     ) {
         self.record_deferred_unicast(best_changed);
         self.record_deferred_unicast(all_affected);
@@ -3475,6 +3492,18 @@ impl RibManager {
         // `rs_control_communities` member on the shared Arc emission.
         let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
         for peer in peers {
+            // Cold ingest is the path that requires in-pass readiness:
+            // service the dedicated, read-only lane at each peer boundary
+            // without admitting general queries or mutations. Keep the
+            // transition age in direct-drive use so a genuinely stalled
+            // transition still fails closed.
+            if service_ingest_readiness {
+                let transition_elapsed = self
+                    .pending_clean_policy_transition
+                    .as_ref()
+                    .map(PendingCleanPolicyTransition::elapsed);
+                self.drain_readiness_queries(transition_elapsed);
+            }
             let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
