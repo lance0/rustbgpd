@@ -463,6 +463,12 @@ unchanged-behavior control (seven family refreshes per peer); the optimized
 target refreshes only the touched family while retaining all seven eager-zero
 series from PeerUp onward.
 
+The pinned July 2026 control/target receipt is retained in
+[`docs/perf/adj-rib-out-family-gauge-2026-07.md`](perf/adj-rib-out-family-gauge-2026-07.md).
+At 256 and 1,000 peers it improves the measured actor/probe/commit/enqueue
+interval by 11.69% and 14.98%, respectively; both mean-change 95% confidence
+intervals exclude zero.
+
 The July 2026 receipt compares the first real-probe baseline against ordered
 batch probing with the live prepared-attribute memo key:
 
