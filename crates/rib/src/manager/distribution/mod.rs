@@ -2246,9 +2246,27 @@ impl RibManager {
                 })
                 .flatten();
             let probe_results = if let Some(results) = reused_results {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.adj_rib_out_commit_stats.exact_probe_cache_reuses = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_cache_reuses
+                        .saturating_add(candidates.len());
+                }
                 debug_assert_eq!(results.len(), candidates.len());
                 results
             } else {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.adj_rib_out_commit_stats.exact_probe_batches = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_batches
+                        .saturating_add(1);
+                    self.adj_rib_out_commit_stats.exact_probe_candidates = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_candidates
+                        .saturating_add(candidates.len());
+                }
                 let (results, cardinality_correct) =
                     probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
                 if cache_eligible && cardinality_correct && results.iter().all(Result::is_ok) {
@@ -2448,21 +2466,51 @@ impl RibManager {
         let grouped_unicast_count = self.grouped_advertised_count(peer);
         let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
 
-        if !announce.is_empty()
-            || !withdraw.is_empty()
-            || !flowspec_announce.is_empty()
-            || !flowspec_withdraw.is_empty()
-            || !evpn_announce.is_empty()
-            || !evpn_withdraw.is_empty()
-            || !bgpls_announce.is_empty()
-            || !bgpls_withdraw.is_empty()
-            || !vpn_announce.is_empty()
-            || !vpn_withdraw.is_empty()
-            || !labeled_announce.is_empty()
-            || !labeled_withdraw.is_empty()
-            || !rtc_announce.is_empty()
-            || !rtc_withdraw.is_empty()
-        {
+        // Derive metric work from the final post-OTC, post-exact-export
+        // vectors: a rejected announce can disappear or synthesize a
+        // withdrawal, and the resulting committed family is the only safe
+        // source of truth. Keep the combined envelope/send atomic below while
+        // refreshing only the family series whose Adj-RIB-Out state moved.
+        let unicast_changed = !announce.is_empty() || !withdraw.is_empty();
+        let flowspec_changed = !flowspec_announce.is_empty() || !flowspec_withdraw.is_empty();
+        let evpn_changed = !evpn_announce.is_empty() || !evpn_withdraw.is_empty();
+        let bgpls_changed = !bgpls_announce.is_empty() || !bgpls_withdraw.is_empty();
+        let vpn_changed = !vpn_announce.is_empty() || !vpn_withdraw.is_empty();
+        let labeled_changed = !labeled_announce.is_empty() || !labeled_withdraw.is_empty();
+        let rtc_changed = !rtc_announce.is_empty() || !rtc_withdraw.is_empty();
+        let has_committed_route_payload = unicast_changed
+            || flowspec_changed
+            || evpn_changed
+            || bgpls_changed
+            || vpn_changed
+            || labeled_changed
+            || rtc_changed;
+        #[cfg(any(test, feature = "bench-internals"))]
+        let family_gauge_write_mask = u8::from(unicast_changed)
+            | (u8::from(flowspec_changed) << 1)
+            | (u8::from(evpn_changed) << 2)
+            | (u8::from(bgpls_changed) << 3)
+            | (u8::from(vpn_changed) << 4)
+            | (u8::from(labeled_changed) << 5)
+            | (u8::from(rtc_changed) << 6);
+        if has_committed_route_payload {
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                self.adj_rib_out_commit_stats.successful_commits = self
+                    .adj_rib_out_commit_stats
+                    .successful_commits
+                    .saturating_add(1);
+                self.adj_rib_out_commit_stats.family_gauge_writes = self
+                    .adj_rib_out_commit_stats
+                    .family_gauge_writes
+                    .saturating_add(family_gauge_write_mask.count_ones() as usize);
+                self.adj_rib_out_commit_stats.last_family_gauge_write_mask =
+                    family_gauge_write_mask;
+            }
+            // Formatting once per route-bearing commit replaces the former
+            // seven identical allocations. EoR/refresh-only envelopes never
+            // enter this block and therefore retain their zero label cost.
+            let peer_label = peer.to_string();
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
@@ -2514,41 +2562,55 @@ impl RibManager {
             for key in &rtc_withdraw {
                 rib_out.remove_rtc(key);
             }
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "all",
-                gauge_val(grouped_unicast_count.unwrap_or_else(|| rib_out.len())),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "flowspec",
-                gauge_val(rib_out.flowspec_len()),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "evpn",
-                gauge_val(rib_out.evpn_len()),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "bgpls",
-                gauge_val(rib_out.bgpls_len()),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "vpn",
-                gauge_val(grouped_vpn_count.unwrap_or_else(|| rib_out.vpn_len())),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "labeled",
-                gauge_val(rib_out.labeled_len()),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "rtc",
-                gauge_val(rib_out.rtc_len()),
-            );
+            if unicast_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "all",
+                    gauge_val(grouped_unicast_count.unwrap_or_else(|| rib_out.len())),
+                );
+            }
+            if flowspec_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "flowspec",
+                    gauge_val(rib_out.flowspec_len()),
+                );
+            }
+            if evpn_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "evpn",
+                    gauge_val(rib_out.evpn_len()),
+                );
+            }
+            if bgpls_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "bgpls",
+                    gauge_val(rib_out.bgpls_len()),
+                );
+            }
+            if vpn_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "vpn",
+                    gauge_val(grouped_vpn_count.unwrap_or_else(|| rib_out.vpn_len())),
+                );
+            }
+            if labeled_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "labeled",
+                    gauge_val(rib_out.labeled_len()),
+                );
+            }
+            if rtc_changed {
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "rtc",
+                    gauge_val(rib_out.rtc_len()),
+                );
+            }
         }
 
         if let Some(pending) = self.pending_otc_blocked.get_mut(&peer) {
@@ -2586,6 +2648,13 @@ impl RibManager {
                 shared_group_encode: None,
             },
         );
+        #[cfg(any(test, feature = "bench-internals"))]
+        if has_committed_route_payload {
+            self.adj_rib_out_commit_stats.successful_enqueues = self
+                .adj_rib_out_commit_stats
+                .successful_enqueues
+                .saturating_add(1);
+        }
         true
     }
 

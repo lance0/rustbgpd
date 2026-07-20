@@ -10,9 +10,9 @@
 //!
 //! Shape: seed `CHANGED` best paths, then fan that batch out to N peers, scaling
 //! N to expose the fanout factor. `no_policy` vs `with_policy` isolates the
-//! per-peer export-policy share. Each measured pass is a *first* advertise
-//! (Adj-RIB-Out starts empty, so the Adj-RIB-Out equality suppression never
-//! short-circuits) — the conservative upper bound on per-peer cost.
+//! per-peer export-policy share. The family-gauge target separately prewarms a
+//! first advertise, mutates every route's MED outside accumulated time, and
+//! measures the resulting second changed-route pass on persistent fleets.
 //! All peers occupy one update group and ordinary members share the same
 //! unicast route/next-hop payload Arcs. The exact-export path may therefore
 //! encode each route once per compatible wire-profile cohort and reapply each
@@ -27,13 +27,13 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_rib::RibManager;
-use rustbgpd_rib::manager::PolicyTransitionBenchReceipt;
+use rustbgpd_rib::manager::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
@@ -49,6 +49,8 @@ const CHANGED: usize = 64;
 const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
 /// IXP route-server fanout factors retained in the exact-export receipt.
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
+/// Route-server fleets retained for the family-gauge A/B receipt.
+const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).
 const CHANNEL_CAP: usize = CHANGED + 8;
@@ -65,14 +67,20 @@ fn typical_attributes() -> Vec<PathAttribute> {
     ]
 }
 
-fn make_route(prefix: Prefix) -> Route {
+fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
+    let mut attributes = typical_attributes();
+    let med_attr = attributes
+        .iter_mut()
+        .find(|attribute| matches!(attribute, PathAttribute::Med(_)))
+        .expect("benchmark attributes include MED");
+    *med_attr = PathAttribute::Med(med);
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
-        attributes: Arc::new(typical_attributes()),
+        attributes: Arc::new(attributes),
         received_at: Instant::now(),
         // eBGP-learned so it reflects freely to the iBGP / RR clients (no
         // iBGP-to-iBGP split-horizon suppression in the way).
@@ -85,6 +93,10 @@ fn make_route(prefix: Prefix) -> Route {
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
+}
+
+fn make_route(prefix: Prefix) -> Route {
+    make_route_with_med(prefix, 50)
 }
 
 fn changed_prefixes() -> Vec<Prefix> {
@@ -271,6 +283,153 @@ fn bench_ixp_exact_export_fanout(c: &mut Criterion) {
                 BatchSize::PerIteration,
             );
         });
+    }
+    group.finish();
+}
+
+struct AdjRibOutGaugeFanoutState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    prefixes: Vec<Prefix>,
+    med: u32,
+}
+
+fn drain_one_route_bearing_envelope_per_peer(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+) {
+    for receiver in receivers {
+        let update = receiver
+            .try_recv()
+            .expect("each changed-route pass enqueues one envelope per peer");
+        assert_eq!(update.announce.len(), CHANGED);
+        assert!(update.withdraw.is_empty());
+        assert!(update.flowspec_announce.is_empty());
+        assert!(update.flowspec_withdraw.is_empty());
+        assert!(update.evpn_announce.is_empty());
+        assert!(update.evpn_withdraw.is_empty());
+        assert!(update.bgpls_announce.is_empty());
+        assert!(update.bgpls_withdraw.is_empty());
+        assert!(update.vpn_announce.is_empty());
+        assert!(update.vpn_withdraw.is_empty());
+        assert!(update.labeled_announce.is_empty());
+        assert!(update.labeled_withdraw.is_empty());
+        assert!(update.rtc_announce.is_empty());
+        assert!(update.rtc_withdraw.is_empty());
+        assert!(
+            update.exact_export_snapshot.is_some(),
+            "route-bearing benchmark envelopes retain the real session snapshot"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "one changed-route pass must enqueue exactly one envelope per peer"
+        );
+    }
+}
+
+fn build_adj_rib_out_gauge_fanout(peers: usize) -> AdjRibOutGaugeFanoutState {
+    let (manager, mut receivers, _changed) = build_ixp(peers, false);
+    // The production seed already distributed the first advertisement. Drain
+    // it outside measured time: this both prewarms every metric label and
+    // proves the next pass starts with empty writer channels.
+    drain_one_route_bearing_envelope_per_peer(&mut receivers);
+    AdjRibOutGaugeFanoutState {
+        manager,
+        receivers,
+        prefixes: changed_prefixes(),
+        med: 50,
+    }
+}
+
+fn assert_adj_rib_out_gauge_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
+    assert_eq!(
+        receipt.update_groups, 1,
+        "fixture must use one update group"
+    );
+    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(
+        receipt.ungrouped_peers, 0,
+        "fallback peers invalidate the A/B"
+    );
+    assert_eq!(receipt.dirty_peers, 0, "dirty resync invalidates the A/B");
+    assert_eq!(
+        receipt.exact_probe_batches, 1,
+        "one real full exact probe batch seeds compatible grouped reuse"
+    );
+    assert_eq!(
+        receipt.exact_probe_candidates, CHANGED,
+        "every changed route must traverse the real exact encoder"
+    );
+    assert_eq!(
+        receipt.exact_probe_cache_reuses,
+        CHANGED * peers.saturating_sub(1),
+        "every remaining grouped member must reuse compatible exact lengths"
+    );
+    assert_eq!(
+        receipt.successful_commits, peers,
+        "equality suppression or commit failure invalidates the A/B"
+    );
+    assert_eq!(
+        receipt.successful_enqueues, peers,
+        "every committed route-bearing envelope must be enqueued"
+    );
+    assert_eq!(
+        receipt.family_gauge_writes, peers,
+        "unicast-only fanout refreshes one family gauge per peer"
+    );
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
+    assert_eq!(
+        receipt.first_peer_family_values,
+        [
+            i64::try_from(CHANGED).expect("fixture size fits i64"),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ],
+        "group-derived unicast truth and untouched zero families must remain exact"
+    );
+}
+
+fn bench_adj_rib_out_family_gauge(c: &mut Criterion) {
+    let mut group = c.benchmark_group("adj_rib_out_family_gauge");
+    group.sample_size(10);
+    for &peers in &ADJ_RIB_OUT_GAUGE_PEER_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new("homogeneous_route_server_second_pass", peers),
+            &peers,
+            |bench, &peers| {
+                let mut state = build_adj_rib_out_gauge_fanout(peers);
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        state.med = if state.med == 50 { 51 } else { 50 };
+                        let changed = state.manager.bench_prepare_unicast_replacement(
+                            state
+                                .prefixes
+                                .iter()
+                                .copied()
+                                .map(|prefix| make_route_with_med(prefix, state.med))
+                                .collect(),
+                        );
+                        assert_eq!(changed.len(), CHANGED);
+                        state.manager.bench_reset_adj_rib_out_fanout_receipt();
+                        let started = Instant::now();
+                        state.manager.bench_distribute(&changed);
+                        accumulated += started.elapsed();
+                        assert_adj_rib_out_gauge_receipt(
+                            state.manager.bench_adj_rib_out_fanout_receipt(),
+                            peers,
+                        );
+                        // Channel inspection is deliberately outside the
+                        // accumulated actor/probe/commit/enqueue duration.
+                        drain_one_route_bearing_envelope_per_peer(&mut state.receivers);
+                    }
+                    accumulated
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -480,6 +639,7 @@ criterion_group!(
     benches,
     bench_fanout,
     bench_ixp_exact_export_fanout,
+    bench_adj_rib_out_family_gauge,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync
 );

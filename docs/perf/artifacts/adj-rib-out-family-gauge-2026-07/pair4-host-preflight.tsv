@@ -1,0 +1,10 @@
+phase	attempt	utc	load_1m	load_1m_max	governor	required_governor	competing_process_count	competing_processes	status
+lan518-pair4-target-256	1	2026-07-20T21:13:33Z	2.17	2.0	performance	performance	0	none	wait-load
+lan518-pair4-target-256	2	2026-07-20T21:13:34Z	2.08	2.0	performance	performance	0	none	wait-load
+lan518-pair4-target-256	3	2026-07-20T21:13:35Z	2.08	2.0	performance	performance	0	none	wait-load
+lan518-pair4-target-256	4	2026-07-20T21:13:36Z	2.08	2.0	performance	performance	0	none	wait-load
+lan518-pair4-target-256	5	2026-07-20T21:13:37Z	2.08	2.0	performance	performance	0	none	wait-load
+lan518-pair4-target-256	6	2026-07-20T21:13:38Z	1.91	2.0	performance	performance	0	none	pass
+lan518-pair4-target-1000	1	2026-07-20T21:13:47Z	1.84	2.0	performance	performance	0	none	pass
+lan518-pair4-control-256	1	2026-07-20T21:13:58Z	1.71	2.0	performance	performance	0	none	pass
+lan518-pair4-control-1000	1	2026-07-20T21:14:07Z	1.76	2.0	performance	performance	0	none	pass
