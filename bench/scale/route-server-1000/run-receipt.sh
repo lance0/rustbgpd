@@ -2,6 +2,53 @@
 # Fixed-shape retained receipt: 1,000 eBGP RS clients x 400 routes.
 set -euo pipefail
 
+pid_running() {
+    local state
+    [[ -n $1 ]] || return 1
+    state=$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null) || return 1
+    [[ -n $state && $state != Z ]]
+}
+
+check_run_outcome() {
+    local hrc=$1 samplers_ok=$2 failures_ok=1 failure
+    for failure in readyz metrics rss; do
+        if [[ -e "$OUT/${failure}-failure" ]]; then
+            cat "$OUT/${failure}-failure" >&2
+            failures_ok=0
+        fi
+    done
+    [[ $hrc -eq 0 ]] || { echo "harness failed: $hrc" >&2; return 1; }
+    ((samplers_ok == 1)) || { echo "sampler completion/coverage failed" >&2; return 1; }
+    ((failures_ok == 1))
+}
+
+terminate_pid() {
+    local -n slot=$1
+    local pid=${slot:-}
+    [[ -n $pid ]] || return 0
+    if pid_running "$pid"; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in {1..20}; do pid_running "$pid" || break; sleep 0.1; done
+        if pid_running "$pid"; then kill -KILL "$pid" 2>/dev/null || true; fi
+    fi
+    wait "$pid" 2>/dev/null || true
+    slot=''
+}
+
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    for slot in GUARD_PID READY_PID METRICS_PID RSS_PID H_PID DAEMON_PID; do terminate_pid "$slot"; done
+    if ((SUCCESS == 0)) && [[ -d $OUT ]]; then
+        printf 'status=failed\nexit_status=%s\n' "$rc" >"$OUT/exit-status.env"
+    fi
+    [[ -z $RUN ]] || rm -rf "$RUN"
+    exit "$rc"
+}
+
+# The focused mechanics test sources these exact production helpers.
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
 [[ $# -eq 0 ]] || { echo "usage: $0" >&2; exit 2; }
 for command in awk cargo curl find flock git grep mktemp nproc paste ps python3 rustc \
     sha256sum sort ss timeout tr uname xargs; do
@@ -31,31 +78,6 @@ readonly COMMIT TREE OUT
 mkdir -p "$OUT/build" "$OUT/scenario"
 chmod 700 "$OUT"
 SUCCESS=0 RUN='' DAEMON_PID='' H_PID='' READY_PID='' METRICS_PID='' RSS_PID='' GUARD_PID=''
-pid_running() {
-    [[ -n $1 && -r /proc/$1/stat ]] && [[ $(awk '{print $3}' "/proc/$1/stat") != Z ]]
-}
-terminate_pid() {
-    local -n slot=$1
-    local pid=${slot:-}
-    [[ -n $pid ]] || return 0
-    if pid_running "$pid"; then
-        kill -TERM "$pid" 2>/dev/null || true
-        for _ in {1..20}; do pid_running "$pid" || break; sleep 0.1; done
-        if pid_running "$pid"; then kill -KILL "$pid" 2>/dev/null || true; fi
-    fi
-    wait "$pid" 2>/dev/null || true
-    slot=''
-}
-cleanup() {
-    local rc=$?
-    trap - EXIT
-    for slot in GUARD_PID READY_PID METRICS_PID RSS_PID H_PID DAEMON_PID; do terminate_pid "$slot"; done
-    if ((SUCCESS == 0)) && [[ -d $OUT ]]; then
-        printf 'status=failed\nexit_status=%s\n' "$rc" >"$OUT/exit-status.env"
-    fi
-    [[ -z $RUN ]] || rm -rf "$RUN"
-    exit "$rc"
-}
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -290,9 +312,7 @@ samplers_ok=1
 wait_sampler readyz READY_PID 10 || samplers_ok=0
 wait_sampler metrics METRICS_PID 4 || samplers_ok=0
 wait_sampler rss RSS_PID 2 || samplers_ok=0
-[[ $hrc -eq 0 ]] || { echo "harness failed: $hrc" >&2; exit 1; }
-((samplers_ok == 1)) || { echo "sampler completion/coverage failed" >&2; exit 1; }
-for failure in readyz metrics rss; do [[ ! -e "$OUT/${failure}-failure" ]] || { cat "$OUT/${failure}-failure" >&2; exit 1; }; done
+check_run_outcome "$hrc" "$samplers_ok" || exit 1
 [[ -s "$OUT/metrics-after.prom" && -s "$OUT/advertised-explain.json" ]] || { echo "final evidence missing" >&2; exit 1; }
 
 awk -F, '$1=="reloadstall_csv" {n++; if ($3!=1000||$4!=1000||$5!=0||$6!=400000||$21!=0||$22!=1000||$23!=0) bad=1} END{exit bad || n!=4}' \
