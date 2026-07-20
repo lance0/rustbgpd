@@ -1206,9 +1206,19 @@ fn established_export_policy_test_session(
     attempts: Arc<AtomicUsize>,
     fail_on_attempt: Option<usize>,
 ) -> PeerHandle {
+    established_export_policy_test_session_with_queries(addr, attempts, fail_on_attempt).0
+}
+
+fn established_export_policy_test_session_with_queries(
+    addr: IpAddr,
+    attempts: Arc<AtomicUsize>,
+    fail_on_attempt: Option<usize>,
+) -> (PeerHandle, Arc<AtomicUsize>) {
     use rustbgpd_transport::PeerCommand;
 
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let queries = Arc::new(AtomicUsize::new(0));
+    let task_queries = Arc::clone(&queries);
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
             match command {
@@ -1224,6 +1234,7 @@ fn established_export_policy_test_session(
                     let _ = reply.send(result);
                 }
                 PeerCommand::QueryState { reply } => {
+                    task_queries.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: addr,
@@ -1260,7 +1271,7 @@ fn established_export_policy_test_session(
         }
         Ok(())
     });
-    PeerHandle::from_parts(session_tx, task)
+    (PeerHandle::from_parts(session_tx, task), queries)
 }
 
 fn rollback_ordering_policy_session(
@@ -9509,6 +9520,218 @@ async fn export_only_snapshot_skips_probe_without_repeated_policy_pair() {
     );
 
     drop(manager);
+}
+
+/// Load-bearing LAN-521 regression: restoring first-viable anchoring selects
+/// the leading two-peer pair, making the six-peer batch, single order, and
+/// cohort-first prior order below go red.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actor regression keeps fleet partitioning, RIB dialogue, and prior order in one fixture"
+)]
+async fn export_only_snapshot_selects_largest_local_policy_pair() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = (1..=10)
+        .map(|last| IpAddr::V4(Ipv4Addr::new(10, 36, 1, last)))
+        .collect::<Vec<_>>();
+    let small = &peers[0..2];
+    let large = &peers[2..8];
+    let ninth = peers[8];
+    let tenth = peers[9];
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let rib_task = tokio::spawn(async move {
+        let mut batches = Vec::new();
+        let mut singles = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies {
+                    replacements,
+                    reply,
+                } => {
+                    batches.push(
+                        replacements
+                            .into_iter()
+                            .map(|replacement| replacement.peer)
+                            .collect::<Vec<_>>(),
+                    );
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
+                    singles.push(peer);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+        (batches, singles)
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let installs = Arc::new(AtomicUsize::new(0));
+    for &peer in &peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            established_export_policy_test_session(peer, Arc::clone(&installs), None),
+            false,
+        );
+    }
+
+    let pair_two_chain = distinct_deny_policy_chain(0);
+    let pair_six_chain = distinct_deny_policy_chain(1);
+    let ninth_chain = distinct_deny_policy_chain(2);
+    let tenth_chain = distinct_deny_policy_chain(3);
+    let targets = peers
+        .iter()
+        .copied()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(if small.contains(&address) {
+                pair_two_chain.clone()
+            } else if large.contains(&address) {
+                pair_six_chain.clone()
+            } else if address == ninth {
+                ninth_chain.clone()
+            } else {
+                tenth_chain.clone()
+            }),
+        })
+        .collect::<Vec<_>>();
+    let priors = manager
+        .apply_resolved_policy_snapshot(targets)
+        .await
+        .expect("largest-pair snapshot must commit");
+    assert_eq!(
+        priors.iter().map(|prior| prior.address).collect::<Vec<_>>(),
+        large
+            .iter()
+            .chain(small)
+            .copied()
+            .chain([ninth, tenth])
+            .collect::<Vec<_>>(),
+        "apply order remains winning cohort then caller-ordered remainder"
+    );
+    assert_eq!(installs.load(Ordering::SeqCst), peers.len());
+
+    for &peer in &peers {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(manager);
+    let (batches, singles) = rib_task.await.unwrap();
+    assert_eq!(batches, vec![large.to_vec()]);
+    assert_eq!(
+        singles,
+        small
+            .iter()
+            .copied()
+            .chain([ninth, tenth])
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Load-bearing LAN-521 regression: replacing the canonical tie-break with
+/// first-seen selection makes the two permutations disagree; querying beyond
+/// the winning pair makes one of the losing-pair zero counters go red.
+#[tokio::test]
+async fn export_only_cohort_tie_break_is_stable_and_queries_only_winner() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 36, 2, 1));
+    let b1 = IpAddr::V4(Ipv4Addr::new(10, 36, 2, 2));
+    let b2 = IpAddr::V4(Ipv4Addr::new(10, 36, 2, 3));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 36, 2, 4));
+    let all = [a1, b1, b2, a2];
+    let permutations = [[a1, b1, b2, a2], [b2, a2, a1, b1]];
+    let winner_policy = distinct_deny_policy_chain(4);
+    let loser_policy = distinct_deny_policy_chain(5);
+
+    for order in permutations {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let mut manager = PeerManager::new(
+            command_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let installs = Arc::new(AtomicUsize::new(0));
+        let mut queries = Vec::new();
+        for &peer in &all {
+            let (handle, peer_queries) = established_export_policy_test_session_with_queries(
+                peer,
+                Arc::clone(&installs),
+                None,
+            );
+            insert_test_managed_peer(&mut manager, peer, handle, false);
+            queries.push((peer, peer_queries));
+        }
+        let targets = order
+            .iter()
+            .copied()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: None,
+                export_policy: Some(if [a1, a2].contains(&address) {
+                    winner_policy.clone()
+                } else {
+                    loser_policy.clone()
+                }),
+            })
+            .collect::<Vec<_>>();
+        let mask = manager.export_only_policy_cohort_mask(&targets).await;
+        let selected = order
+            .iter()
+            .zip(&mask)
+            .filter_map(|(&peer, &selected)| selected.then_some(peer))
+            .collect::<Vec<_>>();
+        let remainder = order
+            .iter()
+            .zip(mask)
+            .filter_map(|(&peer, selected)| (!selected).then_some(peer))
+            .collect::<Vec<_>>();
+        for (peer, count) in &queries {
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                usize::from([a1, a2].contains(peer)),
+                "only the canonical winning pair may receive state queries"
+            );
+        }
+        assert_eq!(
+            selected,
+            order
+                .iter()
+                .copied()
+                .filter(|peer| [a1, a2].contains(peer))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            remainder,
+            order
+                .iter()
+                .copied()
+                .filter(|peer| [b1, b2].contains(peer))
+                .collect::<Vec<_>>()
+        );
+        drop(manager);
+    }
 }
 
 #[tokio::test]

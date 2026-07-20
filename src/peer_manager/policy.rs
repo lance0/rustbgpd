@@ -345,54 +345,66 @@ impl PeerManager {
         }
     }
 
-    /// Select the first viable export-only cohort in target order. A local-only
-    /// preflight avoids session queries when no installed/target pair occurs
-    /// twice. Once the first Established local candidate fixes that pair, later
-    /// candidates either join it or remain in the authoritative remainder. The
+    /// Select the largest locally eligible export-only cohort, with a stable
+    /// lowest-`PeerKey` tie-break, while preserving caller order inside both
+    /// partitions. Only the winning pair is queried for Established state. The
     /// RIB independently revalidates runtime group identity, ownership,
-    /// generation, and session state. If a selected session changes after this
-    /// observation, its hot-apply failure is restored by the owned cohort
-    /// transaction; a later RIB divergence hands the entire cohort to the
-    /// authoritative per-peer seam.
+    /// generation, and session state. If fewer than two winning members remain
+    /// Established, the caller takes the wholly authoritative path rather than
+    /// trying a runner-up cohort.
     pub(super) async fn export_only_policy_cohort_mask(
         &mut self,
         targets: &[ResolvedPeerPolicy],
     ) -> Vec<bool> {
         let mut selected = vec![false; targets.len()];
-        let has_repeated_pair = targets.iter().enumerate().any(|(index, target)| {
+        let mut groups: Vec<(usize, usize, PeerKey)> = Vec::new();
+        for (index, target) in targets.iter().enumerate() {
             let Some((installed, target_chain)) = self.local_export_only_policy_pair(target) else {
-                return false;
+                continue;
             };
-            targets[index + 1..].iter().any(|candidate| {
-                self.local_export_only_policy_pair(candidate).is_some_and(
-                    |(candidate_installed, candidate_target)| {
-                        candidate_installed == installed && candidate_target == target_chain
-                    },
-                )
-            })
-        });
-        if !has_repeated_pair {
-            return selected;
+            let peer_key = PeerKey::new(target.address, target.interface.clone());
+            let group = groups.iter().position(|(representative, _, _)| {
+                self.local_export_only_policy_pair(&targets[*representative])
+                    .is_some_and(|(group_installed, group_target)| {
+                        group_installed == installed && group_target == target_chain
+                    })
+            });
+            if let Some(group) = group {
+                groups[group].1 = groups[group].1.saturating_add(1);
+                if peer_key < groups[group].2 {
+                    groups[group].2 = peer_key;
+                }
+            } else {
+                groups.push((index, 1, peer_key));
+            }
         }
-
-        let mut anchor: Option<(Option<PolicyChain>, Option<PolicyChain>)> = None;
+        let mut winner: Option<(usize, usize, PeerKey)> = None;
+        for (representative, count, min_peer_key) in groups {
+            if count >= 2
+                && winner.as_ref().is_none_or(|(_, best_count, best_key)| {
+                    count > *best_count || (count == *best_count && min_peer_key < *best_key)
+                })
+            {
+                winner = Some((representative, count, min_peer_key));
+            }
+        }
+        let Some((representative, _, _)) = winner else {
+            return selected;
+        };
+        let (winning_installed, winning_target) = self
+            .local_export_only_policy_pair(&targets[representative])
+            .expect("winning cohort representative remains locally eligible");
+        let winning_installed = winning_installed.clone();
+        let winning_target = winning_target.clone();
 
         for (index, target) in targets.iter().enumerate() {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
             let Some((installed, target_chain)) = self.local_export_only_policy_pair(target) else {
                 continue;
             };
-            if anchor
-                .as_ref()
-                .is_some_and(|(anchor_installed, anchor_target)| {
-                    anchor_installed != installed || anchor_target != target_chain
-                })
-            {
+            if installed != &winning_installed || target_chain != &winning_target {
                 continue;
             }
-            let prospective_anchor = anchor
-                .is_none()
-                .then(|| (installed.clone(), target_chain.clone()));
             let commands = self
                 .peers
                 .get(&peer_key)
@@ -410,10 +422,6 @@ impl PeerManager {
             self.drain_readiness_queries().await;
             if !established {
                 continue;
-            }
-
-            if let Some(prospective_anchor) = prospective_anchor {
-                anchor = Some(prospective_anchor);
             }
             selected[index] = true;
         }

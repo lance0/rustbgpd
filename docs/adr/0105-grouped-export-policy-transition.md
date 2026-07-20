@@ -48,18 +48,18 @@ RIB work, so the fast path stays deliberately narrow.
 
 ### 2. Policy cohort, wire cohorts, and remainder
 
-PeerManager chooses at most one policy cohort. In caller order, it anchors on
-the first viable pair of installed and target export chains, then selects
-Established peers with that same pair, unchanged import policy, and no pending
-refresh or export apply. Fewer than two selected peers disables the cohort.
-Everything not selected remains the authoritative remainder; the algorithm
-does not recursively find a second cohort. The local repeated-pair preflight is
-O(targets squared) in the worst case; after it finds a possible pair, the
-Established-state selection pass is linear in targets and issues at most one
-session query per locally eligible candidate. Those queries run sequentially
-and each is bounded by the 100 ms peer-query timeout, so a fleet of wedged
-sessions costs up to one timeout per candidate while the PeerManager actor
-services only its readiness lane.
+PeerManager chooses at most one policy cohort. A local O(targets squared) pass
+selects the largest structurally equal pair of installed and target export
+chains; equal-size pairs tie-break by their lowest canonical `PeerKey`. Only
+locally eligible targets for that winning pair are queried, in caller order,
+and only Established peers enter the cohort. Import changes are tolerated:
+cohort setup hot-applies them per member and defers Route Refresh until after
+the batched RIB commit. Fewer than two Established winners disables the cohort
+without trying a runner-up. Everything not selected remains in its original
+order in the authoritative remainder; the algorithm does not recursively find
+a second cohort. State queries run sequentially and each is bounded by the
+100 ms peer-query timeout, so wedged winning sessions cost up to one timeout
+each while the PeerManager actor services only its readiness lane.
 
 The policy cohort is not a wire-equivalence cohort. RibManager independently
 revalidates update-group source and destination, clean state, live session and
