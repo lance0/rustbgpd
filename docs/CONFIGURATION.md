@@ -139,7 +139,7 @@ Required. Defines the local BGP speaker identity.
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
-| `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by their Link Bandwidth Extended Community (draft-ietf-idr-link-bandwidth, FRR's `bgp bestpath bandwidth`) when the whole equal-cost group carries one; otherwise equal-cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
+| `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 
 ```toml
 [global]

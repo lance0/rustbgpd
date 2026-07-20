@@ -64,7 +64,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
-| draft-ietf-idr-link-bandwidth | Link Bandwidth Extended Community (non-transitive two-octet-AS-specific, type 0x40 subtype 0x04): decode + construct of the advertising AS and the IEEE-754 bytes/second bandwidth used to weight unequal-cost multipath |
+| 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 
 ### 0.15.0 compatibility note
 
@@ -162,7 +162,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
-- **Link Bandwidth** (draft-ietf-idr-link-bandwidth) — `ExtendedCommunity::as_link_bandwidth()` decodes the advertising AS and the IEEE-754 bytes/second bandwidth from a non-transitive two-octet-AS-specific community (type 0x40 subtype 0x04); `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` constructs one, for weighting unequal-cost multipath next hops
+- **Link Bandwidth** (RFC 10005 §§2, 3.2) — `ExtendedCommunity::as_link_bandwidth()` decodes exact type 0x00/0x40, subtype 0x04, without interpreting the raw AS/float payload; `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` continues to construct non-transitive type 0x40
 - **Origin Validation State** (RFC 8097) — `ExtendedCommunity::ORIGIN_VALIDATION_VALID` /
   `_NOT_FOUND` / `_INVALID` constants (type 0x43) for the RPKI prefix-origin
   validation-state extended community, rendered `OV_VALID` / `OV_NOT_FOUND` /

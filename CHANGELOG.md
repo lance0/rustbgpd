@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **RFC 10005 Link Bandwidth receiver subset.** The typed wire accessor recognizes
+  exact transitive/non-transitive communities; weighting selects the lowest finite
+  nonnegative value without altering raw reflection. Zero stays valid;
+  construction stays type `0x40`.
+
 ### Added
 
 - **Opt-in timed restart after max-prefix teardown.** Neighbors and peer groups

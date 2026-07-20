@@ -13,13 +13,14 @@ bluntly:
 > weight). Unequal-cost / weighted multipath … is not supported; it is future
 > work.
 
-draft-ietf-idr-link-bandwidth defines a **Link Bandwidth Extended Community**
-(non-transitive two-octet-AS-specific, type `0x40` subtype `0x04`) carrying a
-path's link bandwidth as an IEEE-754 bytes/second value. FRR's
-`bgp bestpath bandwidth` weights ECMP next-hops in proportion to it, so a
-40G link draws ~4× the traffic of a 10G link in the same bundle. The wire
-parse landed already (`ExtendedCommunity::as_link_bandwidth` /
-`Route::link_bandwidth`); this ADR wires it into the FIB.
+RFC 10005 defines transitive and non-transitive **Link Bandwidth Extended
+Communities** (exact type `0x00`/`0x40`, subtype `0x04`) carrying an IEEE-754
+bytes/second value. This implementation is a receiver subset: it accepts both
+types, uses the lowest finite nonnegative value per §§3.2/4, and leaves the raw
+communities unchanged for §3.3.2 reflection. NaN/infinities are ignored by
+local finite-value policy. The constructor remains type `0x40`; sender
+transitivity/regeneration policy is not implemented. FRR's `bgp bestpath
+bandwidth` supplies the FIB-weighting model below.
 
 ## Decision
 
@@ -57,8 +58,9 @@ For each equal-cost group, after it is deduped and capped:
 The **all-or-nothing** rule (one path missing the community ⇒ the whole group
 reverts to equal weight) is deterministic and avoids inventing a default
 bandwidth for a path that never advertised one — a conservative reading of the
-draft, akin to FRR's `skip-missing`. It is documented as a limitation, not a
-silent guess.
+RFC, akin to FRR's `skip-missing`. RFC 10005 permits zero; locally, zero in any
+weighted group takes the existing equal-cost fallback because FIB weights must
+be positive. It is documented as a limitation, not a silent guess.
 
 ### Why global, not per-table
 

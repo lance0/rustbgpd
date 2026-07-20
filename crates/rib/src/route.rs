@@ -180,15 +180,17 @@ impl Route {
         self.origin_type == RouteOrigin::Ebgp
     }
 
-    /// Link Bandwidth in **bytes per second** (draft-ietf-idr-link-bandwidth),
-    /// if the route carries a Link Bandwidth Extended Community. Used to weight
-    /// next hops for unequal-cost multipath. Returns the first match's bandwidth;
-    /// the advertising AS is discarded since weighting only needs the magnitude.
+    /// Lowest usable Link Bandwidth in **bytes per second** (RFC 10005 §§3.2, 4).
+    /// Both transitivity types and zero are accepted; negative and non-finite
+    /// values are ignored by local receiver policy. The raw communities remain
+    /// untouched for reflection.
     #[must_use]
     pub fn link_bandwidth(&self) -> Option<f32> {
         self.extended_communities()
             .iter()
-            .find_map(|c| c.as_link_bandwidth().map(|(_asn, bw)| bw))
+            .filter_map(|c| c.as_link_bandwidth().map(|(_asn, bw)| bw))
+            .filter(|bw| bw.is_finite() && *bw >= 0.0)
+            .min_by(f32::total_cmp)
     }
 
     /// Extract the ORIGIN attribute value, defaulting to Incomplete.

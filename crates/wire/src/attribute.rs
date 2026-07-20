@@ -525,14 +525,13 @@ impl ExtendedCommunity {
         let raw = u64::from_be_bytes([0x06, 0x06, alg, cap[0], cap[1], 0, pref[0], pref[1]]);
         Self(raw)
     }
-    /// Decode as Link Bandwidth Extended Community
-    /// (draft-ietf-idr-link-bandwidth): non-transitive two-octet-AS-specific,
-    /// type `0x40`, subtype `0x04`. The value carries the 2-octet AS plus the
-    /// bandwidth as an IEEE-754 single-precision float in **bytes per second**.
-    /// Returns `(asn, bytes_per_sec)`.
+    /// Decode as Link Bandwidth Extended Community (RFC 10005 §2): transitive
+    /// or non-transitive two-octet-AS-specific, exact type `0x00` or `0x40`,
+    /// subtype `0x04`. Returns the raw `(asn, bytes_per_sec)` payload; receiver
+    /// policy is applied by the consumer.
     #[must_use]
     pub fn as_link_bandwidth(self) -> Option<(u16, f32)> {
-        if self.type_byte() != 0x40 || self.subtype() != 0x04 {
+        if !matches!(self.type_byte(), 0x00 | 0x40) || self.subtype() != 0x04 {
             return None;
         }
         let v = self.value_bytes();
@@ -540,10 +539,9 @@ impl ExtendedCommunity {
         let bytes_per_sec = f32::from_be_bytes([v[2], v[3], v[4], v[5]]);
         Some((asn, bytes_per_sec))
     }
-    /// Construct a Link Bandwidth Extended Community
-    /// (draft-ietf-idr-link-bandwidth): non-transitive two-octet-AS-specific,
-    /// type `0x40`, subtype `0x04`. `bytes_per_sec` is encoded as an IEEE-754
-    /// single-precision float.
+    /// Construct a non-transitive Link Bandwidth Extended Community
+    /// (RFC 10005 §2), type `0x40`, subtype `0x04`. `bytes_per_sec` is encoded
+    /// as an IEEE-754 single-precision float.
     #[must_use]
     pub fn link_bandwidth(asn: u16, bytes_per_sec: f32) -> Self {
         let a = asn.to_be_bytes();
@@ -3383,21 +3381,29 @@ mod tests {
         assert_eq!(decoded.to_bits(), bw.to_bits());
     }
     #[test]
+    /// Load-bearing proof: dropping exact type `0x00` or `0x40` receiver
+    /// support breaks that type's raw ASN/bandwidth assertions.
     fn ext_comm_link_bandwidth_decodes_known_wire_bytes() {
-        // type=0x40 subtype=0x04 AS=0xFDE9(65001) bw=IEEE-754(1.0)
         let one = 1.0_f32.to_be_bytes();
-        let raw = u64::from_be_bytes([0x40, 0x04, 0xFD, 0xE9, one[0], one[1], one[2], one[3]]);
-        let (asn, bw) = ExtendedCommunity::new(raw)
-            .as_link_bandwidth()
-            .expect("decodes as link bandwidth");
-        assert_eq!(asn, 65001);
-        assert_eq!(bw.to_bits(), 1.0_f32.to_bits());
+        for type_byte in [0x00, 0x40] {
+            let raw =
+                u64::from_be_bytes([type_byte, 0x04, 0xFD, 0xE9, one[0], one[1], one[2], one[3]]);
+            let (asn, bw) = ExtendedCommunity::new(raw)
+                .as_link_bandwidth()
+                .expect("decodes as link bandwidth");
+            assert_eq!(asn, 65001);
+            assert_eq!(bw.to_bits(), 1.0_f32.to_bits());
+        }
     }
     #[test]
+    /// Load-bearing proof: masking the type byte admits `0x80`/`0xc0`, while
+    /// dropping the subtype check admits the wrong-subtype assertion.
     fn ext_comm_link_bandwidth_rejects_wrong_type_or_subtype() {
-        // Right subtype (0x04) but transitive type (0x00) — not Link Bandwidth.
-        let transitive = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x04, 0, 0, 0, 0, 0, 0]));
-        assert!(transitive.as_link_bandwidth().is_none());
+        for type_byte in [0x80, 0xc0] {
+            let wrong_type =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x04, 0, 0, 0, 0, 0, 0]));
+            assert!(wrong_type.as_link_bandwidth().is_none());
+        }
         // Right type (0x40) but a different subtype.
         let wrong_sub = ExtendedCommunity::new(u64::from_be_bytes([0x40, 0x02, 0, 0, 0, 0, 0, 0]));
         assert!(wrong_sub.as_link_bandwidth().is_none());

@@ -1385,6 +1385,25 @@ while retaining the legacy raw unlimited sentinel for rolling compatibility.
 
 ---
 
+## RFC 10005 — Link Bandwidth receiver subset
+
+- **§2 / §3.2:** `ExtendedCommunity::as_link_bandwidth()` accepts the exact
+  transitive (`0x00`) and non-transitive (`0x40`) two-octet-AS-specific types
+  with subtype `0x04`. It returns the raw AS and IEEE-754 bytes/second value;
+  `ExtendedCommunity::link_bandwidth()` continues to construct non-transitive
+  type `0x40`.
+- **§4:** `Route::link_bandwidth()` chooses the lowest finite nonnegative value,
+  independent of transitivity or AS. Positive and negative zero are valid;
+  negative values are ignored. NaN and infinities are also ignored as a local
+  finite-value policy. With no usable value, existing equal-cost fallback wins.
+- **§3.3.2:** receive-side inspection does not mutate, reorder, or deduplicate
+  the raw Extended Communities vector, so unchanged-next-hop reflection remains
+  byte-preserving.
+
+This is a receiver subset, not full RFC 10005 sender or re-advertisement policy.
+
+---
+
 ## EVPN Extended Communities — typed accessors (RFC 7432 §7.5-§7.8)
 
 Subtypes with typed accessors on `ExtendedCommunity` (others pass
