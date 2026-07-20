@@ -156,6 +156,50 @@ pub struct UpdateGroupSnapshot {
     pub peers: Vec<UpdateGroupPeerSnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// Stable relationship between two live update-group memberships.
+pub enum UpdateGroupComparisonVerdict {
+    Unknown,
+    Private,
+    Shared,
+    Separate,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// Stable membership state without internal group identifiers.
+pub enum UpdateGroupComparisonMembership {
+    Unknown,
+    Grouped,
+    PolicyPeerContext,
+    AddPathSend,
+    PerClientBest,
+    OrrVantage,
+    OrfInstalled,
+    SlowPeer,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+/// Semantic staging input that separates two groupable peers.
+pub enum UpdateGroupComparisonDifference {
+    ExportPolicy,
+    SessionKind,
+    RouteReflectorClient,
+    LocalRole,
+    Rfc1997Mode,
+    NegotiatedFamilies,
+    LlgrFamilies,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+/// One actor-owned comparison of two configured peers.
+pub struct UpdateGroupPeerComparison {
+    pub primary_update_group: String,
+    pub verdict: UpdateGroupComparisonVerdict,
+    pub primary_membership: UpdateGroupComparisonMembership,
+    pub comparison_membership: UpdateGroupComparisonMembership,
+    pub differences: Vec<UpdateGroupComparisonDifference>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlannedGroupability {
     Group { id: String },
@@ -1648,12 +1692,10 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<NeighborPolicyStats>,
     },
-    /// Query: return a peer's update-group membership label — `group:N`
-    /// when the fingerprint grouped it, an ungrouped reason
-    /// (`policy_peer_context` / `add_path_send` / `orr_vantage` /
-    /// `orf_installed`) when a v1 disqualifier applies, or empty for a
-    /// peer with no outbound registration. Shadow mode: observational
-    /// only; distribution still runs per peer.
+    /// Query a peer's live shared-group label, private-path reason
+    /// (`policy_peer_context`, `add_path_send`, `per_client_best`,
+    /// `orr_vantage`, `orf_installed`, or recoverable `slow_peer`), or empty
+    /// when no outbound registration exists.
     QueryPeerUpdateGroup {
         /// The target peer.
         peer: IpAddr,
@@ -1670,6 +1712,12 @@ pub enum RibUpdate {
     /// Side-effect-free snapshot used by config impact planning.
     QueryUpdateGroupSnapshot {
         reply: oneshot::Sender<UpdateGroupSnapshot>,
+    },
+    /// Query: compare two live update-group registrations in one actor turn.
+    QueryUpdateGroupComparison {
+        primary: IpAddr,
+        comparison: IpAddr,
+        reply: oneshot::Sender<UpdateGroupPeerComparison>,
     },
     /// TEST ONLY: a peer's advertised VPN view recomputed from manager
     /// state — the Φ-filtered group table for a VPN-grouped member, the

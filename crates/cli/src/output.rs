@@ -303,6 +303,17 @@ pub struct JsonNeighborDetail {
     pub selection_deferral: Vec<JsonSelectionDeferralFamily>,
 }
 
+#[derive(Debug, PartialEq, Serialize)]
+pub struct JsonUpdateGroupComparison {
+    pub primary_neighbor: String,
+    pub comparison_neighbor: String,
+    pub verdict: String,
+    pub primary_membership: String,
+    pub comparison_membership: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub differences: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct JsonSelectionDeferralFamily {
     pub afi: u32,
@@ -1378,6 +1389,30 @@ mod tests {
                 ..Default::default()
             },
         ]
+    }
+
+    #[test]
+    fn update_group_comparison_json_is_stable_and_id_free() {
+        let value = serde_json::to_value(JsonUpdateGroupComparison {
+            primary_neighbor: "192.0.2.1".into(),
+            comparison_neighbor: "192.0.2.2".into(),
+            verdict: "separate".into(),
+            primary_membership: "grouped".into(),
+            comparison_membership: "grouped".into(),
+            differences: vec!["export_policy".into(), "session_kind".into()],
+        })
+        .unwrap();
+        assert_inventory_json_contract(&value, "neighbor-update-group-comparison-v1");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "primary_neighbor": "192.0.2.1", "comparison_neighbor": "192.0.2.2",
+                "verdict": "separate", "primary_membership": "grouped",
+                "comparison_membership": "grouped",
+                "differences": ["export_policy", "session_kind"]
+            })
+        );
+        assert!(!value.to_string().contains("group:"));
     }
 
     /// Pins the default table byte-for-byte: `--wide` must not change

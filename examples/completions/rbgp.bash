@@ -5896,12 +5896,16 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__neighbor)
-            opts="-s -j -h --wide --addr --token-file --json --no-color --help add delete enable disable softreset help"
+            opts="-s -j -h --wide --compare --addr --token-file --json --no-color --help add delete enable disable softreset help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --compare)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

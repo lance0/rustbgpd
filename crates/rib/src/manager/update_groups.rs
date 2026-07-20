@@ -44,7 +44,8 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::{
     ExactExportKey, RouteQueryKey, UpdateGroupClassification, UpdateGroupClassifierInput,
-    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
+    UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
+    UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
 };
 use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
 
@@ -158,6 +159,75 @@ impl GroupMembership {
             Self::SlowPeer => "slow_peer".to_string(),
         }
     }
+
+    fn comparison_membership(&self) -> UpdateGroupComparisonMembership {
+        match self {
+            Self::Grouped(_) => UpdateGroupComparisonMembership::Grouped,
+            Self::PolicyPeerContext => UpdateGroupComparisonMembership::PolicyPeerContext,
+            Self::AddPathSend => UpdateGroupComparisonMembership::AddPathSend,
+            Self::PerClientBest => UpdateGroupComparisonMembership::PerClientBest,
+            Self::OrrVantage => UpdateGroupComparisonMembership::OrrVantage,
+            Self::OrfInstalled => UpdateGroupComparisonMembership::OrfInstalled,
+            Self::SlowPeer => UpdateGroupComparisonMembership::SlowPeer,
+        }
+    }
+}
+
+fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComparisonDifference> {
+    let GroupKey {
+        chain: left_chain,
+        target_is_ebgp: left_ebgp,
+        target_is_rr_client: left_rr,
+        target_local_role: left_role,
+        interpret_rfc1997: left_rfc1997,
+        sendable_ipv4_unicast: left_v4,
+        sendable_ipv6_unicast: left_v6,
+        sendable_vpnv4: left_vpnv4,
+        sendable_vpnv6: left_vpnv6,
+        rtc_negotiated: left_rtc,
+        llgr_families: left_llgr,
+    } = left;
+    let GroupKey {
+        chain: right_chain,
+        target_is_ebgp: right_ebgp,
+        target_is_rr_client: right_rr,
+        target_local_role: right_role,
+        interpret_rfc1997: right_rfc1997,
+        sendable_ipv4_unicast: right_v4,
+        sendable_ipv6_unicast: right_v6,
+        sendable_vpnv4: right_vpnv4,
+        sendable_vpnv6: right_vpnv6,
+        rtc_negotiated: right_rtc,
+        llgr_families: right_llgr,
+    } = right;
+    let mut differences = Vec::new();
+    if left_chain != right_chain {
+        differences.push(UpdateGroupComparisonDifference::ExportPolicy);
+    }
+    if left_ebgp != right_ebgp {
+        differences.push(UpdateGroupComparisonDifference::SessionKind);
+    }
+    if left_rr != right_rr {
+        differences.push(UpdateGroupComparisonDifference::RouteReflectorClient);
+    }
+    if left_role != right_role {
+        differences.push(UpdateGroupComparisonDifference::LocalRole);
+    }
+    if left_rfc1997 != right_rfc1997 {
+        differences.push(UpdateGroupComparisonDifference::Rfc1997Mode);
+    }
+    if left_v4 != right_v4
+        || left_v6 != right_v6
+        || left_vpnv4 != right_vpnv4
+        || left_vpnv6 != right_vpnv6
+        || left_rtc != right_rtc
+    {
+        differences.push(UpdateGroupComparisonDifference::NegotiatedFamilies);
+    }
+    if left_llgr != right_llgr {
+        differences.push(UpdateGroupComparisonDifference::LlgrFamilies);
+    }
+    differences
 }
 
 /// The registry: interned chain contents, group keys, and per-peer
@@ -3102,6 +3172,55 @@ impl RibManager {
         let _ = reply.send(UpdateGroupSnapshot { peers });
     }
 
+    pub(super) fn handle_query_update_group_comparison(
+        &self,
+        primary: IpAddr,
+        comparison: IpAddr,
+        reply: tokio::sync::oneshot::Sender<UpdateGroupPeerComparison>,
+    ) {
+        let primary_runtime = self.update_groups.members.get(&primary);
+        let comparison_runtime = self.update_groups.members.get(&comparison);
+        let primary_membership = primary_runtime.map_or(
+            UpdateGroupComparisonMembership::Unknown,
+            GroupMembership::comparison_membership,
+        );
+        let comparison_membership = comparison_runtime.map_or(
+            UpdateGroupComparisonMembership::Unknown,
+            GroupMembership::comparison_membership,
+        );
+
+        let (verdict, differences) = match (primary_runtime, comparison_runtime) {
+            (None, _) | (_, None) => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
+            (Some(GroupMembership::Grouped(left)), Some(GroupMembership::Grouped(right))) => {
+                if left == right {
+                    (UpdateGroupComparisonVerdict::Shared, Vec::new())
+                } else {
+                    match (
+                        self.update_groups.group_key(*left),
+                        self.update_groups.group_key(*right),
+                    ) {
+                        (Some(left), Some(right)) => (
+                            UpdateGroupComparisonVerdict::Separate,
+                            grouped_differences(left, right),
+                        ),
+                        _ => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
+                    }
+                }
+            }
+            (Some(_), Some(_)) => (UpdateGroupComparisonVerdict::Private, Vec::new()),
+        };
+
+        let _ = reply.send(UpdateGroupPeerComparison {
+            primary_update_group: primary_runtime
+                .map(GroupMembership::label)
+                .unwrap_or_default(),
+            verdict,
+            primary_membership,
+            comparison_membership,
+            differences,
+        });
+    }
+
     /// Re-derive every update-group gauge from the membership map.
     /// Registered peers are at most low-thousands and this runs only on
     /// lifecycle/config events, so a full recount beats incremental
@@ -3292,6 +3411,145 @@ mod tests {
 
     use super::*;
     use crate::test_support::make_route;
+
+    fn comparison_key() -> GroupKey {
+        GroupKey {
+            chain: Some(1),
+            target_is_ebgp: true,
+            target_is_rr_client: false,
+            target_local_role: None,
+            interpret_rfc1997: true,
+            sendable_ipv4_unicast: true,
+            sendable_ipv6_unicast: false,
+            sendable_vpnv4: false,
+            sendable_vpnv6: false,
+            rtc_negotiated: false,
+            llgr_families: vec![(1, 1)],
+        }
+    }
+
+    fn compare(manager: &mut RibManager, left: IpAddr, right: IpAddr) -> UpdateGroupPeerComparison {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        manager.handle_update(crate::RibUpdate::QueryUpdateGroupComparison {
+            primary: left,
+            comparison: right,
+            reply: tx,
+        });
+        rx.try_recv().unwrap()
+    }
+
+    #[test]
+    fn comparison_reasons_cover_every_group_key_axis() {
+        use UpdateGroupComparisonDifference as D;
+        let base = comparison_key();
+        macro_rules! check {
+            ($field:ident = $value:expr => $reason:expr) => {{
+                let mut key = base.clone();
+                key.$field = $value;
+                assert_eq!(grouped_differences(&base, &key), vec![$reason]);
+            }};
+        }
+        check!(chain = Some(2) => D::ExportPolicy);
+        check!(target_is_ebgp = false => D::SessionKind);
+        check!(target_is_rr_client = true => D::RouteReflectorClient);
+        check!(target_local_role = Some(1) => D::LocalRole);
+        check!(interpret_rfc1997 = false => D::Rfc1997Mode);
+        check!(sendable_ipv4_unicast = false => D::NegotiatedFamilies);
+        check!(sendable_ipv6_unicast = true => D::NegotiatedFamilies);
+        check!(sendable_vpnv4 = true => D::NegotiatedFamilies);
+        check!(sendable_vpnv6 = true => D::NegotiatedFamilies);
+        check!(rtc_negotiated = true => D::NegotiatedFamilies);
+        check!(llgr_families = vec![(2, 1)] => D::LlgrFamilies);
+        let mut combined = base.clone();
+        combined.chain = None;
+        combined.target_is_ebgp = false;
+        combined.sendable_ipv4_unicast = false;
+        combined.sendable_ipv6_unicast = true;
+        combined.llgr_families.clear();
+        assert_eq!(
+            grouped_differences(&base, &combined),
+            vec![
+                D::ExportPolicy,
+                D::SessionKind,
+                D::NegotiatedFamilies,
+                D::LlgrFamilies,
+            ]
+        );
+    }
+
+    #[test]
+    fn comparison_verdicts_use_runtime_identity_and_preserve_sides() {
+        use UpdateGroupComparisonMembership as M;
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        manager.update_groups.groups = vec![comparison_key(), comparison_key()];
+        manager
+            .update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(0));
+        manager
+            .update_groups
+            .members
+            .insert(OTHER1, GroupMembership::Grouped(1));
+        let separate = compare(&mut manager, MEMBER, OTHER1);
+        assert_eq!(separate.verdict, UpdateGroupComparisonVerdict::Separate);
+        assert_eq!(separate.primary_update_group, "group:0");
+        assert!(separate.differences.is_empty());
+        assert_eq!(
+            compare(&mut manager, MEMBER, OTHER2).verdict,
+            UpdateGroupComparisonVerdict::Unknown
+        );
+        assert_eq!(
+            compare(&mut manager, OTHER2, MEMBER).verdict,
+            UpdateGroupComparisonVerdict::Unknown
+        );
+        let absent: IpAddr = "192.0.2.254".parse().unwrap();
+        assert_eq!(
+            compare(&mut manager, OTHER2, absent).verdict,
+            UpdateGroupComparisonVerdict::Unknown
+        );
+
+        for (private, expected) in [
+            (GroupMembership::PolicyPeerContext, M::PolicyPeerContext),
+            (GroupMembership::AddPathSend, M::AddPathSend),
+            (GroupMembership::PerClientBest, M::PerClientBest),
+            (GroupMembership::OrrVantage, M::OrrVantage),
+            (GroupMembership::OrfInstalled, M::OrfInstalled),
+            (GroupMembership::SlowPeer, M::SlowPeer),
+        ] {
+            manager.update_groups.members.insert(OTHER1, private);
+            assert_eq!(
+                compare(&mut manager, OTHER2, OTHER1).verdict,
+                UpdateGroupComparisonVerdict::Unknown
+            );
+            let left = compare(&mut manager, OTHER1, MEMBER);
+            let right = compare(&mut manager, MEMBER, OTHER1);
+            assert_eq!(
+                (left.verdict, left.primary_membership),
+                (UpdateGroupComparisonVerdict::Private, expected)
+            );
+            assert_eq!(
+                (right.verdict, right.comparison_membership),
+                (UpdateGroupComparisonVerdict::Private, expected)
+            );
+            assert_eq!(right.primary_membership, M::Grouped);
+        }
+        manager
+            .update_groups
+            .members
+            .insert(OTHER1, GroupMembership::Grouped(0));
+        assert_eq!(
+            compare(&mut manager, MEMBER, OTHER1).verdict,
+            UpdateGroupComparisonVerdict::Shared
+        );
+    }
 
     #[test]
     fn effective_distribution_mode_precedence_is_deterministic() {

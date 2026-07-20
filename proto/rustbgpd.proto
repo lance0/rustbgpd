@@ -497,10 +497,10 @@ message NeighborState {
   uint64 export_policy_routes_permitted = 20;
   // Export policy evaluations that denied a route.
   uint64 export_policy_routes_denied = 21;
-  // Update-group membership (shadow mode): "group:N" when the RIB
-  // fingerprint grouped this peer, or the ungrouped reason
+  // Live outbound update-group membership: "group:N" for shared staging, or
+  // the private-path reason
   // ("policy_peer_context", "add_path_send", "per_client_best",
-  // "orr_vantage", "orf_installed"). Empty when the peer has no
+  // "orr_vantage", "orf_installed", "slow_peer"). Empty when the peer has no
   // outbound registration.
   string update_group = 22;
   // Total BGP messages received/sent, all types (OPEN, KEEPALIVE,
@@ -554,6 +554,45 @@ message NeighborState {
   string max_prefix_action = 38;
   // Present only while a timed max-prefix restart hold-down is active.
   optional uint64 max_prefix_restart_remaining_millis = 39;
+  UpdateGroupComparison update_group_comparison = 40;
+}
+
+message UpdateGroupComparison {
+  UpdateGroupComparisonVerdict verdict = 1;
+  UpdateGroupComparisonMembership primary_membership = 2;
+  UpdateGroupComparisonMembership comparison_membership = 3;
+  repeated UpdateGroupComparisonDifference differences = 4;
+}
+
+enum UpdateGroupComparisonVerdict {
+  UPDATE_GROUP_COMPARISON_VERDICT_UNSPECIFIED = 0;
+  UPDATE_GROUP_COMPARISON_VERDICT_UNKNOWN = 1;
+  UPDATE_GROUP_COMPARISON_VERDICT_PRIVATE = 2;
+  UPDATE_GROUP_COMPARISON_VERDICT_SHARED = 3;
+  UPDATE_GROUP_COMPARISON_VERDICT_SEPARATE = 4;
+}
+
+enum UpdateGroupComparisonMembership {
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_UNSPECIFIED = 0;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_UNKNOWN = 1;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_GROUPED = 2;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_POLICY_PEER_CONTEXT = 3;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_ADD_PATH_SEND = 4;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_PER_CLIENT_BEST = 5;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORR_VANTAGE = 6;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_ORF_INSTALLED = 7;
+  UPDATE_GROUP_COMPARISON_MEMBERSHIP_SLOW_PEER = 8;
+}
+
+enum UpdateGroupComparisonDifference {
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_UNSPECIFIED = 0;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_EXPORT_POLICY = 1;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_SESSION_KIND = 2;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_ROUTE_REFLECTOR_CLIENT = 3;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_LOCAL_ROLE = 4;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_RFC1997_MODE = 5;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_NEGOTIATED_FAMILIES = 6;
+  UPDATE_GROUP_COMPARISON_DIFFERENCE_LLGR_FAMILIES = 7;
 }
 
 message SelectionDeferralFamilyState {
@@ -675,6 +714,8 @@ message ListNeighborsResponse {
 message GetNeighborStateRequest {
   string address = 1;
   string interface = 2;
+  string compare_address = 3;
+  string compare_interface = 4;
 }
 
 message EnableNeighborRequest {

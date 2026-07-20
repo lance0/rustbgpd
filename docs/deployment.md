@@ -566,6 +566,7 @@ configured with TLS / mTLS, the gNMI adapter (ADR-0070) exposes
 ```sh
 rbgp neighbor                  # list all neighbors
 rbgp neighbor 10.0.0.2         # detail
+rbgp neighbor 10.0.0.2 --compare 10.0.0.3  # live update-group relationship
 rbgp rib                       # browse Loc-RIB
 rbgp bfd                       # BFD sessions (ADR-0067)
 rbgp evpn                      # EVPN instances + Type 2/3 RIB

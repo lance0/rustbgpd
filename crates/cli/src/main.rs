@@ -130,6 +130,16 @@ enum Command {
         /// -j already carries every field
         #[arg(long, conflicts_with = "address")]
         wide: bool,
+
+        /// Compare this peer's live update-group membership with another
+        /// configured peer without exposing internal group identifiers
+        #[arg(
+            long,
+            value_name = "NEIGHBOR",
+            requires = "address",
+            conflicts_with = "wide"
+        )]
+        compare: Option<String>,
     },
 
     /// Inspect single-hop BFD sessions (ADR-0067)
@@ -1683,6 +1693,23 @@ fn generate_completions(shell: Shell, binary_name: &'static str, output: &mut dy
     clap_complete::generate(shell, &mut cli_command(binary_name), binary_name, output);
 }
 
+fn validate_neighbor_compare_action(command: &Command) -> Result<(), CliError> {
+    if matches!(
+        command,
+        Command::Neighbor {
+            compare: Some(_),
+            action: Some(_),
+            ..
+        }
+    ) {
+        Err(CliError::Argument(
+            "--compare cannot be combined with a neighbor action".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Render the whole CLI as one comprehensive `rbgp.1`: the top-level
 /// page, a short SUBCOMMANDS index, then a SYNOPSIS/DESCRIPTION/OPTIONS
 /// block for every subcommand recursively ("RBGP NEIGHBOR DRAIN" style
@@ -1946,6 +1973,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         std::process::exit(code);
     }
 
+    validate_neighbor_compare_action(&cli.command)?;
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -2045,9 +2073,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             address,
             action,
             wide,
+            compare,
         } => match (address, action) {
             (None, None) => commands::neighbor::list(connection, json, wide).await,
-            (Some(addr), None) => commands::neighbor::show(connection, &addr, json).await,
+            (Some(addr), None) => {
+                commands::neighbor::show(connection, &addr, compare.as_deref(), json).await
+            }
             (
                 Some(addr),
                 Some(NeighborAction::Add {
@@ -3208,6 +3239,7 @@ mod tests {
                 address: None,
                 action: None,
                 wide: false,
+                compare: None,
             }
         ));
     }
@@ -3221,6 +3253,7 @@ mod tests {
                 address: None,
                 action: None,
                 wide: false,
+                compare: None,
             }
         ));
     }
@@ -3234,6 +3267,7 @@ mod tests {
                 address: None,
                 action: None,
                 wide: true,
+                compare: None,
             }
         ));
         // Display-only list flag: rejected on the per-neighbor detail view.
@@ -3259,14 +3293,33 @@ mod tests {
             address,
             action,
             wide,
+            compare,
         } = cli.command
         {
             assert_eq!(address.unwrap(), "10.0.0.1");
             assert!(action.is_none());
             assert!(!wide);
+            assert!(compare.is_none());
         } else {
             panic!("expected Neighbor command");
         }
+    }
+
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn test_parse_neighbor_compare_and_reject_incompatible_modes() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        *server.state.neighbor_comparison.lock().await = Some(Default::default());
+        let valid = Cli::try_parse_from(["rbgp", "--addr", server.addr.as_str(), "neighbor",
+            "10.0.0.1", "--compare", "10.0.0.2"]).unwrap();
+        run(valid, "rbgp").await.unwrap();
+        assert_eq!(server.state.last_get_neighbor_state.lock().await.as_ref().unwrap().compare_address, "10.0.0.2");
+        assert!(Cli::try_parse_from(["rbgp", "neighbor", "--compare", "10.0.0.2"]).is_err());
+        assert!(Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.1", "--compare", "10.0.0.2", "--wide"]).is_err());
+        let action = Cli::try_parse_from(["rbgp", "--addr", "http://127.0.0.1:1", "neighbor",
+            "10.0.0.1", "--compare", "10.0.0.2", "delete"]).unwrap();
+        assert_eq!(run(action, "rbgp").await.unwrap_err().to_string(),
+            "--compare cannot be combined with a neighbor action");
     }
 
     #[test]

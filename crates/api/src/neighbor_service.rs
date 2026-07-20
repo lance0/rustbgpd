@@ -18,7 +18,10 @@ use crate::server::{
     AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_runtime_config_event,
     read_only_rejection,
 };
-use rustbgpd_rib::{EffectiveDistributionMode, PeerOutboundState, RibUpdate};
+use rustbgpd_rib::{
+    EffectiveDistributionMode, PeerOutboundState, RibUpdate, UpdateGroupComparisonDifference,
+    UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupPeerComparison,
+};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -26,6 +29,19 @@ fn is_ipv6_link_local(address: IpAddr) -> bool {
     match address {
         IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
         IpAddr::V4(_) => false,
+    }
+}
+
+fn validate_update_group_comparison_scope(
+    primary: IpAddr,
+    comparison: IpAddr,
+) -> Result<(), Status> {
+    if is_ipv6_link_local(primary) || is_ipv6_link_local(comparison) {
+        Err(Status::invalid_argument(
+            "update-group comparison does not support IPv6 link-local neighbors",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -184,6 +200,92 @@ async fn query_peer_outbound_state(
     reply_rx
         .await
         .map_err(|_| Status::internal("RIB manager dropped reply"))
+}
+
+async fn query_update_group_comparison(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    primary: IpAddr,
+    comparison: IpAddr,
+) -> Result<UpdateGroupPeerComparison, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryUpdateGroupComparison {
+            primary,
+            comparison,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("RIB manager unavailable"))?;
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("RIB manager dropped reply"))
+}
+
+fn update_group_comparison_to_proto(
+    comparison: &UpdateGroupPeerComparison,
+) -> proto::UpdateGroupComparison {
+    let verdict = match comparison.verdict {
+        UpdateGroupComparisonVerdict::Unknown => proto::UpdateGroupComparisonVerdict::Unknown,
+        UpdateGroupComparisonVerdict::Private => proto::UpdateGroupComparisonVerdict::Private,
+        UpdateGroupComparisonVerdict::Shared => proto::UpdateGroupComparisonVerdict::Shared,
+        UpdateGroupComparisonVerdict::Separate => proto::UpdateGroupComparisonVerdict::Separate,
+    };
+    let membership = |value| match value {
+        UpdateGroupComparisonMembership::Unknown => proto::UpdateGroupComparisonMembership::Unknown,
+        UpdateGroupComparisonMembership::Grouped => proto::UpdateGroupComparisonMembership::Grouped,
+        UpdateGroupComparisonMembership::PolicyPeerContext => {
+            proto::UpdateGroupComparisonMembership::PolicyPeerContext
+        }
+        UpdateGroupComparisonMembership::AddPathSend => {
+            proto::UpdateGroupComparisonMembership::AddPathSend
+        }
+        UpdateGroupComparisonMembership::PerClientBest => {
+            proto::UpdateGroupComparisonMembership::PerClientBest
+        }
+        UpdateGroupComparisonMembership::OrrVantage => {
+            proto::UpdateGroupComparisonMembership::OrrVantage
+        }
+        UpdateGroupComparisonMembership::OrfInstalled => {
+            proto::UpdateGroupComparisonMembership::OrfInstalled
+        }
+        UpdateGroupComparisonMembership::SlowPeer => {
+            proto::UpdateGroupComparisonMembership::SlowPeer
+        }
+    };
+    let differences = comparison
+        .differences
+        .iter()
+        .map(|difference| match difference {
+            UpdateGroupComparisonDifference::ExportPolicy => {
+                proto::UpdateGroupComparisonDifference::ExportPolicy
+            }
+            UpdateGroupComparisonDifference::SessionKind => {
+                proto::UpdateGroupComparisonDifference::SessionKind
+            }
+            UpdateGroupComparisonDifference::RouteReflectorClient => {
+                proto::UpdateGroupComparisonDifference::RouteReflectorClient
+            }
+            UpdateGroupComparisonDifference::LocalRole => {
+                proto::UpdateGroupComparisonDifference::LocalRole
+            }
+            UpdateGroupComparisonDifference::Rfc1997Mode => {
+                proto::UpdateGroupComparisonDifference::Rfc1997Mode
+            }
+            UpdateGroupComparisonDifference::NegotiatedFamilies => {
+                proto::UpdateGroupComparisonDifference::NegotiatedFamilies
+            }
+            UpdateGroupComparisonDifference::LlgrFamilies => {
+                proto::UpdateGroupComparisonDifference::LlgrFamilies
+            }
+        })
+        .map(Into::into)
+        .collect();
+    proto::UpdateGroupComparison {
+        verdict: verdict.into(),
+        primary_membership: membership(comparison.primary_membership).into(),
+        comparison_membership: membership(comparison.comparison_membership).into(),
+        differences,
+    }
 }
 
 fn dynamic_range_error_status(error: DynamicRangeError) -> Status {
@@ -588,6 +690,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         graceful_shutdown_advertise_intent: Some(info.graceful_shutdown_advertise_intent),
         max_prefix_action: info.max_prefix_action.clone(),
         max_prefix_restart_remaining_millis: info.max_prefix_restart_remaining_millis,
+        update_group_comparison: None,
     }
 }
 
@@ -973,6 +1076,18 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
     ) -> Result<Response<proto::NeighborState>, Status> {
         let req = request.into_inner();
         let peer = peer_key(&req.address, &req.interface)?;
+        if req.compare_address.is_empty() && !req.compare_interface.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "compare_interface requires compare_address",
+            ));
+        }
+        let compare_peer = if req.compare_address.is_empty() {
+            None
+        } else {
+            let compare_peer = peer_key(&req.compare_address, &req.compare_interface)?;
+            validate_update_group_comparison_scope(peer.address, compare_peer.address)?;
+            Some(compare_peer)
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -988,7 +1103,32 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .ok_or_else(|| Status::not_found(format!("peer {peer} not found")))?;
 
+        if let Some(compare_peer) = &compare_peer {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.peer_mgr_tx
+                .send(PeerManagerCommand::GetPeerState {
+                    peer: compare_peer.clone(),
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Status::internal("peer manager unavailable"))?;
+            reply_rx
+                .await
+                .map_err(|_| Status::internal("peer manager dropped reply"))?
+                .ok_or_else(|| Status::not_found(format!("peer {compare_peer} not found")))?;
+        }
+
         let mut state = peer_info_to_proto(&info);
+        if let Some(compare_peer) = compare_peer {
+            let comparison =
+                query_update_group_comparison(&self.rib_tx, info.address, compare_peer.address)
+                    .await?;
+            state
+                .update_group
+                .clone_from(&comparison.primary_update_group);
+            state.update_group_comparison = Some(update_group_comparison_to_proto(&comparison));
+            return Ok(Response::new(state));
+        }
         state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
         let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
         state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
@@ -1323,6 +1463,31 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
+    }
+
+    #[tokio::test]
+    async fn update_group_comparison_rejects_link_local_before_actor_queries() {
+        for (address, interface, compare_address, compare_interface) in [
+            ("fe80::1", "eth0", "2001:db8::1", ""),
+            ("2001:db8::1", "", "fe80::1", "eth0"),
+            ("2001:db8::1", "", "", "eth0"),
+        ] {
+            let (peer_tx, mut peer_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+            let request = Request::new(proto::GetNeighborStateRequest {
+                address: address.into(),
+                interface: interface.into(),
+                compare_address: compare_address.into(),
+                compare_interface: compare_interface.into(),
+            });
+            let error = tokio::select! {
+                result = svc.get_neighbor_state(request) => result.unwrap_err(),
+                _ = peer_rx.recv() => panic!("invalid request reached peer actor"),
+            };
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
     }
 
     #[test]
@@ -2062,6 +2227,9 @@ mod tests {
                             ],
                         });
                     }
+                    RibUpdate::QueryUpdateGroupComparison { .. } => {
+                        panic!("ordinary neighbor query must not request a comparison");
+                    }
                     _ => {}
                 }
             }
@@ -2071,6 +2239,7 @@ mod tests {
             .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
                 address: "10.0.0.1".into(),
                 interface: String::new(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -2092,6 +2261,49 @@ mod tests {
         assert_eq!(resp.selection_deferral[0].waiter_session_id, Some(42));
         assert_eq!(resp.selection_deferral[0].blocking_waiters, 2);
         assert_eq!(resp.selection_deferral[0].remaining_millis, 1_500);
+    }
+
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn comparison_validates_both_peers_then_uses_one_typed_rib_query() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let primary: IpAddr = "10.0.0.1".parse().unwrap();
+        let comparison: IpAddr = "10.0.0.2".parse().unwrap();
+        let peer_task = tokio::spawn(async move {
+            for expected in [primary, comparison] {
+                let Some(PeerManagerCommand::GetPeerState { peer, reply }) = peer_rx.recv().await else {
+                    panic!("expected configured-peer validation");
+                };
+                assert_eq!(peer.address, expected);
+                reply.send(Some(peer_info(expected))).unwrap();
+            }
+        });
+        let rib_task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryUpdateGroupComparison { primary: left, comparison: right, reply })
+                = rib_rx.recv().await else {
+                panic!("comparison must be the only RIB snapshot query");
+            };
+            assert_eq!((left, right), (primary, comparison));
+            reply.send(UpdateGroupPeerComparison {
+                primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
+                primary_membership: UpdateGroupComparisonMembership::Grouped,
+                comparison_membership: UpdateGroupComparisonMembership::SlowPeer,
+                differences: vec![UpdateGroupComparisonDifference::SessionKind],
+            }).unwrap();
+        });
+        let request = proto::GetNeighborStateRequest { address: primary.to_string(),
+            compare_address: comparison.to_string(), ..Default::default() };
+        let state = svc.get_neighbor_state(Request::new(request)).await.unwrap().into_inner();
+        let result = state.update_group_comparison.unwrap();
+        peer_task.await.unwrap();
+        rib_task.await.unwrap();
+        assert_eq!(state.update_group, "group:7");
+        assert_eq!(result.verdict, proto::UpdateGroupComparisonVerdict::Separate as i32);
+        assert_eq!(result.primary_membership, proto::UpdateGroupComparisonMembership::Grouped as i32);
+        assert_eq!(result.comparison_membership, proto::UpdateGroupComparisonMembership::SlowPeer as i32);
+        assert_eq!(result.differences, vec![proto::UpdateGroupComparisonDifference::SessionKind as i32]);
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub(crate) struct MockState {
     pub(crate) last_config_confirm: Mutex<Option<server_proto::ConfirmConfigTransactionRequest>>,
     pub(crate) last_config_abort: Mutex<Option<server_proto::AbortConfigTransactionRequest>>,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
+    pub(crate) last_get_neighbor_state: Mutex<Option<server_proto::GetNeighborStateRequest>>,
+    pub(crate) neighbor_comparison: Mutex<Option<server_proto::UpdateGroupComparison>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
@@ -739,9 +741,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
 
     async fn get_neighbor_state(
         &self,
-        _request: Request<server_proto::GetNeighborStateRequest>,
+        request: Request<server_proto::GetNeighborStateRequest>,
     ) -> Result<Response<server_proto::NeighborState>, Status> {
-        Ok(Response::new(server_proto::NeighborState {
+        *self.state.last_get_neighbor_state.lock().await = Some(request.into_inner());
+        let mut response = server_proto::NeighborState {
             config: Some(server_proto::NeighborConfig {
                 address: "10.0.0.2".to_string(),
                 interface: String::new(),
@@ -801,7 +804,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             graceful_shutdown_advertise_intent: Some(true),
             max_prefix_action: "shutdown".to_string(),
             max_prefix_restart_remaining_millis: None,
-        }))
+            update_group_comparison: None,
+        };
+        response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
+        Ok(Response::new(response))
     }
 
     async fn enable_neighbor(
