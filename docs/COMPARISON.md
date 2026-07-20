@@ -308,6 +308,12 @@ OpenBGPD 9.1 head-to-head at 700 peers × 400k prefixes under live churn
 convergence, and RSS — with identical wire inputs, config disclosure,
 and the losses published alongside the wins.
 
+A separate [1,000-peer retained receipt](perf/route-server-1000-2026-07.md)
+exercises a uniform all-eBGP route-server fleet against the real daemon: 400k
+routes, 399.6 million observer-NLRI cold deliveries, four generation-complete
+export reloads, and continuous readiness/RSS/grouping checks. It is capacity
+acceptance for that disclosed same-host shape, not another competitor result.
+
 ## Positioning
 
 **rustbgpd** is an API-first BGP daemon targeting data-center fabric, IX
