@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cold-ingest fanout services readiness between outbound peers.** Ordinary
+  route ingest now services the dedicated read-only readiness lane at peer
+  boundaries, including mixed update-group and private-policy fleets, without
+  admitting general queries or weakening stalled policy-transition verdicts.
+
 - **RFC 10005 Link Bandwidth receiver subset.** The typed wire accessor recognizes
   exact transitive/non-transitive communities; weighting selects the lowest finite
   nonnegative value without altering raw reflection. Zero stays valid;

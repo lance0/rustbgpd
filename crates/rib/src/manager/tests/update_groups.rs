@@ -3,7 +3,8 @@
 //! stability under a content-identical export-policy reinstall.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
@@ -149,6 +150,216 @@ impl crate::update::ExactExportEncoder for CohortExactEncoder {
             probes: Arc::clone(&self.probes),
             reuses: Arc::clone(&self.reuses),
         })
+    }
+}
+
+struct IngestReadinessProbe {
+    readiness_tx: mpsc::Sender<crate::update::RibReadinessQuery>,
+    reply: Mutex<Option<oneshot::Receiver<Result<usize, crate::update::RibReadinessError>>>>,
+    probes: AtomicUsize,
+    answered_before_later_probe: AtomicBool,
+}
+
+struct IngestReadinessEncoder {
+    owner: u64,
+    probe: Arc<IngestReadinessProbe>,
+}
+
+struct IngestReadinessSnapshot {
+    owner: u64,
+    probe: Arc<IngestReadinessProbe>,
+}
+
+impl crate::update::ExactExportSnapshot for IngestReadinessSnapshot {
+    fn owner_id(&self) -> u64 {
+        self.owner
+    }
+
+    fn generation(&self) -> u64 {
+        1
+    }
+
+    fn probe_announcement(
+        &self,
+        _candidate: crate::update::ExactExportCandidate<'_>,
+    ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+        let probe_index = self.probe.probes.fetch_add(1, Ordering::Relaxed);
+        let mut reply = self.probe.reply.lock().unwrap();
+        if probe_index == 0 {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.probe
+                .readiness_tx
+                .try_send(crate::update::RibReadinessQuery::LocRibCount { reply: reply_tx })
+                .unwrap();
+            *reply = Some(reply_rx);
+        } else if let Some(reply) = reply.as_mut()
+            && matches!(reply.try_recv(), Ok(Ok(1)))
+        {
+            self.probe
+                .answered_before_later_probe
+                .store(true, Ordering::Relaxed);
+        }
+        Ok(crate::update::ExactExportResult {
+            encoded_len: 64,
+            max_len: 4_096,
+            generation: 1,
+        })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl crate::update::ExactExportEncoder for IngestReadinessEncoder {
+    fn owner_id(&self) -> u64 {
+        self.owner
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        Arc::new(IngestReadinessSnapshot {
+            owner: self.owner,
+            probe: Arc::clone(&self.probe),
+        })
+    }
+}
+
+/// Load-bearing regression: deleting the ingest-only readiness drain from the
+/// outbound peer boundary leaves the query queued when the second real
+/// exact-export probe runs, so `answered_before_later_probe` stays false and
+/// this test goes red.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression keeps the mixed fanout setup and mid-pass observation together"
+)]
+fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
+    const GROUPED_PEERS: usize = 4;
+    const FALLBACK_PEERS: usize = 2;
+    let (_tx, rx) = mpsc::channel(1);
+    let (query_tx, query_rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    let (general_reply, mut general_response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount {
+            reply: general_reply,
+        })
+        .unwrap();
+    let probe = Arc::new(IngestReadinessProbe {
+        readiness_tx,
+        reply: Mutex::new(None),
+        probes: AtomicUsize::new(0),
+        answered_before_later_probe: AtomicBool::new(false),
+    });
+    let grouped_probes = Arc::new(AtomicUsize::new(0));
+    let grouped_reuses = Arc::new(AtomicUsize::new(0));
+    let mut peers = Vec::new();
+    let mut receivers = Vec::new();
+
+    for index in 0..GROUPED_PEERS + FALLBACK_PEERS {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 51, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        let encoder: Arc<dyn crate::update::ExactExportEncoder> = if index < GROUPED_PEERS {
+            Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 51,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&grouped_probes),
+                reuses: Arc::clone(&grouped_reuses),
+            })
+        } else {
+            Arc::new(IngestReadinessEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                probe: Arc::clone(&probe),
+            })
+        };
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder,
+        });
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: (index >= GROUPED_PEERS).then(peer_context_chain),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        receivers.push(outbound_rx);
+    }
+
+    assert!(
+        peers[..GROUPED_PEERS]
+            .iter()
+            .all(|peer| manager.grouped_member_of(*peer).is_some())
+    );
+    assert!(peers[GROUPED_PEERS..].iter().all(|peer| matches!(
+        manager.update_groups.membership(*peer),
+        Some(crate::manager::update_groups::GroupMembership::PolicyPeerContext)
+    )));
+
+    let source_v4 = Ipv4Addr::new(192, 0, 2, 51);
+    let source = IpAddr::V4(source_v4);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            source_v4,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert_eq!(
+        probe.probes.load(Ordering::Relaxed),
+        FALLBACK_PEERS,
+        "both peer-context fallback peers took a real exact-export probe"
+    );
+    assert_eq!(
+        grouped_probes.load(Ordering::Relaxed),
+        1,
+        "the grouped peers shared one real exact-export probe"
+    );
+    assert_eq!(
+        grouped_reuses.load(Ordering::Relaxed),
+        GROUPED_PEERS - 1,
+        "every later grouped peer reused the shared probe result"
+    );
+    assert!(
+        probe.answered_before_later_probe.load(Ordering::Relaxed),
+        "readiness reply must arrive after fanout starts and before a later peer is probed"
+    );
+    assert!(
+        matches!(
+            general_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "ordinary queries must remain fenced during the ingest fanout"
+    );
+    for receiver in &mut receivers {
+        assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
     }
 }
 
