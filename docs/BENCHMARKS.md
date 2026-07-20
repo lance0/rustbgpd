@@ -447,6 +447,20 @@ a RIB-to-transport dependency cycle. Run it with:
 cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
+The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
+control. It keeps persistent homogeneous route-server fleets at 8, 64, 256,
+and 1,000 peers, drains the prewarm advertisement, and alternates a wire-visible
+MED across all 64 routes before each measured pass. Route mutation, Loc-RIB
+recompute, receipt assertions, and receiver draining stay outside accumulated
+time. The measured interval covers manager distribution, the real exact-export
+probe and compatible grouped reuse, authoritative Adj-RIB-Out commit, metric
+refresh, and bounded-channel enqueue; it does not include session-writer or
+network I/O. In-code receipts require one update group, one full real probe per
+changed route, compatible reuse for every remaining member, one successful
+route-bearing commit and enqueue per peer, no dirty or ungrouped fallback, and
+exact family-gauge values. The unchanged-behavior control refreshes all seven
+family gauges per peer.
+
 The July 2026 receipt compares the first real-probe baseline against ordered
 batch probing with the live prepared-attribute memo key:
 

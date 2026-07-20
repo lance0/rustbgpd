@@ -1,7 +1,7 @@
 #[cfg(feature = "bench-internals")]
 mod bench_support;
 #[cfg(feature = "bench-internals")]
-pub use bench_support::PolicyTransitionBenchReceipt;
+pub use bench_support::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 mod distribution;
 mod graceful_restart;
 mod helpers;
@@ -60,6 +60,24 @@ struct PolicyTransitionStats {
     authoritative_peer_applies: usize,
     #[cfg(feature = "bench-internals")]
     max_authoritative_peer_apply: std::time::Duration,
+}
+
+/// Test/benchmark-only receipt from the authoritative outbound commit path.
+///
+/// The counters live on the production path but compile out of normal builds.
+/// They prove performance fixtures reached exact export, committed one
+/// route-bearing envelope per peer, and exercised the intended family-gauge
+/// writes instead of an equality-suppressed no-op.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AdjRibOutCommitStats {
+    exact_probe_batches: usize,
+    exact_probe_candidates: usize,
+    exact_probe_cache_reuses: usize,
+    successful_commits: usize,
+    successful_enqueues: usize,
+    family_gauge_writes: usize,
+    last_family_gauge_write_mask: u8,
 }
 
 #[cfg(test)]
@@ -552,6 +570,9 @@ pub struct RibManager {
     /// Test/benchmark-only evidence for the explicit clean policy transition.
     #[cfg(any(test, feature = "bench-internals"))]
     policy_transition_stats: PolicyTransitionStats,
+    /// Test/benchmark-only evidence from the authoritative outbound commit.
+    #[cfg(any(test, feature = "bench-internals"))]
+    adj_rib_out_commit_stats: AdjRibOutCommitStats,
 }
 
 /// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
@@ -1245,6 +1266,8 @@ impl RibManager {
             test_exact_export_fast_path_hits: 0,
             #[cfg(any(test, feature = "bench-internals"))]
             policy_transition_stats: PolicyTransitionStats::default(),
+            #[cfg(any(test, feature = "bench-internals"))]
+            adj_rib_out_commit_stats: AdjRibOutCommitStats::default(),
             vrp_table: None,
             aspa_table: None,
             route_events_tx,

@@ -2246,9 +2246,27 @@ impl RibManager {
                 })
                 .flatten();
             let probe_results = if let Some(results) = reused_results {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.adj_rib_out_commit_stats.exact_probe_cache_reuses = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_cache_reuses
+                        .saturating_add(candidates.len());
+                }
                 debug_assert_eq!(results.len(), candidates.len());
                 results
             } else {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.adj_rib_out_commit_stats.exact_probe_batches = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_batches
+                        .saturating_add(1);
+                    self.adj_rib_out_commit_stats.exact_probe_candidates = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_candidates
+                        .saturating_add(candidates.len());
+                }
                 let (results, cardinality_correct) =
                     probe_exact_export_announcements(peer, snapshot.as_ref(), &candidates);
                 if cache_eligible && cardinality_correct && results.iter().all(Result::is_ok) {
@@ -2448,7 +2466,7 @@ impl RibManager {
         let grouped_unicast_count = self.grouped_advertised_count(peer);
         let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
 
-        if !announce.is_empty()
+        let has_committed_route_payload = !announce.is_empty()
             || !withdraw.is_empty()
             || !flowspec_announce.is_empty()
             || !flowspec_withdraw.is_empty()
@@ -2461,8 +2479,21 @@ impl RibManager {
             || !labeled_announce.is_empty()
             || !labeled_withdraw.is_empty()
             || !rtc_announce.is_empty()
-            || !rtc_withdraw.is_empty()
-        {
+            || !rtc_withdraw.is_empty();
+        if has_committed_route_payload {
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                const ALL_FAMILY_GAUGES: u8 = 0x7f;
+                self.adj_rib_out_commit_stats.successful_commits = self
+                    .adj_rib_out_commit_stats
+                    .successful_commits
+                    .saturating_add(1);
+                self.adj_rib_out_commit_stats.family_gauge_writes = self
+                    .adj_rib_out_commit_stats
+                    .family_gauge_writes
+                    .saturating_add(ALL_FAMILY_GAUGES.count_ones() as usize);
+                self.adj_rib_out_commit_stats.last_family_gauge_write_mask = ALL_FAMILY_GAUGES;
+            }
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
@@ -2586,6 +2617,13 @@ impl RibManager {
                 shared_group_encode: None,
             },
         );
+        #[cfg(any(test, feature = "bench-internals"))]
+        if has_committed_route_payload {
+            self.adj_rib_out_commit_stats.successful_enqueues = self
+                .adj_rib_out_commit_stats
+                .successful_enqueues
+                .saturating_add(1);
+        }
         true
     }
 

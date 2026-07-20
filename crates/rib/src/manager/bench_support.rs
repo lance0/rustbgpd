@@ -47,6 +47,25 @@ pub struct PolicyTransitionBenchReceipt {
     pub max_uninterrupted_work: std::time::Duration,
 }
 
+/// Evidence that the fanout benchmark traversed the authoritative grouped
+/// exact-export commit path rather than an equality-suppressed or fallback
+/// path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdjRibOutFanoutBenchReceipt {
+    pub update_groups: usize,
+    pub grouped_peers: usize,
+    pub ungrouped_peers: usize,
+    pub dirty_peers: usize,
+    pub exact_probe_batches: usize,
+    pub exact_probe_candidates: usize,
+    pub exact_probe_cache_reuses: usize,
+    pub successful_commits: usize,
+    pub successful_enqueues: usize,
+    pub family_gauge_writes: usize,
+    pub last_family_gauge_write_mask: u8,
+    pub first_peer_family_values: [i64; 7],
+}
+
 impl RibManager {
     /// Synthetic peer address used by [`Self::bench_register_peers`].
     ///
@@ -252,6 +271,131 @@ impl RibManager {
     /// no-Add-Path peers, best-changed and affected are the same set.
     pub fn bench_distribute(&mut self, changed: &HashSet<Prefix>) {
         self.distribute_changes(changed, changed);
+    }
+
+    /// Replace existing unicast routes in their source Adj-RIB-In and
+    /// recompute Loc-RIB without distributing the change. This fixture-only
+    /// seam puts a real wire-visible change immediately in front of the timed
+    /// production distribution path; setup, interning, and recompute remain
+    /// outside the accumulated duration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a source Adj-RIB-In is absent or the replacement does not
+    /// change every requested Loc-RIB best.
+    #[must_use]
+    pub fn bench_prepare_unicast_replacement(&mut self, routes: Vec<Route>) -> HashSet<Prefix> {
+        let expected = routes.len();
+        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        for route in routes {
+            by_peer.entry(route.peer).or_default().push(route);
+        }
+
+        let mut changed = HashSet::new();
+        for (peer, mut routes) in by_peer {
+            let mut affected = HashSet::with_capacity(routes.len());
+            for route in &mut routes {
+                self.attr_intern.intern(&mut route.attributes);
+                affected.insert(route.prefix);
+            }
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("benchmark source Adj-RIB-In remains registered");
+            for route in routes {
+                rib.insert(route);
+            }
+            for prefix in &affected {
+                self.register_unicast_announcer(peer, *prefix);
+            }
+            changed.extend(self.recompute_best_after_announce(peer, &affected));
+        }
+        assert_eq!(
+            changed.len(),
+            expected,
+            "every benchmark replacement must change its Loc-RIB best"
+        );
+        changed
+    }
+
+    /// Reset the production-path counters immediately before one measured
+    /// fanout pass.
+    pub fn bench_reset_adj_rib_out_fanout_receipt(&mut self) {
+        self.adj_rib_out_commit_stats = super::AdjRibOutCommitStats::default();
+    }
+
+    /// Capture production-path and current metric evidence after one measured
+    /// fanout pass.
+    #[must_use]
+    pub fn bench_adj_rib_out_fanout_receipt(&self) -> AdjRibOutFanoutBenchReceipt {
+        use super::update_groups::GroupMembership;
+
+        let group_ids = self
+            .update_groups
+            .members
+            .values()
+            .filter_map(|membership| match membership {
+                GroupMembership::Grouped(group_id) => Some(*group_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let grouped_peers = self
+            .update_groups
+            .members
+            .values()
+            .filter(|membership| matches!(membership, GroupMembership::Grouped(_)))
+            .count();
+        let stats = self.adj_rib_out_commit_stats;
+        AdjRibOutFanoutBenchReceipt {
+            update_groups: group_ids.len(),
+            grouped_peers,
+            ungrouped_peers: self
+                .update_groups
+                .members
+                .len()
+                .saturating_sub(grouped_peers),
+            dirty_peers: self.dirty_peers.len(),
+            exact_probe_batches: stats.exact_probe_batches,
+            exact_probe_candidates: stats.exact_probe_candidates,
+            exact_probe_cache_reuses: stats.exact_probe_cache_reuses,
+            successful_commits: stats.successful_commits,
+            successful_enqueues: stats.successful_enqueues,
+            family_gauge_writes: stats.family_gauge_writes,
+            last_family_gauge_write_mask: stats.last_family_gauge_write_mask,
+            first_peer_family_values: self
+                .bench_adj_rib_out_family_values(Self::bench_peer_address(0)),
+        }
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "benchmark fixture gauge counts are exact small nonnegative integers"
+    )]
+    fn bench_adj_rib_out_family_values(&self, peer: IpAddr) -> [i64; 7] {
+        const FAMILIES: [&str; 7] = ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+        let peer_label = peer.to_string();
+        let gathered = self.metrics.registry().gather();
+        let Some(gauge) = gathered
+            .iter()
+            .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        else {
+            return [0; 7];
+        };
+        std::array::from_fn(|index| {
+            gauge
+                .metric
+                .iter()
+                .find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "peer" && label.value() == peer_label)
+                        && metric.get_label().iter().any(|label| {
+                            label.name() == "afi_safi" && label.value() == FAMILIES[index]
+                        })
+                })
+                .map_or(0, |metric| metric.get_gauge().value() as i64)
+        })
     }
 
     /// Apply one export-policy replacement to every synthetic peer through
