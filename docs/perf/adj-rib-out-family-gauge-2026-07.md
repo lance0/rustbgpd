@@ -27,6 +27,14 @@ Both builds run the same receipt instrumentation. The accounting cost is one
 mask `count_ones` and one total-counter addition in both revisions; the target
 does not receive a cheaper benchmark-only counter path.
 
+The optimization has two explicit costs/bounds outside its best unicast-only
+case. `PeerUp` now creates six additional zero-valued family series per peer,
+including their registry/cardinality cost, outside the timed interval. At the
+other extreme, an envelope that touches all seven families skips no metric
+setter; it only avoids the six duplicate `peer.to_string()` label allocations
+made by the control. The receipt therefore does not claim a sevenfold whole-
+daemon improvement or a gain for every envelope shape.
+
 The measured interval contains manager distribution, one real
 `SessionExportEncoder` exact-export probe per changed route, compatible reuse
 across the one update group, authoritative Adj-RIB-Out commit, metric refresh,
@@ -47,17 +55,20 @@ pinned to logical CPU 5 with the `performance` governor.
 | 256 | 1.194 ms | 1.055 ms | -11.69% | -12.34% to -11.07% |
 | 1,000 | 4.830 ms | 4.106 ms | -14.98% | -16.05% to -13.93% |
 
-Two shorter retained pairs at the release-gating 256/1,000-peer sizes also
-favored the target:
+Three additional retained pairs at the release-gating 256/1,000-peer sizes
+also favored the target. Pair 4 used the full Criterion duration, held the
+shared host lock, and used one explicit Criterion home across separate target
+and control Cargo target directories:
 
 | Pair | 256 peers | 1,000 peers |
 |-----:|----------:|------------:|
 | 2, target then control | -14.23% | -11.11% |
 | 3, control then target | -14.53% | -22.41% |
+| 4, target then control | -17.54% | -14.60% |
 
-The spread between short pairs is why the full Criterion confidence interval,
-not a single short point estimate, is the shipping control. Exact unrounded
-estimates and environment metadata are retained under
+The spread between pairs is why the primary Criterion confidence interval, not
+a single point estimate, is the shipping control. Exact unrounded estimates,
+the pair-4 host preflight, and environment metadata are retained under
 [`artifacts/adj-rib-out-family-gauge-2026-07/`](artifacts/adj-rib-out-family-gauge-2026-07/).
 
 ## Regression controls
@@ -111,17 +122,29 @@ series-presence test red.
 ## Reproduction
 
 Build each revision in a separate target directory; sharing one directory can
-silently reuse the wrong benchmark executable after switching worktrees.
+silently reuse the wrong benchmark executable after switching worktrees. Both
+phases must also name the same explicit `CRITERION_HOME`; otherwise Criterion
+writes and reads baselines relative to different worktrees. Run both phases in
+one Bash shell so the shared host-lock descriptor remains held:
 
 ```bash
-taskset -c 5 env CARGO_TARGET_DIR=<control-target> \
+source docs/perf/event-history-host-fence.sh
+event_history_acquire_host_lock
+
+CRITERION_HOME=<shared-criterion-home> CARGO_TARGET_DIR=<control-target> \
+  taskset -c 5 \
   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout \
   -- adj_rib_out_family_gauge --save-baseline lan518-control
 
-taskset -c 5 env CARGO_TARGET_DIR=<target-target> \
+CRITERION_HOME=<shared-criterion-home> CARGO_TARGET_DIR=<target-target> \
+  taskset -c 5 \
   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout \
   -- adj_rib_out_family_gauge --baseline lan518-control
 ```
+
+Pair 4 validated that layout in target-then-control order with full 3-second
+warmups, 5-second measurements, 10 samples, and no competing retained
+benchmark/build process at any preflight.
 
 Reject a run if another process becomes CPU-active on the pinned core. Two
 attempts were rejected before retention after a local inference server became
