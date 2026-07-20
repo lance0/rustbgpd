@@ -56,10 +56,10 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it) |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it) |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | The client's IRR-derived `prefix-set` and origin `asn-set`, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
-| `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities and max-prefix ceilings, warnings |
+| `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities, max-prefix ceilings and restart seconds, warnings |
 
 Every generated `.rpol` file carries in-language `test` blocks derived
 from the site's own data; `rbgp policy check` runs them.
@@ -110,16 +110,17 @@ has no RTT source; permanent), `next_hop.policy` other than `strict`
 `tag`/`tag_and_reject` (reject-reason community wiring is a tracked
 follow-up; the daemon retains rejected routes with reasons natively —
 see the route-server cookbook's filtered-route view), `prepend_rs_as`,
-`perform_graceful_shutdown`, `max_prefix.action` `restart`/`block`/`warning`,
+`perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
 and an effective `max_prefix.count_rejected_routes: true` while a positive
-shutdown limit is active (ARouteServer 1.23.2 defaults this option to true,
+shutdown or restart limit is active (ARouteServer 1.23.2 defaults this option to true,
 while rustbgpd counts accepted routes only),
 per-client `black_list_pref` and IRR `white_list_*` entries (dropping
 a black list would fail open; dropping a white list would reject
 routes the site intends to accept), and disabling both IRR
-enforcement knobs. Only `max_prefix.action: shutdown` is rendered;
-an absent effective action emits no max-prefix ceilings, and zero is
-treated as an unset per-family limit.
+enforcement knobs. `shutdown` emits the positive family ceilings;
+`restart` additionally requires a positive `restart_after` in minutes, checked
+while converting to `u32` seconds. An absent action or zero family limits emit
+neither ceilings nor a restart timer.
 
 An empty per-client prefix or origin set aborts the whole render: an
 empty set under the default-reject tail is fail-closed for that client,
